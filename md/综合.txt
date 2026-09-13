@@ -1,0 +1,15 @@
+Write-Host "Vite局域网地址：http://$((Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notmatch '^(127\.|169\.254\.)'} | Select-Object -First 1 -ExpandProperty IPAddress)):5173"
+一键组合脚本（直接打印 Vite 访问地址）
+
+
+.\minio.exe server D:\minio-data --console-address :9001 
+单机minIo启动  API 9000 浏览器9001
+
+mvn clean install -DskipTests 改了模块 
+mvn spring-boot:run
+
+解决乱码  
+chcp 65001
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
+mvn spring-boot:run

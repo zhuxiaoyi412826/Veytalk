@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志配置。
+
+  放在 im-common 的 classpath 根下，任何依赖 common 的模块（最终由 im-bootstrap 打包）都会自动生效。
+  pattern 中的 %X{traceId} 由 TraceIdFilter 写入，%X{userId} 由 WebLogAspect / SecurityUtil 写入，
+  两者缺失时输出 '-'，避免出现空白列影响肉眼对齐。
+-->
+<!--
+  scan 刻意关闭：交付物是单个可执行 jar，本文件位于 BOOT-INF/lib/im-common-1.0.0.jar 内部，
+  而 logback 的热加载要求「主配置文件能作为 URL 直接访问」，嵌套 jar 里的条目做不到。
+  开着 scan 只会在每次启动时打一条
+  "Watching .xml files requires that the main configuration file is reachable as a URL" 的 WARN，
+  看着像配置出了问题，实际什么也没发生。
+  （只有在 IDE 里以 target/classes 展开运行时热加载才可能生效，那不是本项目的交付形态。）
+-->
+<configuration>
+
+    <!--
+      必须先引入 Boot 的 defaults.xml：下面用到的 %clr 是 Spring Boot 注册的 logback 转换词，
+      并不是 logback 自带的。少了这一行，logback 初始化阶段会报
+      "There is no conversion class registered for composite conversion word [clr]"，
+      并由 LogbackLoggingSystem 判定为配置错误、直接让应用启动失败。
+      顺带也拿到了 %wEx（更整洁的堆栈输出）与 Tomcat / Hibernate Validator 的启动降噪。
+    -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="im-server"/>
+    <springProperty scope="context" name="LOG_PATH" source="logging.file.path" defaultValue="logs"/>
+
+    <property name="CONSOLE_PATTERN"
+              value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%15.15thread]){magenta} %clr([%X{traceId:--}]){cyan} %clr([uid:%X{userId:--}]){blue} %clr(%-40.40logger{39}){faint} %clr(:){faint} %msg%n"/>
+    <property name="FILE_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%15.15thread] [%X{traceId:--}] [uid:%X{userId:--}] %-40.40logger{39} : %msg%n"/>
+
+    <!-- 控制台 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 全量文件，按天 + 单文件 50MB 滚动，保留 30 天 -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>5GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- WARN 及以上单独归档，便于快速定位问题 -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 异步包装，避免磁盘 IO 阻塞业务线程 -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="FILE"/>
+    </appender>
+
+    <appender name="ASYNC_ERROR_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="ERROR_FILE"/>
+    </appender>
+
+    <!-- 三方组件降噪 -->
+    <logger name="org.springframework" level="INFO"/>
+    <logger name="org.apache.ibatis" level="INFO"/>
+    <logger name="com.baomidou.mybatisplus" level="INFO"/>
+    <logger name="com.zaxxer.hikari" level="INFO"/>
+    <logger name="io.lettuce" level="INFO"/>
+    <logger name="io.netty" level="INFO"/>
+    <logger name="okhttp3" level="INFO"/>
+    <logger name="org.springdoc" level="INFO"/>
+
+    <!-- 开发环境打开本项目 DEBUG，WebLogAspect 会输出出入参明细与 SQL -->
+    <springProfile name="dev">
+        <logger name="com.im" level="DEBUG"/>
+    </springProfile>
+    <springProfile name="!dev">
+        <logger name="com.im" level="INFO"/>
+    </springProfile>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ASYNC_FILE"/>
+        <appender-ref ref="ASYNC_ERROR_FILE"/>
+    </root>
+
+</configuration>

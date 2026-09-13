@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-file</artifactId>
+    <name>im-file</name>
+    <description>文件存储：MinIO 与本地磁盘双实现、上传、访问鉴权、元数据</description>
+
+    <dependencies>
+        <!-- 业务模块只依赖 im-common，跨模块协作全部走 com.im.common.spi 契约 -->
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-common</artifactId>
+        </dependency>
+
+        <!--
+          对象存储客户端，仅在 im.file.storage=minio 时真正被使用。
+          排掉空壳 okhttp 换成 okhttp-jvm，理由见父 POM 的 okhttp.version 注释；
+          不排的话它会跟着 minio 一路传到 im-bootstrap，打出的 jar 里就是两套 okhttp。
+        -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.squareup.okhttp3</groupId>
+                    <artifactId>okhttp</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp-jvm</artifactId>
+        </dependency>
+    </dependencies>
+</project>

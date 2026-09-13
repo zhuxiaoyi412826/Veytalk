@@ -1,0 +1,55 @@
+# ==============================================================================
+# 生产环境。启动方式：
+#   java -jar im-server.jar --spring.profiles.active=prod
+# 或设置环境变量 SPRING_PROFILES_ACTIVE=prod
+#
+# 相对主配置只做三类收敛：关掉文档、关掉一切验证码回显、收紧日志。
+# 数据库与 Redis 的连接信息不在这里重复，仍然只从环境变量读取。
+# ==============================================================================
+
+# 接口文档整体关闭。/doc.html 与 /v3/api-docs 会返回 404，
+# 而不是「加个拦截器挡住」——后者一旦拦截规则漏写一条，
+# 全部接口的入参出参结构就等于公开挂在网上。
+knife4j:
+  enable: false
+  production: true
+
+springdoc:
+  api-docs:
+    enabled: false
+
+im:
+  captcha:
+    # 主配置已经是 false，这里再写一遍是为了让「生产绝不回显验证码」
+    # 成为一条显式声明，而不是依赖某个人没有去改主配置。
+    expose-sms-code: false
+    expose-image-code: false
+  websocket:
+    # 生产环境客户端基数大，空闲扫描放宽到 60s，减少无谓的遍历开销；
+    # 断连判定仍然由 heartbeat-timeout-seconds 决定，这里只改检查频率。
+    idle-check-interval-ms: 60000
+
+server:
+  tomcat:
+    threads:
+      # 虚拟线程已开启，平台线程池主要承载容器自身的acceptor/poller，
+      # 这里适度上调以应对握手风暴（例如前端集中重连）。
+      max: 400
+
+spring:
+  datasource:
+    hikari:
+      # 生产并发更高，把上限抬到 50。注意这个值要与 MySQL 的 max_connections
+      # 以及实例数一起算：50 × 实例数 必须明显小于 max_connections，
+      # 否则连接池会先把数据库的连接数抢光，新实例启动时直接连不上。
+      maximum-pool-size: 50
+      minimum-idle: 10
+
+logging:
+  level:
+    root: info
+    # 生产不打 DEBUG：WebLogAspect 在 DEBUG 下会输出完整出入参，
+    # 消息正文与手机号都会落进日志文件，那是隐私数据。
+    com.im: info
+  file:
+    path: ${LOG_PATH:logs}

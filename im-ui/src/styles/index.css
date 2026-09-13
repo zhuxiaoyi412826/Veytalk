@@ -1,0 +1,171 @@
+/*
+ * 全局样式。
+ *
+ * 只放三样东西：CSS 变量、跨页面复用的布局骨架、以及 element-plus 覆盖不到位的细节。
+ * 页面私有的样式一律写在各自的 <style scoped> 里，避免这里变成谁都不敢删的大杂烩。
+ */
+
+:root {
+  /* 主色沿用 element-plus 的默认蓝，改这一处即可全局换肤 */
+  --im-primary: #409eff;
+  --im-primary-light: #ecf5ff;
+
+  /* 三栏结构的宽度：导航条 + 列表栏 + 内容区 */
+  --im-nav-width: 64px;
+  --im-list-width: 300px;
+
+  --im-bg: #f2f3f5;
+  --im-panel: #ffffff;
+  --im-border: #e4e7ed;
+  --im-text: #303133;
+  --im-text-secondary: #909399;
+
+  /* 气泡：自己在右侧用主色，对方在左侧用白色 */
+  --im-bubble-self: #95ec69;
+  --im-bubble-other: #ffffff;
+  --im-chat-bg: #f5f5f5;
+
+  --im-radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
+  font-size: 14px;
+  color: var(--im-text);
+  background: var(--im-bg);
+  /* 聊天窗口里大量绝对定位的气泡与拖拽选择容易触发横向滚动，这里从根上禁掉 */
+  overflow: hidden;
+}
+
+a {
+  color: var(--im-primary);
+  text-decoration: none;
+}
+
+/*
+ * 移动端基础修正：断点统一 768px，各页面的单栏退化写在各自的 scoped 样式里。
+ * iOS Safari 对 font-size 小于 16px 的输入框聚焦时会自动放大整页，
+ * 表现为「点一下输入框页面自己跳一下」；统一到 16px 顺便保证可读性。
+ */
+@media (max-width: 768px) {
+  .el-input__inner,
+  .el-textarea__inner {
+    font-size: 16px;
+  }
+}
+
+/*
+ * 细滚动条。
+ * 会话列表与消息区都是长列表，默认滚动条在 Windows 上宽到 17px，
+ * 会把 300px 的列表栏挤得内容换行。
+ */
+.im-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #c8c9cc transparent;
+}
+
+.im-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.im-scroll::-webkit-scrollbar-thumb {
+  background: #c8c9cc;
+  border-radius: 3px;
+}
+
+.im-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a6a9ad;
+}
+
+.im-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 单行省略，会话列表的昵称与摘要都用得上 */
+.im-ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.im-muted {
+  color: var(--im-text-secondary);
+}
+
+/* 在线状态的绿点：绝对定位在头像右下角 */
+.im-online-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--im-panel);
+  border-radius: 50%;
+  background: #67c23a;
+}
+
+.im-offline-dot {
+  background: #c0c4cc;
+}
+
+/*
+ * 消息气泡里的图片：限制最大宽度并保持比例。
+ * 尺寸信息在 extra.width / height 里，组件会据此先占位，
+ * 这里的 max-width 只是最后一道保险，防止超大原图撑破布局。
+ */
+.im-msg-image {
+  max-width: 240px;
+  max-height: 320px;
+  display: block;
+  border-radius: 4px;
+  cursor: zoom-in;
+}
+
+/* element-plus 的卡片默认内边距偏大，聊天场景里寸土寸金 */
+.el-card__body {
+  --el-card-padding: 16px;
+}
+
+/* 右键菜单：三个列表（会话 / 好友 / 消息）共用同一套外观 */
+.im-context-menu {
+  position: fixed;
+  z-index: 3000;
+  min-width: 132px;
+  padding: 4px 0;
+  background: var(--im-panel);
+  border: 1px solid var(--im-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  user-select: none;
+}
+
+.im-context-menu__item {
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.im-context-menu__item:hover {
+  background: var(--im-primary-light);
+  color: var(--im-primary);
+}
+
+.im-context-menu__item--danger:hover {
+  background: #fef0f0;
+  color: #f56c6c;
+}

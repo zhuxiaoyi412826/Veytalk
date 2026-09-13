@@ -1,0 +1,27 @@
+{
+  "name": "im-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "IM 即时通讯系统前端（Vue 3 + Vite + Element Plus）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "axios": "^1.20.0",
+    "dayjs": "^1.11.23",
+    "element-plus": "^2.14.5",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.42",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^7.3.6"
+  }
+}

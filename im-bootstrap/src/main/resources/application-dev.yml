@@ -1,0 +1,28 @@
+# ==============================================================================
+# 开发环境。默认激活（见 application.yml 的 spring.profiles.active）。
+#
+# 这个 profile 的唯一职责是「让本地联调不必去猜」：把验证码答案回显出来、
+# 把 SQL 与出入参打到控制台。所有回显类开关都只在这里为 true，
+# 主配置与 prod 一律关闭，避免哪天忘了切 profile 就把生产环境的校验废掉。
+# ==============================================================================
+
+im:
+  captcha:
+    # 短信验证码是 Mock 实现（不接真实服务商），回显到响应体与日志，
+    # 否则本地根本拿不到这个码，手机号登录这条路径没法测。
+    expose-sms-code: true
+    # 图形验证码答案一并回显，接口串测时可以直接脚本化，
+    # 不必为了拿一个 4 位算术题的答案去解析 Base64 图片。
+    expose-image-code: true
+
+logging:
+  level:
+    # com.im 下的 Mapper 接口名就是 logger 名，DEBUG 级别会打出完整 SQL、
+    # 参数与返回行数。因为走的是 logback，这些 SQL 自带 traceId 与 userId，
+    # 能直接和同一次请求的业务日志对齐——这也是不用
+    # mybatis-plus.configuration.log-impl=StdOutImpl 的原因：
+    # StdOutImpl 直接写 System.out，绕过 logback，日志里既没有时间戳也没有 traceId。
+    com.im: debug
+    # 连接池与 Redis 的问题在开发期同样值得看见
+    com.zaxxer.hikari: debug
+    org.springframework.data.redis: info
