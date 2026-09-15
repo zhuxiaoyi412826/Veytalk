@@ -92,7 +92,9 @@ const navItems = computed(() => [
   { name: 'chat', label: '消息', icon: ChatDotRound, badge: conversation.totalUnread, match: 'chat' },
   { name: 'friends', label: '好友', icon: User, badge: 0, match: 'friends' },
   { name: 'friend-requests', label: '申请', icon: Bell, badge: friend.pendingCount, match: 'friend-requests' },
-  { name: 'profile', label: '我的', icon: Setting, badge: 0, match: 'profile' }
+  // 齿轮图标不变，但入口由「我的（个人信息）」改为「设置（全局页面设置）」；
+  // 个人信息仍由顶部头像进入，窄屏下头像隐藏时改由设置页内的入口兼顾
+  { name: 'settings', label: '设置', icon: Setting, badge: 0, match: 'settings' }
 ])
 
 /**
@@ -297,7 +299,10 @@ async function onLogout() {
     padding: 0 2px;
   }
 
-  /* 头像入口与「我的」导航项功能重复，窄屏只留后者 */
+  /*
+   * 窄屏隐藏头像入口。个人信息页改由「设置」页顶部的「编辑个人信息」按钮进入，
+   * 因此这里去掉头像不会让 profile 在移动端失去入口。
+   */
   .main-layout__me {
     display: none;
   }

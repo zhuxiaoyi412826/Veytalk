@@ -10,6 +10,11 @@ export function loginBySms(data) {
   return http.post('/auth/login/sms', data)
 }
 
+/** 邮箱 + 邮箱验证码登录，邮箱未注册时后端自动建号 */
+export function loginByEmail(data) {
+  return http.post('/auth/login/email', data)
+}
+
 /** 注册，成功后直接返回登录态，前端无需再调一次 login */
 export function register(data) {
   return http.post('/auth/register', data)
@@ -34,7 +39,12 @@ export function fetchCaptchaImage() {
   return http.get('/captcha/image')
 }
 
-/** 发送短信验证码，scene 取 login / register / bind */
+/** 发送短信验证码，scene 取 login / register / bind；开启闸门时需带 captchaKey / captchaCode */
 export function sendSmsCode(data) {
   return http.post('/captcha/sms', data)
+}
+
+/** 发送邮箱验证码：{ email } */
+export function sendEmailCode(data) {
+  return http.post('/captcha/email', data)
 }

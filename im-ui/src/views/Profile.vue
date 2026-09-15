@@ -60,11 +60,15 @@
             <el-input v-model.trim="form.email" maxlength="64" clearable placeholder="选填" />
           </el-form-item>
           <!--
-            手机号只展示不可改：UpdateProfileRequest 里没有 phone 字段，
+            手机号不能直接改：UpdateProfileRequest 里没有 phone 字段，
             换绑手机要走短信验证流程，放进这个表单会造成「改了但没生效」的假象。
+            绑定 / 换绑都通过右侧按钮弹出的短信验证对话框完成（无需图形验证码）。
           -->
           <el-form-item label="手机号">
             <span class="profile__readonly">{{ maskPhone(auth.phone) || '未绑定' }}</span>
+            <el-button class="profile__phone-btn" link type="primary" @click="openPhoneDialog">
+              {{ auth.phone ? '换绑' : '绑定' }}
+            </el-button>
           </el-form-item>
           <el-form-item label="账号">
             <span class="profile__readonly">{{ auth.username }}</span>
@@ -79,17 +83,25 @@
       <!-- ==================== 账号安全 ==================== -->
       <section class="profile__card">
         <div class="profile__card-title">账号安全</div>
+        <div v-if="firstTimeSet" class="profile__hint profile__hint--warn">
+          当前账号通过验证码登录自动创建，尚未设置密码，设置后即可用「账号登录」。
+        </div>
         <div class="profile__actions">
-          <el-button :icon="Lock" @click="openPasswordDialog">修改密码</el-button>
+          <el-button :icon="Lock" @click="openPasswordDialog">{{ firstTimeSet ? '设置密码' : '修改密码' }}</el-button>
           <el-button type="danger" plain :icon="SwitchButton" @click="onLogout">退出登录</el-button>
         </div>
       </section>
     </div>
 
-    <!-- ==================== 修改密码 ==================== -->
-    <el-dialog v-model="passwordDialog.visible" title="修改密码" width="420px" @closed="resetPasswordForm">
+    <!-- ==================== 修改 / 首次设置密码 ==================== -->
+    <el-dialog
+      v-model="passwordDialog.visible"
+      :title="firstTimeSet ? '设置密码' : '修改密码'"
+      width="420px"
+      @closed="resetPasswordForm"
+    >
       <el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-width="90px">
-        <el-form-item label="原密码" prop="oldPassword">
+        <el-form-item v-if="!firstTimeSet" label="原密码" prop="oldPassword">
           <el-input v-model="passwordForm.oldPassword" type="password" show-password placeholder="请输入当前密码" />
         </el-form-item>
         <el-form-item label="新密码" prop="newPassword">
@@ -105,16 +117,55 @@
           />
         </el-form-item>
         <el-form-item>
-          <el-checkbox v-model="passwordForm.logoutAll">修改后退出所有设备（包括当前）</el-checkbox>
+          <el-checkbox v-model="passwordForm.logoutAll">{{ firstTimeSet ? '设置后退出所有设备' : '修改后退出所有设备（包括当前）' }}</el-checkbox>
           <div class="profile__hint">
-            后端默认就是这个行为：不勾选才会保留当前登录态。改了密码还留着旧设备的登录，
-            等于没改。
+            {{ firstTimeSet
+              ? '首次设置密码默认保留当前登录态，勾选后才会踢掉所有设备。'
+              : '后端默认就是这个行为：不勾选才会保留当前登录态。改了密码还留着旧设备的登录，等于没改。' }}
           </div>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="passwordDialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="passwordDialog.saving" @click="submitPassword">确定修改</el-button>
+        <el-button type="primary" :loading="passwordDialog.saving" @click="submitPassword">{{ firstTimeSet ? '确定设置' : '确定修改' }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ==================== 绑定 / 换绑手机号 ==================== -->
+    <el-dialog
+      v-model="phoneDialog.visible"
+      :title="auth.phone ? '换绑手机号' : '绑定手机号'"
+      width="420px"
+      @closed="resetPhoneForm"
+    >
+      <el-form ref="phoneFormRef" :model="phoneForm" :rules="phoneRules" label-width="90px">
+        <el-form-item label="手机号" prop="phone">
+          <el-input v-model.trim="phoneForm.phone" maxlength="11" placeholder="请输入要绑定的手机号" clearable />
+        </el-form-item>
+        <el-form-item label="验证码" prop="smsCode">
+          <div class="profile__sms-row">
+            <el-input
+              v-model.trim="phoneForm.smsCode"
+              maxlength="6"
+              placeholder="6 位短信验证码"
+              @keyup.enter="submitPhone"
+            />
+            <el-button
+              :disabled="smsCountdown > 0 || smsSending"
+              :loading="smsSending"
+              @click="sendBindSms"
+            >
+              {{ smsCountdown > 0 ? `${smsCountdown}s 后重发` : '获取验证码' }}
+            </el-button>
+          </div>
+        </el-form-item>
+      </el-form>
+      <div v-if="smsDebugCode" class="profile__hint profile__hint--warn">
+        开发环境短信验证码：{{ smsDebugCode }}
+      </div>
+      <template #footer>
+        <el-button @click="phoneDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="phoneDialog.saving" @click="submitPhone">确定绑定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -127,6 +178,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Loading, Lock, SwitchButton } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { uploadAvatar } from '@/api/file'
+import { sendSmsCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { signOut } from '@/stores'
 import { formatFileSize, formatDateTime, maskPhone } from '@/utils/format'
@@ -247,8 +299,12 @@ const passwordFormRef = ref(null)
 const passwordDialog = reactive({ visible: false, saving: false })
 const passwordForm = reactive({ oldPassword: '', newPassword: '', confirmPassword: '', logoutAll: true })
 
-const passwordRules = {
-  oldPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
+/** 验证码登录自动建号、从未设过密码的账号：首次设置无需原密码 */
+const firstTimeSet = computed(() => !auth.passwordSet)
+
+const passwordRules = computed(() => ({
+  // 首次设置时不渲染也不校验原密码，与后端哨兵密码的放行逻辑一致
+  oldPassword: firstTimeSet.value ? [] : [{ required: true, message: '请输入原密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
     { min: 6, max: 32, message: '密码长度 6-32 位', trigger: 'blur' }
@@ -266,9 +322,11 @@ const passwordRules = {
       trigger: 'blur'
     }
   ]
-}
+}))
 
 function openPasswordDialog() {
+  // 首次设置默认不踢下线，避免刚设完密码就被登出；修改密码仍默认踢下线
+  passwordForm.logoutAll = !firstTimeSet.value
   passwordDialog.visible = true
 }
 
@@ -286,15 +344,20 @@ async function submitPassword() {
     return
   }
   passwordDialog.saving = true
+  // 先快照当前是否为首次设置：loadCurrentUser 后 firstTimeSet 会翻转为 false，影响文案
+  const wasFirstTime = firstTimeSet.value
   try {
     const stayed = await auth.changePassword({
-      oldPassword: passwordForm.oldPassword,
+      // 首次设置时无原密码，不传该字段（后端哨兵分支会跳过校验）
+      oldPassword: wasFirstTime ? undefined : passwordForm.oldPassword,
       newPassword: passwordForm.newPassword,
       logoutAll: passwordForm.logoutAll
     })
     passwordDialog.visible = false
     if (stayed) {
-      ElMessage.success('密码已修改')
+      // 设完密码后 passwordSet 已变，刷新一次资料让按钮文案同步
+      await auth.loadCurrentUser()
+      ElMessage.success(wasFirstTime ? '密码已设置' : '密码已修改')
       return
     }
     // 勾选了「退出所有设备」时 auth.changePassword 已经清掉本地登录态，
@@ -305,6 +368,111 @@ async function submitPassword() {
     // 原密码错误等提示已弹出，保留对话框让用户重试
   } finally {
     passwordDialog.saving = false
+  }
+}
+
+/* ------------------------------ 绑定手机号 ------------------------------ */
+
+/**
+ * 通用倒计时：发送短信验证码后禁用按钮，避免频繁重发。
+ * 与 Login.vue 里的实现保持一致（那边是登录发码，这边是绑定发码）。
+ */
+function useCountdown() {
+  const seconds = ref(0)
+  let timer = null
+  function stop() {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    seconds.value = 0
+  }
+  function start(value) {
+    stop()
+    seconds.value = Math.max(1, Math.ceil(Number(value) || 60))
+    timer = setInterval(() => {
+      seconds.value -= 1
+      if (seconds.value <= 0) {
+        stop()
+      }
+    }, 1000)
+  }
+  return { seconds, start, stop }
+}
+
+const phoneFormRef = ref(null)
+const phoneDialog = reactive({ visible: false, saving: false })
+const phoneForm = reactive({ phone: '', smsCode: '' })
+const smsSending = ref(false)
+const smsDebugCode = ref('')
+const sms = useCountdown()
+const smsCountdown = sms.seconds
+
+const phoneRules = {
+  phone: [
+    { required: true, message: '请输入手机号', trigger: 'blur' },
+    { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }
+  ],
+  smsCode: [
+    { required: true, message: '请输入短信验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
+  ]
+}
+
+function openPhoneDialog() {
+  phoneForm.phone = ''
+  phoneForm.smsCode = ''
+  smsDebugCode.value = ''
+  phoneDialog.visible = true
+}
+
+function resetPhoneForm() {
+  phoneForm.phone = ''
+  phoneForm.smsCode = ''
+  smsDebugCode.value = ''
+  sms.stop()
+  phoneFormRef.value?.clearValidate()
+}
+
+/**
+ * 发送绑定验证码。
+ *
+ * scene=bind 且用户已登录，后端跳过图形验证码闸门，因此这里只校验手机号本身，
+ * 不需要像登录页那样先填图形验证码。
+ */
+async function sendBindSms() {
+  try {
+    await phoneFormRef.value.validateField('phone')
+  } catch {
+    return
+  }
+  smsSending.value = true
+  try {
+    const vo = await sendSmsCode({ phone: phoneForm.phone, scene: 'bind' })
+    smsDebugCode.value = vo?.debugCode || ''
+    sms.start(vo?.retryAfter || vo?.expiresIn || 60)
+    ElMessage.success('短信验证码已发送')
+  } catch {
+    // 提示已由 request.js 弹出（如发送过于频繁）
+  } finally {
+    smsSending.value = false
+  }
+}
+
+async function submitPhone() {
+  const valid = await phoneFormRef.value.validate().catch(() => false)
+  if (!valid) {
+    return
+  }
+  phoneDialog.saving = true
+  try {
+    await auth.bindPhone({ phone: phoneForm.phone, smsCode: phoneForm.smsCode })
+    phoneDialog.visible = false
+    ElMessage.success('手机号已绑定')
+  } catch {
+    // 验证码错误 / 号码被占用等提示已弹出，保留对话框让用户重试
+  } finally {
+    phoneDialog.saving = false
   }
 }
 
@@ -442,6 +610,20 @@ onMounted(async () => {
   color: var(--im-text-secondary);
 }
 
+.profile__phone-btn {
+  margin-left: 12px;
+}
+
+.profile__sms-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.profile__sms-row :deep(.el-input) {
+  flex: 1;
+}
+
 .profile__actions {
   display: flex;
   gap: 12px;
@@ -452,6 +634,11 @@ onMounted(async () => {
   font-size: 12px;
   line-height: 18px;
   color: var(--im-text-secondary);
+}
+
+.profile__hint--warn {
+  margin-bottom: 12px;
+  color: #e6a23c;
 }
 
 .profile__file-input {

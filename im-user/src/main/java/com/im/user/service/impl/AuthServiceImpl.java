@@ -13,6 +13,7 @@ import com.im.common.spi.OnlineStatusSpi;
 import com.im.common.spi.PushSpi;
 import com.im.common.util.SecurityUtil;
 import com.im.common.util.TextUtil;
+import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
 import com.im.user.dto.req.SmsLoginRequest;
@@ -29,7 +30,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * 认证服务实现。
@@ -51,13 +51,19 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO login(LoginRequest request) {
-        captchaService.verifyImage(request.getCaptchaKey(), request.getCaptchaCode());
-
         String account = request.getAccount() == null ? null : request.getAccount().trim();
         User user = request.byPhone() ? userService.findByPhone(account) : userService.findByAccount(account);
-        // 账号不存在与密码错误返回同一个错误码，避免被用来枚举有效账号
-        if (user == null || !passwordEncryptor.matches(request.getPassword(), user.getPassword())) {
-            log.warn("登录失败: account={}, ip={}", account, SecurityUtil.getClientIp());
+        // 账号登录不自动注册：账号不存在直接提示“无账号”，引导用户去注册或用验证码登录
+        if (user == null) {
+            log.warn("登录失败，账号不存在: account={}, ip={}", account, SecurityUtil.getClientIp());
+            throw new BusinessException(ResultCode.USER_NOT_FOUND);
+        }
+        // 验证码登录自动建号的账号密码为哨兵，无法用密码登录，引导先去设置密码
+        if (User.NO_PASSWORD.equals(user.getPassword())) {
+            throw new BusinessException(ResultCode.USER_PASSWORD_NOT_SET);
+        }
+        if (!passwordEncryptor.matches(request.getPassword(), user.getPassword())) {
+            log.warn("登录失败，密码错误: account={}, ip={}", account, SecurityUtil.getClientIp());
             throw new BusinessException(ResultCode.USER_PASSWORD_ERROR);
         }
         checkUsable(user);
@@ -70,7 +76,20 @@ public class AuthServiceImpl implements AuthService {
 
         User user = userService.findByPhone(request.getPhone());
         if (user == null) {
-            user = autoRegister(request.getPhone());
+            user = autoRegisterByPhone(request.getPhone());
+        }
+        checkUsable(user);
+        return doLogin(user, request.getDeviceId());
+    }
+
+    @Override
+    public LoginVO loginByEmail(EmailLoginRequest request) {
+        String email = request.getEmail() == null ? null : request.getEmail().trim();
+        captchaService.verifyEmail(email, request.getEmailCode());
+
+        User user = userService.findByEmail(email);
+        if (user == null) {
+            user = autoRegisterByEmail(email);
         }
         checkUsable(user);
         return doLogin(user, request.getDeviceId());
@@ -78,7 +97,6 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO register(RegisterRequest request) {
-        captchaService.verifyImage(request.getCaptchaKey(), request.getCaptchaCode());
         User user = userService.createUser(request.getUsername(), request.getPassword(),
                 request.getNickname(), request.getPhone(), request.getEmail());
         return doLogin(user, null);
@@ -137,10 +155,10 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * 手机号首次短信登录时自动建号：账号取 {@code u + 手机号}，密码为不可知的随机值，
-     * 用户后续可在个人中心自行设置密码。
+     * 手机号首次短信登录时自动建号：账号取 {@code u + 手机号}，密码写入哨兵（未知），
+     * 用户后续可在个人中心首次设置密码与昵称。
      */
-    private User autoRegister(String phone) {
+    private User autoRegisterByPhone(String phone) {
         String username = "u" + phone;
         int attempt = 0;
         while (userService.existsUsername(username) && attempt < 5) {
@@ -149,7 +167,32 @@ public class AuthServiceImpl implements AuthService {
         }
         String nickname = "用户" + phone.substring(phone.length() - 4);
         log.info("手机号 {} 未注册，自动创建账号 {}", TextUtil.maskPhone(phone), username);
-        return userService.createUser(username, UUID.randomUUID().toString(), nickname, phone, null);
+        return userService.createAutoUser(username, nickname, phone, null);
+    }
+
+    /**
+     * 邮箱首次验证码登录时自动建号：账号由邮箱本地部分派生（过滤非法字符），
+     * 密码写入哨兵，昵称默认取账号，用户后续可自行设置。
+     */
+    private User autoRegisterByEmail(String email) {
+        int at = email.indexOf('@');
+        String local = at > 0 ? email.substring(0, at) : email;
+        // 账号只保留字母数字下划线，其余字符一律剔除，避免违反账号规则
+        String base = local.replaceAll("[^A-Za-z0-9_]", "");
+        if (base.isEmpty() || !Character.isLetter(base.charAt(0))) {
+            base = "u" + base;
+        }
+        if (base.length() > 24) {
+            base = base.substring(0, 24);
+        }
+        String username = base;
+        int attempt = 0;
+        while (userService.existsUsername(username) && attempt < 5) {
+            attempt++;
+            username = base + attempt;
+        }
+        log.info("邮箱 {} 未注册，自动创建账号 {}", TextUtil.maskEmail(email), username);
+        return userService.createAutoUser(username, username, null, email);
     }
 
     /**

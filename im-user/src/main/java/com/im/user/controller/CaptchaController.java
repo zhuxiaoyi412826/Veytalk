@@ -1,8 +1,10 @@
 package com.im.user.controller;
 
 import com.im.common.api.Result;
+import com.im.user.dto.req.SendEmailRequest;
 import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.vo.CaptchaImageVO;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.service.CaptchaService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -33,9 +35,16 @@ public class CaptchaController {
     }
 
     @Operation(summary = "发送短信验证码",
-            description = "Mock 实现，不接真实短信服务商；同一手机号 60 秒内只允许发送一次")
+            description = "Mock 实现，不接真实短信服务商；开启闸门时需先传图形验证码；同一手机号 60 秒内只允许发送一次")
     @PostMapping("/sms")
     public Result<SmsSendVO> sms(@RequestBody @Valid SendSmsRequest request) {
         return Result.ok(captchaService.sendSms(request), "验证码已发送");
+    }
+
+    @Operation(summary = "发送邮箱验证码",
+            description = "通过 QQ 邮箱 SMTP 发送 6 位验证码；同一邮箱 60 秒内只允许发送一次")
+    @PostMapping("/email")
+    public Result<EmailSendVO> email(@RequestBody @Valid SendEmailRequest request) {
+        return Result.ok(captchaService.sendEmail(request), "验证码已发送");
     }
 }

@@ -169,9 +169,15 @@ public class ImProperties {
         private long smsTtlSeconds = 300;
         /** 同一手机号短信发送最小间隔（秒） */
         private long smsIntervalSeconds = 60;
+        /** 邮箱验证码有效期（秒） */
+        private long emailTtlSeconds = 300;
+        /** 同一邮箱验证码发送最小间隔（秒） */
+        private long emailIntervalSeconds = 60;
         /** 是否在响应中回显短信验证码，仅开发环境使用 */
         private boolean exposeSmsCode = true;
-        /** 注册与密码登录是否强制校验图形验证码 */
+        /** 是否在响应中回显邮箱验证码，仅开发环境使用 */
+        private boolean exposeEmailCode = false;
+        /** 发送短信验证码前是否强制先校验图形验证码（防短信轰炸的闸门） */
         private boolean imageRequired = true;
         /** 是否在响应中回显图形验证码答案，仅开发环境联调使用 */
         private boolean exposeImageCode = false;

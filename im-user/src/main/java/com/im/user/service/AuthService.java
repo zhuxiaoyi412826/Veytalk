@@ -1,5 +1,6 @@
 package com.im.user.service;
 
+import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
 import com.im.user.dto.req.SmsLoginRequest;
@@ -20,6 +21,11 @@ public interface AuthService {
      * 手机号 + 短信验证码登录，手机号未注册时自动注册。
      */
     LoginVO loginBySms(SmsLoginRequest request);
+
+    /**
+     * 邮箱 + 邮箱验证码登录，邮箱未注册时自动注册。
+     */
+    LoginVO loginByEmail(EmailLoginRequest request);
 
     /**
      * 注册并直接返回登录态，省去前端的二次登录。

@@ -20,6 +20,12 @@ public final class RedisKeys {
     /** 短信发送频率限制：im:captcha:sms:limit:{phone} */
     public static final String CAPTCHA_SMS_LIMIT = PREFIX + "captcha:sms:limit:";
 
+    /** 邮箱验证码：im:captcha:email:{email} -> 6 位验证码 */
+    public static final String CAPTCHA_EMAIL = PREFIX + "captcha:email:";
+
+    /** 邮箱验证码发送频率限制：im:captcha:email:limit:{email} */
+    public static final String CAPTCHA_EMAIL_LIMIT = PREFIX + "captcha:email:limit:";
+
     /** 在线状态：im:online:{userId} -> Hash(deviceId -> 最近心跳时间戳) */
     public static final String ONLINE = PREFIX + "online:";
 
@@ -52,6 +58,14 @@ public final class RedisKeys {
 
     public static String captchaSmsLimit(String phone) {
         return CAPTCHA_SMS_LIMIT + phone;
+    }
+
+    public static String captchaEmail(String email) {
+        return CAPTCHA_EMAIL + email;
+    }
+
+    public static String captchaEmailLimit(String email) {
+        return CAPTCHA_EMAIL_LIMIT + email;
     }
 
     public static String online(Long userId) {

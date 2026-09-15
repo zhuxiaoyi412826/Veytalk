@@ -12,6 +12,16 @@ export function changePassword(data) {
   return http.put('/user/password', data)
 }
 
+/**
+ * 绑定 / 换绑手机号：{ phone, smsCode }。
+ *
+ * 走的是已登录本人的操作，后端 scene=bind 发短信时不需要图形验证码，
+ * 因此这里只传手机号与短信验证码。成功后返回最新的个人资料。
+ */
+export function bindPhone(data) {
+  return http.put('/user/phone', data)
+}
+
 /** 他人资料卡片，含 friend / blocked / blockedByOther 三个关系位 */
 export function fetchUserCard(id) {
   return http.get(`/user/${id}/card`)

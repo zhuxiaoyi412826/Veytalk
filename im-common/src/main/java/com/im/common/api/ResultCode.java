@@ -30,6 +30,12 @@ public enum ResultCode {
     SMS_CODE_ERROR(2008, "短信验证码错误或已过期"),
     SMS_SEND_TOO_FREQUENT(2009, "短信发送过于频繁，请稍后再试"),
     USER_KICKED_OUT(2010, "账号已在其他设备登录"),
+    USER_EMAIL_EXISTS(2011, "邮箱已被注册"),
+    USER_PASSWORD_NOT_SET(2012, "该账号尚未设置密码，请用短信或邮箱验证码登录后在「我的」中设置"),
+    EMAIL_CODE_ERROR(2013, "邮箱验证码错误或已过期"),
+    EMAIL_SEND_TOO_FREQUENT(2014, "邮件发送过于频繁，请稍后再试"),
+    MAIL_NOT_CONFIGURED(2015, "邮件服务未配置，无法发送验证码"),
+    MAIL_SEND_FAILED(2016, "验证码邮件发送失败，请稍后再试"),
 
     /* ==================== 3xxx 好友 ==================== */
     FRIEND_NOT_FOUND(3001, "好友关系不存在"),

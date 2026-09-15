@@ -139,7 +139,7 @@
         :maxlength="MAX_TEXT_LENGTH"
         :show-word-limit="!isMobile"
         :disabled="isMuted"
-        :placeholder="isMuted ? '你已被禁言' : '输入消息，Enter 发送，Shift + Enter 换行'"
+        :placeholder="inputPlaceholder"
         @keydown.enter="onEnter"
       />
 
@@ -223,6 +223,7 @@ import GroupSettings from '@/components/GroupSettings.vue'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
+import { useSettingsStore } from '@/stores/settings'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
 import { uploadFile } from '@/api/file'
 import { searchMessages } from '@/api/message'
@@ -256,6 +257,7 @@ const chat = useChatStore()
 const conversations = useConversationStore()
 const auth = useAuthStore()
 const groupStore = useGroupStore()
+const settings = useSettingsStore()
 
 /** 是否为窄屏（移动端），用于控制工具栏显隐与输入框行数 */
 function checkMobile() {
@@ -377,8 +379,9 @@ function onScroll() {
   }
   const el = scrollRef.value
   // 触顶自动加载上一页。store 里的 loadingHistory 会挡掉并发，
-  // 所以这里不必再做节流，惯性滚动连续触发也只会真正发一次请求
-  if (el && el.scrollTop < 40 && hasMore.value && !loadingMore.value) {
+  // 所以这里不必再做节流，惯性滚动连续触发也只会真正发一次请求；
+  // 关闭「自动加载历史」后，触顶不再拉取，用户仍可用顶部按钮手动加载
+  if (settings.autoLoadHistory && el && el.scrollTop < 40 && hasMore.value && !loadingMore.value) {
     loadMore()
   }
 }
@@ -403,8 +406,11 @@ async function loadMore() {
   nearBottom = isNearBottom()
 }
 
-/** 时间分隔线：与上一条间隔够久才显示，否则每条消息上都挂一个时间戳 */
+/** 时间分隔线：与上一条间隔够久才显示，否则每条消息上都挂一个时间戳；关闭「时间戳显示」后一律不显示 */
 function showDivider(index) {
+  if (!settings.showTimestamp) {
+    return false
+  }
   return needTimeDivider(index > 0 ? messages.value[index - 1] : null, messages.value[index])
 }
 
@@ -501,6 +507,16 @@ const inputRef = ref(null)
 const sending = ref(false)
 const emojiVisible = ref(false)
 
+/** 输入框占位提示跟随发送快捷键设置变化，让用户一眼知道当前怎么发送 */
+const inputPlaceholder = computed(() => {
+  if (isMuted.value) {
+    return '你已被禁言'
+  }
+  return settings.sendKey === 'ctrlEnter'
+    ? '输入消息，Ctrl + Enter 发送，Enter 换行'
+    : '输入消息，Enter 发送，Shift + Enter 换行'
+})
+
 /**
  * 草稿按会话暂存。
  *
@@ -527,6 +543,14 @@ watch(draft, (value) => {
  */
 function onEnter(event) {
   if (event.isComposing || event.keyCode === 229) {
+    return
+  }
+  // Ctrl+Enter 模式：只有按住 Ctrl（或 Mac 的 Cmd）才发送，普通回车照常换行
+  if (settings.sendKey === 'ctrlEnter') {
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault()
+      sendText()
+    }
     return
   }
   if (event.shiftKey) {

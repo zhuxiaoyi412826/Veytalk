@@ -98,4 +98,24 @@ public final class TextUtil {
     public static boolean isPhone(String phone) {
         return phone != null && phone.matches("^1[3-9]\\d{9}$");
     }
+
+    /**
+     * 隐藏邮箱本地部分，仅保留首尾字符，用于日志与响应展示。
+     * 例如 {@code zhangsan@qq.com -> zh******an@qq.com}。
+     */
+    public static String maskEmail(String email) {
+        if (isBlank(email)) {
+            return email;
+        }
+        int at = email.indexOf('@');
+        if (at <= 0) {
+            return email;
+        }
+        String local = email.substring(0, at);
+        String domain = email.substring(at);
+        if (local.length() <= 2) {
+            return local.charAt(0) + "***" + domain;
+        }
+        return local.charAt(0) + "*".repeat(local.length() - 2) + local.charAt(local.length() - 1) + domain;
+    }
 }

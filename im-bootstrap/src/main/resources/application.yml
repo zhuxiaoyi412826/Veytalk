@@ -111,6 +111,34 @@ spring:
       # 关掉它的表现是「接口全通、文档 404」，很容易被误判成 knife4j 版本不兼容。
       add-mappings: true
 
+  # ---------------------------------------------------------------------------
+  # 邮箱（QQ 邮箱 SMTP）——邮箱验证码登录用
+  #
+  # MAIL_USERNAME 是完整邮箱地址（如 123456@qq.com），MAIL_PASSWORD 是 QQ 邮箱的
+  # 「SMTP 授权码」而不是 QQ 登录密码：授权码在 QQ 邮箱 → 设置 → 账户 →
+  # 「POP3/IMAP/SMTP服务」里开启并生成。用登录密码会直接 535 认证失败。
+  # 465 端口走 SSL；两个环境变量都没配时，发信会抛 MAIL_NOT_CONFIGURED，
+  # 不影响其余登录方式。
+  # ---------------------------------------------------------------------------
+  mail:
+    host: smtp.qq.com
+    port: 465
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+          socketFactory:
+            port: 465
+            class: javax.net.ssl.SSLSocketFactory
+        # 连接/读写超时，避免 SMTP 卡死拖住请求线程
+        debug: false
+    test-connection: false
+
 server:
   port: ${SERVER_PORT:8080}
   servlet:
@@ -321,10 +349,14 @@ im:
     sms-ttl-seconds: 300
     # 同一手机号两次短信的最小间隔，挡住短信轰炸与费用消耗
     sms-interval-seconds: 60
+    # 邮箱验证码有效期与同一邮箱的最小发送间隔（秒）
+    email-ttl-seconds: 300
+    email-interval-seconds: 60
     # 是否在响应里回显验证码。主配置一律 false，只有 dev profile 打开；
     # 生产环境回显验证码等于把这道校验彻底废掉。
     expose-sms-code: false
     expose-image-code: false
+    expose-email-code: false
     image-required: true
 
 # ==============================================================================

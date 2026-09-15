@@ -1,6 +1,7 @@
 package com.im.user.service;
 
 import com.im.common.api.PageResult;
+import com.im.user.dto.req.BindPhoneRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
 import com.im.user.dto.req.UpdateProfileRequest;
 import com.im.user.dto.req.UserSearchQuery;
@@ -27,6 +28,11 @@ public interface UserService {
     User findByPhone(String phone);
 
     /**
+     * 按邮箱查找，邮箱验证码登录用。
+     */
+    User findByEmail(String email);
+
+    /**
      * 按账号或手机号查找，登录与添加好友共用。
      */
     User findByAccount(String account);
@@ -35,10 +41,18 @@ public interface UserService {
 
     boolean existsPhone(String phone);
 
+    boolean existsEmail(String email);
+
     /**
      * 创建用户并绑定默认的 {@code user} 角色，密码在服务内部加密。
      */
     User createUser(String username, String rawPassword, String nickname, String phone, String email);
+
+    /**
+     * 短信/邮箱验证码登录时的自动建号：只分配 ID、账号与联系方式，
+     * 密码写入「未设置」哨兵、昵称取默认值，用户登录后自行在「我的」设置密码与昵称。
+     */
+    User createAutoUser(String username, String nickname, String phone, String email);
 
     /**
      * 本人完整资料，含角色与权限码。
@@ -51,6 +65,11 @@ public interface UserService {
      * 修改密码，成功后调用方需要决定是否踢掉已有登录态。
      */
     void changePassword(Long userId, ChangePasswordRequest request);
+
+    /**
+     * 绑定/换绑手机号：凭短信验证码校验通过后写入，手机号被他人占用时报错。
+     */
+    void bindPhone(Long userId, BindPhoneRequest request);
 
     /**
      * 更新头像地址，由 im-file 模块上传成功后回调。

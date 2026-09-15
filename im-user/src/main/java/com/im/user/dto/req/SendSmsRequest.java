@@ -33,4 +33,10 @@ public class SendSmsRequest implements Serializable {
     @Schema(description = "使用场景：login / register / bind，默认 login", example = "login",
             allowableValues = {SCENE_LOGIN, SCENE_REGISTER, SCENE_BIND})
     private String scene = SCENE_LOGIN;
+
+    @Schema(description = "图形验证码键，来自 /api/captcha/image；开启闸门时必填")
+    private String captchaKey;
+
+    @Schema(description = "图形验证码答案；开启闸门时必填，校验通过后才发送短信")
+    private String captchaCode;
 }

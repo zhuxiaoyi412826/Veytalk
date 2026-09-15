@@ -33,6 +33,7 @@ public final class UserConvert {
                 .phone(user.getPhone())
                 .email(user.getEmail())
                 .status(user.getStatus())
+                .passwordSet(!User.NO_PASSWORD.equals(user.getPassword()))
                 .lastLoginTime(user.getLastLoginTime())
                 .createTime(user.getCreateTime())
                 .build();

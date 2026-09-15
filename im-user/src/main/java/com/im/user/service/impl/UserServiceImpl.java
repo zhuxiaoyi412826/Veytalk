@@ -13,6 +13,7 @@ import com.im.common.spi.OnlineStatusSpi;
 import com.im.common.spi.PermissionProvider;
 import com.im.common.util.TextUtil;
 import com.im.user.convert.UserConvert;
+import com.im.user.dto.req.BindPhoneRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
 import com.im.user.dto.req.UpdateProfileRequest;
 import com.im.user.dto.req.UserSearchQuery;
@@ -23,6 +24,7 @@ import com.im.user.entity.UserRole;
 import com.im.user.mapper.RoleMapper;
 import com.im.user.mapper.UserMapper;
 import com.im.user.mapper.UserRoleMapper;
+import com.im.user.service.CaptchaService;
 import com.im.user.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -57,6 +59,8 @@ public class UserServiceImpl implements UserService {
     private final OnlineStatusSpi onlineStatusSpi;
     private final PermissionProvider permissionProvider;
     private final ObjectProvider<FriendRelationSpi> friendRelationSpiProvider;
+    /** 绑定手机号时需校验短信验证码；CaptchaService 不依赖 UserService，无循环依赖 */
+    private final CaptchaService captchaService;
 
     @Override
     public User requireById(Long userId) {
@@ -88,6 +92,16 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
+    public User findByEmail(String email) {
+        if (TextUtil.isBlank(email)) {
+            return null;
+        }
+        return userMapper.selectOne(Wrappers.<User>lambdaQuery()
+                .eq(User::getEmail, email.trim())
+                .last("LIMIT 1"));
+    }
+
+    @Override
     public User findByAccount(String account) {
         if (TextUtil.isBlank(account)) {
             return null;
@@ -110,6 +124,12 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
+    public boolean existsEmail(String email) {
+        return TextUtil.isNotBlank(email) && userMapper.exists(Wrappers.<User>lambdaQuery()
+                .eq(User::getEmail, email.trim()));
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public User createUser(String username, String rawPassword, String nickname, String phone, String email) {
         String account = username == null ? null : username.trim();
@@ -118,6 +138,7 @@ public class UserServiceImpl implements UserService {
         }
         BusinessException.throwIf(existsUsername(account), ResultCode.USER_ALREADY_EXISTS);
         BusinessException.throwIf(existsPhone(phone), ResultCode.USER_PHONE_EXISTS);
+        BusinessException.throwIf(existsEmail(email), ResultCode.USER_EMAIL_EXISTS);
 
         User user = new User();
         user.setUsername(account);
@@ -131,6 +152,33 @@ public class UserServiceImpl implements UserService {
 
         bindDefaultRole(user.getId());
         log.info("新用户注册成功: userId={}, username={}", user.getId(), user.getUsername());
+        return user;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public User createAutoUser(String username, String nickname, String phone, String email) {
+        String account = username == null ? null : username.trim();
+        if (TextUtil.isBlank(account)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "账号不能为空");
+        }
+        BusinessException.throwIf(existsUsername(account), ResultCode.USER_ALREADY_EXISTS);
+        BusinessException.throwIf(existsPhone(phone), ResultCode.USER_PHONE_EXISTS);
+        BusinessException.throwIf(existsEmail(email), ResultCode.USER_EMAIL_EXISTS);
+
+        User user = new User();
+        user.setUsername(account);
+        // 写入哨兵而非有效密文：这类账号无法用密码登录，直到用户首次设置密码
+        user.setPassword(User.NO_PASSWORD);
+        user.setNickname(TextUtil.isBlank(nickname) ? account : nickname.trim());
+        user.setPhone(TextUtil.isBlank(phone) ? null : phone.trim());
+        user.setEmail(TextUtil.isBlank(email) ? null : email.trim());
+        user.setGender(User.GENDER_UNKNOWN);
+        user.setStatus(User.STATUS_NORMAL);
+        userMapper.insert(user);
+
+        bindDefaultRole(user.getId());
+        log.info("验证码登录自动建号: userId={}, username={}", user.getId(), user.getUsername());
         return user;
     }
 
@@ -192,17 +240,45 @@ public class UserServiceImpl implements UserService {
     @Override
     public void changePassword(Long userId, ChangePasswordRequest request) {
         User user = requireById(userId);
-        if (!passwordEncryptor.matches(request.getOldPassword(), user.getPassword())) {
-            throw new BusinessException(ResultCode.USER_OLD_PASSWORD_ERROR);
-        }
-        if (request.getOldPassword().equals(request.getNewPassword())) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "新密码不能与原密码相同");
+        // 哨兵密码 = 验证码登录自动建号、从未设置过密码：允许直接设置新密码，不校验原密码。
+        // 已经设过密码的账号仍必须提供正确的原密码，避免登录态被盗后直接改密。
+        boolean firstTimeSet = User.NO_PASSWORD.equals(user.getPassword());
+        if (!firstTimeSet) {
+            if (TextUtil.isBlank(request.getOldPassword())
+                    || !passwordEncryptor.matches(request.getOldPassword(), user.getPassword())) {
+                throw new BusinessException(ResultCode.USER_OLD_PASSWORD_ERROR);
+            }
+            if (request.getOldPassword().equals(request.getNewPassword())) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "新密码不能与原密码相同");
+            }
         }
         User patch = new User();
         patch.setId(userId);
         patch.setPassword(passwordEncryptor.encode(request.getNewPassword()));
         userMapper.updateById(patch);
-        log.info("用户 {} 修改密码成功", userId);
+        log.info("用户 {} {}密码成功", userId, firstTimeSet ? "首次设置" : "修改");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void bindPhone(Long userId, BindPhoneRequest request) {
+        User user = requireById(userId);
+        String phone = request.getPhone().trim();
+        // 先校验短信验证码（一次性消费），再判断占用，避免验证码被无效请求白白消耗
+        captchaService.verifySms(phone, request.getSmsCode());
+        User occupied = findByPhone(phone);
+        if (occupied != null && !occupied.getId().equals(userId)) {
+            throw new BusinessException(ResultCode.USER_PHONE_EXISTS);
+        }
+        if (phone.equals(user.getPhone())) {
+            // 已经是当前手机号，幂等返回，不重复写库
+            return;
+        }
+        User patch = new User();
+        patch.setId(userId);
+        patch.setPhone(phone);
+        userMapper.updateById(patch);
+        log.info("用户 {} 绑定手机号 {}", userId, TextUtil.maskPhone(phone));
     }
 
     @Override

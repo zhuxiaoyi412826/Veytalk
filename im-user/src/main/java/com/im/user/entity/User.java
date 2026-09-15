@@ -36,6 +36,16 @@ public class User extends BaseEntity {
     /** 性别：女 */
     public static final int GENDER_FEMALE = 2;
 
+    /**
+     * 「密码未设置」哨兵值。
+     *
+     * <p>短信/邮箱验证码登录时若账号不存在会自动建号，这类账号只分配 ID 与账号，
+     * 密码字段写入本哨兵而不是任何有效密文：它不是合法的 Argon2/BCrypt 格式，
+     * {@code PasswordEncryptor.matches} 对它一律返回 false，因此无法用密码登录，
+     * 直到用户在「我的」页面首次设置密码。判定「是否已设置密码」只需比较本常量。
+     */
+    public static final String NO_PASSWORD = "!NO_PASSWORD!";
+
     @TableId(type = IdType.ASSIGN_ID)
     private Long id;
 

@@ -20,12 +20,54 @@
   --im-text: #303133;
   --im-text-secondary: #909399;
 
+  /* 会话列表侧栏底色与悬停/选中态，深色模式下需随之变化 */
+  --im-list-bg: #f7f7f7;
+  --im-hover: #ebebeb;
+  --im-active: #e0e0e0;
+
   /* 气泡：自己在右侧用主色，对方在左侧用白色 */
   --im-bubble-self: #95ec69;
   --im-bubble-other: #ffffff;
   --im-chat-bg: #f5f5f5;
 
   --im-radius: 8px;
+
+  /*
+   * 下面两个由 settings store 在运行时写到 documentElement 上，
+   * 这里给一份默认值兜底：store 还没初始化（或首屏 SSR）时界面不至于错乱。
+   * --im-font-scale 消息字号缩放倍率；--im-bubble-radius 气泡圆角（简约风格会调小）。
+   */
+  --im-font-scale: 1;
+  --im-bubble-radius: 8px;
+}
+
+/*
+ * 深色模式：settings store 在 documentElement 上加/去 .dark 类来切换。
+ * 只覆盖派生色，主色仍由 store 按用户选择单独写入，两种机制互不打架。
+ * Element Plus 组件的深色由 main.js 引入的 dark/css-vars.css 负责，这里只管自研变量。
+ */
+html.dark {
+  --im-bg: #17181a;
+  --im-panel: #232425;
+  --im-border: #363637;
+  --im-text: #e5e5e5;
+  --im-text-secondary: #a6a6a6;
+
+  --im-bubble-other: #2c2d2e;
+  --im-chat-bg: #1b1c1e;
+
+  --im-list-bg: #1f2021;
+  --im-hover: #2c2d2e;
+  --im-active: #343536;
+}
+
+/*
+ * 简约气泡风格：去掉气泡尖角。
+ * .bubble__box 是 MessageBubble 的 scoped 类（带 data-v 属性），
+ * 但类名本身仍在 DOM 上，用全局选择器照样能命中，不必在组件内写两套。
+ */
+html.im-bubble-simple .bubble__box::before {
+  display: none;
 }
 
 * {

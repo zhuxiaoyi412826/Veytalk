@@ -26,7 +26,7 @@
           <UserAvatar
             :src="item.avatar"
             :name="item.name"
-            :size="42"
+            :size="settings.avatarPx"
             :online="item.type === 1 ? item.online : null"
           />
 
@@ -38,7 +38,7 @@
             <div class="conv__row">
               <span class="conv__summary im-ellipsis">
                 <span v-if="item.atFlag" class="conv__at">[有人@我]</span>
-                {{ item.lastMsgContent || '暂无消息' }}
+                <span v-if="settings.showPreview">{{ item.lastMsgContent || '暂无消息' }}</span>
               </span>
               <span class="conv__flags">
                 <el-icon v-if="item.muted" class="conv__flag" title="已开启消息免打扰"><MuteNotification /></el-icon>
@@ -62,7 +62,7 @@
     </aside>
 
     <!-- ==================== 右侧：聊天窗口 ==================== -->
-    <section class="chat-home__main">
+    <section class="chat-home__main" :style="settings.chatBackgroundStyle">
       <ChatWindow v-if="conversation.activeId" :key="conversation.activeId" :conversation-id="conversation.activeId" />
       <div v-else class="chat-home__placeholder">
         <el-empty description="选择左侧的一个会话开始聊天" :image-size="120" />
@@ -88,6 +88,7 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import ChatWindow from './ChatWindow.vue'
 import { useConversationStore } from '@/stores/conversation'
+import { useSettingsStore } from '@/stores/settings'
 import { formatConvTime } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
 
@@ -102,6 +103,7 @@ defineOptions({ name: 'ChatHome' })
 const route = useRoute()
 const router = useRouter()
 const conversation = useConversationStore()
+const settings = useSettingsStore()
 
 function isActive(item) {
   return sameId(item.conversationId, conversation.activeId)
@@ -237,7 +239,7 @@ async function confirmRemove(target) {
   flex-direction: column;
   width: var(--im-list-width);
   flex: none;
-  background: #f7f7f7;
+  background: var(--im-list-bg, #f7f7f7);
   border-right: 1px solid var(--im-border);
 }
 
@@ -282,12 +284,12 @@ async function confirmRemove(target) {
 }
 
 .conv:hover {
-  background: #ebebeb;
+  background: var(--im-hover, #ebebeb);
 }
 
 .conv--active,
 .conv--active:hover {
-  background: #e0e0e0;
+  background: var(--im-active, #e0e0e0);
 }
 
 /* 置顶会话在左上角留一道主色标记，比加图标更省横向空间 */

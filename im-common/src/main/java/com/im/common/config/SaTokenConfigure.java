@@ -39,6 +39,7 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/login/sms",
+            "/api/auth/login/email",
             "/api/captcha/**",
             "/api/file/download/**"
     );

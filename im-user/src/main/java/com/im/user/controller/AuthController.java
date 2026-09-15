@@ -2,6 +2,7 @@ package com.im.user.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.im.common.api.Result;
+import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
 import com.im.user.dto.req.SmsLoginRequest;
@@ -50,6 +51,12 @@ public class AuthController {
     @PostMapping("/login/sms")
     public Result<LoginVO> loginBySms(@RequestBody @Valid SmsLoginRequest request) {
         return Result.ok(authService.loginBySms(request), "登录成功");
+    }
+
+    @Operation(summary = "邮箱验证码登录", description = "邮箱未注册时自动建号后登录")
+    @PostMapping("/login/email")
+    public Result<LoginVO> loginByEmail(@RequestBody @Valid EmailLoginRequest request) {
+        return Result.ok(authService.loginByEmail(request), "登录成功");
     }
 
     @Operation(summary = "注销当前设备")

@@ -8,7 +8,7 @@
       </div>
 
       <el-tabs v-model="tab" class="login__tabs" stretch>
-        <!-- ==================== 账号登录 ==================== -->
+        <!-- ==================== 账号登录（无需验证码） ==================== -->
         <el-tab-pane label="账号登录" name="account">
           <el-form
             ref="accountFormRef"
@@ -31,25 +31,13 @@
                 @keyup.enter="submitAccount"
               />
             </el-form-item>
-            <el-form-item label="验证码" prop="captchaCode">
-              <div class="login__captcha-row">
-                <el-input
-                  v-model.trim="accountForm.captchaCode"
-                  placeholder="图形验证码"
-                  maxlength="8"
-                  :prefix-icon="Key"
-                  @keyup.enter="submitAccount"
-                />
-                <CaptchaImage :src="captcha.image" :loading="captchaLoading" @refresh="loadCaptcha" />
-              </div>
-            </el-form-item>
             <el-button type="primary" class="login__submit" :loading="submitting" @click="submitAccount">
               登录
             </el-button>
           </el-form>
         </el-tab-pane>
 
-        <!-- ==================== 短信登录 ==================== -->
+        <!-- ==================== 短信登录（先图形验证码，再短信验证码） ==================== -->
         <el-tab-pane label="短信登录" name="sms">
           <el-form
             ref="smsFormRef"
@@ -62,6 +50,21 @@
             <el-form-item label="手机号" prop="phone">
               <el-input v-model.trim="smsForm.phone" placeholder="11 位手机号" maxlength="11" clearable :prefix-icon="Iphone" />
             </el-form-item>
+
+            <!-- 第一步：图形验证码，作为发送短信的闸门 -->
+            <el-form-item label="图形验证码" prop="captchaCode">
+              <div class="login__captcha-row">
+                <el-input
+                  v-model.trim="smsForm.captchaCode"
+                  placeholder="先完成图形验证"
+                  maxlength="8"
+                  :prefix-icon="Key"
+                />
+                <CaptchaImage :src="captcha.image" :loading="captchaLoading" @refresh="loadCaptcha" />
+              </div>
+            </el-form-item>
+
+            <!-- 第二步：短信验证码 -->
             <el-form-item label="短信验证码" prop="smsCode">
               <div class="login__captcha-row">
                 <el-input
@@ -77,7 +80,7 @@
               </div>
             </el-form-item>
             <p v-if="smsDebugCode" class="login__debug">
-              开发环境回显验证码：<b>{{ smsDebugCode }}</b>
+              开发环境回显短信验证码：<b>{{ smsDebugCode }}</b>
             </p>
             <el-button type="primary" class="login__submit" :loading="submitting" @click="submitSms">
               登录
@@ -85,68 +88,96 @@
           </el-form>
         </el-tab-pane>
 
-        <!-- ==================== 注册 ==================== -->
-        <el-tab-pane label="注册" name="register">
+        <!-- ==================== 邮箱登录 ==================== -->
+        <el-tab-pane label="邮箱登录" name="email">
           <el-form
-            ref="registerFormRef"
-            :model="registerForm"
-            :rules="registerRules"
+            ref="emailFormRef"
+            :model="emailForm"
+            :rules="emailRules"
             label-position="top"
             size="large"
-            @submit.prevent="submitRegister"
+            @submit.prevent="submitEmail"
           >
-            <el-form-item label="账号" prop="username">
-              <el-input v-model.trim="registerForm.username" placeholder="字母开头，4-32 位字母数字下划线" clearable :prefix-icon="User" />
+            <el-form-item label="邮箱" prop="email">
+              <el-input v-model.trim="emailForm.email" placeholder="用于接收验证码的邮箱" clearable :prefix-icon="Message" />
             </el-form-item>
-            <el-form-item label="昵称" prop="nickname">
-              <el-input v-model.trim="registerForm.nickname" placeholder="留空则与账号相同" maxlength="32" clearable />
-            </el-form-item>
-            <el-form-item label="密码" prop="password">
-              <el-input v-model="registerForm.password" type="password" placeholder="6-32 位" show-password :prefix-icon="Lock" />
-            </el-form-item>
-            <el-form-item label="确认密码" prop="confirmPassword">
-              <el-input
-                v-model="registerForm.confirmPassword"
-                type="password"
-                placeholder="再输入一次"
-                show-password
-                :prefix-icon="Lock"
-              />
-            </el-form-item>
-            <el-form-item label="手机号" prop="phone">
-              <el-input v-model.trim="registerForm.phone" placeholder="选填，用于短信登录" maxlength="11" clearable :prefix-icon="Iphone" />
-            </el-form-item>
-            <el-form-item label="验证码" prop="captchaCode">
+
+            <!-- 第一步：图形验证码，作为发送邮件的闸门 -->
+            <el-form-item label="图形验证码" prop="captchaCode">
               <div class="login__captcha-row">
                 <el-input
-                  v-model.trim="registerForm.captchaCode"
-                  placeholder="图形验证码"
+                  v-model.trim="emailForm.captchaCode"
+                  placeholder="先完成图形验证"
                   maxlength="8"
                   :prefix-icon="Key"
-                  @keyup.enter="submitRegister"
                 />
                 <CaptchaImage :src="captcha.image" :loading="captchaLoading" @refresh="loadCaptcha" />
               </div>
             </el-form-item>
-            <el-button type="primary" class="login__submit" :loading="submitting" @click="submitRegister">
-              注册并登录
+
+            <!-- 第二步：邮箱验证码 -->
+            <el-form-item label="邮箱验证码" prop="emailCode">
+              <div class="login__captcha-row">
+                <el-input
+                  v-model.trim="emailForm.emailCode"
+                  placeholder="6 位数字"
+                  maxlength="6"
+                  :prefix-icon="Key"
+                  @keyup.enter="submitEmail"
+                />
+                <el-button :disabled="emailCountdown > 0" :loading="emailSending" @click="sendEmailCode">
+                  {{ emailCountdown > 0 ? `${emailCountdown} 秒后重发` : '获取验证码' }}
+                </el-button>
+              </div>
+            </el-form-item>
+            <el-button type="primary" class="login__submit" :loading="submitting" @click="submitEmail">
+              登录
             </el-button>
           </el-form>
         </el-tab-pane>
       </el-tabs>
 
-      <!--
-        debugCode 只在 dev profile 下由后端回显（captcha.expose-image-code），
-        生产环境该字段为空，这里自然就不渲染，不需要前端再判一次环境。
-      -->
-      <p v-if="captcha.debugCode" class="login__debug">
-        开发环境回显图形验证码：<b>{{ captcha.debugCode }}</b>
-      </p>
-
+      <!-- 注册入口移到底部 -->
       <p class="login__tip">
-        演示账号：alice / bob / admin，密码均为 123456
+        未登录请
+        <el-link type="primary" :underline="false" @click="openRegister">注册</el-link>
       </p>
     </div>
+
+    <!-- ==================== 注册弹窗（无需验证码） ==================== -->
+    <el-dialog v-model="registerVisible" title="注册账号" width="min(420px, calc(100vw - 32px))" append-to-body>
+      <el-form
+        ref="registerFormRef"
+        :model="registerForm"
+        :rules="registerRules"
+        label-position="top"
+        size="large"
+        @submit.prevent="submitRegister"
+      >
+        <el-form-item label="账号" prop="username">
+          <el-input v-model.trim="registerForm.username" placeholder="字母开头，4-32 位字母数字下划线" clearable :prefix-icon="User" />
+        </el-form-item>
+        <el-form-item label="昵称" prop="nickname">
+          <el-input v-model.trim="registerForm.nickname" placeholder="留空则与账号相同" maxlength="32" clearable />
+        </el-form-item>
+        <el-form-item label="密码" prop="password">
+          <el-input v-model="registerForm.password" type="password" placeholder="6-32 位" show-password :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item label="确认密码" prop="confirmPassword">
+          <el-input v-model="registerForm.confirmPassword" type="password" placeholder="再输入一次" show-password :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item label="手机号" prop="phone">
+          <el-input v-model.trim="registerForm.phone" placeholder="选填，用于短信登录" maxlength="11" clearable :prefix-icon="Iphone" />
+        </el-form-item>
+        <el-form-item label="邮箱" prop="email">
+          <el-input v-model.trim="registerForm.email" placeholder="选填，用于邮箱登录" clearable :prefix-icon="Message" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="registerVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitRegister">注册并登录</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -156,7 +187,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Iphone, Key, Lock, Message, User } from '@element-plus/icons-vue'
 import CaptchaImage from '@/components/CaptchaImage.vue'
-import { fetchCaptchaImage, sendSmsCode as sendSmsCodeApi } from '@/api/auth'
+import {
+  fetchCaptchaImage,
+  sendSmsCode as sendSmsCodeApi,
+  sendEmailCode as sendEmailCodeApi
+} from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'Login' })
@@ -170,7 +205,7 @@ const submitting = ref(false)
 
 /* ------------------------------ 图形验证码 ------------------------------ */
 
-const captcha = reactive({ key: '', image: '', debugCode: '' })
+const captcha = reactive({ key: '', image: '' })
 const captchaLoading = ref(false)
 
 /**
@@ -186,64 +221,107 @@ async function loadCaptcha() {
     const vo = await fetchCaptchaImage()
     captcha.key = vo?.captchaKey || ''
     captcha.image = vo?.image || ''
-    captcha.debugCode = vo?.debugCode || ''
   } catch {
     captcha.key = ''
     captcha.image = ''
-    captcha.debugCode = ''
   } finally {
     captchaLoading.value = false
   }
 }
 
+/* ------------------------------ 通用倒计时 ------------------------------ */
+
+function useCountdown() {
+  const seconds = ref(0)
+  let timer = null
+  function stop() {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    seconds.value = 0
+  }
+  function start(value) {
+    stop()
+    seconds.value = Math.max(1, Math.ceil(Number(value) || 60))
+    timer = setInterval(() => {
+      seconds.value -= 1
+      if (seconds.value <= 0) {
+        stop()
+      }
+    }, 1000)
+  }
+  return { seconds, start, stop }
+}
+
 /* ------------------------------ 短信验证码 ------------------------------ */
 
 const smsSending = ref(false)
-const smsCountdown = ref(0)
 const smsDebugCode = ref('')
-let smsTimer = null
-
-function startCountdown(seconds) {
-  stopCountdown()
-  smsCountdown.value = Math.max(1, Math.ceil(Number(seconds) || 60))
-  smsTimer = setInterval(() => {
-    smsCountdown.value -= 1
-    if (smsCountdown.value <= 0) {
-      stopCountdown()
-    }
-  }, 1000)
-}
-
-function stopCountdown() {
-  if (smsTimer) {
-    clearInterval(smsTimer)
-    smsTimer = null
-  }
-  smsCountdown.value = 0
-}
+const sms = useCountdown()
+const smsCountdown = sms.seconds
 
 /**
- * 发送短信验证码。
+ * 发送短信验证码：先校验手机号与图形验证码，图形验证码通过后后端才发短信。
  *
- * 先单独校验手机号字段再发请求：整表 validate 会因为「短信验证码还没填」而失败，
- * 用户点「获取验证码」时看到红色错误落在另一个输入框上，很莫名。
+ * 图形验证码是一次性的——无论发送成功还是被拒，这张图都已作废，
+ * 因此每次尝试后都要换新图并清空输入，避免用户拿旧答案反复提交。
  */
 async function sendSmsCode() {
   try {
-    await smsFormRef.value.validateField('phone')
+    await smsFormRef.value.validateField(['phone', 'captchaCode'])
   } catch {
     return
   }
   smsSending.value = true
   try {
-    const vo = await sendSmsCodeApi({ phone: smsForm.phone, scene: 'login' })
+    const vo = await sendSmsCodeApi({
+      phone: smsForm.phone,
+      scene: 'login',
+      captchaKey: captcha.key,
+      captchaCode: smsForm.captchaCode
+    })
     smsDebugCode.value = vo?.debugCode || ''
-    // retryAfter 是后端算好的「还需等待多久」，比前端写死 60 秒更准，
-    // 尤其是刚刚已经发过一次、被限流挡住的情况
-    startCountdown(vo?.retryAfter || vo?.expiresIn || 60)
-    ElMessage.success('验证码已发送')
+    sms.start(vo?.retryAfter || vo?.expiresIn || 60)
+    ElMessage.success('短信验证码已发送')
   } finally {
     smsSending.value = false
+    loadCaptcha()
+    smsForm.captchaCode = ''
+  }
+}
+
+/* ------------------------------ 邮箱验证码 ------------------------------ */
+
+const emailSending = ref(false)
+const email = useCountdown()
+const emailCountdown = email.seconds
+
+/**
+ * 发送邮箱验证码：先校验邮箱与图形验证码，图形验证码通过后后端才发邮件。
+ *
+ * 图形验证码是一次性的——无论发送成功还是被拒，这张图都已作废，
+ * 因此每次尝试后都要换新图并清空输入，避免用户拿旧答案反复提交。
+ */
+async function sendEmailCode() {
+  try {
+    await emailFormRef.value.validateField(['email', 'captchaCode'])
+  } catch {
+    return
+  }
+  emailSending.value = true
+  try {
+    const vo = await sendEmailCodeApi({
+      email: emailForm.email,
+      captchaKey: captcha.key,
+      captchaCode: emailForm.captchaCode
+    })
+    email.start(vo?.retryAfter || vo?.expiresIn || 60)
+    ElMessage.success('邮箱验证码已发送，请注意查收')
+  } finally {
+    emailSending.value = false
+    loadCaptcha()
+    emailForm.captchaCode = ''
   }
 }
 
@@ -251,24 +329,27 @@ async function sendSmsCode() {
 
 const accountFormRef = ref(null)
 const smsFormRef = ref(null)
+const emailFormRef = ref(null)
 const registerFormRef = ref(null)
 
-const accountForm = reactive({ account: '', password: '', captchaCode: '' })
-const smsForm = reactive({ phone: '', smsCode: '' })
+const accountForm = reactive({ account: '', password: '' })
+const smsForm = reactive({ phone: '', captchaCode: '', smsCode: '' })
+const emailForm = reactive({ email: '', captchaCode: '', emailCode: '' })
+
+const registerVisible = ref(false)
 const registerForm = reactive({
   username: '',
   nickname: '',
   password: '',
   confirmPassword: '',
   phone: '',
-  captchaCode: ''
+  email: ''
 })
 
-/** 与后端 RegisterRequest / SmsLoginRequest 上的注解保持一致，避免前端放行后端拒绝 */
+/** 与后端 LoginRequest / SmsLoginRequest / EmailLoginRequest 上的注解保持一致 */
 const accountRules = {
   account: [{ required: true, message: '请输入账号', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  captchaCode: [{ required: true, message: '请输入图形验证码', trigger: 'blur' }]
+  password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
 }
 
 const smsRules = {
@@ -276,8 +357,21 @@ const smsRules = {
     { required: true, message: '请输入手机号', trigger: 'blur' },
     { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }
   ],
+  captchaCode: [{ required: true, message: '请输入图形验证码', trigger: 'blur' }],
   smsCode: [
     { required: true, message: '请输入短信验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
+  ]
+}
+
+const emailRules = {
+  email: [
+    { required: true, message: '请输入邮箱', trigger: 'blur' },
+    { type: 'email', message: '邮箱格式不正确', trigger: 'blur' }
+  ],
+  captchaCode: [{ required: true, message: '请输入图形验证码', trigger: 'blur' }],
+  emailCode: [
+    { required: true, message: '请输入邮箱验证码', trigger: 'blur' },
     { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
   ]
 }
@@ -306,7 +400,7 @@ const registerRules = {
     }
   ],
   phone: [{ pattern: /^$|^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }],
-  captchaCode: [{ required: true, message: '请输入图形验证码', trigger: 'blur' }]
+  email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }]
 }
 
 /**
@@ -334,25 +428,21 @@ async function submitAccount() {
     await auth.login({
       loginType: 'username',
       account: accountForm.account,
-      password: accountForm.password,
-      captchaKey: captcha.key,
-      captchaCode: accountForm.captchaCode
+      password: accountForm.password
     })
     ElMessage.success('登录成功')
     redirectAfterLogin()
-  } catch {
-    // 验证码是一次性的：无论后端因为密码错还是验证码错而拒绝，这张图都已经作废，
-    // 不换新的话用户会拿同一个答案反复提交并反复失败
-    loadCaptcha()
-    accountForm.captchaCode = ''
   } finally {
     submitting.value = false
   }
 }
 
 async function submitSms() {
-  const valid = await smsFormRef.value.validate().catch(() => false)
-  if (!valid) {
+  // 登录只校验手机号与短信验证码：图形验证码仅是「发送验证码」的闸门，
+  // 发送成功后已被后端消费并清空，登录阶段不能再拿它卡住用户
+  try {
+    await smsFormRef.value.validateField(['phone', 'smsCode'])
+  } catch {
     return
   }
   submitting.value = true
@@ -363,6 +453,27 @@ async function submitSms() {
   } finally {
     submitting.value = false
   }
+}
+
+async function submitEmail() {
+  // 同短信登录：登录只校验邮箱与邮箱验证码，不再校验已被消费的图形验证码
+  try {
+    await emailFormRef.value.validateField(['email', 'emailCode'])
+  } catch {
+    return
+  }
+  submitting.value = true
+  try {
+    await auth.loginByEmail({ email: emailForm.email, emailCode: emailForm.emailCode })
+    ElMessage.success('登录成功')
+    redirectAfterLogin()
+  } finally {
+    submitting.value = false
+  }
+}
+
+function openRegister() {
+  registerVisible.value = true
 }
 
 async function submitRegister() {
@@ -378,14 +489,12 @@ async function submitRegister() {
       // 昵称留空时后端会拿账号顶上，前端不必代劳
       nickname: registerForm.nickname || undefined,
       phone: registerForm.phone || undefined,
-      captchaKey: captcha.key,
-      captchaCode: registerForm.captchaCode
+      email: registerForm.email || undefined
     })
+    registerVisible.value = false
     ElMessage.success('注册成功，已自动登录')
+    // 注册成功后端直接返回登录态，跳转到聊天页面
     redirectAfterLogin()
-  } catch {
-    loadCaptcha()
-    registerForm.captchaCode = ''
   } finally {
     submitting.value = false
   }
@@ -395,14 +504,17 @@ async function submitRegister() {
 
 onMounted(loadCaptcha)
 
-onBeforeUnmount(stopCountdown)
+onBeforeUnmount(() => {
+  sms.stop()
+  email.stop()
+})
 
 /**
- * 切到需要图形验证码的 Tab 时，若图还没加载出来就补一次。
+ * 切到短信 Tab 时，若图形验证码还没加载出来就补一次。
  * 不在每次切换都刷新：验证码有 5 分钟有效期，频繁刷新只会白白增加后端画图开销。
  */
 watch(tab, (value) => {
-  if ((value === 'account' || value === 'register') && !captcha.image) {
+  if ((value === 'sms' || value === 'email') && !captcha.image) {
     loadCaptcha()
   }
 })
@@ -483,7 +595,7 @@ watch(tab, (value) => {
   margin: 16px 0 0;
   padding-top: 12px;
   border-top: 1px solid var(--im-border);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--im-text-secondary);
   text-align: center;
 }

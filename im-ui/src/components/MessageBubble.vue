@@ -32,7 +32,7 @@
             v-else-if="msgType === 2"
             class="im-msg-image"
             :src="imageUrl"
-            :preview-src-list="imageUrl ? [imageUrl] : []"
+            :preview-src-list="settings.imagePreview && imageUrl ? [imageUrl] : []"
             :preview-teleported="true"
             :style="imageStyle"
             fit="cover"
@@ -54,7 +54,7 @@
               v-if="videoSrc"
               :src="videoSrc"
               controls
-              preload="metadata"
+              :preload="settings.autoPlay ? 'metadata' : 'none'"
               :style="videoStyle"
             />
             <div v-else class="bubble__video-loading">
@@ -107,6 +107,7 @@ import { ElMessage } from 'element-plus'
 import { Document, Loading, View, VideoPause, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
+import { useSettingsStore } from '@/stores/settings'
 import { mediaUrl, downloadFile, isViewableText, isVideo } from '@/utils/media'
 import { formatDuration, formatFileSize } from '@/utils/format'
 
@@ -128,6 +129,7 @@ const props = defineProps({
 const emit = defineEmits(['menu', 'resend', 'discard', 'view-file'])
 
 const auth = useAuthStore()
+const settings = useSettingsStore()
 
 const msgType = computed(() => Number(props.message.msgType))
 const isSystem = computed(() => msgType.value === 5)
@@ -187,6 +189,8 @@ const readInfoText = computed(() => {
   if (status === 0) return ''
   if (status === 5) return ''
   if (status === 1) return '已发送'
+  // 单聊关闭「已读回执」后，隐藏已送达 / 已读标记；群聊的已读人数不受此开关影响
+  if (!props.isGroup && !settings.showReadReceipt) return ''
   if (status === 2) {
     if (props.isGroup && readCount > 0) return `${readCount} 人已读`
     return '已送达'
@@ -407,7 +411,7 @@ onBeforeUnmount(() => {
 .bubble__box {
   position: relative;
   padding: 8px 12px;
-  border-radius: var(--im-radius);
+  border-radius: var(--im-bubble-radius, var(--im-radius));
   background: var(--im-bubble-other);
   word-break: break-word;
 }
@@ -446,8 +450,8 @@ onBeforeUnmount(() => {
 }
 
 .bubble__text {
-  font-size: 14px;
-  line-height: 22px;
+  font-size: calc(14px * var(--im-font-scale, 1));
+  line-height: calc(22px * var(--im-font-scale, 1));
   /* 保留用户敲的换行与连续空格，但不保留 HTML —— 用的是插值而不是 v-html，天然免疫 XSS */
   white-space: pre-wrap;
 }

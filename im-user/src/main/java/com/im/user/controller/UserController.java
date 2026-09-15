@@ -6,6 +6,7 @@ import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.util.SecurityUtil;
+import com.im.user.dto.req.BindPhoneRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
 import com.im.user.dto.req.UpdateProfileRequest;
 import com.im.user.dto.req.UserSearchQuery;
@@ -69,6 +70,15 @@ public class UserController {
             return Result.ok(null, "密码已修改，请使用新密码重新登录");
         }
         return Result.ok(null, "密码已修改");
+    }
+
+    @Operation(summary = "绑定手机号", description = "凭短信验证码绑定或换绑手机号；验证码通过 /api/captcha/sms（scene=bind）获取，无需图形验证码")
+    @SaCheckPermission(ImConstants.PERM_USER_UPDATE)
+    @PutMapping("/phone")
+    public Result<UserVO> bindPhone(@RequestBody @Valid BindPhoneRequest request) {
+        Long userId = SecurityUtil.getUserId();
+        userService.bindPhone(userId, request);
+        return Result.ok(userService.getProfile(userId), "手机号已绑定");
     }
 
     @Operation(summary = "他人资料卡片", description = "不含手机号与邮箱，附带与当前用户的好友/拉黑关系")

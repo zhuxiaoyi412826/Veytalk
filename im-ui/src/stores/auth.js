@@ -32,6 +32,8 @@ export const useAuthStore = defineStore('auth', {
     email: (state) => state.userInfo?.email || '',
     roles: (state) => state.userInfo?.roles || [],
     permissions: (state) => state.userInfo?.permissions || [],
+    /** 是否已设置密码；验证码登录自动建号的账号为 false，需引导首次设置 */
+    passwordSet: (state) => state.userInfo?.passwordSet !== false,
     /** 头像的可渲染地址，空值时组件回退到昵称首字母 */
     avatarUrl: (state) => mediaUrl(state.userInfo?.avatar),
     avatarRaw: (state) => state.userInfo?.avatar || ''
@@ -68,6 +70,13 @@ export const useAuthStore = defineStore('auth', {
     /** 手机号 + 短信验证码登录 */
     async loginBySms(form) {
       const vo = await authApi.loginBySms({ ...form, deviceId: getDeviceId() })
+      this.applyLoginResult(vo)
+      return vo
+    },
+
+    /** 邮箱 + 邮箱验证码登录，form: { email, emailCode } */
+    async loginByEmail(form) {
+      const vo = await authApi.loginByEmail({ ...form, deviceId: getDeviceId() })
       this.applyLoginResult(vo)
       return vo
     },
@@ -116,6 +125,12 @@ export const useAuthStore = defineStore('auth', {
 
     async updateProfile(data) {
       this.userInfo = await userApi.updateProfile(data)
+      return this.userInfo
+    },
+
+    /** 绑定 / 换绑手机号，后端返回绑定后的最新资料，直接覆盖本地缓存 */
+    async bindPhone(data) {
+      this.userInfo = await userApi.bindPhone(data)
       return this.userInfo
     },
 

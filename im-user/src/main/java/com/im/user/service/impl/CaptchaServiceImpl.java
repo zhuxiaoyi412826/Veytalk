@@ -6,12 +6,18 @@ import com.im.common.constant.RedisKeys;
 import com.im.common.exception.BusinessException;
 import com.im.common.util.RedisUtil;
 import com.im.common.util.TextUtil;
+import com.im.user.dto.req.SendEmailRequest;
 import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.vo.CaptchaImageVO;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.service.CaptchaService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -53,6 +59,12 @@ public class CaptchaServiceImpl implements CaptchaService {
 
     private final RedisUtil redisUtil;
     private final ImProperties properties;
+    /** QQ 邮箱 SMTP 未配置（无 spring-boot-starter-mail 或缺少账号）时为空，发信时才报错 */
+    private final ObjectProvider<JavaMailSender> mailSenderProvider;
+
+    /** 发件人地址，取 QQ 邮箱账号 */
+    @Value("${spring.mail.username:}")
+    private String mailFrom;
 
     @Override
     public CaptchaImageVO generateImage() {
@@ -91,6 +103,12 @@ public class CaptchaServiceImpl implements CaptchaService {
     @Override
     public SmsSendVO sendSms(SendSmsRequest request) {
         String phone = request.getPhone();
+        // 绑定手机号场景下用户已登录、是本人操作，跳过图形验证码闸门；
+        // 登录/注册等匿名场景仍先校验图形验证码，防止脚本化短信轰炸（一次性消费）
+        if (!SendSmsRequest.SCENE_BIND.equalsIgnoreCase(request.getScene())) {
+            verifyImage(request.getCaptchaKey(), request.getCaptchaCode());
+        }
+
         long interval = properties.getCaptcha().getSmsIntervalSeconds();
         String limitKey = RedisKeys.captchaSmsLimit(phone);
         // setIfAbsent 天然原子，用它同时完成「频率限制判断」与「占位」
@@ -121,6 +139,64 @@ public class CaptchaServiceImpl implements CaptchaService {
         String expected = redisUtil.getAndDelete(RedisKeys.captchaSms(phone));
         if (expected == null || !expected.equals(smsCode.trim())) {
             throw new BusinessException(ResultCode.SMS_CODE_ERROR);
+        }
+    }
+
+    @Override
+    public EmailSendVO sendEmail(SendEmailRequest request) {
+        String email = request.getEmail() == null ? null : request.getEmail().trim();
+        // 图形验证码闸门：先校验通过才发送邮件，防止脚本化邮箱轰炸（一次性消费）
+        verifyImage(request.getCaptchaKey(), request.getCaptchaCode());
+
+        JavaMailSender mailSender = mailSenderProvider.getIfAvailable();
+        if (mailSender == null || TextUtil.isBlank(mailFrom)) {
+            // 未引入 spring-boot-starter-mail 或未配置 MAIL_USERNAME，无法发信
+            throw new BusinessException(ResultCode.MAIL_NOT_CONFIGURED);
+        }
+
+        long interval = properties.getCaptcha().getEmailIntervalSeconds();
+        String limitKey = RedisKeys.captchaEmailLimit(email);
+        // setIfAbsent 原子完成「频率限制判断」与「占位」
+        if (!redisUtil.setIfAbsent(limitKey, "1", Duration.ofSeconds(interval))) {
+            throw new BusinessException(ResultCode.EMAIL_SEND_TOO_FREQUENT);
+        }
+
+        String code = String.format("%06d", RANDOM.nextInt(1_000_000));
+        long ttl = properties.getCaptcha().getEmailTtlSeconds();
+        try {
+            SimpleMailMessage message = new SimpleMailMessage();
+            message.setFrom(mailFrom);
+            message.setTo(email);
+            message.setSubject("【IM】登录验证码");
+            message.setText("您的登录验证码为：" + code + "，" + (ttl / 60) + " 分钟内有效。\n"
+                    + "如非本人操作，请忽略本邮件。");
+            mailSender.send(message);
+        } catch (Exception e) {
+            // 发信失败时释放频率限制占位，允许用户立即重试
+            redisUtil.delete(limitKey);
+            log.error("验证码邮件发送失败: email={}, {}", TextUtil.maskEmail(email), e.getMessage());
+            throw new BusinessException(ResultCode.MAIL_SEND_FAILED);
+        }
+        redisUtil.set(RedisKeys.captchaEmail(email), code, Duration.ofSeconds(ttl));
+        log.info("向 {} 发送邮箱登录验证码，{} 秒内有效", TextUtil.maskEmail(email), ttl);
+
+        long retryAfter = redisUtil.getExpire(limitKey);
+        return EmailSendVO.builder()
+                .email(TextUtil.maskEmail(email))
+                .expiresIn(ttl)
+                .retryAfter(retryAfter > 0 ? retryAfter : interval)
+                .debugCode(properties.getCaptcha().isExposeEmailCode() ? code : null)
+                .build();
+    }
+
+    @Override
+    public void verifyEmail(String email, String emailCode) {
+        if (TextUtil.isBlank(email) || TextUtil.isBlank(emailCode)) {
+            throw new BusinessException(ResultCode.EMAIL_CODE_ERROR);
+        }
+        String expected = redisUtil.getAndDelete(RedisKeys.captchaEmail(email.trim()));
+        if (expected == null || !expected.equals(emailCode.trim())) {
+            throw new BusinessException(ResultCode.EMAIL_CODE_ERROR);
         }
     }
 

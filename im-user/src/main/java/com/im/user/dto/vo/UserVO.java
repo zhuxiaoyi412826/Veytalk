@@ -51,6 +51,9 @@ public class UserVO implements Serializable {
     @Schema(description = "状态：1 正常 0 禁用")
     private Integer status;
 
+    @Schema(description = "是否已设置密码；验证码登录自动建号的账号为 false，需引导首次设置")
+    private Boolean passwordSet;
+
     @Schema(description = "是否在线")
     private Boolean online;
 

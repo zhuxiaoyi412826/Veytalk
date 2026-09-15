@@ -18,8 +18,7 @@ public class ChangePasswordRequest implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    @Schema(description = "原密码", requiredMode = Schema.RequiredMode.REQUIRED)
-    @NotBlank(message = "原密码不能为空")
+    @Schema(description = "原密码；验证码登录自动建号、从未设过密码的账号首次设置时可留空")
     private String oldPassword;
 
     @Schema(description = "新密码，6-32 位", requiredMode = Schema.RequiredMode.REQUIRED)

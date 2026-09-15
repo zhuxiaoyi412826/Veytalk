@@ -1,7 +1,9 @@
 package com.im.user.service;
 
+import com.im.user.dto.req.SendEmailRequest;
 import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.vo.CaptchaImageVO;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.SmsSendVO;
 
 /**
@@ -23,6 +25,9 @@ public interface CaptchaService {
 
     /**
      * 发送短信验证码（Mock 实现：写 Redis + 日志），带 60 秒频率限制。
+     *
+     * <p>当 {@code im.captcha.image-required=true} 时，发送前先校验图形验证码，
+     * 作为防短信轰炸的闸门；图形验证码一次性消费。
      */
     SmsSendVO sendSms(SendSmsRequest request);
 
@@ -30,4 +35,14 @@ public interface CaptchaService {
      * 校验短信验证码，成功后立即作废。
      */
     void verifySms(String phone, String smsCode);
+
+    /**
+     * 发送邮箱验证码（通过 QQ 邮箱 SMTP），带频率限制。
+     */
+    EmailSendVO sendEmail(SendEmailRequest request);
+
+    /**
+     * 校验邮箱验证码，成功后立即作废。
+     */
+    void verifyEmail(String email, String emailCode);
 }

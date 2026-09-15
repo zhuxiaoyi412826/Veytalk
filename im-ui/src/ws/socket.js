@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { fetchWsTicket } from '@/api/ws'
 import { getToken, getDeviceId } from '@/utils/token'
+import { dlog } from '@/utils/logger'
 
 /**
  * WebSocket 客户端：连接、心跳、指数退避重连与事件分发。
@@ -155,6 +156,7 @@ export function send(type, data, clientMsgId) {
   }
   try {
     ws.send(JSON.stringify(packet))
+    dlog('ws send ↑', type, packet)
     return true
   } catch (error) {
     console.error('[ws] 发送失败', type, error)
@@ -206,6 +208,7 @@ async function openOnce() {
     socketState.status = 'open'
     socketState.lastError = ''
     startHeartbeat()
+    dlog('ws open，连接已建立', { reconnected: reconnectCount > 0 })
     emit('open', { reconnected: reconnectCount > 0 })
   }
 
@@ -239,6 +242,7 @@ async function openOnce() {
       // 服务端推完这帧就会关连接，先置位避免 onclose 触发重连
       manualClose = true
     }
+    dlog('ws recv ↓', packet.type, packet)
     emit(packet.type, packet)
   }
 
@@ -257,6 +261,7 @@ async function openOnce() {
       pongTimer = null
     }
     ws = null
+    dlog('ws close，连接关闭', { code: event.code, reason: event.reason, willReconnect: !manualClose && !!getToken() })
     emit('close', { code: event.code, reason: event.reason, willReconnect: !manualClose && !!getToken() })
     if (manualClose || !getToken()) {
       socketState.status = 'closed'
@@ -276,6 +281,7 @@ function scheduleReconnect() {
   const base = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** (attempts - 1))
   const delay = base + Math.floor(Math.random() * 500)
   socketState.status = 'reconnecting'
+  dlog('ws 准备重连', { attempts, delay })
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     reconnectCount += 1
@@ -303,6 +309,7 @@ export function connect() {
  * 不会触发重连，也不清空已注册的监听器 —— 监听器的生命周期属于组件。
  */
 export function disconnect() {
+  dlog('ws disconnect，主动断开（登出 / 被踢）')
   manualClose = true
   clearTimers()
   attempts = 0

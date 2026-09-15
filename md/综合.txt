@@ -6,6 +6,7 @@ Write-Host "Vite局域网地址：http://$((Get-NetIPAddress -AddressFamily IPv4
 单机minIo启动  API 9000 浏览器9001
 
 mvn clean install -DskipTests 改了模块 
+mvn -f ..\pom.xml clean install -DskipTests
 mvn spring-boot:run
 
 解决乱码  
