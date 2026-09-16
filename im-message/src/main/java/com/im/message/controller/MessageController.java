@@ -6,6 +6,7 @@ import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.util.SecurityUtil;
+import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageIdsRequest;
 import com.im.message.dto.req.MessageSearchQuery;
 import com.im.message.dto.req.ReadReportRequest;
@@ -128,5 +129,14 @@ public class MessageController {
     public Result<Void> markDelivered(@RequestBody @Valid MessageIdsRequest request) {
         messageService.markDelivered(SecurityUtil.getUserId(), request.getMessageIds());
         return Result.ok(null, "已上报送达");
+    }
+
+    @Operation(summary = "转发消息",
+            description = "把一条已存在的消息复制到目标会话；附件复用原文件不重新上传，"
+                    + "转发者必须是原会话成员；目标会话定位优先级 conversationId > toUserId > toGroupId")
+    @PostMapping("/forward")
+    @SaCheckPermission(ImConstants.PERM_MESSAGE_SEND)
+    public Result<MessageVO> forward(@RequestBody @Valid ForwardMessageRequest request) {
+        return Result.ok(messageService.forward(SecurityUtil.getUserId(), request));
     }
 }

@@ -6,6 +6,7 @@ import com.im.common.domain.MessageSendCmd;
 import java.util.Collection;
 import java.util.List;
 
+
 /**
  * 消息契约，由 im-message 模块实现。
  */
@@ -82,4 +83,21 @@ public interface MessageSpi {
      * 清除离线消息标记。
      */
     void clearOffline(Long userId);
+
+    /**
+     * 转发消息：把一条已存在的消息复制到目标会话。
+     *
+     * <p>转发者必须是原消息所在会话的成员；附件复用原文件不重新上传，
+     * 目标会话定位优先级 {@code conversationId} &gt; {@code toUserId} &gt; {@code toGroupId}。
+     *
+     * @param userId         转发操作者
+     * @param messageId      被转发的原消息 ID
+     * @param conversationId 目标会话 ID，与 toUserId/toGroupId 三选一
+     * @param toUserId       单聊目标用户 ID
+     * @param toGroupId      群聊目标群 ID
+     * @param clientMsgId    幂等键，为空时由服务端生成
+     * @return 落库后的新消息
+     */
+    MessageDTO forward(Long userId, Long messageId, Long conversationId,
+                       Long toUserId, Long toGroupId, String clientMsgId);
 }

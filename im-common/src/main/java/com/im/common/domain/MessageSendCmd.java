@@ -53,6 +53,13 @@ public class MessageSendCmd implements Serializable {
     @Schema(description = "是否 @ 全员，仅群聊有效")
     private Boolean atAll;
 
+    @Schema(description = "引用/回复的原消息 ID，为空表示普通消息")
+    private Long quoteMsgId;
+
+    @Schema(description = "是否为转发操作，转发时跳过附件归属校验")
+    @Builder.Default
+    private Boolean forward = Boolean.FALSE;
+
     @Schema(description = "是否跳过好友关系 / 禁言校验，仅服务端内部系统通知使用")
     @Builder.Default
     private Boolean internal = Boolean.FALSE;

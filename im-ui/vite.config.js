@@ -25,14 +25,20 @@ export default defineConfig({
   //   exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
   // },
   server: {
-    // 监听所有网卡而不只是 localhost：手机（USB 共享网络或同一热点）要用电脑在
-    // 该网段里的 IP 才能打开页面。代价是同网段的其他机器也能访问这个 dev server，
-    // 只在可信网络下这么跑；启动后控制台会多打一行 Network 地址，那就是给手机用的。
-    host: true,
+    // 监听 0.0.0.0（所有网卡）而不只是 localhost：手机、局域网其他机器、
+    // 内网穿透都能用本机在该网段的 IP / 域名打开页面。代价是同网段的
+    // 其他机器也能访问这个 dev server，只在可信网络下这么跑；启动后控制台
+    // 会多打一行 Network 地址，那就是给手机 / 外部访问用的。
+    host: '0.0.0.0',
     port: 5173,
     // 端口被占用时直接报错，而不是自动顺延到 5174。
     // README 与后端联调说明里写死的是 5173，静默换端口会让人以为文档过期了。
     strictPort: true,
+    // 本地开发 / 内网穿透：放行任意 Host 头。Vite 5+ 默认会拦截不在白名单
+    // 里的域名（返回 "Blocked request. This host is not allowed"），true 表示全部放行，
+    // 任何 IP / 域名 / 穿透工具都能直接访问，无需再维护白名单。
+    // 注意：仅限本地开发使用，生产环境应收紧为具体域名。
+    allowedHosts: true,
     // TODO: 视频压缩功能启用后需要取消以下注释（ffmpeg.wasm 依赖 SharedArrayBuffer）
     // headers: {
     //   'Cross-Origin-Opener-Policy': 'same-origin',

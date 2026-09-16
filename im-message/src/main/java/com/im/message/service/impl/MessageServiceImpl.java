@@ -12,6 +12,7 @@ import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.domain.MessageExtra;
 import com.im.common.domain.MessageSendCmd;
+import com.im.common.domain.QuotePreview;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.domain.WsPacket;
 import com.im.common.enums.ConvType;
@@ -29,6 +30,7 @@ import com.im.common.util.RedisUtil;
 import com.im.common.util.TextUtil;
 import com.im.message.convert.MessageConvert;
 import com.im.message.dto.po.ConversationMaxSeq;
+import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageSearchQuery;
 import com.im.message.dto.req.SendMessageRequest;
 import com.im.message.dto.vo.MessageVO;
@@ -159,6 +161,8 @@ public class MessageServiceImpl implements MessageService {
             handlerOf(type).normalize(cmd);
             // 必须在 normalize 之后：文本处理器会清空 extra，先合并 @ 信息会被一起清掉
             MessageExtra extra = mergeMention(cmd, conversationType);
+            // 引用校验也在 normalize 之后：转发时 cmd.quoteMsgId 为空，不会触发
+            validateQuote(cmd.getQuoteMsgId(), conversationId);
             LocalDateTime now = LocalDateTime.now();
 
             Message message = new Message();
@@ -170,6 +174,7 @@ public class MessageServiceImpl implements MessageService {
             message.setContent(cmd.getContent());
             message.setExtra(extra);
             message.setSeq(sequenceService.nextSeq(conversationId));
+            message.setQuoteMsgId(cmd.getQuoteMsgId());
             message.setRecalled(0);
             message.setSendTime(now);
             message.setCreateTime(now);
@@ -181,14 +186,16 @@ public class MessageServiceImpl implements MessageService {
                 Message existing = messageMapper.selectByClientMsgId(cmd.getFromUserId(), clientMsgId);
                 BusinessException.throwIf(existing == null, ResultCode.MESSAGE_DUPLICATE);
                 log.warn("[消息发送] 命中唯一键幂等: fromUserId={}, clientMsgId={}", cmd.getFromUserId(), clientMsgId);
-                return MessageConvert.toDTO(existing, senderOf(existing), conversationType, MessageStatus.SENT);
+                return MessageConvert.toDTO(existing, senderOf(existing), conversationType, MessageStatus.SENT,
+                        loadQuotePreview(existing.getQuoteMsgId()));
             }
 
             // 会话摘要与未读数必须和消息同生共死，放在事务内；
             // ConversationSpiImpl 的事务传播是 REQUIRED，会直接加入当前事务
             conversationSpi.onNewMessage(buildEvent(message, conversationType, extra, cmd));
 
-            MessageDTO dto = MessageConvert.toDTO(message, senderOf(message), conversationType, MessageStatus.SENT);
+            MessageDTO dto = MessageConvert.toDTO(message, senderOf(message), conversationType, MessageStatus.SENT,
+                    loadQuotePreview(message.getQuoteMsgId()));
             if (!Boolean.FALSE.equals(cmd.getPush())) {
                 afterCommit(() -> pushNewMessage(dto, conversationId, cmd.getFromUserId()));
             }
@@ -213,6 +220,7 @@ public class MessageServiceImpl implements MessageService {
                 .extra(request.getExtra())
                 .atUserIds(request.getAtUserIds())
                 .atAll(request.getAtAll())
+                .quoteMsgId(request.getQuoteMsgId())
                 .build();
         return MessageConvert.toVO(send(cmd), userId);
     }
@@ -336,7 +344,8 @@ public class MessageServiceImpl implements MessageService {
             throw new BusinessException(ResultCode.MESSAGE_DUPLICATE);
         }
         Integer conversationType = conversationSpi.getType(existing.getConversationId());
-        return MessageConvert.toDTO(existing, senderOf(existing), conversationType, MessageStatus.SENT);
+        return MessageConvert.toDTO(existing, senderOf(existing), conversationType, MessageStatus.SENT,
+                loadQuotePreview(existing.getQuoteMsgId()));
     }
 
     /**
@@ -417,7 +426,8 @@ public class MessageServiceImpl implements MessageService {
             return null;
         }
         return MessageConvert.toDTO(message, senderOf(message),
-                conversationSpi.getType(message.getConversationId()), MessageStatus.SENT);
+                conversationSpi.getType(message.getConversationId()), MessageStatus.SENT,
+                loadQuotePreview(message.getQuoteMsgId()));
     }
 
     @Override
@@ -476,9 +486,11 @@ public class MessageServiceImpl implements MessageService {
         }
         Map<Long, UserBriefDTO> senders = sendersOf(records);
         Map<Long, Integer> conversationTypes = conversationTypesOf(records);
+        Map<Long, QuotePreview> quotes = loadQuotePreviews(records);
         return records.stream()
                 .map(message -> MessageConvert.toDTO(message, senders.get(message.getFromUserId()),
-                        conversationTypes.get(message.getConversationId()), MessageStatus.SENT))
+                        conversationTypes.get(message.getConversationId()), MessageStatus.SENT,
+                        message.getQuoteMsgId() == null ? null : quotes.get(message.getQuoteMsgId())))
                 .toList();
     }
 
@@ -529,6 +541,7 @@ public class MessageServiceImpl implements MessageService {
      *
      * <p>用户资料与回执各查一次：逐条消息查会产生 2N 次数据库往返，
      * 一屏 20 条消息就是 40 次，历史翻页时这个开销会直接体现在响应时间上。
+     * 引用预览同样批量加载，避免每条带引用的消息都单独回表。
      */
     private List<MessageVO> toViewList(List<Message> records, Long viewerId) {
         Set<Long> messageIds = records.stream().map(Message::getId).collect(Collectors.toSet());
@@ -546,12 +559,15 @@ public class MessageServiceImpl implements MessageService {
                 .map(Message::getId)
                 .collect(Collectors.toSet());
         Map<Long, Receipt> receipts = loadReceipts(selfMessageIds);
+        // 批量加载引用预览：收集所有 quoteMsgId，一次查出原消息与发送者
+        Map<Long, QuotePreview> quotes = loadQuotePreviews(visible);
 
         return visible.stream().map(message -> {
             boolean self = viewerId.equals(message.getFromUserId());
             Receipt receipt = self ? receipts.getOrDefault(message.getId(), Receipt.EMPTY) : Receipt.EMPTY;
             MessageStatus status = MessageConvert.resolveStatus(message, self, receipt.delivered(), receipt.read());
-            return MessageConvert.toVO(message, senders.get(message.getFromUserId()), viewerId, status, receipt.read());
+            QuotePreview quote = message.getQuoteMsgId() == null ? null : quotes.get(message.getQuoteMsgId());
+            return MessageConvert.toVO(message, senders.get(message.getFromUserId()), viewerId, status, receipt.read(), quote);
         }).toList();
     }
 
@@ -632,7 +648,7 @@ public class MessageServiceImpl implements MessageService {
         int limitSeconds = imProperties.getMessage().getRecallLimitSeconds();
         LocalDateTime deadline = message.getSendTime().plusSeconds(limitSeconds);
         BusinessException.throwIf(LocalDateTime.now().isAfter(deadline),
-                ResultCode.MESSAGE_RECALL_TIMEOUT, limitSeconds);
+                ResultCode.MESSAGE_RECALL_TIMEOUT);
         validateRecallRight(message, operatorId);
 
         if (messageMapper.markRecalled(messageId, LocalDateTime.now()) == 0) {
@@ -834,6 +850,99 @@ public class MessageServiceImpl implements MessageService {
         row.setReadTime(readTime);
         row.setCreateTime(LocalDateTime.now());
         return row;
+    }
+
+    /* ==================== 引用与转发 ==================== */
+
+    /**
+     * 校验引用的原消息。
+     *
+     * <p>三条规则：原消息必须存在、未撤回、且与新消息属于同一会话。
+     * 跨会话引用没有意义（对方看不到原消息），已撤回的消息继续引用等于绕过撤回。
+     */
+    private void validateQuote(Long quoteMsgId, Long conversationId) {
+        if (quoteMsgId == null) {
+            return;
+        }
+        Message quoted = messageMapper.selectById(quoteMsgId);
+        BusinessException.throwIf(quoted == null, ResultCode.MESSAGE_QUOTE_INVALID);
+        BusinessException.throwIf(quoted.isRecalledNow(), ResultCode.MESSAGE_QUOTE_INVALID);
+        BusinessException.throwIf(!quoted.getConversationId().equals(conversationId), ResultCode.MESSAGE_QUOTE_INVALID);
+    }
+
+    /**
+     * 加载单条引用预览，发送路径与单条查询用。
+     */
+    private QuotePreview loadQuotePreview(Long quoteMsgId) {
+        if (quoteMsgId == null) {
+            return null;
+        }
+        Message quoted = messageMapper.selectById(quoteMsgId);
+        if (quoted == null) {
+            return null;
+        }
+        return MessageConvert.toQuotePreview(quoted, senderOf(quoted));
+    }
+
+    /**
+     * 批量加载引用预览，历史分页与离线拉取用。
+     *
+     * <p>收集所有非空的 quoteMsgId，一次查出原消息，再批量补齐发送者资料，
+     * 避免每条带引用的消息都单独回表。
+     */
+    private Map<Long, QuotePreview> loadQuotePreviews(List<Message> messages) {
+        Set<Long> quoteIds = messages.stream()
+                .map(Message::getQuoteMsgId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (quoteIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Message> quotedMessages = new ArrayList<>(messageMapper.selectByIdIn(quoteIds));
+        if (quotedMessages.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, UserBriefDTO> quotedSenders = sendersOf(quotedMessages);
+        Map<Long, QuotePreview> result = new HashMap<>(quotedMessages.size());
+        for (Message quoted : quotedMessages) {
+            result.put(quoted.getId(),
+                    MessageConvert.toQuotePreview(quoted, quotedSenders.get(quoted.getFromUserId())));
+        }
+        return result;
+    }
+
+    @Override
+    public MessageDTO forwardDto(Long userId, ForwardMessageRequest request) {
+        Message origin = messageMapper.selectById(request.getMessageId());
+        BusinessException.throwIf(origin == null, ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwIf(origin.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        // 转发者必须是原会话成员，否则任何人都能通过猜 messageId 把别人会话里的文件广播出去
+        BusinessException.throwUnless(conversationSpi.isMember(origin.getConversationId(), userId),
+                ResultCode.MESSAGE_FORWARD_FORBIDDEN);
+
+        String clientMsgId = TextUtil.isNotBlank(request.getClientMsgId())
+                ? request.getClientMsgId().trim()
+                : "fwd-" + UUID.randomUUID();
+
+        MessageSendCmd cmd = MessageSendCmd.builder()
+                .clientMsgId(clientMsgId)
+                .conversationId(request.getConversationId())
+                .fromUserId(userId)
+                .toUserId(request.getToUserId())
+                .toGroupId(request.getToGroupId())
+                .msgType(origin.getMsgType())
+                .content(origin.getContent())
+                .extra(origin.getExtra())
+                // 转发不携带引用，收到的消息就是一条普通的新消息
+                .quoteMsgId(null)
+                .forward(Boolean.TRUE)
+                .build();
+        return send(cmd);
+    }
+
+    @Override
+    public MessageVO forward(Long userId, ForwardMessageRequest request) {
+        return MessageConvert.toVO(forwardDto(userId, request), userId);
     }
 
     /* ==================== 公共辅助 ==================== */

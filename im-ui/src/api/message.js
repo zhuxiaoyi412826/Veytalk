@@ -61,7 +61,7 @@ export function reportDelivered(messageIds) {
 
 /**
  * 撤回消息。
- * 后端限制发出后 120 秒内、且只有发送者本人（或持 message:recall:any 权限者）可撤。
+ * 后端限制发出后撤回时限内（im.message.recall-limit-seconds，默认 2 小时）、且只有发送者本人（或持 message:recall:any 权限者）可撤。
  */
 export function recallMessage(messageId) {
   return http.put(`/message/${messageId}/recall`)
@@ -75,4 +75,15 @@ export function deleteMessage(messageId) {
 /** 会话内消息内容检索 */
 export function searchMessages(params) {
   return http.get('/message/search', { params })
+}
+
+/**
+ * 转发消息。
+ *
+ * 把一条已存在的消息复制到目标会话，附件复用原文件不重新上传。
+ * 目标会话定位优先级：conversationId > toUserId > toGroupId。
+ * 转发不携带引用，收到的消息就是一条普通的新消息。
+ */
+export function forwardMessage(data) {
+  return http.post('/message/forward', data)
 }

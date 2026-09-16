@@ -72,15 +72,18 @@
 
       <template v-for="(item, index) in messages" :key="item.messageId || item.clientMsgId">
         <div v-if="showDivider(index)" class="chat-window__divider">{{ formatMsgTime(item.sendTime) }}</div>
-        <MessageBubble
-          :message="item"
-          :show-sender="isGroup"
-          :is-group="isGroup"
-          @menu="(event) => onBubbleMenu(event, item)"
-          @resend="onResend"
-          @discard="onDiscard"
-          @view-file="onViewFile"
-        />
+        <div :data-msg-id="item.messageId ? asId(item.messageId) : undefined">
+          <MessageBubble
+            :message="item"
+            :show-sender="isGroup"
+            :is-group="isGroup"
+            @menu="(event) => onBubbleMenu(event, item)"
+            @resend="onResend"
+            @discard="onDiscard"
+            @view-file="onViewFile"
+            @jump-quote="onJumpQuote"
+          />
+        </div>
       </template>
 
       <div v-if="!messages.length && !loading" class="chat-window__empty">
@@ -128,6 +131,15 @@
       <!-- 被禁言时的提示 -->
       <div v-if="isMuted" class="chat-window__muted-notice">
         {{ isMuteAll ? '群聊已开启全员禁言，仅管理员与群主可发言' : '你已被禁言，无法发送消息' }}
+      </div>
+
+      <!-- 回复横幅：选定了要回复的消息后在输入框上方展示，点右侧 X 取消 -->
+      <div v-if="replyTarget" class="chat-window__reply-banner">
+        <div class="chat-window__reply-info">
+          <span class="chat-window__reply-label">回复 {{ replyTarget.fromNickname }}</span>
+          <span class="chat-window__reply-content im-ellipsis">{{ replyPreview }}</span>
+        </div>
+        <el-button text :icon="Close" size="small" @click="cancelReply" />
       </div>
 
       <el-input
@@ -202,6 +214,11 @@
       :file-name="viewer.fileName"
     />
 
+    <ForwardDialog
+      v-model:visible="forwardDialog.visible"
+      :message-id="forwardDialog.messageId"
+    />
+
     <GroupSettings
       v-if="isGroup"
       v-model="showGroupSettings"
@@ -220,6 +237,7 @@ import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import FileViewer from '@/components/FileViewer.vue'
 import GroupSettings from '@/components/GroupSettings.vue'
+import ForwardDialog from '@/components/ForwardDialog.vue'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
@@ -568,6 +586,10 @@ async function sendText() {
   }
   // 先解析 @ 提及再清输入框，否则 parseMentions 拿到的是空串
   const { text: cleanText, atUserIds, atAll } = parseMentions(text)
+  // 引用消息：发送前先拿到 quoteMsgId 再清空，发送失败时 replyTarget 已经清空，
+  // 用户重新点回复才能再引用，避免失败消息带者一个看不见的引用关系
+  const quoteMsgId = replyTarget.value?.messageId || undefined
+  replyTarget.value = null
   // 先清输入框再发：失败时内容还在气泡里（带「重发」入口），
   // 留在输入框反而会让用户以为没发出去而再按一次，制造重复消息
   draft.value = ''
@@ -577,7 +599,8 @@ async function sendText() {
       msgType: 1,
       content: cleanText,
       atUserIds: atUserIds.length ? atUserIds : undefined,
-      atAll: atAll || undefined
+      atAll: atAll || undefined,
+      quoteMsgId
     })
   } catch {
     // 占位消息已被 store 标成「发送失败」，错误提示也由 request.js 弹过了
@@ -910,6 +933,68 @@ function onViewFile({ fileUrl, fileName }) {
 
 const menu = reactive({ visible: false, x: 0, y: 0, target: null })
 
+/**
+ * 当前正在回复的消息，不为空时在输入框上方展示回复横幅。
+ * 发送后清空，切换会话时也要清空（否则上一条会话的回复对象会泄露到新会话里）。
+ */
+const replyTarget = ref(null)
+
+/** 转发对话框状态 */
+const forwardDialog = reactive({ visible: false, messageId: null })
+
+/**
+ * 回复横幅里的内容摘要，与气泡里的引用块保持一致的口径。
+ */
+const replyPreview = computed(() => {
+  const msg = replyTarget.value
+  if (!msg) return ''
+  if (msg.recalled) return '[消息已撤回]'
+  const type = Number(msg.msgType)
+  if (type === 2) return '[图片]'
+  if (type === 3) return `[文件] ${msg.extra?.fileName || ''}`
+  if (type === 4) return '[语音]'
+  return msg.content || ''
+})
+
+function cancelReply() {
+  replyTarget.value = null
+}
+
+/**
+ * 点击气泡里的引用块时跳转到原消息。
+ *
+ * 当前列表里能找到就滚过去并短暂高亮；
+ * 找不到（历史分页尚未加载到）时提示用户向上滚动。
+ */
+function onJumpQuote(quoteMsgId) {
+  if (!quoteMsgId) return
+  const el = document.querySelector(`[data-msg-id="${asId(quoteMsgId)}"]`)
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('chat-window__msg--highlight')
+    setTimeout(() => el.classList.remove('chat-window__msg--highlight'), 1600)
+  } else {
+    ElMessage.info('原消息尚未加载，请向上滚动查看历史消息')
+  }
+}
+
+/** 撤回时限，与后端 im.message.recall-limit-seconds 保持一致（2 小时） */
+const RECALL_LIMIT_MS = 2 * 60 * 60 * 1000
+
+/**
+ * 消息是否还在可撤回的时间窗口内。
+ *
+ * 客户端时钟可能有偏差，这里只做「隐藏入口」的软判断，
+ * 最终时限仍由后端 recall 接口裁决（超时会返回 MESSAGE_RECALL_TIMEOUT）。
+ */
+function withinRecallWindow(message) {
+  const sent = new Date(message.sendTime).getTime()
+  if (Number.isNaN(sent)) {
+    return false
+  }
+  return Date.now() - sent <= RECALL_LIMIT_MS
+}
+
 function itemsFor(message) {
   if (!message || !message.messageId) {
     // 还没落库的本地占位（发送中 / 发送失败）没有可撤回、可删除的对象，
@@ -919,13 +1004,28 @@ function itemsFor(message) {
   const items = [
     { key: 'copy', label: '复制', show: Number(message.msgType) === 1 && !message.recalled },
     {
+      key: 'reply',
+      label: '回复',
+      // 已撤回的消息不能回复；自己发的消息也没必要回复自己
+      show: !message.recalled && !message.self
+    },
+    {
+      key: 'forward',
+      label: '转发',
+      show: !message.recalled
+    },
+    {
       key: 'recall',
       label: '撤回',
-      // 撤回别人的消息需要 message:recall:any 权限（群主/管理员/运营），普通用户只能撤自己的
-      show: !message.recalled && (message.self || auth.hasPermission('message:recall:any'))
+      // 撤回别人的消息需要 message:recall:any 权限（群主/管理员/运营），普通用户只能撤自己的；
+      // 且发送超过 2 小时后不再提供入口，与后端时限保持一致
+      show: !message.recalled
+        && (message.self || auth.hasPermission('message:recall:any'))
+        && withinRecallWindow(message)
     },
     { key: 'download', label: '另存为', show: [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType)) },
-    { key: 'delete', label: '删除', danger: true }
+    // 单端删除：只从自己的记录里移除，对方仍可见；自己发的和对方发的都能删
+    { key: 'delete', label: '删除', danger: true, show: true }
   ]
   return items.filter((item) => item.show)
 }
@@ -952,6 +1052,15 @@ async function onMenuSelect(action) {
     switch (action) {
       case 'copy':
         await copyText(message.content || '')
+        break
+      case 'reply':
+        replyTarget.value = message
+        // 回复时自动把焦点拉回输入框，省得用户再点一次
+        nextTick(() => inputRef.value?.focus())
+        break
+      case 'forward':
+        forwardDialog.messageId = message.messageId
+        forwardDialog.visible = true
         break
       case 'recall':
         await chat.recall(props.conversationId, message.messageId)
@@ -1057,6 +1166,7 @@ onBeforeUnmount(() => {
 watch(key, async () => {
   detail.value = null
   draft.value = drafts.get(key.value) || ''
+  replyTarget.value = null
   nearBottom = true
   showJump.value = false
   await loadInitial()
@@ -1294,6 +1404,50 @@ watch(key, async () => {
   background: #fdf6ec;
   border-radius: 4px;
   margin-bottom: 4px;
+}
+
+/* ------------------------------ 回复横幅 ------------------------------ */
+.chat-window__reply-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  background: var(--im-bg, #f5f5f5);
+  border-left: 3px solid var(--im-primary, #409eff);
+  border-radius: 0 4px 4px 0;
+}
+
+.chat-window__reply-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat-window__reply-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--im-primary, #409eff);
+}
+
+.chat-window__reply-content {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------ 跳转高亮 ------------------------------ */
+.chat-window__msg--highlight :deep(.bubble__box) {
+  animation: quote-flash 1.4s ease-out;
+}
+
+@keyframes quote-flash {
+  0%, 30% { box-shadow: 0 0 0 3px var(--im-primary, #409eff); }
+  100%    { box-shadow: 0 0 0 0 transparent; }
 }
 
 /* ------------------------------ @ 提及 ------------------------------ */

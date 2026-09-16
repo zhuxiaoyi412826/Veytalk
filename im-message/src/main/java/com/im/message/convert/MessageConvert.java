@@ -2,6 +2,7 @@ package com.im.message.convert;
 
 import com.im.common.constant.ImConstants;
 import com.im.common.domain.MessageDTO;
+import com.im.common.domain.QuotePreview;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.enums.MessageStatus;
 import com.im.common.enums.MsgType;
@@ -27,6 +28,14 @@ public final class MessageConvert {
      * 转为跨模块传输对象，{@code conversationType} 由调用方从会话模块取得。
      */
     public static MessageDTO toDTO(Message entity, UserBriefDTO sender, Integer conversationType, MessageStatus status) {
+        return toDTO(entity, sender, conversationType, status, null);
+    }
+
+    /**
+     * 转为跨模块传输对象，附带引用预览。
+     */
+    public static MessageDTO toDTO(Message entity, UserBriefDTO sender, Integer conversationType,
+                                   MessageStatus status, QuotePreview quote) {
         boolean recalled = entity.isRecalledNow();
         return MessageDTO.builder()
                 .messageId(entity.getId())
@@ -40,6 +49,7 @@ public final class MessageConvert {
                 // 撤回后不再下发原文：内容已经对所有人生效失效，继续返回等于撤回功能形同虚设
                 .content(recalled ? null : entity.getContent())
                 .extra(recalled ? null : entity.getExtra())
+                .quote(quote)
                 .seq(entity.getSeq())
                 .status(status.getCode())
                 .recalled(recalled)
@@ -55,6 +65,14 @@ public final class MessageConvert {
      */
     public static MessageVO toVO(Message entity, UserBriefDTO sender, Long viewerId,
                                  MessageStatus status, int readCount) {
+        return toVO(entity, sender, viewerId, status, readCount, null);
+    }
+
+    /**
+     * 转为前端视图对象，附带引用预览。
+     */
+    public static MessageVO toVO(Message entity, UserBriefDTO sender, Long viewerId,
+                                 MessageStatus status, int readCount, QuotePreview quote) {
         boolean recalled = entity.isRecalledNow();
         boolean self = entity.getFromUserId() != null && entity.getFromUserId().equals(viewerId);
         MsgType type = MsgType.of(entity.getMsgType());
@@ -69,6 +87,7 @@ public final class MessageConvert {
                 .msgTypeDesc(type.getDesc())
                 .content(recalled ? null : entity.getContent())
                 .extra(recalled ? null : entity.getExtra())
+                .quote(quote)
                 .seq(entity.getSeq())
                 .status(status.getCode())
                 .statusDesc(status.getDesc())
@@ -102,6 +121,7 @@ public final class MessageConvert {
                 .msgTypeDesc(type.getDesc())
                 .content(dto.getContent())
                 .extra(dto.getExtra())
+                .quote(dto.getQuote())
                 .seq(dto.getSeq())
                 .status(status.getCode())
                 .statusDesc(status.getDesc())
@@ -178,7 +198,7 @@ public final class MessageConvert {
     }
 
     /**
-     * 系统通知的发送者 ID 为 0，查不到用户资料，需要给一个固定昵称兜底。
+     * 系统通知的发送者 ID 为 0，查不到用户资料，需要给一个固定昵称兖底。
      */
     private static String nicknameOf(UserBriefDTO sender, Long fromUserId) {
         if (ImConstants.SYSTEM_USER_ID.equals(fromUserId)) {
@@ -191,5 +211,26 @@ public final class MessageConvert {
             return sender.getNickname();
         }
         return TextUtil.isNotBlank(sender.getUsername()) ? sender.getUsername() : "用户" + sender.getUserId();
+    }
+
+    /**
+     * 构建引用消息预览。
+     *
+     * <p>已撤回的原消息只保留标记，不下发内容摘要——撤回的语义是「对所有人失效」，
+     * 引用块里继续展示原文等于绕过了撤回。
+     */
+    public static QuotePreview toQuotePreview(Message entity, UserBriefDTO sender) {
+        if (entity == null) {
+            return null;
+        }
+        boolean recalled = entity.isRecalledNow();
+        return QuotePreview.builder()
+                .messageId(entity.getId())
+                .fromUserId(entity.getFromUserId())
+                .fromNickname(nicknameOf(sender, entity.getFromUserId()))
+                .msgType(entity.getMsgType())
+                .content(recalled ? null : summaryOf(entity, null))
+                .recalled(recalled)
+                .build();
     }
 }

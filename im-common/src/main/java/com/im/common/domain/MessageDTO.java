@@ -53,6 +53,9 @@ public class MessageDTO implements Serializable {
     @Schema(description = "扩展信息：附件元数据、@ 列表等")
     private MessageExtra extra;
 
+    @Schema(description = "引用/回复的原消息预览，普通消息为 null")
+    private QuotePreview quote;
+
     @Schema(description = "会话内自增序列，用于游标分页与未读计算")
     private Long seq;
 

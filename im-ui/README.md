@@ -170,7 +170,7 @@ im-ui/
    | `MAX_TEXT_LENGTH` | `im.message.max-text-length` | 5000 |
    | `MAX_UPLOAD_BYTES` | `im.file.max-size` | 20 MB |
    | `MAX_AVATAR_BYTES` | `im.file.max-avatar-size` | 2 MB |
-   | 撤回时限提示 | `im.message.recall-limit-seconds` | 120 秒 |
+   | 撤回时限提示 | `im.message.recall-limit-seconds` | 7200 秒（2 小时） |
 
 7. **Enter 发送不能用模板上的 `.prevent` 修饰符。**
    中文输入法按回车是「确认候选词」，此时 `event.isComposing` 为真，

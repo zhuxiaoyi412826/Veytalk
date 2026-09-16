@@ -223,6 +223,7 @@ CREATE TABLE `im_message`
     `content`         TEXT COMMENT '消息内容：文本为正文，附件类为文件 ID',
     `extra`           JSON                 DEFAULT NULL COMMENT '扩展信息：附件元数据、@ 列表等',
     `seq`             BIGINT      NOT NULL COMMENT '会话内自增序列，游标分页与未读计算依据',
+    `quote_msg_id`    BIGINT               DEFAULT NULL COMMENT '引用/回复的原消息 ID，转发时为空',
     `is_recalled`     TINYINT     NOT NULL DEFAULT 0 COMMENT '是否已撤回：1 是 0 否',
     `recall_time`     DATETIME             DEFAULT NULL COMMENT '撤回时间',
     `send_time`       DATETIME    NOT NULL COMMENT '发送时间（服务端落库时间）',
@@ -232,7 +233,8 @@ CREATE TABLE `im_message`
     UNIQUE KEY `uk_from_client` (`from_user_id`, `client_msg_id`),
     -- 历史消息游标分页：WHERE conversation_id=? AND seq<? ORDER BY seq DESC
     KEY `idx_conv_seq` (`conversation_id`, `seq`),
-    KEY `idx_send_time` (`send_time`)
+    KEY `idx_send_time` (`send_time`),
+    KEY `idx_quote_msg` (`quote_msg_id`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='消息表（同时充当离线消息持久化队列）';
 

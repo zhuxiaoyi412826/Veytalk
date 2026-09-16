@@ -3,6 +3,7 @@ package com.im.message.service;
 import com.im.common.api.PageResult;
 import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageSendCmd;
+import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageSearchQuery;
 import com.im.message.dto.req.SendMessageRequest;
 import com.im.message.dto.vo.MessageVO;
@@ -109,4 +110,24 @@ public interface MessageService {
      * 用户真正点开会话触发 {@code markRead} 才消失。
      */
     void clearOffline(Long userId);
+
+    /* ==================== 转发 ==================== */
+
+    /**
+     * 转发消息：把一条已存在的消息复制到目标会话。
+     *
+     * <p>转发不携带引用（quoteMsgId 为空），收到的消息就是一条普通的新消息。
+     * 附件类消息复用原文件 ID，不重新上传；转发者必须是原会话成员，
+     * 否则任何人都能通过猜 messageId 把别人会话里的文件广播出去。
+     *
+     * @param userId  转发操作人
+     * @param request 转发请求（原消息 ID + 目标会话）
+     * @return 落库后的新消息（跨模块传输对象，供 SPI 调用）
+     */
+    MessageDTO forwardDto(Long userId, ForwardMessageRequest request);
+
+    /**
+     * REST 转发入口，返回值直接可渲染。
+     */
+    MessageVO forward(Long userId, ForwardMessageRequest request);
 }

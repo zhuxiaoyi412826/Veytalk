@@ -203,7 +203,7 @@ export const useChatStore = defineStore('chat', {
      * 先塞一条本地占位（status=0 发送中）再发请求，用户按下回车立刻就能看到气泡。
      * 失败时不删除占位，而是标成 status=5，让用户能看见「这条没发出去」并重试。
      */
-    async send(conversationId, { msgType, content, extra, atAll, atUserIds, clientMsgId }) {
+    async send(conversationId, { msgType, content, extra, atAll, atUserIds, clientMsgId, quoteMsgId }) {
       const auth = useAuthStore()
       const id = clientMsgId || newClientMsgId()
       const now = new Date().toISOString()
@@ -218,6 +218,7 @@ export const useChatStore = defineStore('chat', {
           msgType,
           content,
           extra,
+          quoteMsgId: quoteMsgId || null,
           seq: null,
           status: 0,
           recalled: false,
@@ -233,7 +234,8 @@ export const useChatStore = defineStore('chat', {
           conversationId,
           atAll,
           atUserIds,
-          extra
+          extra,
+          quoteMsgId: quoteMsgId || undefined
         })
         this.appendMessage(conversationId, vo, true)
         return vo
@@ -284,7 +286,8 @@ export const useChatStore = defineStore('chat', {
           msgType: message.msgType,
           content: message.content,
           conversationId,
-          extra: message.extra
+          extra: message.extra,
+          quoteMsgId: message.quoteMsgId || undefined
         })
         this.appendMessage(conversationId, vo, true)
         return vo
@@ -299,6 +302,17 @@ export const useChatStore = defineStore('chat', {
       const key = this.bucket(conversationId)
       this.messages[key] = this.messages[key].filter((item) => !sameId(item.clientMsgId, clientMsgId))
       persist(key, this.messages[key])
+    },
+
+    /**
+     * 转发消息到目标会话。
+     *
+     * 转发复用原消息的文件 ID，不重新上传；附件消息由服务端校验转发者是否属于原会话成员。
+     */
+    async forward(conversationId, messageId) {
+      const vo = await messageApi.forwardMessage({ conversationId, messageId })
+      this.appendMessage(conversationId, vo, true)
+      return vo
     },
 
     /**

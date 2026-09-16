@@ -303,8 +303,8 @@ im:
       bucket: ${MINIO_BUCKET:im-files}
 
   message:
-    # 撤回时限（秒）。超过这个时间的消息只能删除（仅本端不可见），不能撤回。
-    recall-limit-seconds: 120
+    # 撤回时限（秒），默认 2 小时。超过这个时间的消息只能删除（仅本端不可见），不能撤回。
+    recall-limit-seconds: 7200
     history-page-size: 20
     max-text-length: 5000
 

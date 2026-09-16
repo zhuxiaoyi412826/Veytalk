@@ -15,6 +15,16 @@
       <!-- 群聊里需要区分是谁说的；单聊显示昵称纯属噪音 -->
       <div v-if="!message.self && showSender" class="bubble__sender im-ellipsis">{{ message.fromNickname }}</div>
 
+      <!-- 引用预览块：显示在气泡上方，点击可跳转到原消息 -->
+      <div
+        v-if="message.quote"
+        class="bubble__quote"
+        @click.stop="emit('jump-quote', message.quote.messageId)"
+      >
+        <span class="bubble__quote-nick">回复 {{ message.quote.fromNickname }}</span>
+        <span class="bubble__quote-text im-ellipsis">{{ quoteContent }}</span>
+      </div>
+
       <div class="bubble__row">
         <!-- 自己的消息：状态显示在气泡左侧 -->
         <span v-if="message.self" class="bubble__status" :class="statusClass">
@@ -126,7 +136,7 @@ const props = defineProps({
   isGroup: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'jump-quote'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -169,6 +179,23 @@ const boxClass = computed(() => ({
   // 附件类气泡自带白底卡片，再套一层气泡底色会出现双重边框
   'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4
 }))
+
+/**
+ * 引用块的内容摘要。
+ *
+ * 附件类消息的 content 是文件 ID，直接显示会露出一串雪花数字；
+ * 已撤回的消息用占位文字，否则撤回功能形同虚设。
+ */
+const quoteContent = computed(() => {
+  const q = props.message.quote
+  if (!q) return ''
+  if (q.recalled) return '[引用内容已撤回]'
+  const type = Number(q.msgType)
+  if (type === 2) return '[图片]'
+  if (type === 3) return '[文件]'
+  if (type === 4) return '[语音]'
+  return q.content || ''
+})
 
 const statusClass = computed(() => ({
   'bubble__status--pending': Number(props.message.status) === 0,
@@ -530,6 +557,40 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 4px;
   margin-top: 2px;
+}
+
+.bubble__quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 100%;
+  margin-bottom: 4px;
+  padding: 4px 8px;
+  border-left: 3px solid var(--im-primary, #409eff);
+  border-radius: 0 4px 4px 0;
+  background: rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.bubble__quote:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.bubble__quote-nick {
+  color: var(--im-primary, #409eff);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubble__quote-text {
+  color: var(--im-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bubble__video {

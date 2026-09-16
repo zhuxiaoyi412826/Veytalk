@@ -153,7 +153,8 @@ public class WsInboundDispatcher {
                 .extra(payload.getExtra())
                 .atUserIds(payload.getAtUserIds())
                 .atAll(payload.getAtAll())
-                // 显式钉死，不依赖 builder 的默认值：这两个开关决定要不要跳过好友与禁言校验，
+                .quoteMsgId(payload.getQuoteMsgId())
+                // 显式钉死，不依赖 builder 的默认値：这两个开关决定要不要跳过好友与禁言校验，
                 // 写出来比藏在 @Builder.Default 里更容易在 review 时被看到
                 .internal(Boolean.FALSE)
                 .push(Boolean.TRUE)

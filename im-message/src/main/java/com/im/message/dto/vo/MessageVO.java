@@ -1,6 +1,7 @@
 package com.im.message.dto.vo;
 
 import com.im.common.domain.MessageExtra;
+import com.im.common.domain.QuotePreview;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -60,6 +61,9 @@ public class MessageVO implements Serializable {
 
     @Schema(description = "扩展信息，已撤回时为空")
     private MessageExtra extra;
+
+    @Schema(description = "引用/回复的原消息预览，普通消息为 null")
+    private QuotePreview quote;
 
     @Schema(description = "会话内自增序列，历史分页游标")
     private Long seq;

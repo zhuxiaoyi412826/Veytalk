@@ -53,4 +53,7 @@ public class WsChatPayload implements Serializable {
 
     /** 是否 @ 全员，仅群聊有效 */
     private Boolean atAll;
+
+    /** 引用/回复的原消息 ID，为空表示普通消息 */
+    private Long quoteMsgId;
 }

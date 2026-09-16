@@ -58,9 +58,13 @@ public class AttachmentContentHandler implements MessageContentHandler {
 
         FileDTO file = fileSpi.getById(fileId);
         BusinessException.throwIf(file == null, ResultCode.FILE_NOT_FOUND);
-        // 归属校验：只能引用自己上传的文件，否则可以拿别人的 fileId 把私密文件广播出去
-        BusinessException.throwIf(!cmd.getFromUserId().equals(file.getUploaderId()),
-                ResultCode.FILE_DOWNLOAD_FORBIDDEN);
+        // 归属校验：只能引用自己上传的文件，否则可以拿别人的 fileId 把私密文件广播出去。
+        // 转发场景例外：转发者不是上传者，但他已经通过原消息获得了文件的可见性，
+        // 服务层的 forward 方法已经校验过「转发者是原会话成员」，这里不再重复卡归属
+        if (!Boolean.TRUE.equals(cmd.getForward())) {
+            BusinessException.throwIf(!cmd.getFromUserId().equals(file.getUploaderId()),
+                    ResultCode.FILE_DOWNLOAD_FORBIDDEN);
+        }
 
         extra.setFileName(file.getOriginalName());
         extra.setFileSize(file.getSize());

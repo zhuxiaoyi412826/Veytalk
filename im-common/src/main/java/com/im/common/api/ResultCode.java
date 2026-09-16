@@ -55,11 +55,13 @@ public enum ResultCode {
     /* ==================== 5xxx 消息 ==================== */
     MESSAGE_NOT_FOUND(5001, "消息不存在"),
     MESSAGE_DUPLICATE(5002, "消息重复提交"),
-    MESSAGE_RECALL_TIMEOUT(5003, "超过 {} 秒的消息不允许撤回"),
+    MESSAGE_RECALL_TIMEOUT(5003, "该消息已超过撤回时限，无法撤回"),
     MESSAGE_RECALL_FORBIDDEN(5004, "只能撤回自己发送的消息"),
     MESSAGE_CONTENT_ILLEGAL(5005, "消息内容不合法"),
     MESSAGE_TYPE_UNSUPPORTED(5006, "不支持的消息类型"),
     MESSAGE_SEND_FORBIDDEN(5007, "当前状态下无法发送消息"),
+    MESSAGE_QUOTE_INVALID(5008, "引用的消息不存在、已撤回或不属于当前会话"),
+    MESSAGE_FORWARD_FORBIDDEN(5009, "无权转发该消息"),
 
     /* ==================== 6xxx 群组 ==================== */
     GROUP_NOT_FOUND(6001, "群组不存在"),

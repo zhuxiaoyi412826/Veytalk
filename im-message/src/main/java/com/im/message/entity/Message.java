@@ -55,6 +55,9 @@ public class Message implements Serializable {
     /** 会话内自增序列，游标分页与离线消息计算的依据 */
     private Long seq;
 
+    /** 引用/回复的原消息 ID，普通消息与转发消息为 null */
+    private Long quoteMsgId;
+
     /**
      * 是否已撤回：1 是 0 否。
      *

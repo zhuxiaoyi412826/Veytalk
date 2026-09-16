@@ -3,12 +3,14 @@ package com.im.message.spi;
 import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageSendCmd;
 import com.im.common.spi.MessageSpi;
+import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.service.MessageService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
 import java.util.List;
+
 
 /**
  * {@link MessageSpi} 在本模块的实现，供 im-friend / im-group / im-websocket 跨模块调用。
@@ -69,5 +71,17 @@ public class MessageSpiImpl implements MessageSpi {
     @Override
     public void clearOffline(Long userId) {
         messageService.clearOffline(userId);
+    }
+
+    @Override
+    public MessageDTO forward(Long userId, Long messageId, Long conversationId,
+                              Long toUserId, Long toGroupId, String clientMsgId) {
+        ForwardMessageRequest request = new ForwardMessageRequest();
+        request.setMessageId(messageId);
+        request.setConversationId(conversationId);
+        request.setToUserId(toUserId);
+        request.setToGroupId(toGroupId);
+        request.setClientMsgId(clientMsgId);
+        return messageService.forwardDto(userId, request);
     }
 }

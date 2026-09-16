@@ -56,4 +56,7 @@ public class SendMessageRequest implements Serializable {
 
     @Schema(description = "是否 @ 全员，仅群聊有效")
     private Boolean atAll;
+
+    @Schema(description = "引用/回复的原消息 ID，为空表示普通消息；原消息必须存在、未撤回且属于同一会话")
+    private Long quoteMsgId;
 }
