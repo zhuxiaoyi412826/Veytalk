@@ -71,6 +71,7 @@ public class ImProperties {
         private DataSize maxAvatarSize = DataSize.ofMegabytes(2);
         private Local local = new Local();
         private Minio minio = new Minio();
+        private Upload upload = new Upload();
 
         @Data
         public static class Local {
@@ -90,6 +91,30 @@ public class ImProperties {
              * 直接抛 {@code IllegalArgumentException}，会让 {@code MinioFileStorage} 构造失败、应用启动中断。
              */
             private String bucket = "im-files";
+        }
+
+        /**
+         * 分片上传（断点续传）相关配置。
+         *
+         * <p>分片先落本地临时目录，合并后再写入真正的存储实现（local 或 minio），
+         * 因此无论最终存哪里，临时目录都必须可读写。分片上传刻意不复用
+         * {@link File#getMaxSize()}：单个分片只有几 MB，远低于 multipart 的硬上限，
+         * 而整体文件可以很大（大视频），两道限制的职责本就不同。
+         */
+        @Data
+        public static class Upload {
+            /** 分片临时目录，合并成功后即清理；过期会话由定时任务回收 */
+            private String tmpDir = System.getProperty("user.home") + "/im-upload-tmp";
+            /** 服务端权威分片大小，默认 5MB；init 时下发给前端，前端必须按它切片 */
+            private DataSize chunkSize = DataSize.ofMegabytes(5);
+            /** 单个分片请求体的上限，默认 6MB，给 chunkSize 留出表单字段等开销余量 */
+            private DataSize maxChunkSize = DataSize.ofMegabytes(6);
+            /** 走分片通道的整体文件大小上限，默认 2GB */
+            private DataSize maxSize = DataSize.ofGigabytes(2);
+            /** 上传会话（临时分片）保留时长（秒），默认 24 小时，超时由清理任务回收 */
+            private long sessionTtlSeconds = 24 * 60 * 60;
+            /** 单文件最多分片数，防御性上限，避免 totalChunks 被算成天文数字撑爆磁盘 */
+            private int maxChunks = 100_000;
         }
     }
 

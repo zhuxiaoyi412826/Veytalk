@@ -301,6 +301,22 @@ im:
       # 桶不存在时启动阶段会自动创建，无需手工建桶。
       # 桶名须符合 S3 规范：≥3 字符、仅小写字母/数字/点/连字符；"im" 这类过短名会被 SDK 拒绝导致启动失败
       bucket: ${MINIO_BUCKET:im-files}
+    # 分片上传（断点续传 + 秒传）。分片先落本地临时目录，合并后再写入上面的 storage，
+    # 因此即便 storage=minio，tmp-dir 所在磁盘也必须可读写。
+    upload:
+      # 分片临时目录，合并成功即清理，过期会话由定时任务回收
+      tmp-dir: ${IM_UPLOAD_TMP_DIR:${user.home}/im-upload-tmp}
+      # 服务端权威分片大小，init 时下发给前端，前端必须按它切片
+      chunk-size: 5MB
+      # 单个分片请求体上限，给 chunk-size 留出表单字段开销余量；
+      # 单个分片远小于 spring.servlet.multipart.max-file-size，走分片通道的大文件不受那道 100MB 限制
+      max-chunk-size: 6MB
+      # 走分片通道的整体文件大小上限
+      max-size: 2GB
+      # 上传会话（临时分片）保留时长（秒），默认 24 小时
+      session-ttl-seconds: 86400
+      # 单文件最多分片数，防御性上限
+      max-chunks: 100000
 
   message:
     # 撤回时限（秒），默认 2 小时。超过这个时间的消息只能删除（仅本端不可见），不能撤回。

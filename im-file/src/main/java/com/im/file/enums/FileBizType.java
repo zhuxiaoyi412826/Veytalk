@@ -30,6 +30,9 @@ public enum FileBizType {
             "py", "js", "ts", "java", "c", "cpp", "h", "cs", "go", "sh", "ps1", "bat",
             "html", "css", "sql",
             "zip", "rar", "7z", "gz", "tar",
+            // 安装包：下载时 Content-Type 归为 octet-stream、非图片/视频不会 inline，
+            // 浏览器不会在本站源内渲染或执行它，风险与传一个 zip 等价（是否运行由接收方知情决定）
+            "exe", "msi",
             "mp4", "avi", "mov", "mkv", "webm", "flv", "wmv",
             "mp3", "wav", "flac", "aac", "ogg", "m4a")),
 

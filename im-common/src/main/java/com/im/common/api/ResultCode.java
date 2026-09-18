@@ -81,6 +81,9 @@ public enum ResultCode {
     FILE_UPLOAD_FAILED(7004, "文件上传失败"),
     FILE_DOWNLOAD_FORBIDDEN(7005, "无权访问该文件"),
     FILE_STORAGE_UNAVAILABLE(7006, "文件存储服务不可用"),
+    FILE_UPLOAD_SESSION_NOT_FOUND(7007, "上传会话不存在或已过期，请重新上传"),
+    FILE_CHUNK_INVALID(7008, "分片校验失败：{}"),
+    FILE_MD5_MISMATCH(7009, "文件内容校验失败，请重新上传"),
 
     /* ==================== 8xxx 长连接 ==================== */
     WS_TICKET_INVALID(8001, "连接票据无效或已过期"),

@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { fetchBlob } from '@/api/request'
+import { fetchSignedUrl } from '@/api/file'
 
 /**
  * 受控文件地址 -> 可渲染的 blob 地址。
@@ -155,20 +156,47 @@ export function readVideoMetadata(file) {
 /**
  * 下载文件到本地。
  *
- * 走同一条鉴权通道取 blob，再用一个不落 DOM 的 <a download> 触发保存。
- * 直接 window.open 受控地址会因为拿不到登录头而变成一段 JSON 错误文本。
+ * 不再把内容读成 blob：大文件（如 1GB 安装包）在手机浏览器上会因内存不足或 XHR
+ * 20s 超时而静默失败，表现就是「点了没反应」，而小文件几秒读完所以正常。改为换取带
+ * 票据的直链后交给浏览器原生下载器流式接管——不占页面内存、不受 axios 超时限制，PC 与手机一致。
  */
 export async function downloadFile(rawUrl, fileName) {
-  const blob = await fetchBlob(rawUrl, { baseURL: '' })
-  const objectUrl = URL.createObjectURL(blob)
+  const directUrl = await resolveDirectDownloadUrl(rawUrl)
   const anchor = document.createElement('a')
-  anchor.href = objectUrl
+  anchor.href = directUrl
   anchor.download = fileName || 'download'
+  anchor.rel = 'noopener'
   document.body.appendChild(anchor)
   anchor.click()
   document.body.removeChild(anchor)
-  // 立即 revoke 会让部分浏览器取消尚未开始的下载，交给下一轮任务循环
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+}
+
+/**
+ * 把受控地址 /api/file/download/{id} 换成浏览器可直接导航下载的直链。
+ *
+ * - 已经是直链（http/data/blob）的原样返回；
+ * - 受控地址解析出 fileId 后调 /file/{id}/url 换带票据的地址：票据挂在 URL 上，
+ *   浏览器导航时无需登录头，也就绕开了「a 标签带不了 satoken」的老问题（该接口内部已做访问权校验）；
+ *   再对同源受控地址追加 inline=false，让图片/视频也强制下载而不是在标签页里渲染；
+ * - MinIO 预签名直链是跨源绝对地址，追加参数可能影响签名，原样返回；
+ * - 解析不出 fileId 时退回原地址，不会比现状更糟。
+ */
+async function resolveDirectDownloadUrl(rawUrl) {
+  if (!rawUrl || DIRECT_PATTERN.test(rawUrl)) {
+    return rawUrl
+  }
+  const match = String(rawUrl).match(/\/download\/(\d+)/)
+  if (!match) {
+    return rawUrl
+  }
+  const signed = await fetchSignedUrl(match[1])
+  if (!signed) {
+    return rawUrl
+  }
+  if (/^https?:/i.test(signed)) {
+    return signed
+  }
+  return signed + (signed.includes('?') ? '&' : '?') + 'inline=false'
 }
 
 /**

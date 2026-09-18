@@ -11,15 +11,20 @@ import com.im.common.exception.BusinessException;
 import com.im.common.util.SecurityUtil;
 import com.im.common.util.TextUtil;
 import com.im.file.convert.FileConvert;
+import com.im.file.dto.req.UploadInitReq;
 import com.im.file.dto.vo.FileVO;
+import com.im.file.dto.vo.UploadChunkVO;
+import com.im.file.dto.vo.UploadInitVO;
 import com.im.file.entity.FileEntity;
 import com.im.file.enums.FileBizType;
+import com.im.file.service.ChunkUploadService;
 import com.im.file.service.FileService;
 import com.im.file.service.FileTicketService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ContentDisposition;
@@ -28,6 +33,7 @@ import org.springframework.util.StreamUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
@@ -58,6 +64,7 @@ import java.nio.charset.StandardCharsets;
 public class FileController {
 
     private final FileService fileService;
+    private final ChunkUploadService chunkUploadService;
     private final FileTicketService ticketService;
     private final ImProperties imProperties;
 
@@ -80,6 +87,34 @@ public class FileController {
         Long userId = SecurityUtil.getUserId();
         FileEntity stored = fileService.store(toCmd(userId, file, FileBizType.AVATAR.getCode(), null));
         return Result.ok(fileService.toView(stored, userId), "头像已更新");
+    }
+
+    @Operation(summary = "分片上传初始化", description = "上报整文件 MD5：命中秒传直接返回文件信息（uploaded=true），否则下发分片大小与会话 ID 用于断点续传")
+    @SaCheckLogin
+    @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @PostMapping("/upload/init")
+    public Result<UploadInitVO> initUpload(@Valid @RequestBody UploadInitReq req) {
+        return Result.ok(chunkUploadService.init(SecurityUtil.getUserId(), req));
+    }
+
+    @Operation(summary = "上传分片", description = "逐片上传，重复投递同一分片幂等；返回服务端当前已收到的分片下标")
+    @SaCheckLogin
+    @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @PostMapping("/upload/chunk")
+    public Result<UploadChunkVO> uploadChunk(@Parameter(description = "init 下发的会话 ID") @RequestParam("uploadId") String uploadId,
+                                             @Parameter(description = "分片下标，从 0 开始") @RequestParam("chunkIndex") int chunkIndex,
+                                             @RequestPart("chunk") MultipartFile chunk) {
+        return Result.ok(chunkUploadService.storeChunk(SecurityUtil.getUserId(), uploadId, chunkIndex, chunk));
+    }
+
+    @Operation(summary = "合并分片", description = "全部分片到位后合并落库，服务端重算 MD5 与大小并核对，成功后返回文件信息")
+    @SaCheckLogin
+    @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @PostMapping("/upload/merge")
+    public Result<FileVO> mergeUpload(@Parameter(description = "init 下发的会话 ID") @RequestParam("uploadId") String uploadId) {
+        Long userId = SecurityUtil.getUserId();
+        FileEntity merged = chunkUploadService.merge(userId, uploadId);
+        return Result.ok(fileService.toView(merged, userId), "上传成功");
     }
 
     @Operation(summary = "文件元数据", description = "需要登录且对该文件有访问权")

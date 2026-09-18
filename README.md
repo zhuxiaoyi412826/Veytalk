@@ -8,6 +8,8 @@
 单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
 文件上传（MinIO / 本地双实现）、WebSocket 实时推送（心跳/重连/多端踢下线）。
 
+> 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
+
 ---
 
 ## 一、技术栈与版本
@@ -307,6 +309,54 @@ npm run preview    # 本地预览构建产物
 
 token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie 与 body 读取都已关闭）。
 
+### 请求链路：从前端发出到拿到响应
+
+关键约定：**后端所有失败都返回 HTTP 200 + `Result` 体**，业务错误码放在 `code` 里，
+所以前端的错误判定全在 axios 响应拦截器的「成功分支」，错误分支只处理网络问题。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户 / 组件
+    participant ST as Pinia Store
+    participant AX as axios（request.js）
+    participant PX as Vite Proxy
+    participant TF as TraceIdFilter
+    participant SA as Sa-Token 拦截器
+    participant CT as Controller
+    participant SV as Service
+    participant MP as Mapper
+    participant DB as MySQL
+    participant GEH as GlobalExceptionHandler
+
+    U->>ST: 触发操作（进入会话 / 发消息 / 刷新列表）
+    ST->>AX: 调用 api/*.js 方法
+    Note over AX: 请求拦截器：<br/>注入 token 头（tokenName）<br/>+ X-Trace-Id
+    AX->>PX: HTTP 请求 /api/xxx
+    PX->>TF: 转发到 localhost:8080
+    TF->>SA: 写入 MDC traceId 后放行
+    SA->>CT: 鉴权通过（@SaCheckLogin / @SaCheckPermission）
+    CT->>SV: 调业务方法（SecurityUtil.getUserId 取当前用户）
+    SV->>MP: 数据访问
+    MP->>DB: 执行 SQL
+    DB-->>MP: 结果集
+    MP-->>SV: Entity
+    SV-->>CT: VO / DTO（经 Convert 转换）
+    CT-->>PX: Result.ok(data)（HTTP 200）
+
+    alt 出现异常（BusinessException / 未登录 / 参数校验失败）
+        SV-->>GEH: 抛出异常
+        GEH-->>PX: Result.fail(code, message)（HTTP 仍 200）
+    end
+
+    PX-->>AX: HTTP 200 + Result JSON
+    Note over AX: 响应拦截器：<br/>code==200 → 只返回 data<br/>code==1002/2010 → 清 token 跳登录<br/>其余 → 弹错误并 reject(ApiError)
+    AX-->>ST: 业务数据 或 抛出 ApiError
+    ST-->>U: 更新视图 / 提示错误
+```
+
+> 更多链路图（三层架构、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
+
 ---
 
 ## 十、WebSocket
@@ -340,6 +390,51 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 
 断线后前端按指数退避重连，重连时会重新取票据（旧票据 60 秒就过期了，不可能复用）。
 
+### 消息链路：实时收发
+
+连接建立走「先 HTTP 换票据、再握手」；发消息是上行 `chat` 帧，落库后由**写库的那一方**
+在事务提交后推送：接收方走 `message` 通道、发送方走 `ack` 通道（推给发送者的全部设备，实现多端同步）。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 发送方组件
+    participant CS as chat store
+    participant SK as socket.js
+    participant HS as WsHandshakeInterceptor
+    participant HD as ImWebSocketHandler
+    participant DP as WsInboundDispatcher
+    participant SPI as MessageSpi
+    participant MS as MessageServiceImpl
+    participant DB as MySQL
+    participant SM as WsSessionManager
+    participant RC as 接收方连接
+
+    Note over U,HS: 阶段一：建立连接（先换票据）
+    CS->>SK: 请求 WS 票据 POST /api/ws/ticket
+    SK->>HS: 握手 ws://host/ws?ticket=xxx
+    HS-->>SK: 校验票据通过，握手成功，注册连接
+
+    Note over U,RC: 阶段二：发送消息（上行 chat 帧）
+    U->>CS: send(conversationId, content, quoteMsgId)
+    CS->>SK: wsSend('chat', payload)
+    SK->>HD: 发送文本帧
+    HD->>DP: dispatch(connection, payload)
+    DP->>DP: route → handleChat
+    DP->>SPI: send(MessageSendCmd)，fromUserId 只认连接身份
+    SPI->>MS: 落库（幂等：uk_from_client 唯一键 + Redis 标记）
+    MS->>DB: INSERT im_message
+    DB-->>MS: 成功
+    Note over MS: 事务提交后 afterCommit 再推送
+    MS->>SM: 推送新消息
+    SM->>RC: message 通道（接收方渲染气泡）
+    SM->>SK: ack 通道（发送方全部设备）
+    SK-->>CS: 收到 ack，按 clientMsgId 匹配本地占位消息
+    CS-->>U: 气泡状态从「发送中」变为「已发送 √」
+
+    Note over DP,SK: 任一步失败 → reject 回 error 帧<br/>异常绝不逃逸到容器，否则会误判为断连
+```
+
 ---
 
 ## 十一、文件存储：local / MinIO 切换
@@ -366,6 +461,28 @@ java -jar im-bootstrap/target/im-server.jar
 无论哪种实现，对外暴露的都是 `/api/file/download/{id}` 这种**受控地址**：
 下载时校验登录态与访问权限，再签发一个 30 分钟有效的文件票据
 （`im.jwt.file-ticket-ttl-seconds`），不存在裸的对象存储直链。
+
+### 秒传与断点续传（分片上传）
+
+大文件不再走单请求 `/api/file/upload`（受 `byte[]` 与 multipart 内存上限约束，默认 100MB），
+而是走三段式分片通道，前端 `uploadFileSmart` 按 **5MB 阈值**自动选路，对上层透明：
+
+| 端点 | 作用 |
+|---|---|
+| `POST /api/file/upload/init` | 上报整文件 MD5：命中**秒传**直接返回文件记录（零字节上传）；否则下发权威分片大小、会话 ID 与已收分片下标（**断点续传**） |
+| `POST /api/file/upload/chunk` | 逐片上传，「临时文件 + 原子改名」落盘，重复投递同一分片幂等 |
+| `POST /api/file/upload/merge` | 合并落库：服务端**重读全部分片、重算 MD5 与大小并与声明值核对**，对不上直接拒绝 |
+
+- 会话状态落在临时目录 `im.file.upload.tmp-dir`（默认 `${user.home}/im-upload-tmp`），
+  **不引入 Redis**：断点续传要的就是「进程重启后分片还在」，磁盘天然满足。
+  `uploadId = userId + "-" + md5`，天然幂等；每个写操作都核对 meta 里的 `uploaderId`，别人拿到 ID 也无法操作。
+- 走分片通道的整体上限由 `im.file.upload.max-size` 控制（默认 **2GB**），与普通上传的 `im.file.max-size`（100MB）刻意分开。
+- 过期会话（默认 24 小时未更新）由 `ChunkUploadServiceImpl#cleanExpiredSessions` 定时回收。
+- 合并出的可信内容仍交回 `FileService#storeMerged`，走与普通上传**完全相同**的类型白名单 / 大小 / 秒传校验，不存在「分片能绕过白名单」的口子。
+
+> ⚠️ 秒传会采信客户端上报的 MD5（能报出某文件 MD5 的前提是本地真的持有它），
+> 且要求 `size` 与已有记录一致才判定命中，以此收窄碰撞与谎报空间。
+> 前端计算 MD5 依赖 `spark-md5`，首次拉取代码后需在 `im-ui` 下 `npm install`。
 
 ---
 

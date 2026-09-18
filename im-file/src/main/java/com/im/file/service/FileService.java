@@ -1,6 +1,7 @@
 package com.im.file.service;
 
 import com.im.common.domain.UploadCmd;
+import com.im.file.dto.po.MergedUpload;
 import com.im.file.dto.vo.FileVO;
 import com.im.file.entity.FileEntity;
 
@@ -28,6 +29,32 @@ public interface FileService {
      * @return 落库后的元数据记录；命中秒传时是一条指向已有对象键的新记录
      */
     FileEntity store(UploadCmd cmd);
+
+    /**
+     * 整文件秒传：仅凭 MD5 判定服务端是否已存有相同内容的对象，命中就为当前上传者
+     * 新建一条指向同一对象键的记录并返回，全程不传输、不写入任何字节。
+     *
+     * <p>这是分片上传 init 阶段的前置判定：大文件在真正开始切片上传之前先问一句
+     * 「这个 MD5 你那边有了吗」，有就直接拿记录走人。与 {@link #store} 里的写时去重不同，
+     * 那条路径仍要先把字节收上来才算得出 MD5，省的是存储、不是网络。
+     *
+     * <p>安全权衡：这里采信客户端上报的 MD5。能报出某个文件 MD5 的前提是本地真的持有该文件，
+     * 因此「凭 MD5 领取一份自己并不拥有的文件」在实践中无法构造；同时 {@code size} 也要与已有
+     * 记录一致才判定命中，进一步收窄 MD5 碰撞的空间。
+     *
+     * @return 命中秒传时返回新建的记录；服务端没有可复用对象时返回 {@code null}
+     */
+    FileEntity instantReuse(Long uploaderId, String bizType, String originalName,
+                            String md5, long size, Integer duration);
+
+    /**
+     * 分片合并后的流式落库：内容以流的形式提供（{@link MergedUpload#getStreamSupplier()}），
+     * {@code md5} 与 {@code size} 已由分片服务重读分片算出并核对。
+     *
+     * <p>与 {@link #store} 走完全相同的类型 / 大小校验与秒传判定，唯一区别是字节来自流而不是
+     * {@code byte[]}，因此可以承载远超内存的大文件。命中秒传时同样只建记录、不写对象。
+     */
+    FileEntity storeMerged(MergedUpload upload);
 
     /* ==================== 查询与鉴权 ==================== */
 

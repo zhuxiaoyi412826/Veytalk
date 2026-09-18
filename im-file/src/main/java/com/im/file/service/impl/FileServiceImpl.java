@@ -10,6 +10,7 @@ import com.im.common.spi.MessageSpi;
 import com.im.common.spi.UserProfileSpi;
 import com.im.common.util.TextUtil;
 import com.im.file.convert.FileConvert;
+import com.im.file.dto.po.MergedUpload;
 import com.im.file.dto.vo.FileVO;
 import com.im.file.entity.FileEntity;
 import com.im.file.enums.FileBizType;
@@ -63,14 +64,9 @@ public class FileServiceImpl implements FileService {
         byte[] bytes = cmd.getBytes();
         BusinessException.throwIf(bytes == null || bytes.length == 0, ResultCode.FILE_EMPTY);
 
-        FileBizType bizType = FileBizType.of(cmd.getBizType());
-        BusinessException.throwIf(bizType == null, ResultCode.BAD_REQUEST, "未知的文件业务类型：" + cmd.getBizType());
-
+        FileBizType bizType = requireBizType(cmd.getBizType());
         String originalName = FileConvert.sanitizeFileName(cmd.getOriginalName());
-        String ext = TextUtil.extension(originalName);
-        // 没有扩展名一律拒绝：无法判断类型就等于无法判断风险，而客户端几乎总是能报出文件名
-        BusinessException.throwUnless(bizType.allows(ext), ResultCode.FILE_TYPE_NOT_ALLOWED,
-                TextUtil.isBlank(ext) ? "(无扩展名)" : ext);
+        String ext = requireAllowedExt(originalName, bizType);
 
         // 头像与普通附件是两道独立的上限：头像会被各类列表反复拉取，没必要允许传原图
         DataSize limit = bizType == FileBizType.AVATAR
@@ -83,7 +79,7 @@ public class FileServiceImpl implements FileService {
         String storageType = fileStorage.type().getCode();
         String contentType = FileConvert.safeContentType(ext);
 
-        String objectKey = findReusableObjectKey(md5, storageType);
+        String objectKey = findReusableObjectKey(md5, storageType, bytes.length);
         if (objectKey != null) {
             log.info("[文件] 秒传命中，跳过字节写入: md5={}, objectKey={}, uploader={}",
                     md5, objectKey, cmd.getUploaderId());
@@ -92,28 +88,137 @@ public class FileServiceImpl implements FileService {
             writeBytes(bytes, contentType, objectKey);
         }
 
+        FileEntity entity = insertRecord(cmd.getUploaderId(), bizType, originalName, ext,
+                contentType, objectKey, bytes.length, md5, cmd.getDuration());
+        log.info("[文件] 上传成功: fileId={}, bizType={}, size={}, uploader={}",
+                entity.getId(), bizType.getCode(), bytes.length, cmd.getUploaderId());
+        return entity;
+    }
+
+    @Override
+    public FileEntity instantReuse(Long uploaderId, String bizTypeCode, String originalName,
+                                   String md5, long size, Integer duration) {
+        BusinessException.throwIf(uploaderId == null, ResultCode.UNAUTHORIZED);
+        if (TextUtil.isBlank(md5) || size <= 0) {
+            return null;
+        }
+        FileBizType bizType = requireBizType(TextUtil.isBlank(bizTypeCode) ? FileBizType.CHAT_FILE.getCode() : bizTypeCode);
+        String name = FileConvert.sanitizeFileName(originalName);
+        String ext = requireAllowedExt(name, bizType);
+        BusinessException.throwIf(size > limitOf(bizType).toBytes(), ResultCode.UPLOAD_TOO_LARGE);
+
+        String objectKey = findReusableObjectKey(md5, fileStorage.type().getCode(), size);
+        if (objectKey == null) {
+            return null;
+        }
+        String contentType = FileConvert.safeContentType(ext);
+        FileEntity entity = insertRecord(uploaderId, bizType, name, ext, contentType, objectKey, size, md5, duration);
+        log.info("[文件] 秒传命中，已建记录: fileId={}, md5={}, objectKey={}, uploader={}",
+                entity.getId(), md5, objectKey, uploaderId);
+        return entity;
+    }
+
+    @Override
+    public FileEntity storeMerged(MergedUpload upload) {
+        BusinessException.throwIf(upload == null, ResultCode.BAD_REQUEST, "上传参数不能为空");
+        BusinessException.throwIf(upload.getUploaderId() == null, ResultCode.UNAUTHORIZED);
+        BusinessException.throwIf(upload.getStreamSupplier() == null, ResultCode.BAD_REQUEST, "缺少内容流");
+
+        FileBizType bizType = requireBizType(TextUtil.isBlank(upload.getBizType()) ? FileBizType.CHAT_FILE.getCode() : upload.getBizType());
+        String originalName = FileConvert.sanitizeFileName(upload.getOriginalName());
+        String ext = requireAllowedExt(originalName, bizType);
+        long size = upload.getSize();
+        BusinessException.throwIf(size <= 0, ResultCode.FILE_EMPTY);
+        BusinessException.throwIf(size > limitOf(bizType).toBytes(), ResultCode.UPLOAD_TOO_LARGE);
+        String md5 = upload.getMd5();
+        BusinessException.throwIf(TextUtil.isBlank(md5), ResultCode.BAD_REQUEST, "md5 不能为空");
+
+        String storageType = fileStorage.type().getCode();
+        String contentType = FileConvert.safeContentType(ext);
+
+        // 合并阶段再判一次秒传：大文件上传耗时，期间很可能已有别人传完同一份，命中就不必再写一遍
+        String objectKey = findReusableObjectKey(md5, storageType, size);
+        if (objectKey != null) {
+            log.info("[文件] 合并阶段秒传命中，跳过写入: md5={}, objectKey={}, uploader={}",
+                    md5, objectKey, upload.getUploaderId());
+        } else {
+            objectKey = FileConvert.newObjectKey(ext);
+            try (InputStream in = upload.getStreamSupplier().get()) {
+                fileStorage.upload(in, size, contentType, objectKey);
+            } catch (IOException e) {
+                log.error("[文件] 合并写入失败: objectKey={}", objectKey, e);
+                throw new BusinessException(ResultCode.FILE_UPLOAD_FAILED);
+            }
+        }
+
+        FileEntity entity = insertRecord(upload.getUploaderId(), bizType, originalName, ext,
+                contentType, objectKey, size, md5, upload.getDuration());
+        log.info("[文件] 分片合并上传成功: fileId={}, bizType={}, size={}, uploader={}",
+                entity.getId(), bizType.getCode(), size, upload.getUploaderId());
+        return entity;
+    }
+
+    /**
+     * 校验并返回业务类型，未知类型一律拒绝（不回退默认值，理由见 {@link FileBizType#of}）。
+     */
+    private FileBizType requireBizType(String code) {
+        FileBizType bizType = FileBizType.of(code);
+        BusinessException.throwIf(bizType == null, ResultCode.BAD_REQUEST, "未知的文件业务类型：" + code);
+        return bizType;
+    }
+
+    /**
+     * 取扩展名并校验白名单。没有扩展名一律拒绝：无法判断类型就等于无法判断风险。
+     *
+     * @param sanitizedOriginalName 已经过 {@link FileConvert#sanitizeFileName} 清理的文件名
+     */
+    private String requireAllowedExt(String sanitizedOriginalName, FileBizType bizType) {
+        String ext = TextUtil.extension(sanitizedOriginalName);
+        BusinessException.throwUnless(bizType.allows(ext), ResultCode.FILE_TYPE_NOT_ALLOWED,
+                TextUtil.isBlank(ext) ? "(无扩展名)" : ext);
+        return ext;
+    }
+
+    /**
+     * 分片通道的大小上限：头像仍走头像上限，其余走 {@code im.file.upload.max-size}（默认 2GB）。
+     *
+     * <p>与普通上传的 {@code im.file.max-size}（默认 100MB）刻意分开：后者受 byte[] 与 multipart
+     * 内存上限约束，而分片通道边读边写，可以承载远超内存的大文件。
+     */
+    private DataSize limitOf(FileBizType bizType) {
+        return bizType == FileBizType.AVATAR
+                ? imProperties.getFile().getMaxAvatarSize()
+                : imProperties.getFile().getUpload().getMaxSize();
+    }
+
+    /**
+     * 组装并插入一行文件元数据，头像类型顺带回写用户资料。
+     *
+     * <p>{@code store} / {@code instantReuse} / {@code storeMerged} 三条上传路径共用它，
+     * 保证「主键提前取号、url 内嵌 ID、头像回写」这些细节不会在某条路径上漏掉。
+     */
+    private FileEntity insertRecord(Long uploaderId, FileBizType bizType, String originalName, String ext,
+                                    String contentType, String objectKey, long size, String md5, Integer duration) {
         // 主键提前取号而不是等 INSERT 回填：url 列里就带着这个 ID，先拿到 ID 才能一次写完
         long fileId = IdWorker.getId();
         FileEntity entity = new FileEntity();
         entity.setId(fileId);
-        entity.setUploaderId(cmd.getUploaderId());
+        entity.setUploaderId(uploaderId);
         entity.setBizType(bizType.getCode());
-        entity.setStorageType(storageType);
+        entity.setStorageType(fileStorage.type().getCode());
         entity.setBucket(fileStorage.bucket());
         entity.setObjectKey(objectKey);
         entity.setOriginalName(originalName);
         entity.setUrl(accessUrl(fileId));
-        entity.setSize((long) bytes.length);
+        entity.setSize(size);
         entity.setContentType(contentType);
         entity.setExt(ext);
         entity.setMd5(md5);
-        entity.setDuration(normalizeDuration(cmd.getDuration()));
+        entity.setDuration(normalizeDuration(duration));
         fileMapper.insert(entity);
-        log.info("[文件] 上传成功: fileId={}, bizType={}, size={}, uploader={}",
-                fileId, bizType.getCode(), bytes.length, cmd.getUploaderId());
 
         if (bizType == FileBizType.AVATAR) {
-            applyAvatar(cmd.getUploaderId(), entity.getUrl());
+            applyAvatar(uploaderId, entity.getUrl());
         }
         return entity;
     }
@@ -141,9 +246,13 @@ public class FileServiceImpl implements FileService {
      *
      * @return 没有可复用对象时返回 {@code null}
      */
-    private String findReusableObjectKey(String md5, String storageType) {
+    private String findReusableObjectKey(String md5, String storageType, long size) {
         FileEntity exist = fileMapper.selectReusableByMd5(md5, storageType);
-        return exist == null ? null : exist.getObjectKey();
+        // size 一并核对：MD5 相同但长度不同只可能是碰撞或客户端谎报，宁可当成新文件重写一遍
+        if (exist == null || exist.getSize() == null || exist.getSize() != size) {
+            return null;
+        }
+        return exist.getObjectKey();
     }
 
     /**

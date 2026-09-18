@@ -122,9 +122,19 @@
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
         </el-tooltip>
 
-        <span v-if="uploading" class="chat-window__progress">
-          <el-progress :percentage="uploadPercent" :stroke-width="4" :show-text="false" style="width: 90px" />
-          <span class="chat-window__progress-text">上传中 {{ uploadPercent }}%</span>
+        <span
+          v-if="uploading"
+          class="chat-window__progress"
+          :title="uploadFileName"
+        >
+          <el-progress
+            :percentage="uploadPercent"
+            :stroke-width="4"
+            :show-text="false"
+            :status="uploadStage === 'instant' || uploadStage === 'done' ? 'success' : undefined"
+            style="width: 120px"
+          />
+          <span class="chat-window__progress-text">{{ uploadStageText }}</span>
         </span>
       </div>
 
@@ -243,7 +253,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
-import { uploadFile } from '@/api/file'
+import { uploadFileSmart } from '@/api/file'
 import { searchMessages } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo } from '@/utils/media'
 // TODO: 视频压缩功能待后续开发 —— 客户端 ffmpeg.wasm 压缩后上传，减少带宽消耗
@@ -260,10 +270,11 @@ const props = defineProps({
 /** 后端 im.message.max-text-length，超了会被拒；在输入框上就拦住比发出去再报错好 */
 const MAX_TEXT_LENGTH = 5000
 
-/** 与 im.file.max-size 是一对：这里是 Servlet 容器的硬上限，先于业务代码生效。
- *  只调 im.file.max-size 的话，请求会先被这里拦下并抛 MaxUploadSizeExceededException，
- *  返回的错误码与真正起作用的那道限制对不上。两个值必须一起改。 */
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+/** 前端选文件的总大小上限，对齐后端分片通道 im.file.upload.max-size（2GB）。
+ *  ≤5MB 走直传（受 spring.servlet.multipart.max-file-size=100MB 约束，远未触及）；
+ *  >5MB 自动走分片上传，边切边传，单个分片请求体才 ~5MB，不受那道 100MB multipart 限制。
+ *  要传更大的文件，需同时调大后端 im.file.upload.max-size 与 max-chunks。 */
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 /** 消息类型与文件业务类型，与后端 MsgType / im-file 的约定对齐 */
 const TYPE_IMAGE = 2
@@ -790,6 +801,35 @@ const imageInputRef = ref(null)
 const fileInputRef = ref(null)
 const uploading = ref(false)
 const uploadPercent = ref(0)
+/** 上传阶段：hash 计算文件中 / upload 传分片 / merge 服务端合并 / instant 秒传 / done 完成 */
+const uploadStage = ref('upload')
+/** 分片计数 { loaded, total }，仅 upload 阶段有值，用于展示「已传 x/y 片」 */
+const uploadChunkInfo = ref(null)
+/** 正在上传的文件名，挂在进度提示的 title 上 */
+const uploadFileName = ref('')
+
+/**
+ * 把上传阶段翻译成人话：分片上传时额外带上分片进度，秒传/合并阶段没有百分比意义直接用文案覆盖。
+ */
+const uploadStageText = computed(() => {
+  const p = uploadPercent.value
+  switch (uploadStage.value) {
+    case 'hash':
+      return `计算文件中 ${p}%`
+    case 'instant':
+      return '秒传完成'
+    case 'merge':
+      return '合并中…'
+    case 'done':
+      return '上传完成'
+    case 'upload': {
+      const info = uploadChunkInfo.value
+      return info ? `上传中 ${info.loaded}/${info.total} 片 · ${p}%` : `上传中 ${p}%`
+    }
+    default:
+      return `上传中 ${p}%`
+  }
+})
 
 /** 没有上传权限就把入口藏掉：种子数据里 user 角色是有 file:upload 的，管理员同样有 */
 const canUpload = computed(() => auth.hasPermission('file:upload'))
@@ -826,6 +866,9 @@ async function uploadAndSend(file) {
   const kind = kindOf(file)
   uploading.value = true
   uploadPercent.value = 0
+  uploadStage.value = 'upload'
+  uploadChunkInfo.value = null
+  uploadFileName.value = file.name || ''
   try {
     const extra = {}
     let duration = null
@@ -853,8 +896,12 @@ async function uploadAndSend(file) {
     }
 
     const bizType = kind === 'image' ? 'chat_image' : kind === 'voice' ? 'chat_voice' : 'chat_file'
-    const vo = await uploadFile(file, bizType, duration, (percent) => {
+    const vo = await uploadFileSmart(file, bizType, duration, (percent, stage, chunkInfo) => {
       uploadPercent.value = percent
+      if (stage) {
+        uploadStage.value = stage
+      }
+      uploadChunkInfo.value = chunkInfo || null
     })
 
     // 这里传的 fileName / fileSize / fileUrl 会被服务端按文件记录覆盖（防越权改写），
@@ -876,6 +923,9 @@ async function uploadAndSend(file) {
   } finally {
     uploading.value = false
     uploadPercent.value = 0
+    uploadStage.value = 'upload'
+    uploadChunkInfo.value = null
+    uploadFileName.value = ''
   }
 }
 
@@ -1109,7 +1159,11 @@ async function onDownload(message) {
     return
   }
   const name = message.extra?.fileName || `message-${asId(message.messageId)}`
-  await downloadFile(url, name)
+  try {
+    await downloadFile(url, name)
+  } catch {
+    // 换取直链失败（如登录态失效）已由 request.js 弹过提示，这里只兜住异常避免未捕获拒绝
+  }
 }
 
 /**
@@ -1295,6 +1349,7 @@ watch(key, async () => {
 .chat-window__progress-text {
   font-size: 12px;
   color: var(--im-text-secondary);
+  white-space: nowrap;
 }
 
 .chat-window__send-row {
