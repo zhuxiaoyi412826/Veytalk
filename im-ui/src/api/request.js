@@ -2,6 +2,7 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
 import { getToken, getTokenName, clearToken } from '@/utils/token'
+import { apiBaseURL } from '@/utils/env'
 
 /**
  * 统一的 HTTP 客户端。
@@ -67,7 +68,8 @@ export function resetRedirectFlag() {
 }
 
 const http = axios.create({
-  baseURL: '/api',
+  // Electron 桌面端指向远程后端绝对地址，Web 部署走同源 /api（见 utils/env.js）
+  baseURL: apiBaseURL(),
   timeout: 20000,
   // 数组参数序列化成 userIds=1&userIds=2。
   // axios 默认会写成 userIds[]=1&userIds[]=2，Spring 的 @RequestParam List 认不了带方括号的参数名，

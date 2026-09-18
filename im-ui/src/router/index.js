@@ -1,6 +1,7 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router'
 import { getToken } from '@/utils/token'
 import { setSectionTitle } from '@/utils/title'
+import { isElectron } from '@/utils/env'
 
 /**
  * 路由表。
@@ -69,7 +70,9 @@ const routes = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  // Electron 从 file:// 加载页面，没有服务器做 URL 重写，HTML5 history 模式会让刷新/深链
+  // 落到不存在的路径而白屏，必须退回 hash 模式；浏览器 Web 部署仍用 history（URL 更干净）。
+  history: isElectron() ? createWebHashHistory() : createWebHistory(),
   routes,
   // 切换会话时不要把滚动位置带过去
   scrollBehavior: () => ({ top: 0 })

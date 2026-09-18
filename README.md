@@ -6,7 +6,8 @@
 
 功能覆盖：注册登录（图形/短信验证码）、JWT 鉴权与 RBAC 权限、好友申请与管理、
 单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
-文件上传（MinIO / 本地双实现）、WebSocket 实时推送（心跳/重连/多端踢下线）。
+文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB）、
+WebSocket 实时推送（心跳/重连/多端踢下线）；前端另可用 **Electron 打包为 Windows 桌面客户端**。
 
 > 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
 
@@ -256,6 +257,24 @@ npm run preview    # 本地预览构建产物
 
 前端详细说明见 [`im-ui/README.md`](im-ui/README.md)。
 
+#### 打包为 Windows 桌面客户端（Electron）
+
+前端可用 **Electron** 打包成独立的 Windows 桌面 exe（**只打前端**，后端仍远程部署、客户端连之）。
+项目根 `electron/` 已配好主进程、preload 与 electron-builder；前端做了「浏览器 / Electron 两用」适配——
+同一份代码，Web 部署走同源相对路径 + history 路由，桌面端自动切到后端绝对地址 + hash 路由 + 相对 `base`，
+靠 `utils/env.js` 的 `isElectron()` 判断，互不影响。
+
+```powershell
+cd im-ui; npm run build:electron          # 相对 base './' + hash 路由
+Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
+cd ..\electron; npm install; npm run build
+# 产物：electron\release\IM通讯 Setup 1.0.0.exe（约 90MB）
+```
+
+> ⚠️ 分发前先改 `electron/main.js` 的 `SERVER_BASE` 为实际后端地址。
+> 完整的环境准备、打包流程图、踩坑（SSL 证书拦截、`file://` 白屏、大文件下载）与注意事项，
+> 见 [`md/Electron打包指南.md`](md/Electron打包指南.md)。
+
 ---
 
 ## 八、演示账号
@@ -462,6 +481,10 @@ java -jar im-bootstrap/target/im-server.jar
 下载时校验登录态与访问权限，再签发一个 30 分钟有效的文件票据
 （`im.jwt.file-ticket-ttl-seconds`），不存在裸的对象存储直链。
 
+前端下载**不把整文件读成 blob**（大文件在手机上会超时 + 撑爆内存，表现为「点了没反应」），
+而是先用 `/api/file/{id}/url` 换取带票据的直链，再交给 `<a download>` 让浏览器 / Electron
+原生下载器流式接管——不占内存、不受 axios 超时限制，1GB 大文件也能正常下（见 `utils/media.js`）。
+
 ### 秒传与断点续传（分片上传）
 
 大文件不再走单请求 `/api/file/upload`（受 `byte[]` 与 multipart 内存上限约束，默认 100MB），
@@ -483,6 +506,12 @@ java -jar im-bootstrap/target/im-server.jar
 > ⚠️ 秒传会采信客户端上报的 MD5（能报出某文件 MD5 的前提是本地真的持有它），
 > 且要求 `size` 与已有记录一致才判定命中，以此收窄碰撞与谎报空间。
 > 前端计算 MD5 依赖 `spark-md5`，首次拉取代码后需在 `im-ui` 下 `npm install`。
+
+**前端体验**：`uploadFileSmart` 的进度条按阶段渲染——「计算文件中」（MD5，0~15%）、「上传中 N/M 片」
+（分片并发上传，15~95%）、「合并中…」（96~100%），命中秒传时直接显示「秒传完成」。
+前端选文件的总上限已对齐后端的 2GB（`ChatWindow.vue` 的 `MAX_UPLOAD_BYTES`）；类型白名单覆盖常见
+文档 / 图片 / 音视频 / 压缩包与 Windows 安装包（exe/msi）。要传更大文件，需同时调大后端
+`im.file.upload.max-size`、`max-chunks` 与前端这个常量。
 
 ---
 
@@ -561,19 +590,25 @@ spring-boot-duomokuia/
 │   ├── src/main/resources/application-prod.yml  生产环境：关闭全部回显与 DEBUG 日志
 │   ├── src/main/resources/logback-spring.xml    控制台 + 按天滚动文件（pattern 含 traceId/userId）
 │   └── target/im-server.jar                     打包产物（单 jar）
-└── im-ui/                   Vue 3 前端（独立工程）
-    ├── README.md            前端专项说明
-    ├── vite.config.js       含 /api 与 /ws 代理
-    └── src/
-        ├── api/             7 个接口模块
-        ├── components/      6 个可复用组件
-        ├── layout/          主框架（左侧导航 + 路由出口）
-        ├── stores/          5 个 Pinia store
-        ├── router/          路由与登录守卫
-        ├── styles/          全局样式与 CSS 变量
-        ├── utils/           格式化、ID 归一化、媒体地址、标题、token
-        ├── views/           7 个页面
-        └── ws/              WebSocket 客户端（连接管理 + 报文分发）
+├── im-ui/                   Vue 3 前端（独立工程，浏览器 / Electron 两用）
+│   ├── README.md            前端专项说明
+│   ├── vite.config.js       含 /api 与 /ws 代理；--mode electron 时 base 切 './'
+│   └── src/
+│       ├── api/             7 个接口模块
+│       ├── components/      6 个可复用组件
+│       ├── layout/          主框架（左侧导航 + 路由出口）
+│       ├── stores/          5 个 Pinia store
+│       ├── router/          路由与登录守卫（Electron 用 hash 模式）
+│       ├── styles/          全局样式与 CSS 变量
+│       ├── utils/           格式化、ID 归一化、媒体地址/下载、标题、token、env（环境适配）
+│       ├── views/           7 个页面
+│       └── ws/              WebSocket 客户端（连接管理 + 报文分发）
+└── electron/                Electron 桌面端（前端壳 + electron-builder，连远程后端）
+    ├── main.js              主进程：窗口 / 下载处理 / 跨域 / 注入后端地址
+    ├── preload.js           contextBridge 注入 window.__IM_SERVER__
+    ├── package.json         electron-builder 配置（electronDist 指向本地 electron）
+    ├── dist/                从 im-ui/dist 复制来的前端产物
+    └── release/             打包产物（IM通讯 Setup 1.0.0.exe）
 ```
 
 ---
@@ -607,3 +642,7 @@ spring-boot-duomokuia/
 
 > 群聊后端功能完整实现，但前端按页面清单只做了单聊相关的 7 个页面，**群聊 UI 不在交付范围内**。
 > 单元测试不纳入本次交付，验证以真实启动 + 接口/WebSocket 串测为准。
+>
+> **桌面端（可选）**：`cd im-ui; npm run build:electron` → 复制 dist 到 `electron/` →
+> `npm install; npm run build` 生成 `release/IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked/IM通讯.exe`
+> 应能登录、收发、上传、下载大文件（前提：`main.js` 的 `SERVER_BASE` 指向的后端已启动）。

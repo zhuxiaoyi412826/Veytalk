@@ -9,7 +9,11 @@ import vue from '@vitejs/plugin-vue'
  * 始终是同源请求（不管是 localhost:5173 还是局域网 IP:5173），不必在 axios
  * 里拼绝对地址，WebSocket 地址也由 socket.js 按 location.host 动态推导。
  */
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  // Electron 桌面端从 file:// 加载，必须用相对路径 ./ 才能定位到 assets；Web 部署仍用根路径 /
+  // （配合 history 路由，避免深层刷新时相对路径错乱）。Electron 打包走 `vite build --mode electron`
+  // （见 package.json 的 build:electron），与 Web 构建互不影响。
+  base: mode === 'electron' ? './' : '/',
   plugins: [vue()],
   resolve: {
     alias: {
@@ -66,4 +70,4 @@ export default defineConfig({
     // element-plus 全量引入后单包偏大，抬高告警阈值避免每次构建都刷一屏无意义的提示
     chunkSizeWarningLimit: 1500
   }
-})
+}))

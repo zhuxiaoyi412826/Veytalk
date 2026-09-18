@@ -124,6 +124,11 @@ java -jar im-bootstrap/target/im-server.jar
 
 ## 四、打包为 Windows EXE 桌面应用
 
+> 📘 **本项目已用 Electron 实际打包成功（产物约 90 MB）**：完整的环境准备、前端「浏览器 /
+> Electron 两用」适配、打包命令、踩坑与解决（含 SSL 证书拦截绕过）、3 张 Mermaid 流程图与注意事项，
+> 见 **[《Electron 打包指南（实操版）》](./Electron打包指南.md)**。
+> 下面的方案 A（Electron）与方案 B（Tauri）为通用思路概览，**实际落地请以新文档为准**。
+
 ### 方案 A：Electron（前端桌面壳）+ jpackage（后端 bundled JRE）
 
 这是最成熟的方案，分两部分打包：

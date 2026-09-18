@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 import { fetchWsTicket } from '@/api/ws'
 import { getToken, getDeviceId } from '@/utils/token'
 import { dlog } from '@/utils/logger'
+import { wsBaseURL } from '@/utils/env'
 
 /**
  * WebSocket 客户端：连接、心跳、指数退避重连与事件分发。
@@ -85,11 +86,10 @@ export function off(type, handler) {
 }
 
 function wsUrl(endpoint, ticket) {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  // 用 location.host 而不是写死 localhost:8080：开发期走 vite 的 /ws 代理，
-  // 部署后走同域反代，两种情况都不需要改代码
+  // Electron 桌面端连远程后端（wsBaseURL 已把 http 换成 ws）；Web 部署按同源 location.host 推导，
+  // 开发期走 vite 的 /ws 代理、生产走同域反代，两种情况都不需要改代码（见 utils/env.js）
   const path = endpoint && endpoint.startsWith('/') ? endpoint : '/ws'
-  return `${protocol}//${window.location.host}${path}?ticket=${encodeURIComponent(ticket)}`
+  return `${wsBaseURL()}${path}?ticket=${encodeURIComponent(ticket)}`
 }
 
 function clearTimers() {
