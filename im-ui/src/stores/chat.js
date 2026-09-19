@@ -439,6 +439,24 @@ export const useChatStore = defineStore('chat', {
       return list
     },
 
+    /**
+     * 清空某会话的本地消息与 localStorage 缓存。
+     *
+     * <p>服务端「清空聊天记录」后必须调用：loadHistory(reset=true) 会把 readCache 的
+     * 本地缓存与服务端结果合并，不清缓存的话刚清掉的消息会从 localStorage 复活。
+     */
+    clearConversation(conversationId) {
+      const key = asId(conversationId)
+      delete this.messages[key]
+      delete this.hasMore[key]
+      delete this.loadingHistory[key]
+      try {
+        localStorage.removeItem(CACHE_PREFIX + key)
+      } catch {
+        // 隐私模式等忽略，缓存只是优化项
+      }
+    },
+
     /** 切换账号或退出时清空，避免把上一个人的聊天记录留给下一个登录者 */
     reset() {
       this.messages = {}

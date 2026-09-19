@@ -29,4 +29,24 @@ public interface FileMapper extends BaseMapper<FileEntity> {
                 .orderByAsc(FileEntity::getId)
                 .last("LIMIT 1"));
     }
+
+    /**
+     * 清除某个 MD5 在当前存储下的全部秒传依据（把 md5 置空）。
+     *
+     * <p>当发现 MD5 命中的源对象已从存储中消失（如 MinIO 控制台手工删除）时调用：这些行的
+     * {@code object_key} 已指向空气，留着 md5 只会让后续每一次相同文件的上传都秒传命中这条坏记录。
+     * 置空后它们不再参与 {@link #selectReusableByMd5}，下一次上传会重新写入字节并建立一条指向真实对象的新记录。
+     *
+     * <p>刻意用 {@code setSql("md5 = NULL")} 而非 {@code .set(FileEntity::getMd5, null)}：
+     * 全局 {@code update-strategy: not_null} 会让后者的 null 字段被静默忽略（见 application.yml 的说明），
+     * 只有拼 SQL 片段才能真正把列写成 NULL。
+     *
+     * @return 受影响的行数
+     */
+    default int clearReusableMd5(String md5, String storageType) {
+        return update(null, Wrappers.<FileEntity>lambdaUpdate()
+                .setSql("md5 = NULL")
+                .eq(FileEntity::getMd5, md5)
+                .eq(FileEntity::getStorageType, storageType));
+    }
 }

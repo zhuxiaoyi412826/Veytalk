@@ -35,6 +35,17 @@ public interface FileStorage {
     InputStream download(String objectKey);
 
     /**
+     * 判断对象当前是否仍存在于存储中。
+     *
+     * <p>专供秒传复用前的存在性校验：源对象可能被 MinIO 控制台手工删除或被生命周期策略回收，
+     * 而 {@code im_file} 里的 md5 记录还在。复用前确认对象真的在，才不会写出一条指向空气的新记录。
+     *
+     * @return 对象确认存在返回 {@code true}；已不存在、或存储暂时不可用无法确认时返回 {@code false}
+     *         （宁可放弃一次秒传转为重新上传，也不复用可能失效的对象键）
+     */
+    boolean exists(String objectKey);
+
+    /**
      * 生成临时直链。
      *
      * @param ttlSeconds 期望有效期（秒），实现可按自身上限收敛

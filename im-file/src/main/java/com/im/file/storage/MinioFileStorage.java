@@ -11,6 +11,7 @@ import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
+import io.minio.StatObjectArgs;
 import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
 import lombok.extern.slf4j.Slf4j;
@@ -106,6 +107,30 @@ public class MinioFileStorage implements FileStorage {
         } catch (Exception e) {
             log.error("[MinIO] 读取失败: bucket={}, key={}", bucket, objectKey, e);
             throw new BusinessException(ResultCode.FILE_STORAGE_UNAVAILABLE);
+        }
+    }
+
+    @Override
+    public boolean exists(String objectKey) {
+        try {
+            minioClient.statObject(StatObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(objectKey)
+                    .build());
+            return true;
+        } catch (ErrorResponseException e) {
+            String code = e.errorResponse() == null ? null : e.errorResponse().code();
+            if (NO_SUCH_KEY.equals(code)) {
+                return false;
+            }
+            // 服务端明确拒绝（权限、桶不存在等）：无法确认对象在不在，按不存在处理，交给上层重新上传
+            log.warn("[MinIO] 存在性校验被服务端拒绝: bucket={}, key={}, code={}", bucket, objectKey, code);
+            return false;
+        } catch (Exception e) {
+            // 网络抖动等导致无法确认：同样按不存在处理。代价只是丢失一次秒传、转为重新上传，
+            // 但绝不会复用一条可能指向空气的对象键
+            log.warn("[MinIO] 存在性校验失败，按不存在处理: bucket={}, key={}", bucket, objectKey, e);
+            return false;
         }
     }
 

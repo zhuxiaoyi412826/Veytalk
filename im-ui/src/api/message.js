@@ -72,6 +72,11 @@ export function deleteMessage(messageId) {
   return http.delete(`/message/${messageId}`)
 }
 
+/** 清空某会话的全部聊天记录（单端）：只对自己生效，对方不受影响 */
+export function clearConversationMessages(conversationId) {
+  return http.delete(`/message/clear/${conversationId}`)
+}
+
 /** 会话内消息内容检索 */
 export function searchMessages(params) {
   return http.get('/message/search', { params })

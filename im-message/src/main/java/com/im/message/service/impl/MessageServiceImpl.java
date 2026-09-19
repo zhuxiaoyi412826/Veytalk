@@ -8,6 +8,7 @@ import com.im.common.api.ResultCode;
 import com.im.common.config.ImProperties;
 import com.im.common.constant.ImConstants;
 import com.im.common.constant.RedisKeys;
+import com.im.common.domain.ConversationBriefDTO;
 import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.domain.MessageExtra;
@@ -92,6 +93,9 @@ public class MessageServiceImpl implements MessageService {
 
     /** 幂等标记存活时间，覆盖客户端重试窗口即可，不必长期占用内存 */
     private static final Duration IDEMPOTENT_TTL = Duration.ofMinutes(5);
+
+    /** 清空会话聊天记录时批量写删除记录的单批行数，避免一条超大 INSERT 撑爆 SQL 长度 */
+    private static final int CLEAR_BATCH = 500;
 
     private final MessageMapper messageMapper;
     private final MessageReadMapper messageReadMapper;
@@ -458,14 +462,31 @@ public class MessageServiceImpl implements MessageService {
 
     @Override
     public PageResult<MessageVO> search(Long userId, MessageSearchQuery query) {
-        Long conversationId = query.getConversationId();
-        BusinessException.throwUnless(conversationSpi.isMember(conversationId, userId),
-                ResultCode.CONVERSATION_NO_PERMISSION);
         String keyword = TextUtil.sanitize(query.getKeyword());
         if (TextUtil.isBlank(keyword)) {
             return PageResult.empty(query.safeCurrent(), query.safeSize());
         }
-        Page<Message> page = messageMapper.searchByKeyword(query.toPage(), conversationId, keyword);
+        Long conversationId = query.getConversationId();
+        Page<Message> page;
+        if (conversationId != null) {
+            // 会话内检索：先校验成员身份，再把扫描收敛到单个会话
+            BusinessException.throwUnless(conversationSpi.isMember(conversationId, userId),
+                    ResultCode.CONVERSATION_NO_PERMISSION);
+            page = messageMapper.searchByKeyword(query.toPage(), conversationId, keyword);
+        } else {
+            // 全局检索：把 LIKE 的扫描范围收敛到「我参与的会话」集合，避免全表模糊查询；
+            // 一个会话都没有时直接返回空页，不去打数据库
+            List<Long> conversationIds = conversationSpi.listByUser(userId).stream()
+                    .map(ConversationBriefDTO::getConversationId)
+                    .filter(Objects::nonNull)
+                    .toList();
+            if (conversationIds.isEmpty()) {
+                return PageResult.empty(query.safeCurrent(), query.safeSize());
+            }
+            page = messageMapper.searchByKeywordInConversations(query.toPage(), conversationIds, keyword);
+        }
+        // toViewList 会按查看者过滤掉单端删除（im_message_delete）的行，
+        // 因此用户清除过的消息不会出现在检索结果里
         List<MessageVO> records = page.getRecords().isEmpty()
                 ? List.of()
                 : toViewList(new ArrayList<>(page.getRecords()), userId);
@@ -741,6 +762,41 @@ public class MessageServiceImpl implements MessageService {
         } catch (DuplicateKeyException e) {
             log.info("[消息删除] 并发重复删除，忽略: userId={}, messageId={}", userId, messageId);
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void clearConversationForUser(Long userId, Long conversationId) {
+        BusinessException.throwUnless(conversationSpi.isMember(conversationId, userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        List<Long> messageIds = messageMapper.selectIdsByConversation(conversationId);
+        if (messageIds.isEmpty()) {
+            return;
+        }
+        // 跳过早先已单端删除过的消息，避免撞唯一键 uk_msg_user
+        Set<Long> alreadyDeleted = messageDeleteMapper.selectDeletedIds(userId, messageIds);
+        LocalDateTime now = LocalDateTime.now();
+        List<MessageDelete> batch = new ArrayList<>(CLEAR_BATCH);
+        for (Long messageId : messageIds) {
+            if (alreadyDeleted.contains(messageId)) {
+                continue;
+            }
+            MessageDelete record = new MessageDelete();
+            record.setId(IdWorker.getId());
+            record.setMessageId(messageId);
+            record.setUserId(userId);
+            record.setCreateTime(now);
+            batch.add(record);
+            if (batch.size() >= CLEAR_BATCH) {
+                messageDeleteMapper.insertBatch(batch);
+                batch.clear();
+            }
+        }
+        if (!batch.isEmpty()) {
+            messageDeleteMapper.insertBatch(batch);
+        }
+        log.info("[消息删除] 清空会话聊天记录: userId={}, conversationId={}, 消息数={}",
+                userId, conversationId, messageIds.size());
     }
 
     @Override

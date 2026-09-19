@@ -74,6 +74,16 @@ public class LocalFileStorage implements FileStorage {
     }
 
     @Override
+    public boolean exists(String objectKey) {
+        try {
+            return Files.isRegularFile(resolve(objectKey));
+        } catch (BusinessException e) {
+            // resolve 对空键 / 越界键会抛异常：这类键本就不该命中复用，视为不存在
+            return false;
+        }
+    }
+
+    @Override
     public String presignedUrl(String objectKey, long ttlSeconds) {
         // 本地磁盘没有「签名直链」这个概念：文件不在任何可公网访问的对象存储里，
         // 返回 null 让上层改走「受控下载地址 + 短时票据」，两者对外表现一致

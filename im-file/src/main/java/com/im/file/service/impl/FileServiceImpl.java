@@ -244,12 +244,24 @@ public class FileServiceImpl implements FileService {
      * 都指向一个已经不存在的路径，且这种损坏是永久的、写入元数据之后才发现不了。
      * 省下的零点几毫秒换不来这个风险。
      *
-     * @return 没有可复用对象时返回 {@code null}
+     * <p>同理，命中后还要用 {@link FileStorage#exists} 回存储确认对象真的在：MinIO 控制台手工删除、
+     * 生命周期策略回收都不会通知本服务，DB 里的 md5 记录会变成指向空气的孤儿。确认不存在时清掉该
+     * md5 的全部记录并返回 {@code null}，让上传转为重新写入真实字节，而不是反复命中同一条坏记录。
+     *
+     * @return 没有可复用对象、或复用对象已失效时返回 {@code null}
      */
     private String findReusableObjectKey(String md5, String storageType, long size) {
         FileEntity exist = fileMapper.selectReusableByMd5(md5, storageType);
         // size 一并核对：MD5 相同但长度不同只可能是碰撞或客户端谎报，宁可当成新文件重写一遍
         if (exist == null || exist.getSize() == null || exist.getSize() != size) {
+            return null;
+        }
+        // 复用前回存储确认源对象还在：不在了就把该 md5 的全部记录置空（它们共享同一个 objectKey，一起失效），
+        // 转为重新上传，杜绝「秒传命中一条指向空气的记录、下载必炸」
+        if (!fileStorage.exists(exist.getObjectKey())) {
+            int cleared = fileMapper.clearReusableMd5(md5, storageType);
+            log.warn("[文件] 秒传源对象已不存在，清除失效 md5 转为重新上传: md5={}, objectKey={}, 清除行数={}",
+                    md5, exist.getObjectKey(), cleared);
             return null;
         }
         return exist.getObjectKey();

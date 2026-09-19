@@ -3,7 +3,9 @@ package com.im.message.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.im.message.entity.MessageDelete;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
 import java.util.Collection;
 import java.util.List;
@@ -53,4 +55,21 @@ public interface MessageDeleteMapper extends BaseMapper<MessageDelete> {
                 .eq(MessageDelete::getUserId, userId)
                 .eq(MessageDelete::getMessageId, messageId)) > 0;
     }
+
+    /**
+     * 批量写入单端删除记录，供「清空会话聊天记录」一次插入多行。
+     *
+     * <p>{@code id} 由调用方用雪花算法填好：批量 insert 语句不走 MyBatis-Plus 的 id 自动填充，
+     * 留空会因主键为 null 直接报错。调用方需自行保证不违反唯一键 {@code uk_msg_user}。
+     */
+    @Insert("""
+            <script>
+            INSERT INTO im_message_delete (id, message_id, user_id, create_time)
+            VALUES
+            <foreach collection="list" item="item" separator=",">
+                (#{item.id}, #{item.messageId}, #{item.userId}, #{item.createTime})
+            </foreach>
+            </script>
+            """)
+    int insertBatch(@Param("list") Collection<MessageDelete> list);
 }

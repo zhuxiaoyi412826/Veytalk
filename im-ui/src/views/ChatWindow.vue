@@ -21,6 +21,9 @@
         <el-tooltip content="全部标记已读" placement="bottom">
           <el-button text :icon="Select" @click="markAllRead" />
         </el-tooltip>
+        <el-tooltip content="清空聊天记录" placement="bottom">
+          <el-button text :icon="Delete" @click="confirmClearRecords" />
+        </el-tooltip>
         <el-tooltip content="刷新消息" placement="bottom">
           <el-button text :icon="Refresh" :loading="loading" @click="reload" />
         </el-tooltip>
@@ -241,7 +244,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, FolderOpened, Picture, Refresh, Search, Select, Setting, Sunny, User } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, FolderOpened, Picture, Refresh, Search, Select, Setting, Sunny, User } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
@@ -254,10 +257,11 @@ import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
 import { uploadFileSmart } from '@/api/file'
-import { searchMessages } from '@/api/message'
+import { searchMessages, clearConversationMessages } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo } from '@/utils/media'
-// TODO: 视频压缩功能待后续开发 —— 客户端 ffmpeg.wasm 压缩后上传，减少带宽消耗
-// import { compressVideo, isFFmpegAvailable } from '@/utils/video-compressor'
+// 视频压缩只在桌面端启用：调 Electron 主进程的原生 ffmpeg（GPU 硬件编码）压缩后上传；
+// Web 端不压缩、直传原片（window.__IM_NATIVE__ 只在 Electron 里存在，据此区分）。
+import { isElectron } from '@/utils/env'
 import { formatFileSize, formatMsgTime, needTimeDivider } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
 
@@ -482,15 +486,44 @@ async function loadInitial() {
   }
   scrollToBottom()
   markAllRead()
-  // 群聊时拉取群详情，获取禁言状态与角色信息
+  // 群聊时拉取群详情（禁言状态与角色）与群成员列表。
+  // 成员列表是 @ 提及选择器的数据源：不加载的话进群聊打 @ 只会弹出「@所有人」，
+  // 单个成员一个都列不出来（此前只有打开「群设置」抽屉才会加载成员，@ 选人因此形同虚设）。
   if (isGroup.value && groupId.value) {
     groupStore.fetchDetail(groupId.value)
+    groupStore.fetchMembers(groupId.value)
   }
 }
 
 async function reload() {
   await loadInitial()
   ElMessage.success('已刷新')
+}
+
+/**
+ * 清空聊天记录：仅对自己生效，对方不受影响。
+ *
+ * 服务端清空后必须同时清掉本地 store 与 localStorage 缓存，
+ * 否则 loadHistory(reset=true) 合并 readCache 时会把刚清掉的消息复活。
+ */
+async function confirmClearRecords() {
+  try {
+    await ElMessageBox.confirm(
+      '将清除你在本会话的全部聊天记录（仅对你生效，对方不受影响），且无法恢复。',
+      '清空聊天记录',
+      {
+        confirmButtonText: '清空',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return
+  }
+  await clearConversationMessages(props.conversationId)
+  chat.clearConversation(props.conversationId)
+  ElMessage.success('聊天记录已清空')
 }
 
 /* -------------------------------- 已读 -------------------------------- */
@@ -814,6 +847,8 @@ const uploadFileName = ref('')
 const uploadStageText = computed(() => {
   const p = uploadPercent.value
   switch (uploadStage.value) {
+    case 'compress':
+      return `压缩中 ${p}%`
     case 'hash':
       return `计算文件中 ${p}%`
     case 'instant':
@@ -864,6 +899,8 @@ async function onPicked(event) {
 
 async function uploadAndSend(file) {
   const kind = kindOf(file)
+  // 桌面端视频压缩后，真正上传的是压缩产物；其余情况就是原文件
+  let uploadTarget = file
   uploading.value = true
   uploadPercent.value = 0
   uploadStage.value = 'upload'
@@ -885,18 +922,41 @@ async function uploadAndSend(file) {
         extra.duration = duration
       }
     } else if (kind === 'video') {
-      // 视频：读取元数据（时长、宽高），直接上传原始文件
-      // TODO: 后续开发客户端 ffmpeg.wasm 压缩功能，压缩后再上传以节省带宽
+      // 视频：先读原始元数据（时长、宽高），供气泡初始尺寸用
       const meta = await readVideoMetadata(file)
       if (meta) {
         if (meta.duration) { extra.duration = meta.duration }
         if (meta.width) { extra.width = meta.width }
         if (meta.height) { extra.height = meta.height }
       }
+      // 仅桌面端压缩：调 Electron 主进程的原生 ffmpeg（GPU 硬件编码，缺驱动回落软编）转成 720p MP4。
+      // scale=-2:720 保持宽高比，上面读到的 width/height 比例依旧适用，无需重读元数据。
+      // Web 端没有 window.__IM_NATIVE__，跳过压缩直传原片；压缩失败或没变小也回退原片。
+      const native = typeof window !== 'undefined' ? window.__IM_NATIVE__ : null
+      if (isElectron() && native && typeof native.compressVideo === 'function') {
+        const inputPath = native.getPathForFile(file)
+        if (inputPath) {
+          uploadStage.value = 'compress'
+          uploadPercent.value = 0
+          try {
+            const res = await native.compressVideo(
+              inputPath,
+              { duration: (meta && meta.duration) || 0 },
+              (pct) => { uploadPercent.value = Math.min(99, Math.max(0, pct | 0)) }
+            )
+            if (res && res.compressed && res.data) {
+              uploadTarget = new File([res.data], res.name || 'video.mp4', { type: 'video/mp4' })
+              uploadFileName.value = uploadTarget.name
+            }
+          } catch {
+            // 压缩异常不阻断发送，回退原片直传
+          }
+        }
+      }
     }
 
     const bizType = kind === 'image' ? 'chat_image' : kind === 'voice' ? 'chat_voice' : 'chat_file'
-    const vo = await uploadFileSmart(file, bizType, duration, (percent, stage, chunkInfo) => {
+    const vo = await uploadFileSmart(uploadTarget, bizType, duration, (percent, stage, chunkInfo) => {
       uploadPercent.value = percent
       if (stage) {
         uploadStage.value = stage

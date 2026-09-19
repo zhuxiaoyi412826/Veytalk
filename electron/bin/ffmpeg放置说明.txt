@@ -1,0 +1,16 @@
+# 把 ffmpeg.exe 放到本目录（electron/bin/ffmpeg.exe），桌面端视频硬件压缩才会生效。
+#
+# 获取（任选其一，需含 NVENC/QuickSync/AMF 硬件编码器的完整构建）：
+#   - https://www.gyan.dev/ffmpeg/builds/         下载 ffmpeg-release-essentials.zip
+#   - https://github.com/BtbN/FFmpeg-Builds/releases  下载 win64 版
+#   解压后把里面的 bin/ffmpeg.exe 复制到本目录即可（只需 ffmpeg.exe 一个文件）。
+#
+# 打包时 electron-builder 会用 package.json 的 extraResources 把本目录拷进安装包，
+# 安装后位于 resources/ffmpeg/ffmpeg.exe，main.js 的 resolveFfmpegPath() 会自动定位。
+#
+# 开发期免打包测试：直接 npm start 前把 ffmpeg.exe 放到本目录；
+#   或本机已装 ffmpeg 并加进系统 PATH，main.js 也会自动用系统 PATH 里的。
+#
+# 不放 ffmpeg.exe 会怎样：压缩自动禁用，桌面端视频「原片直传」（和 Web 端一致），不报错、不影响其它功能。
+#
+# 授权：ffmpeg 默认 LGPL，作为独立进程调用不影响本项目代码；对外分发请遵守其许可证（随包保留 LICENSE）。

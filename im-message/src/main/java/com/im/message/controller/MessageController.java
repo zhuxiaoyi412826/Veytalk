@@ -91,7 +91,8 @@ public class MessageController {
     }
 
     @Operation(summary = "消息内容检索",
-            description = "必须指定会话：消息表是全系统增长最快的表，不带会话范围的模糊查询会退化成全表扫描")
+            description = "conversationId 可选：指定时在该会话内检索；为空时跨当前用户参与的全部会话全局检索。"
+                    + "两种情形都把 LIKE 的扫描范围收敛到会话集合内，不会退化成全表扫描")
     @GetMapping("/search")
     public Result<PageResult<MessageVO>> search(@Valid MessageSearchQuery query) {
         return Result.ok(messageService.search(SecurityUtil.getUserId(), query));
@@ -112,6 +113,15 @@ public class MessageController {
     public Result<Void> delete(@Parameter(description = "消息 ID") @PathVariable("id") Long id) {
         messageService.deleteForUser(SecurityUtil.getUserId(), id);
         return Result.ok(null, "消息已删除");
+    }
+
+    @Operation(summary = "清空会话聊天记录",
+            description = "只对当前用户生效：批量写单端删除记录，此后历史 / 检索 / 离线都不再返回这些消息；"
+                    + "其他成员不受影响，清空后对方再发的新消息照常可见")
+    @DeleteMapping("/clear/{conversationId}")
+    public Result<Void> clearConversation(@Parameter(description = "会话 ID") @PathVariable("conversationId") Long conversationId) {
+        messageService.clearConversationForUser(SecurityUtil.getUserId(), conversationId);
+        return Result.ok(null, "聊天记录已清空");
     }
 
     @Operation(summary = "已读上报",

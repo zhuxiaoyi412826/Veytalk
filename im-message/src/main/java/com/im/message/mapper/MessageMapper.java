@@ -206,6 +206,44 @@ public interface MessageMapper extends BaseMapper<Message> {
     }
 
     /**
+     * 跨会话消息内容检索（全局搜索）。
+     *
+     * <p>与 {@link #searchByKeyword} 同样是 {@code LIKE '%kw%'}，只是会话条件从等值换成 IN：
+     * 集合来自 {@code ConversationSpi.listByUser}（当前用户参与的会话），保证只扫自己的会话，
+     * 不会退化成全表模糊查询。空集合会让 MyBatis-Plus 生成非法的 {@code IN ()}，这里直接短路返回空页。
+     *
+     * <p>全局结果没有单一会话的 seq 可比，按发送时间倒序（同刻再用雪花 ID 兑底）让最新匹配排最前。
+     */
+    default Page<Message> searchByKeywordInConversations(Page<Message> page, Collection<Long> conversationIds, String keyword) {
+        if (conversationIds == null || conversationIds.isEmpty()) {
+            page.setRecords(List.of());
+            page.setTotal(0);
+            return page;
+        }
+        return selectPage(page, Wrappers.<Message>lambdaQuery()
+                .in(Message::getConversationId, conversationIds)
+                .eq(Message::getRecalled, 0)
+                .like(Message::getContent, keyword)
+                .orderByDesc(Message::getSendTime)
+                .orderByDesc(Message::getId));
+    }
+
+    /**
+     * 某会话全部消息 ID，供「清空本会话聊天记录」批量写单端删除记录使用。
+     *
+     * <p>只取 ID 不取整行：清空是用户低频操作，但重度会话可能有上万条，
+     * 回表取 {@code extra} JSON 等列纯属浪费。
+     */
+    default List<Long> selectIdsByConversation(Long conversationId) {
+        return selectObjs(Wrappers.<Message>lambdaQuery()
+                        .select(Message::getId)
+                        .eq(Message::getConversationId, conversationId))
+                .stream()
+                .map(obj -> (Long) obj)
+                .toList();
+    }
+
+    /**
      * 判断查看者能否看到引用了指定文件的附件消息，文件下载鉴权的唯一依据。
      *
      * <p>驱动方向刻意选成「上传者的消息」而不是「查看者的会话」：

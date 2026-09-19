@@ -1,0 +1,56 @@
+{
+  "name": "im-desktop",
+  "version": "1.0.0",
+  "description": "IM 即时通讯桌面客户端（Electron 壳，连接远程后端）",
+  "main": "main.js",
+  "author": "IM",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.im.desktop",
+    "productName": "IM通讯",
+    "electronDist": "D:/software/electron-37.10.3/electron-v37.10.3-win32-x64",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "ffmpeg",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "IM通讯"
+    }
+  },
+  "devDependencies": {
+    "electron": "37.10.3",
+    "electron-builder": "^25.1.8"
+  }
+}

@@ -14,7 +14,43 @@
         </el-tooltip>
       </header>
 
-      <div v-loading="conversation.loading && conversation.list.length === 0" class="chat-home__items im-scroll">
+      <!-- 全局消息搜索：跨全部会话检索，与聊天窗口内的「仅当前会话」搜索区分开 -->
+      <div class="chat-home__search">
+        <el-input
+          v-model.trim="globalKeyword"
+          placeholder="搜索全部会话的消息"
+          clearable
+          :prefix-icon="Search"
+          @clear="closeGlobalSearch"
+        />
+      </div>
+
+      <!-- 搜索结果面板：有关键字时替换会话列表展示，点击某条跳转到对应会话 -->
+      <div v-if="globalSearching" v-loading="globalLoading" class="chat-home__search-results im-scroll">
+        <div
+          v-for="item in globalResults"
+          :key="item.messageId"
+          class="gsearch"
+          @click="openGlobalResult(item)"
+        >
+          <div class="gsearch__head">
+            <span class="gsearch__conv im-ellipsis">{{ convNameOf(item) }}</span>
+            <span class="gsearch__time">{{ formatConvTime(item.sendTime) }}</span>
+          </div>
+          <div class="gsearch__body im-ellipsis">
+            <span class="gsearch__sender">{{ item.fromNickname }}：</span>
+            <span class="gsearch__content" v-html="highlightGlobal(item.content)"></span>
+          </div>
+        </div>
+        <div v-if="globalHasMore" class="gsearch__more">
+          <el-button link type="primary" :loading="globalLoading" @click="loadMoreGlobal">加载更多</el-button>
+        </div>
+        <div v-if="globalSearched && !globalResults.length && !globalLoading" class="gsearch__empty">
+          未找到匹配的消息
+        </div>
+      </div>
+
+      <div v-else v-loading="conversation.loading && conversation.list.length === 0" class="chat-home__items im-scroll">
         <div
           v-for="item in conversation.list"
           :key="item.conversationId"
@@ -80,15 +116,17 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MuteNotification, Refresh } from '@element-plus/icons-vue'
+import { MuteNotification, Refresh, Search } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import ChatWindow from './ChatWindow.vue'
 import { useConversationStore } from '@/stores/conversation'
 import { useSettingsStore } from '@/stores/settings'
+import { useChatStore } from '@/stores/chat'
+import { clearConversationMessages, searchMessages } from '@/api/message'
 import { formatConvTime } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
 
@@ -104,6 +142,7 @@ const route = useRoute()
 const router = useRouter()
 const conversation = useConversationStore()
 const settings = useSettingsStore()
+const chat = useChatStore()
 
 function isActive(item) {
   return sameId(item.conversationId, conversation.activeId)
@@ -148,6 +187,95 @@ onMounted(() => {
     conversation.fetchList()
   }
 })
+
+/* ------------------------------ 全局消息搜索 ------------------------------ */
+
+const globalKeyword = ref('')
+const globalResults = ref([])
+const globalLoading = ref(false)
+const globalHasMore = ref(false)
+/** 是否已完成过至少一次检索：用于区分「正在搜」与「真的没结果」，避免防抖期间闪一下空态 */
+const globalSearched = ref(false)
+/** 是否处于「展示搜索结果」态：有关键字即为真，用于替换会话列表 */
+const globalSearching = computed(() => !!globalKeyword.value)
+let globalTimer = null
+
+/** 300ms 防抖，避免每敲一个字就打一次跨会话检索 */
+watch(globalKeyword, (val) => {
+  if (globalTimer) clearTimeout(globalTimer)
+  if (!val) {
+    globalResults.value = []
+    globalHasMore.value = false
+    globalSearched.value = false
+    globalLoading.value = false
+    return
+  }
+  // 关键字一变就进入 loading，防抖与请求期间面板显示转圈而不是闪一下空态
+  globalLoading.value = true
+  globalSearched.value = false
+  globalTimer = setTimeout(doGlobalSearch, 300)
+})
+
+async function doGlobalSearch() {
+  if (!globalKeyword.value) return
+  globalLoading.value = true
+  try {
+    // 不传 conversationId：后端跨当前用户全部会话检索
+    const page = await searchMessages({ keyword: globalKeyword.value, current: 1, size: 20 })
+    globalResults.value = (page && page.records) || []
+    globalHasMore.value = globalResults.value.length >= 20
+  } catch {
+    // request.js 已处理
+  } finally {
+    globalLoading.value = false
+    globalSearched.value = true
+  }
+}
+
+async function loadMoreGlobal() {
+  if (!globalKeyword.value || globalLoading.value) return
+  globalLoading.value = true
+  try {
+    const nextPage = Math.ceil(globalResults.value.length / 20) + 1
+    const page = await searchMessages({ keyword: globalKeyword.value, current: nextPage, size: 20 })
+    const records = (page && page.records) || []
+    globalResults.value.push(...records)
+    globalHasMore.value = records.length >= 20
+  } catch {
+    // request.js 已处理
+  } finally {
+    globalLoading.value = false
+  }
+}
+
+function closeGlobalSearch() {
+  if (globalTimer) clearTimeout(globalTimer)
+  globalKeyword.value = ''
+  globalResults.value = []
+  globalHasMore.value = false
+  globalSearched.value = false
+  globalLoading.value = false
+}
+
+/** 结果所属会话的展示名：优先取本地会话列表，隐藏会话等取不到时兜底 */
+function convNameOf(item) {
+  return conversation.find(item.conversationId)?.name || '会话'
+}
+
+/** 点击结果跳转到对应会话的聊天页，并收起搜索面板 */
+function openGlobalResult(item) {
+  const id = asId(item.conversationId)
+  closeGlobalSearch()
+  router.push({ name: 'chat', params: { conversationId: id } })
+}
+
+/** 关键字高亮：转义 HTML 后把匹配片段包成 <mark> */
+function highlightGlobal(text) {
+  if (!text) return ''
+  const escaped = text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  const kw = globalKeyword.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return escaped.replace(new RegExp(kw, 'gi'), (m) => `<mark>${m}</mark>`)
+}
 
 /* ------------------------------ 右键菜单 ------------------------------ */
 
@@ -204,26 +332,52 @@ async function onMenuSelect(key) {
 }
 
 /**
- * 删除会话。
+ * 删除会话，二选一：保留聊天记录 / 不保留聊天记录。
  *
- * 后端这个接口等价于「隐藏」：消息本身还在，对方再发新消息时会话会自动回到列表。
- * 提示语必须说清楚这一点，否则用户以为聊天记录被清了，或者以为删了就再也收不到消息。
+ * 用 distinguishCancelAndClose 把三个出口区分开：
+ * confirm = 不保留（先清空记录再移除）、cancel = 保留（仅移除）、close(X / ESC) = 放弃。
  */
 async function confirmRemove(target) {
+  let mode
   try {
     await ElMessageBox.confirm(
-      `将从列表中移除「${target.name}」，聊天记录保留，对方再发消息时会话会重新出现。`,
+      `保留聊天记录：仅把「${target.name}」从列表移除，记录仍在，对方再发消息时会话会重新出现。\n`
+        + '不保留聊天记录：同时清除你在本会话的全部聊天记录（仅对你生效，对方不受影响），且无法恢复。',
       '删除会话',
-      { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: '不保留聊天记录',
+        cancelButtonText: '保留聊天记录',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning'
+      }
     )
-  } catch {
-    return
+    mode = 'clear'
+  } catch (action) {
+    // cancel = 点了「保留聊天记录」；close = 点 X / ESC 放弃
+    if (action !== 'cancel') {
+      return
+    }
+    mode = 'keep'
+  }
+  // 必须在 remove() 之前记下「删的是不是当前打开的会话」：remove() 内部会把 activeId 清空，
+  // 之后再比对就永远是 false，router.replace 不会执行，路由停在 /chat/:id 不动。
+  // 地址栏残留这个 id 时，对方再发消息让会话重新出现，点击它会命中 open() 里
+  // 「id 与当前路由相同就不跳转」的短路，表现为「点了没反应」，只有先去好友页把路由参数
+  // 冲掉再回来才能进 —— 这正是用户反馈的第二个 bug。
+  const wasActive = sameId(conversation.activeId, target.conversationId)
+  if (mode === 'clear') {
+    await clearConversationMessages(target.conversationId)
+    // 服务端清空只删了远端，本地内存列表与 localStorage 缓存还留着旧消息；不清的话
+    // 会话重新出现、点进去 loadHistory(reset) 会把缓存合并回来，刚清掉的记录又复活
+    // —— 这是用户反馈的第一个 bug。
+    chat.clearConversation(target.conversationId)
   }
   await conversation.remove(target.conversationId)
-  if (sameId(conversation.activeId, target.conversationId)) {
+  if (wasActive) {
     router.replace({ name: 'chat' })
   }
-  ElMessage.success('已从列表移除')
+  ElMessage.success(mode === 'clear' ? '已删除会话并清除聊天记录' : '已从列表移除')
 }
 </script>
 
@@ -272,6 +426,74 @@ async function confirmRemove(target) {
 .chat-home__items {
   flex: 1;
   overflow-y: auto;
+}
+
+/* ------------------------------ 全局搜索 ------------------------------ */
+.chat-home__search {
+  flex: none;
+  padding: 0 12px 8px;
+}
+
+.chat-home__search-results {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.gsearch {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--im-border);
+}
+
+.gsearch:hover {
+  background: var(--im-hover, #ebebeb);
+}
+
+.gsearch__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gsearch__conv {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--im-primary);
+}
+
+.gsearch__time {
+  flex: none;
+  font-size: 11px;
+  color: var(--im-text-secondary);
+}
+
+.gsearch__body {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.gsearch__sender {
+  color: var(--im-text);
+}
+
+.gsearch__content :deep(mark) {
+  background: #fff3cd;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.gsearch__more {
+  padding: 6px 0;
+  text-align: center;
+}
+
+.gsearch__empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--im-text-secondary);
 }
 
 .conv {

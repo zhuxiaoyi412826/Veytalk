@@ -25,7 +25,15 @@ im-ui/dist-ssr/
 .pnpm-store/
 *.local
 .vite/
-electron/
+
+# Electron 桌面端：只忽略构建产物 / 依赖 / 大二进制，源码要提交
+# 保留提交：main.js、preload.js、package.json、package-lock.json、bin/ffmpeg放置说明.txt
+# （node_modules、ffmpeg.exe 其实已被全局规则 node_modules/、*.exe 覆盖，这里显式列出更直观）
+electron/node_modules/
+electron/dist/
+electron/release/
+electron/bin/ffmpeg.exe
+
 # ==============================================================================
 # 运行时产生的文件
 # ==============================================================================

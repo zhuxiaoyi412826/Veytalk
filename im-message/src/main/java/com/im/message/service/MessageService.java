@@ -92,6 +92,14 @@ public interface MessageService {
     void deleteForUser(Long userId, Long messageId);
 
     /**
+     * 清空当前用户在某会话的全部聊天记录（单端）。
+     *
+     * <p>批量写单端删除记录，此后历史 / 检索 / 离线都不再向该用户返回这些消息；
+     * 其他成员不受影响，清空后对方再发的新消息照常可见。
+     */
+    void clearConversationForUser(Long userId, Long conversationId);
+
+    /**
      * 批量送达上报，写入 {@code im_message_read.delivered_time} 并通知发送方。
      */
     void markDelivered(Long userId, Collection<Long> messageIds);
