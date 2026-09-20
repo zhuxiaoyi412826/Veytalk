@@ -5,6 +5,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
+import com.im.common.sensitive.SensitiveWordFilter;
 import com.im.common.util.SecurityUtil;
 import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageIdsRequest;
@@ -29,6 +30,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 消息接口，全部需要登录。
@@ -49,6 +51,27 @@ import java.util.List;
 public class MessageController {
 
     private final MessageService messageService;
+    private final SensitiveWordFilter sensitiveWordFilter;
+
+    @Operation(summary = "敏感词过滤状态",
+            description = "返回全局敏感词过滤的内存开关与词库装载情况；开关初始值来自配置 im.message.sensitive-filter-enabled")
+    @GetMapping("/sensitive-filter")
+    public Result<Map<String, Boolean>> sensitiveFilter() {
+        return Result.ok(Map.of(
+                "enabled", sensitiveWordFilter.isEnabled(),
+                "ready", sensitiveWordFilter.isReady()));
+    }
+
+    @Operation(summary = "切换敏感词过滤开关",
+            description = "运行期热切换内存开关，全服立即生效、不需重启；重启后回到配置文件的值。定位是调试/高级设置入口")
+    @PutMapping("/sensitive-filter")
+    public Result<Map<String, Boolean>> toggleSensitiveFilter(
+            @Parameter(description = "true 开启过滤，false 关闭") @RequestParam("enabled") Boolean enabled) {
+        sensitiveWordFilter.setEnabled(Boolean.TRUE.equals(enabled));
+        return Result.ok(Map.of(
+                "enabled", sensitiveWordFilter.isEnabled(),
+                "ready", sensitiveWordFilter.isReady()));
+    }
 
     @Operation(summary = "发送消息",
             description = "clientMsgId 幂等，重复提交返回首次结果；会话定位优先级 conversationId > toUserId > toGroupId；"

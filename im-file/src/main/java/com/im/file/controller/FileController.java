@@ -34,6 +34,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
@@ -134,15 +135,38 @@ public class FileController {
         return Result.ok(fileService.signedUrl(userId, id, ttl));
     }
 
-    @Operation(summary = "下载文件", description = "支持 satoken 登录头或 URL 上的 ticket 票据，两者都没有时返回 401")
+    @Operation(summary = "下载文件", description = "支持 satoken 登录头或 URL 上的 ticket 票据，两者都没有时返回 401；带 If-None-Match 且指纹命中时返回 304")
     @GetMapping("/download/{id}")
     public void download(@Parameter(description = "文件 ID") @PathVariable("id") Long id,
                          @Parameter(description = "短时访问票据，img src 场景必填") @RequestParam(value = "ticket", required = false) String ticket,
                          @Parameter(description = "是否强制在浏览器内渲染，缺省按文件类型决定") @RequestParam(value = "inline", required = false) Boolean inline,
+                         @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String ifNoneMatch,
                          HttpServletResponse response) throws IOException {
         Long viewerId = resolveViewer(ticket, id);
         FileEntity file = fileService.requireAccessible(viewerId, id);
-        write(file, inline, response);
+        String etag = buildETag(file);
+        if (etag.equals(ifNoneMatch)) {
+            // 协商缓存命中：内容没变，不吐字节体，客户端据 ETag 继续用本地媒体缓存
+            response.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+            response.setHeader(HttpHeaders.ETAG, etag);
+            return;
+        }
+        write(file, inline, response, etag);
+    }
+
+    /**
+     * 资源指纹：文件 ID + 内容 MD5（MD5 缺失时退化到更新时间）。
+     *
+     * <p>客户端把指纹随媒体缓存一起存下，再次请求时带 If-None-Match：
+     * 内容未变回 304 省流量，内容变了会拿到新 ETag，客户端据此让本地缓存失效并重拉。
+     * 用弱指纹（W/ 前缀）：不保证跨网关/转码后字节级一致，语义上只需可比对性。
+     */
+    private String buildETag(FileEntity file) {
+        String version = TextUtil.isNotBlank(file.getMd5())
+                ? file.getMd5()
+                : String.valueOf(file.getUpdateTime() == null ? 0L
+                        : file.getUpdateTime().toInstant(java.time.ZoneOffset.UTC).toEpochMilli());
+        return "W/\"" + file.getId() + "-" + version + "\"";
     }
 
     /**
@@ -195,7 +219,7 @@ public class FileController {
      * {@code nosniff} 是内容类型收敛的最后一道保险——扩展名白名单挡住了上传，
      * 这一行挡住浏览器自己「猜」出别的类型来渲染。
      */
-    private void write(FileEntity file, Boolean inline, HttpServletResponse response) throws IOException {
+    private void write(FileEntity file, Boolean inline, HttpServletResponse response, String etag) throws IOException {
         boolean renderInline = inline != null ? inline : FileConvert.inline(file);
         ContentDisposition disposition = (renderInline ? ContentDisposition.inline() : ContentDisposition.attachment())
                 .filename(FileConvert.downloadName(file), StandardCharsets.UTF_8)
@@ -206,6 +230,7 @@ public class FileController {
         }
         response.setHeader(HttpHeaders.CONTENT_DISPOSITION, disposition.toString());
         response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader(HttpHeaders.ETAG, etag);
         try (InputStream in = fileService.openStream(file)) {
             StreamUtils.copy(in, response.getOutputStream());
         }

@@ -9,6 +9,7 @@ import com.im.common.config.ImProperties;
 import com.im.common.constant.ImConstants;
 import com.im.common.constant.RedisKeys;
 import com.im.common.domain.ConversationBriefDTO;
+import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.domain.MessageExtra;
@@ -291,9 +292,10 @@ public class MessageServiceImpl implements MessageService {
         if (targetId == null) {
             return;
         }
-        // 两个方向的拉黑给不同错误码：自己拉黑别人是「先解除拉黑」，被别人拉黑则不该透露细节之外的信息
-        BusinessException.throwIf(friendSpi.isBlockedBy(fromUserId, targetId), ResultCode.FRIEND_BLOCKED_BY_ME);
+        // 单向阻断：只拦 B→A 的入站消息，被对方拉黑时直接报错、不落库不投递；
+        // 而我拉黑了对方时仍放行——主动发消息即代表想恢复联系，发送成功顺带自动解除拉黑
         BusinessException.throwIf(friendSpi.isBlockedBy(targetId, fromUserId), ResultCode.FRIEND_BLOCKED);
+        friendSpi.unblockSilently(fromUserId, targetId);
     }
 
     /**
@@ -579,17 +581,51 @@ public class MessageServiceImpl implements MessageService {
                 .filter(message -> viewerId.equals(message.getFromUserId()))
                 .map(Message::getId)
                 .collect(Collectors.toSet());
+        // 单聊：逐条回执只有 0/1 行，直接聚合；群聊改由位点推算，im_message_read 里根本没有它们的行
         Map<Long, Receipt> receipts = loadReceipts(selfMessageIds);
+        Map<Long, Integer> convTypes = conversationTypesOf(visible);
+        // 同一页消息几乎都在同一会话，位点按会话缓存，整页只取一次成员行
+        Map<Long, List<MemberPositionDTO>> groupPositions = new HashMap<>();
         // 批量加载引用预览：收集所有 quoteMsgId，一次查出原消息与发送者
         Map<Long, QuotePreview> quotes = loadQuotePreviews(visible);
 
         return visible.stream().map(message -> {
             boolean self = viewerId.equals(message.getFromUserId());
-            Receipt receipt = self ? receipts.getOrDefault(message.getId(), Receipt.EMPTY) : Receipt.EMPTY;
+            Receipt receipt = Receipt.EMPTY;
+            if (self) {
+                if (isGroupConv(convTypes.get(message.getConversationId()))) {
+                    receipt = groupReceipt(message, groupPositions);
+                } else {
+                    receipt = receipts.getOrDefault(message.getId(), Receipt.EMPTY);
+                }
+            }
             MessageStatus status = MessageConvert.resolveStatus(message, self, receipt.delivered(), receipt.read());
             QuotePreview quote = message.getQuoteMsgId() == null ? null : quotes.get(message.getQuoteMsgId());
             return MessageConvert.toVO(message, senders.get(message.getFromUserId()), viewerId, status, receipt.read(), quote);
         }).toList();
+    }
+
+    /**
+     * 群聊消息的送达/已读人数：数成员位点，不数回执行。
+     *
+     * <p>delivered = 接收位点 ≥ 本条 seq 的成员数，read = 已读位点 ≥ 本条 seq 的成员数，
+     * 两者都已排除发送者本人。位点集合每个会话只取一次，页内多条消息复用。
+     */
+    private Receipt groupReceipt(Message message, Map<Long, List<MemberPositionDTO>> cache) {
+        List<MemberPositionDTO> positions = cache.computeIfAbsent(message.getConversationId(),
+                conversationId -> conversationSpi.memberPositions(conversationId, message.getFromUserId()));
+        long seq = message.getSeq() == null ? Long.MAX_VALUE : message.getSeq();
+        int delivered = 0;
+        int read = 0;
+        for (MemberPositionDTO position : positions) {
+            if (position.getAckSeq() != null && position.getAckSeq() >= seq) {
+                delivered++;
+            }
+            if (position.getReadSeq() != null && position.getReadSeq() >= seq) {
+                read++;
+            }
+        }
+        return new Receipt(delivered, read);
     }
 
     /**
@@ -819,15 +855,23 @@ public class MessageServiceImpl implements MessageService {
                 .map(MessageRead::getMessageId)
                 .collect(Collectors.toSet());
         LocalDateTime now = LocalDateTime.now();
+        Map<Long, Integer> types = conversationTypesOf(targets);
         List<Message> pending = targets.stream()
                 .filter(message -> !delivered.contains(message.getId()))
                 .toList();
         if (pending.isEmpty()) {
             return;
         }
-        messageReadMapper.upsertBatch(pending.stream()
-                .map(message -> receiptRow(message.getId(), userId, now, null))
-                .toList());
+        // 群聊不写逐条回执行：送达人数由成员接收位点推算，写表正是规范警告的表爆炸模式；
+        // 推送照旧，发送方正实时看到的气泡靠通知升级状态，重复通知被前端幂等吸收
+        List<Message> rows = pending.stream()
+                .filter(message -> !isGroupConv(types.get(message.getConversationId())))
+                .toList();
+        if (!rows.isEmpty()) {
+            messageReadMapper.upsertBatch(rows.stream()
+                    .map(message -> receiptRow(message.getId(), userId, now, null))
+                    .toList());
+        }
         afterCommit(() -> pushReceipt(pending, WsMessageType.DELIVERED_NOTIFY, userId));
     }
 
@@ -840,6 +884,22 @@ public class MessageServiceImpl implements MessageService {
         Long ackSeq = maxSeq != null ? maxSeq : messageMapper.selectMaxSeq(conversationId);
         // 未读清零与位点推进是「用户打开了会话」的必然结果，即便回执早已存在也要执行，
         // 否则一次已读上报失败就会让未读红点永久卡住
+        if (isGroupConv(conversationSpi.getType(conversationId))) {
+            // 群聊：先读旧已读位点再清未读（clearUnread 会把两个位点一起推到 ackSeq），
+            // 新变为已读的集合 = 区间 (prevRead, ackSeq]，不写 im_message_read 逐条行
+            long prevRead = conversationSpi.readPosition(userId, conversationId);
+            conversationSpi.clearUnread(userId, conversationId, ackSeq);
+            if (ackSeq <= prevRead) {
+                return;
+            }
+            List<Message> newlyRead = messageMapper.selectReadRange(
+                    conversationId, userId, prevRead, ackSeq, MessageMapper.READ_BATCH_LIMIT);
+            if (!newlyRead.isEmpty()) {
+                afterCommit(() -> pushReceipt(newlyRead, WsMessageType.READ_NOTIFY, userId));
+            }
+            return;
+        }
+        // 单聊：每消息最多一行接收记录，不会爆炸，保留逐条回执供发送方查详情
         conversationSpi.clearUnread(userId, conversationId, ackSeq);
 
         List<Message> pending = messageMapper.selectPendingRead(
@@ -853,6 +913,13 @@ public class MessageServiceImpl implements MessageService {
                 .map(message -> receiptRow(message.getId(), userId, now, now))
                 .toList());
         afterCommit(() -> pushReceipt(pending, WsMessageType.READ_NOTIFY, userId));
+    }
+
+    /**
+     * 会话类型是否为群聊，{@code null}（会话已删或查不到）一律按非群聊处理。
+     */
+    private static boolean isGroupConv(Integer type) {
+        return type != null && ConvType.GROUP.getCode() == type;
     }
 
     @Override

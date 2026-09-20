@@ -18,20 +18,40 @@
       <span>{{ error }}</span>
     </div>
 
-    <div v-else class="file-viewer__body im-scroll">
-      <pre class="file-viewer__pre">{{ content }}</pre>
+    <div v-else class="file-viewer__body-host">
+      <!-- PDF：交给浏览器内置查看器渲染，无需引入 pdf.js -->
+      <iframe
+        v-if="isPdfFile"
+        :src="pdfUrl"
+        class="file-viewer__pdf"
+        frameborder="0"
+        title="PDF 预览"
+      />
+      <!-- 文本：等宽字体原样展示 -->
+      <div v-else class="file-viewer__body im-scroll">
+        <pre class="file-viewer__pre">{{ content }}</pre>
+      </div>
+      <!-- 发送者水印：随附件传递，接收端预览时叠在内容上 -->
+      <WatermarkOverlay v-if="watermark" :text="watermark" />
     </div>
 
     <template #footer>
       <div class="file-viewer__footer">
         <span v-if="!loading && !error" class="file-viewer__info">
-          {{ lineCount }} 行 · {{ sizeLabel }}
+          <template v-if="isPdfFile">PDF · {{ sizeLabel }}</template>
+          <template v-else>{{ lineCount }} 行 · {{ sizeLabel }}</template>
         </span>
         <el-button @click="visible = false">关闭</el-button>
-        <el-button :disabled="loading || !!error" @click="onCopy">
+        <el-button v-if="!isPdfFile" :disabled="loading || !!error" @click="onCopy">
           {{ copied ? '已复制' : '复制' }}
         </el-button>
-        <el-button type="primary" :disabled="loading || !!error" @click="onSave">另存为…</el-button>
+        <!-- allowDownload=false 时（设置里开启「预览时禁止下载」）不提供原始文件下载入口 -->
+        <el-button
+          v-if="allowDownload"
+          type="primary"
+          :disabled="loading || !!error"
+          @click="onSave"
+        >另存为…</el-button>
       </div>
     </template>
   </el-dialog>
@@ -39,24 +59,35 @@
 
 <script setup>
 /**
- * 文本文件预览弹窗。
+ * 文件预览弹窗：文本 + PDF。
  *
- * 点击可预览的文本文件（json / xml / yml / py / ps1 / md / txt 等）时打开，
- * 取文件内容以等宽字体原样展示。不提供语法高亮——这些格式用 pre 原样展示就有可读性，
- * 引入 highlight.js 之类的库增加的体积与收益不成比例。
+ * 文本类文件（json / xml / yml / py / ps1 / md / txt 等）取内容以等宽字体原样展示，
+ * 不做语法高亮——这些格式用 pre 原样展示就有可读性，引入 highlight.js 收益不成比例。
+ * PDF 取成 blob 后交 <iframe>，由浏览器内置查看器渲染，同样不引入额外库。
  *
- * 「另存为」通过 <a download> 触发浏览器原生保存对话框，
- * 用户可以在对话框里自由选择保存路径与文件名。
+ * 进入前按 fileSize 卡一道大小上限：预览是把整份文件读进内存，
+ * 超大文件（几百 MB）会拖崩标签页，超限直接提示下载后查看而不发起拉取。
+ *
+ * 「另存为」通过 <a download> 触发浏览器原生保存对话框；当 allowDownload 为 false
+ * （设置里开启「预览时禁止下载原文件」）时隐藏该入口，只做在线预览。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading, WarningFilled } from '@element-plus/icons-vue'
+import WatermarkOverlay from './WatermarkOverlay.vue'
 import { fetchBlob } from '@/api/request'
-import { downloadFile } from '@/utils/media'
+import { downloadFile, isPdf, MAX_PREVIEW_BYTES } from '@/utils/media'
+import { mediaBaseURL } from '@/utils/env'
 
 const props = defineProps({
   fileUrl: { type: String, default: '' },
-  fileName: { type: String, default: '文件预览' }
+  fileName: { type: String, default: '文件预览' },
+  /** 文件字节数，用于进入前的大小上限校验；取不到时（0）跳过校验照常预览 */
+  fileSize: { type: Number, default: 0 },
+  /** 是否允许在预览里下载原文件，false 时隐藏「另存为」 */
+  allowDownload: { type: Boolean, default: true },
+  /** 非空时在预览内容上叠加该文字水印（发送者昵称） */
+  watermark: { type: String, default: '' }
 })
 
 const visible = defineModel('visible', { type: Boolean, default: false })
@@ -65,6 +96,9 @@ const loading = ref(false)
 const error = ref('')
 const content = ref('')
 const copied = ref(false)
+const pdfUrl = ref('')
+
+const isPdfFile = computed(() => isPdf(props.fileName))
 
 const lineCount = computed(() => {
   if (!content.value) {
@@ -74,7 +108,7 @@ const lineCount = computed(() => {
 })
 
 const sizeLabel = computed(() => {
-  const bytes = new Blob([content.value]).size
+  const bytes = isPdfFile.value ? (props.fileSize || 0) : new Blob([content.value]).size
   if (bytes < 1024) {
     return bytes + ' B'
   }
@@ -84,16 +118,31 @@ const sizeLabel = computed(() => {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB'
 })
 
+/** 释放上一次的 PDF object URL，避免反复预览攒下内存泄漏 */
+function revokePdfUrl() {
+  if (pdfUrl.value) {
+    URL.revokeObjectURL(pdfUrl.value)
+    pdfUrl.value = ''
+  }
+}
+
 /**
  * 弹窗打开时取文件内容。
  *
- * 用 fetchBlob 取二进制再转文本，而不是直接 http.get 取字符串：
- * 受控下载地址返回的 Content-Type 可能是 application/octet-stream，
- * axios 的 text 响应类型在遇到非文本 Content-Type 时行为不一致，
- * 走 blob 再 text() 解码最可靠。
+ * 先按大小上限拦截，再把内容读成 blob：文本走 text() 解码，
+ * PDF 转 object URL 交 iframe。用 fetchBlob 而非 http.get 取字符串，是因为受控
+ * 下载地址的 Content-Type 可能是 octet-stream，axios 的 text 响应类型行为不一致。
  */
 watch(visible, async (show) => {
+  revokePdfUrl()
   if (!show || !props.fileUrl) {
+    content.value = ''
+    error.value = ''
+    return
+  }
+  if (props.fileSize && props.fileSize > MAX_PREVIEW_BYTES) {
+    error.value = `文件较大（${sizeLabel.value}），超出在线预览上限，请下载后查看`
+    loading.value = false
     return
   }
   loading.value = true
@@ -101,14 +150,22 @@ watch(visible, async (show) => {
   content.value = ''
   copied.value = false
   try {
-    const blob = await fetchBlob(props.fileUrl, { baseURL: '' })
-    content.value = await blob.text()
+    // fileUrl 是自带 /api 前缀的受控地址：Web 同源下前缀置空即可，Electron 必须补后端绝对地址
+    const blob = await fetchBlob(props.fileUrl, { baseURL: mediaBaseURL() })
+    if (isPdfFile.value) {
+      const typed = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' })
+      pdfUrl.value = URL.createObjectURL(typed)
+    } else {
+      content.value = await blob.text()
+    }
   } catch (e) {
     error.value = e?.message || '文件内容获取失败'
   } finally {
     loading.value = false
   }
 })
+
+onBeforeUnmount(revokePdfUrl)
 
 async function onCopy() {
   try {
@@ -138,9 +195,8 @@ async function onCopy() {
 /**
  * 另存为。
  *
- * 用 downloadFile 触发 <a download>，浏览器会弹出原生保存对话框，
- * 用户可以在对话框里自由选择保存路径和文件名。
- * 这是 Web 应用唯一能做到的方式——浏览器安全模型不允许网页直接指定磁盘路径。
+ * 用 downloadFile 触发 <a download>，浏览器弹出原生保存对话框，
+ * 用户可在其中自由选择保存路径和文件名——浏览器安全模型不允许网页直接指定磁盘路径。
  */
 async function onSave() {
   try {
@@ -167,9 +223,22 @@ async function onSave() {
   color: #f56c6c;
 }
 
+.file-viewer__body-host {
+  position: relative;
+}
+
 .file-viewer__body {
   max-height: 70vh;
   overflow: auto;
+  background: #f8f8f8;
+  border: 1px solid var(--im-border);
+  border-radius: 6px;
+}
+
+.file-viewer__pdf {
+  display: block;
+  width: 100%;
+  height: 72vh;
   background: #f8f8f8;
   border: 1px solid var(--im-border);
   border-radius: 6px;

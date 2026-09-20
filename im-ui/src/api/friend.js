@@ -40,6 +40,11 @@ export function unblockFriend(friendId) {
   return http.delete(`/friend/${friendId}/block`)
 }
 
+/** 我拉黑的用户列表（黑名单），服务端存储所以多端一致 */
+export function fetchBlacklist() {
+  return http.get('/friend/blacklist')
+}
+
 /**
  * 发起好友申请。
  * targetUserId 与 targetAccount 二选一：从资料卡进来用前者，从搜索框输入账号用后者。

@@ -182,7 +182,92 @@
         </div>
       </section>
 
-      <!-- ==================== 三、高级设置 ==================== -->
+      <!-- ==================== 三、隐私与安全 ==================== -->
+      <section class="settings__card">
+        <div class="settings__card-title">隐私与安全</div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>聊天界面水印</span>
+            <span class="settings__desc">开启后在当前账号的聊天区叠加账号信息，防截图泄露（仅当前设备生效）</span>
+          </div>
+          <el-switch v-model="chatWatermark" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>预览时禁止下载</span>
+            <span class="settings__desc">开启后文件预览弹窗不再提供“另存为”，只能在线查看（仅当前设备生效）</span>
+          </div>
+          <el-switch v-model="previewNoDownload" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>多端信息共享</span>
+            <span class="settings__desc">开启后自己在某台设备上发的消息会实时显示在其它登录端（手机/PC/浏览器）；关闭后其它端不实时上屏，拉取历史仍可见（仅当前设备生效）</span>
+          </div>
+          <el-switch v-model="shareMultiDevice" />
+        </div>
+      </section>
+
+      <!-- ==================== 四、本地缓存 ==================== -->
+      <section class="settings__card">
+        <div class="settings__card-title">本地缓存</div>
+        <div class="settings__notice">
+          本地缓存不是云端备份：清理浏览器数据 / 卸载客户端 / 换设备后缓存即丢失，
+          可随时重新登录由服务端按需补齐历史；重要记录请用下方「导出」自行备份。
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>存储占用</span>
+            <span class="settings__desc">{{ cacheUsageText }}</span>
+          </div>
+          <el-button link type="primary" :icon="Refresh" @click="loadCacheStats">刷新</el-button>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>媒体缓存</span>
+            <span class="settings__desc">本地缓存图片/视频/文件，减少重复网络请求；关闭后每次都从服务端重新拉取</span>
+          </div>
+          <el-switch v-model="mediaCacheEnabled" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>媒体缓存上限</span>
+            <span class="settings__desc">超出上限时自动淘汰最久未访问的媒体（消息记录不受影响）；0 为不限制</span>
+          </div>
+          <el-slider
+            v-model="mediaCacheMaxMb"
+            :min="0"
+            :max="2048"
+            :step="64"
+            :format-tooltip="(v) => (v === 0 ? '不限制' : v + ' MB')"
+            class="settings__slider"
+          />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>清除媒体缓存</span>
+            <span class="settings__desc">只删本地文件/视频缓存，服务端原件不受影响，下次浏览重新拉取</span>
+          </div>
+          <el-button size="small" @click="onClearMedia">立即清除</el-button>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>清除消息缓存</span>
+            <span class="settings__desc">删除本地消息库与离线缓存；断网待发送队列会保留，直到发送完成</span>
+          </div>
+          <el-button size="small" type="danger" plain @click="onClearMessages">立即清除</el-button>
+        </div>
+      </section>
+
+      <!-- ==================== 五、高级设置 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">高级设置</div>
 
@@ -194,6 +279,14 @@
           <el-switch v-model="debugLog" />
         </div>
 
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>敏感词过滤（服务端全局）</span>
+            <span class="settings__desc">关闭后全服文本与文件名停止遮蔽，立即生效不需重启；重启后回到配置文件默认值</span>
+          </div>
+          <el-switch v-model="sensitiveFilterEnabled" :loading="sensitiveFilterSaving" @change="onSensitiveFilterChange" />
+        </div>
+
         <div class="settings__row settings__row--stack">
           <div class="settings__label">
             <span>数据备份</span>
@@ -201,6 +294,7 @@
           </div>
           <div class="settings__bg">
             <el-button :icon="Download" @click="exportChatRecords">导出本地聊天记录</el-button>
+            <span class="settings__desc">导出本地库已缓存的全部消息，仅下载到本机磁盘，不会上传云端</span>
           </div>
         </div>
 
@@ -208,7 +302,7 @@
         <div class="settings__row">
           <div class="settings__label">
             <span>文件下载路径 <el-tag size="small" type="info" effect="plain">需桌面版</el-tag></span>
-            <span class="settings__desc">浏览器接管下载位置，Web 端无法自定义保存目录</span>
+            <span class="settings__desc">浏览器接管下载位置，Web 端无法自定义保存目录；Electron 版另存为对话框可选路径</span>
           </div>
           <el-input class="settings__disabled" placeholder="集成 Tauri / Electron 后可用" disabled />
         </div>
@@ -238,13 +332,17 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Picture, RefreshLeft, User } from '@element-plus/icons-vue'
+import { Download, Picture, Refresh, RefreshLeft, User } from '@element-plus/icons-vue'
 import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
+import { dbStats, dbClearAllMessages, dbExportAll, localDbEnabled } from '@/utils/localdb'
+import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
+import { clearMediaCache } from '@/utils/media'
+import { fetchSensitiveFilter, setSensitiveFilter } from '@/api/message'
 
 defineOptions({ name: 'Settings' })
 
@@ -284,7 +382,112 @@ const showTimestamp = setting('showTimestamp')
 const showReadReceipt = setting('showReadReceipt')
 const imagePreview = setting('imagePreview')
 const autoPlay = setting('autoPlay')
+const chatWatermark = setting('chatWatermark')
+const previewNoDownload = setting('previewNoDownload')
+const shareMultiDevice = setting('shareMultiDevice')
+const mediaCacheEnabled = setting('mediaCacheEnabled')
+const mediaCacheMaxMb = setting('mediaCacheMaxMb')
 const debugLog = setting('debugLog')
+
+/* ------------------------------ 敏感词过滤开关（服务端全局） ------------------------------ */
+
+const sensitiveFilterEnabled = ref(true)
+const sensitiveFilterSaving = ref(false)
+
+// 状态存在后端内存里，不是本机 localStorage：进页拉一次回填开关，
+// 拉不到（未登录/后端未起）就保持默认开，不把用户带进错误的初始状态
+onMounted(async () => {
+  try {
+    const vo = await fetchSensitiveFilter()
+    if (vo) {
+      sensitiveFilterEnabled.value = !!vo.enabled
+    }
+  } catch {
+    // 保持默认
+  }
+})
+
+async function onSensitiveFilterChange(value) {
+  sensitiveFilterSaving.value = true
+  try {
+    const vo = await setSensitiveFilter(value)
+    sensitiveFilterEnabled.value = vo ? !!vo.enabled : value
+    ElMessage.success(value ? '已开启敏感词过滤（全服生效）' : '已关闭敏感词过滤（全服生效）')
+  } catch {
+    // 切换失败要把开关拨回去，否则界面状态与服务端不一致
+    sensitiveFilterEnabled.value = !value
+  } finally {
+    sensitiveFilterSaving.value = false
+  }
+}
+
+/* ------------------------------ 本地缓存管理 ------------------------------ */
+
+const cacheStats = reactive({ messages: 0, pending: 0, backend: '', mediaCount: 0, mediaBytes: 0 })
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+const BACKEND_TEXT = { web: '浏览器 SQLite(WASM)', electron: 'Electron 本地库', disabled: '不可用（已降级为服务端直读）' }
+
+const cacheUsageText = computed(() => {
+  if (!localDbEnabled()) {
+    return '本地消息库不可用，历史记录每次从服务端拉取'
+  }
+  return `消息 ${cacheStats.messages} 条 · 待发送 ${cacheStats.pending} 条 · 媒体 ${cacheStats.mediaCount} 个 / ${formatBytes(cacheStats.mediaBytes)} · 引擎：${BACKEND_TEXT[cacheStats.backend] || cacheStats.backend || '—'}`
+})
+
+async function loadCacheStats() {
+  const db = await dbStats()
+  Object.assign(cacheStats, db)
+  try {
+    const media = await mediaCacheStats()
+    cacheStats.mediaCount = media.count
+    cacheStats.mediaBytes = media.bytes
+  } catch {
+    // 统计失败不影响页面其它功能
+  }
+}
+loadCacheStats()
+
+async function onClearMedia() {
+  try {
+    await ElMessageBox.confirm('将删除本地缓存的图片/视频/文件（不影响聊天记录与服务端原件），确定继续？', '清除媒体缓存', {
+      confirmButtonText: '清除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  await mediaCacheClear().catch(() => undefined)
+  // 内存里的 objectUrl 也一并作废，界面下次渲染会从空缓存重新拉
+  clearMediaCache()
+  await loadCacheStats()
+  ElMessage.success('媒体缓存已清除')
+}
+
+async function onClearMessages() {
+  try {
+    await ElMessageBox.confirm(
+      '将删除本机保存的全部消息缓存（不影响服务端记录，滚动历史时重新拉取）；断网待发送的消息会保留。确定继续？',
+      '清除消息缓存',
+      { confirmButtonText: '清除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  await dbClearAllMessages()
+  // 内存分桶同步清空，否则界面还展示着已删的旧消息，下次变更又会写回库
+  chat.$patch({ messages: {}, hasMore: {}, loadingHistory: {} })
+  await loadCacheStats()
+  ElMessage.success('消息缓存已清除')
+}
 
 /** 背景预览区，实时反映聊天背景设置 */
 const previewStyle = computed(() => ({ ...settings.chatBackgroundStyle }))
@@ -325,33 +528,49 @@ function onBgPicked(event) {
 /**
  * 导出本地聊天记录。
  *
- * 只能导出「已经在本地加载过」的消息：完整历史在服务端，浏览器端并没有全量副本。
- * 导出前给出说明，避免用户误以为这是完整备份。
+ * 优先从本地消息库取全量（比内存分桶完整）；本地库不可用时退化到导出已加载部分。
+ * 导出仅下载一个 JSON 文件到本机磁盘，不会上传云端。
  */
-function exportChatRecords() {
-  const buckets = Object.keys(chat.messages)
-  const data = buckets
-    .map((cid) => {
-      const conv = conversations.find(cid)
-      return {
-        conversationId: cid,
-        name: conv?.name || cid,
-        exportedAt: new Date().toISOString(),
-        messages: (chat.messages[cid] || []).map((m) => ({
-          messageId: m.messageId || m.clientMsgId || '',
-          from: m.fromNickname || '',
-          self: !!m.self,
-          type: m.msgTypeDesc || '',
-          content: m.recalled ? '[已撤回]' : m.content || '',
-          time: m.sendTime || '',
-          status: m.statusDesc || ''
-        }))
-      }
+async function exportChatRecords() {
+  const format = (m) => ({
+    messageId: m.messageId || m.clientMsgId || '',
+    from: m.fromNickname || '',
+    self: !!m.self,
+    type: m.msgTypeDesc || '',
+    content: m.recalled ? '[已撤回]' : m.content || '',
+    time: m.sendTime || '',
+    status: m.statusDesc || ''
+  })
+  let data = []
+  const rows = await dbExportAll()
+  if (rows.length) {
+    const buckets = {}
+    rows.forEach(([cid, message]) => {
+      ;(buckets[cid] = buckets[cid] || []).push(message)
     })
-    .filter((item) => item.messages.length > 0)
+    data = Object.entries(buckets)
+      .map(([cid, list]) => ({
+        conversationId: cid,
+        name: conversations.find(cid)?.name || cid,
+        exportedAt: new Date().toISOString(),
+        source: 'local-db',
+        messages: list.map(format)
+      }))
+      .filter((item) => item.messages.length > 0)
+  } else {
+    data = Object.keys(chat.messages)
+      .map((cid) => ({
+        conversationId: cid,
+        name: conversations.find(cid)?.name || cid,
+        exportedAt: new Date().toISOString(),
+        source: 'memory',
+        messages: (chat.messages[cid] || []).map(format)
+      }))
+      .filter((item) => item.messages.length > 0)
+  }
 
   if (!data.length) {
-    ElMessage.warning('本地暂无已加载的聊天记录，先打开几个会话再导出')
+    ElMessage.warning('本地暂无已缓存的聊天记录，先打开几个会话加载历史再导出')
     return
   }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -363,7 +582,7 @@ function exportChatRecords() {
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
-  ElMessage.success('已导出本地聊天记录（仅含已加载部分）')
+  ElMessage.success('已导出本地聊天记录到 JSON 文件（仅本机磁盘，非云端备份）')
 }
 
 async function onReset() {
@@ -427,6 +646,16 @@ async function onReset() {
   font-size: 15px;
   font-weight: 600;
   color: var(--im-primary);
+}
+
+.settings__notice {
+  margin: 4px 0 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--im-text-secondary);
+  background: var(--im-primary-light);
+  border-radius: 6px;
 }
 
 .settings__row {

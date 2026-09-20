@@ -136,9 +136,11 @@ public interface ConversationMemberMapper extends BaseMapper<ConversationMember>
     }
 
     /**
-     * 清零未读数与 @ 提醒标记，并推进已读位点。
+     * 清零未读数与 @ 提醒标记，并同步推进接收位点与已读位点。
      *
-     * <p>位点用 {@code GREATEST} 只允许前进：旧客户端重放已读上报时，
+     * <p>本方法只在用户真正打开会话（markRead）时调用，所以两个位点一起前进是语义正确的；
+     * 离线拉取走的是 {@link #advanceAck}，只推接收位点，不能把未看过的消息算成已读。
+     * 位点用 {@code GREATEST} 只允许前进：旧客户端重放已读上报时，
      * 不能把位点往回拉，否则离线消息会被重复推送。
      */
     default int resetUnread(Long conversationId, Long userId, Long lastAckSeq) {
@@ -148,9 +150,38 @@ public interface ConversationMemberMapper extends BaseMapper<ConversationMember>
                 .eq(ConversationMember::getConversationId, conversationId)
                 .eq(ConversationMember::getUserId, userId);
         if (lastAckSeq != null) {
-            wrapper.setSql("last_ack_seq = GREATEST(last_ack_seq, " + lastAckSeq + ")");
+            wrapper.setSql("last_ack_seq = GREATEST(last_ack_seq, " + lastAckSeq + ")")
+                    .setSql("last_read_seq = GREATEST(last_read_seq, " + lastAckSeq + ")");
         }
         return update(null, wrapper);
+    }
+
+    /**
+     * 查询我在某会话上的已读位点，供 markRead 计算本次新覆盖的 seq 区间。
+     */
+    default Long selectReadSeq(Long conversationId, Long userId) {
+        ConversationMember member = selectOne(Wrappers.<ConversationMember>lambdaQuery()
+                .select(ConversationMember::getLastReadSeq)
+                .eq(ConversationMember::getConversationId, conversationId)
+                .eq(ConversationMember::getUserId, userId)
+                .last("LIMIT 1"));
+        return member == null || member.getLastReadSeq() == null ? 0L : member.getLastReadSeq();
+    }
+
+    /**
+     * 查询会话全部成员（可排除一人）的双位点，群聊送达/已读人数推算的唯一数据源。
+     *
+     * <p>只取三列不碰消息表：无论群多大、历史消息多少，每次只扫这几行，
+     * 正是「不存每条消息的已读记录」防表爆炸策略的读侧。
+     */
+    default List<ConversationMember> selectMemberPositions(Long conversationId, Long excludeUserId) {
+        var wrapper = Wrappers.<ConversationMember>lambdaQuery()
+                .select(ConversationMember::getUserId, ConversationMember::getLastAckSeq, ConversationMember::getLastReadSeq)
+                .eq(ConversationMember::getConversationId, conversationId);
+        if (excludeUserId != null) {
+            wrapper.ne(ConversationMember::getUserId, excludeUserId);
+        }
+        return selectList(wrapper);
     }
 
     /**

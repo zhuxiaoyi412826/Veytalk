@@ -46,8 +46,11 @@ public class ConversationMember extends AuditEntity {
     /** 未读消息数 */
     private Integer unreadCount;
 
-    /** 已确认读到的消息 seq，离线消息与已读回执都以此为准 */
+    /** 已确认接收位点：离线拉取完成后也会推进，用于消息补齐而非已读判定 */
     private Long lastAckSeq;
+
+    /** 已读位点：仅用户真正打开会话时推进，群聊已读人数由它推算，不再存逐条已读行 */
+    private Long lastReadSeq;
 
     /** 是否置顶：1 是 0 否 */
     @TableField("is_top")

@@ -71,6 +71,9 @@ public class MessageExtra implements Serializable {
     @Schema(description = "系统通知动作标识，前端据此决定交互")
     private String action;
 
+    @Schema(description = "图片/文件是否带发送者水印：为真时接收端查看该附件会叠加发送者昵称水印")
+    private Boolean watermark;
+
     /**
      * 是否包含 @ 提醒，供会话模块判断是否需要打破免打扰。
      */

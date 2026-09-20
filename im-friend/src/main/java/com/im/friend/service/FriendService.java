@@ -19,6 +19,11 @@ public interface FriendService {
     List<FriendVO> list(Long userId, String keyword);
 
     /**
+     * 黑名单列表：我拉黑（status=2）的全部好友，存服务端因此多端同步。
+     */
+    List<FriendVO> blacklist(Long userId);
+
+    /**
      * 当前用户的全部好友分组名，「默认分组」置顶，其余按字典序。
      */
     List<String> listGroups(Long userId);

@@ -56,10 +56,10 @@
           </el-descriptions>
 
           <div v-if="blockedByOther" class="user-profile__warn">
-            对方已将你加入黑名单，你发出的消息不会送达，也无法创建会话。
+            对方已将你加入黑名单，你发出的消息会被拒绝，直到对方取消拉黑。
           </div>
           <div v-else-if="blocked" class="user-profile__warn">
-            你已将对方加入黑名单，取消拉黑后才能继续收发消息。
+            你已将对方加入黑名单：对方发来的消息会被拦截，但你仍可主动发消息，发送后自动解除拉黑。
           </div>
         </section>
 
@@ -75,7 +75,7 @@
           <div v-else class="user-profile__actions">
             <!--
               不可用时置灰而不是隐藏，并把原因写在按钮旁边：
-              后端 createSingle 对「非好友 / 任一方拉黑」一律拒绝，
+              后端 createSingle 对「非好友 / 被对方拉黑」一律拒绝，
               让按钮可点再弹一条错误码翻译过来的提示，用户只会觉得是系统坏了。
             -->
             <el-tooltip :content="chatDisabledReason" :disabled="!chatDisabledReason" placement="top">
@@ -210,8 +210,8 @@ const isSelf = computed(() => sameId(card.value && card.value.userId, auth.userI
 const isFriend = computed(() => !!(card.value && card.value.friend))
 const blocked = computed(() => !!(card.value && card.value.blocked))
 const blockedByOther = computed(() => !!(card.value && card.value.blockedByOther))
-/** 后端 createSingle 要求「已是好友」且「双方都没拉黑」，三个条件缺一不可 */
-const canChat = computed(() => isFriend.value && !blocked.value && !blockedByOther.value)
+/** 单向阻断：只拦「对方拉黑我」；我拉黑对方后仍可主动发，发送成功会顺带自动解除拉黑 */
+const canChat = computed(() => isFriend.value && !blockedByOther.value)
 const canApply = computed(() => !isSelf.value && auth.hasPermission('friend:apply'))
 const displayName = computed(() => {
   const target = card.value
@@ -227,9 +227,6 @@ const chatDisabledReason = computed(() => {
   }
   if (blockedByOther.value) {
     return '对方已将你加入黑名单，无法发起聊天'
-  }
-  if (blocked.value) {
-    return '你已将对方加入黑名单，取消拉黑后才能发消息'
   }
   return '添加为好友后才能发消息'
 })
@@ -376,7 +373,7 @@ async function submitRemark() {
 async function toggleBlock() {
   const next = !blocked.value
   const tip = next
-    ? '拉黑后对方发来的消息不再推送给你，你也不能向对方发消息。确定拉黑？'
+    ? '拉黑后对方发来的消息会被拦截；你仍可向对方发消息，发送后自动解除拉黑。确定拉黑？'
     : '取消拉黑后双方可以正常收发消息。'
   try {
     await ElMessageBox.confirm(tip, next ? '拉黑好友' : '取消拉黑', {

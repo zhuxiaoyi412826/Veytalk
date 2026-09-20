@@ -35,6 +35,9 @@ export function installWsDispatch() {
 
   disposers.push(
     on('open', ({ reconnected }) => {
+      // 连上就是「网络可用」的最强信号：先重提交离线待发送队列（内部空队列时几乎零成本），
+      // 断网期间攒下的消息按入队顺序补发，clientMsgId 幂等保证不会重复入库
+      chat.flushPending()
       if (!reconnected) {
         // 首次连接：登录流程里已经拉过一遍列表，不重复请求
         return

@@ -1,6 +1,8 @@
 import { reactive } from 'vue'
-import { fetchBlob } from '@/api/request'
+import { fetchBlobMeta } from '@/api/request'
 import { fetchSignedUrl } from '@/api/file'
+import { mediaCacheGet, mediaCachePut } from '@/utils/medacache'
+import { mediaBaseURL } from '@/utils/env'
 
 /**
  * 受控文件地址 -> 可渲染的 blob 地址。
@@ -10,6 +12,10 @@ import { fetchSignedUrl } from '@/api/file'
  * 直接用必然 401。另一条路是先调 /api/file/{id}/url 换带票据的直链，
  * 但那要两次往返且票据 1800 秒后失效，长会话里翻旧图会集体裂掉。
  * 所以这里用带登录头的 XHR 把内容取成 blob，一次往返、无有效期问题。
+ *
+ * 取内容前先查媒体持久缓存（浏览器 IndexedDB / Electron 主进程目录），
+ * 命中则立即渲染 + 后台带 If-None-Match 复核（ETag 失效策略，见 medacache.js），
+ * 断网时复核失败但展示照常 —— 旧图离线可看。
  *
  * objectUrls 用 reactive(Map) 而不是普通 Map：模板里读它会建立依赖，
  * 取回内容后 set 一次就能让所有引用同一地址的 <img> 自动刷新，不需要手动通知组件。
@@ -48,11 +54,21 @@ async function loadMedia(rawUrl) {
   }
   const task = (async () => {
     try {
-      // baseURL 置空：rawUrl 本身就是以 /api 开头的完整路径，不能再被实例的 /api 前缀拼一次
-      const blob = await fetchBlob(rawUrl, { baseURL: '' })
+      // 1) 持久缓存命中：立即渲染，后台复核；未命中才走网络
+      const hit = await mediaCacheGet(rawUrl).catch(() => null)
+      if (hit && hit.blob) {
+        objectUrls.set(rawUrl, URL.createObjectURL(hit.blob))
+        revalidate(rawUrl, hit.etag)
+        return
+      }
+      // rawUrl 本身就是以 /api 开头的完整路径，不能再被实例的 /api 前缀拼一次；
+      // Web 同源下前缀为空串，Electron 里必须是后端绝对地址（file:// 解析相对路径必挂）
+      const { blob, etag } = await fetchBlobMeta(rawUrl, { baseURL: mediaBaseURL() })
       objectUrls.set(rawUrl, URL.createObjectURL(blob))
+      // 写缓存失败（配额满等）不影响展示，只丢一次优化机会
+      mediaCachePut(rawUrl, blob, etag).catch(() => undefined)
     } catch {
-      // 失败不写缓存，下次渲染还会重试；错误提示已由 fetchBlob 内部的登录态判断处理，
+      // 失败不写缓存，下次渲染还会重试；错误提示已由 fetchBlobMeta 内部的登录态判断处理，
       // 这里再弹一次会在列表页刷出一屏重复的「文件获取失败」
       objectUrls.set(rawUrl, '')
     } finally {
@@ -61,6 +77,28 @@ async function loadMedia(rawUrl) {
   })()
   inflight.set(rawUrl, task)
   return task
+}
+
+/**
+ * ETag 条件复核：服务端确认没变（304）什么都不做；内容变了就替换缓存并刷新气泡。
+ *
+ * 刻意不 await：复核结果是优化项，不能把首次渲染拖到网络往返之后。
+ */
+async function revalidate(rawUrl, etag) {
+  try {
+    const result = await fetchBlobMeta(rawUrl, { ifNoneMatch: etag, baseURL: mediaBaseURL() })
+    if (result.notModified || !result.blob) {
+      return
+    }
+    await mediaCachePut(rawUrl, result.blob, result.etag).catch(() => undefined)
+    const previous = objectUrls.get(rawUrl)
+    objectUrls.set(rawUrl, URL.createObjectURL(result.blob))
+    if (previous) {
+      URL.revokeObjectURL(previous)
+    }
+  } catch {
+    // 断网/票据过期：继续用缓存展示，下次进页再复核
+  }
 }
 
 /**
@@ -90,6 +128,35 @@ export function isViewableText(fileName) {
   const ext = fileName.slice(dot + 1).toLowerCase()
   return VIEWABLE_TEXT_EXTS.has(ext)
 }
+
+/**
+ * PDF 判定：浏览器能原生渲染 PDF，无需引入 pdf.js，命中时文件卡片点击走预览弹窗。
+ */
+export function isPdf(fileName) {
+  if (!fileName) {
+    return false
+  }
+  const dot = fileName.lastIndexOf('.')
+  return dot >= 0 && fileName.slice(dot + 1).toLowerCase() === 'pdf'
+}
+
+/**
+ * 可在预览弹窗里展示的文件：文本类 + PDF。
+ *
+ * 两者共用 FileViewer，只是渲染分支不同：文本读成字符串走 <pre>，
+ * PDF 读成 blob 交 <iframe> 交给浏览器内置查看器。
+ */
+export function isPreviewableFile(fileName) {
+  return isViewableText(fileName) || isPdf(fileName)
+}
+
+/**
+ * 在线预览的大小上限：超过就不把整份文件读进内存，直接提示下载后查看。
+ *
+ * 预览走 fetchBlob 一次性把内容读进内存再交给 img/iframe，
+ * 一份几百 MB 的文件足以把标签页拖崩，这里在进入前按 fileSize 拦一道。
+ */
+export const MAX_PREVIEW_BYTES = 20 * 1024 * 1024
 
 /**
  * 判断文件名是否属于常见视频类型。

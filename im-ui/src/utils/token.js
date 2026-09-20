@@ -10,6 +10,8 @@
  * 写死 'satoken' 在配置改名后会全线 401，且报错信息里看不出是头名字不对。
  */
 
+import { isElectron } from '@/utils/env'
+
 const TOKEN_KEY = 'im_token'
 const TOKEN_NAME_KEY = 'im_token_name'
 
@@ -45,12 +47,12 @@ export function clearToken() {
  * 设备标识。
  *
  * 后端把这个值经 DeviceType.codeOf 归一化，只认 web / pc / android / ios / mini 五种，
- * 未知值一律当 web。所以这里没必要造一个「每台浏览器唯一」的随机串 ——
- * 它会被静默丢掉，只会让人误以为两个标签页算两个设备。
+ * 未知值一律当 web。Electron 桌面端报 'pc'，与浏览器 'web' 分占不同设备位，
+ * 同一台机器上「浏览器 + 桌面端」可以共存。
  *
- * 真实语义是：同一账号在两个浏览器标签页登录会互相顶下线（kickSameDevice 按 device 匹配），
- * 这是后端的既定设计，前端如实告知而不是假装能区分。
+ * 同一设备位内的多条连接（多标签页、多窗口）不再互相顶号：
+ * 后端登录不再踢旧会话，WebSocket 注册表也支持每个设备位挂多条连接。
  */
 export function getDeviceId() {
-  return DEVICE_ID
+  return isElectron() ? 'pc' : DEVICE_ID
 }

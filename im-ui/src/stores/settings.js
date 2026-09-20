@@ -48,6 +48,18 @@ const DEFAULTS = {
   showReadReceipt: true,
   imagePreview: true,
   autoPlay: true,
+  // ---------- 隐私与安全 ----------
+  /** 聊天窗口全局水印：开启后在当前账号的聊天区叠加账号信息，防截图（仅本机生效） */
+  chatWatermark: false,
+  /** 预览时禁止下载原文件：开启后文件预览弹窗隐藏「另存为」，只在线查看 */
+  previewNoDownload: false,
+  /** 多端信息共享：开启后自己在某台设备上发的消息实时镜像到其它端（ack 广播）；关闭后其它端不实时上屏，拉历史仍可见 */
+  shareMultiDevice: true,
+  // ---------- 本地缓存 ----------
+  /** 媒体（图片/视频/文件）本地缓存开关：关闭后每次都从服务端重新拉取 */
+  mediaCacheEnabled: true,
+  /** 媒体缓存占用上限（MB），超限按 LRU 淘汰最旧条目；0 表示不限制 */
+  mediaCacheMaxMb: 200,
   // ---------- 高级 ----------
   debugLog: false
 }

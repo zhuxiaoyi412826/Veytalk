@@ -19,6 +19,20 @@ contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl })
  * 浏览器 Web 部署没有 preload，window.__IM_NATIVE__ 不存在，前端据此走「不压缩、直传原片」。
  */
 let compressSeq = 0
+
+/**
+ * 主进程 IPC 的统一拆包：handler 返回 { ok, data | error }，
+ * 失败时在本侧抛带原始信息的 Error，让调用方能拿到根因而不是
+ * 「Error invoking remote method」一句废话。
+ */
+async function call(channel, payload) {
+  const res = await ipcRenderer.invoke(channel, payload)
+  if (!res || !res.ok) {
+    throw new Error((res && res.error) || `IPC ${channel} 调用失败`)
+  }
+  return res.data
+}
+
 contextBridge.exposeInMainWorld('__IM_NATIVE__', {
   isDesktop: true,
   /**
@@ -43,5 +57,36 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
     return ipcRenderer
       .invoke('im:compress-video', { inputPath, requestId, duration: (options && options.duration) || 0 })
       .finally(() => ipcRenderer.removeListener('im:compress-progress', handler))
+  },
+  /**
+   * 本地消息库桥：渲染进程不碰 sqlite 文件，所有 SQL 经主进程执行（架构约束）。
+   * statements 是 [[sql, params], ...]，主进程在同一事务里执行完再原子落盘。
+   */
+  db: {
+    open: (userId) => call('im:db-open', { userId }),
+    close: () => call('im:db-close', null),
+    all: (sql, params) => call('im:db-all', { sql, params }),
+    write: (statements) => call('im:db-write', { statements }),
+    info: () => call('im:db-info', null),
+    destroy: () => call('im:db-destroy', null)
+  },
+  /**
+   * 媒体缓存桥：二进制存主进程的 cache/media 目录（与消息 DB 物理隔离），
+   * 命中时主进程顺手 touch 时间戳供 LRU；data 经结构化克隆以 ArrayBuffer 往返。
+   */
+  media: {
+    get: async (key) => {
+      const hit = await call('im:media-get', { key })
+      if (!hit) return null
+      return { data: new Blob([hit.data]), etag: hit.etag, mime: hit.mime }
+    },
+    put: async (key, blob, etag, mime) => {
+      const buffer = await blob.arrayBuffer()
+      return call('im:media-put', { key, data: buffer, etag, mime })
+    },
+    remove: (key) => call('im:media-remove', { key }),
+    clear: () => call('im:media-clear', null),
+    stats: () => call('im:media-stats', null),
+    trim: (maxBytes) => call('im:media-trim', { maxBytes })
   }
 })

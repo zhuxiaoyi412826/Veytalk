@@ -194,7 +194,8 @@ CREATE TABLE `im_conversation_member`
     `conversation_id` BIGINT   NOT NULL COMMENT '会话 ID',
     `user_id`         BIGINT   NOT NULL COMMENT '成员用户 ID',
     `unread_count`    INT      NOT NULL DEFAULT 0 COMMENT '未读消息数',
-    `last_ack_seq`    BIGINT   NOT NULL DEFAULT 0 COMMENT '已确认读到的消息 seq，用于计算离线消息',
+    `last_ack_seq`    BIGINT   NOT NULL DEFAULT 0 COMMENT '已确认接收位点：离线拉取完成也推进，用于计算离线消息',
+    `last_read_seq`   BIGINT   NOT NULL DEFAULT 0 COMMENT '已读位点：仅用户打开会话推进，群聊已读人数推算依据（不存逐条已读行）',
     `is_top`          TINYINT  NOT NULL DEFAULT 0 COMMENT '是否置顶：1 是 0 否',
     `top_time`        DATETIME          DEFAULT NULL COMMENT '置顶时间',
     `is_muted`        TINYINT  NOT NULL DEFAULT 0 COMMENT '是否免打扰：1 是 0 否',
@@ -250,7 +251,7 @@ CREATE TABLE `im_message_read`
     UNIQUE KEY `uk_msg_user` (`message_id`, `user_id`),
     KEY `idx_user_msg` (`user_id`, `message_id`)
 ) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4 COMMENT ='消息送达与已读回执表';
+  DEFAULT CHARSET = utf8mb4 COMMENT ='消息送达与已读回执表（仅单聊写入；群聊用 im_conversation_member.last_read_seq 推算，避免逐条写爆表）';
 
 CREATE TABLE `im_message_delete`
 (

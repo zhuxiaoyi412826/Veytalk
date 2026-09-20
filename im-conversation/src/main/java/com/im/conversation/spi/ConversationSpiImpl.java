@@ -1,6 +1,7 @@
 package com.im.conversation.spi;
 
 import com.im.common.domain.ConversationBriefDTO;
+import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.spi.ConversationSpi;
 import com.im.conversation.entity.Conversation;
@@ -102,6 +103,16 @@ public class ConversationSpiImpl implements ConversationSpi {
     @Override
     public Map<Long, Long> getAckPositions(Long userId) {
         return conversationService.ackPositions(userId);
+    }
+
+    @Override
+    public Long readPosition(Long userId, Long conversationId) {
+        return conversationService.readPosition(userId, conversationId);
+    }
+
+    @Override
+    public List<MemberPositionDTO> memberPositions(Long conversationId, Long excludeUserId) {
+        return conversationService.memberPositions(conversationId, excludeUserId);
     }
 
     @Override

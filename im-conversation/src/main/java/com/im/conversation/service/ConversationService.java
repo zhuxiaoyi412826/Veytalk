@@ -1,6 +1,7 @@
 package com.im.conversation.service;
 
 import com.im.common.domain.ConversationBriefDTO;
+import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.conversation.dto.vo.ConversationVO;
 import com.im.conversation.entity.Conversation;
@@ -145,6 +146,18 @@ public interface ConversationService {
      * @return key 为 conversationId，value 为 last_ack_seq
      */
     Map<Long, Long> ackPositions(Long userId);
+
+    /**
+     * 用户在单会话上的已读位点，非成员或从未已读时返回 0。
+     */
+    long readPosition(Long userId, Long conversationId);
+
+    /**
+     * 会话成员的双位点列表，群聊送达/已读人数推算依据。
+     *
+     * @param excludeUserId 需要排除的成员（通常是消息发送者），为 {@code null} 时不排除
+     */
+    List<MemberPositionDTO> memberPositions(Long conversationId, Long excludeUserId);
 
     /**
      * 批量新增会话成员，已存在的成员自动跳过。

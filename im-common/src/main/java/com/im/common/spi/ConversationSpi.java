@@ -1,6 +1,7 @@
 package com.im.common.spi;
 
 import com.im.common.domain.ConversationBriefDTO;
+import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageEvent;
 
 import java.util.Collection;
@@ -96,6 +97,22 @@ public interface ConversationSpi {
      * @return key 为 conversationId，value 为 last_ack_seq
      */
     Map<Long, Long> getAckPositions(Long userId);
+
+    /**
+     * 用户在某会话上的已读位点（last_read_seq），取不到返回 0。
+     *
+     * <p>供群聊已读上报推算「本次新读了哪些消息」：推进前先读旧位点，
+     * 位于旧位点与新位点之间的消息才需要推送已读通知。
+     */
+    Long readPosition(Long userId, Long conversationId);
+
+    /**
+     * 会话其余成员的接收/已读双位点，供群聊按位点推算送达数与已读数，
+     * 替代逐条消息的回执行（防表爆炸）。
+     *
+     * @param excludeUserId 要排除的成员（通常是消息发送者），可为 null
+     */
+    List<MemberPositionDTO> memberPositions(Long conversationId, Long excludeUserId);
 
     /**
      * 批量新增会话成员（入群）。

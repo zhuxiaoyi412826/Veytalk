@@ -113,6 +113,47 @@ public interface MessageMapper extends BaseMapper<Message> {
                                     @Param("limit") int limit);
 
     /**
+     * 群聊专用：取已读位点区间内「别人发的、本次新变为已读」的消息。
+     *
+     * <p>不碰 {@code im_message_read}：群聊不再逐条写回执行，新已读集合直接由
+     * 「旧已读位点 → 新接收位点」这个区间推出，一次主键段扫描即可。
+     *
+     * @param afterSeq 旧已读位点（不含）
+     * @param maxSeq   本次已读推进到的位点（含）
+     */
+    @Select("""
+            SELECT m.id, m.conversation_id, m.from_user_id, m.seq
+            FROM im_message m
+            WHERE m.conversation_id = #{conversationId}
+              AND m.from_user_id <> #{userId}
+              AND m.is_recalled = 0
+              AND m.seq > #{afterSeq}
+              AND m.seq <= #{maxSeq}
+            ORDER BY m.seq DESC
+            LIMIT #{limit}
+            """)
+    List<Message> selectReadRange(@Param("conversationId") Long conversationId,
+                                  @Param("userId") Long userId,
+                                  @Param("afterSeq") Long afterSeq,
+                                  @Param("maxSeq") Long maxSeq,
+                                  @Param("limit") int limit);
+
+    /**
+     * 取一批发送时间早于阈值的消息 ID，供过期清理任务分批删除。
+     *
+     * <p>只取 ID 不取整行：清理要级联三张表，先把主键收集齐再逐表按 ID 删，
+     * 避免在 DELETE 语句里写子查询锁住大段索引。
+     */
+    @Select("""
+            SELECT id
+            FROM im_message
+            WHERE send_time < #{beforeTime}
+            ORDER BY send_time
+            LIMIT #{limit}
+            """)
+    List<Long> selectExpiredIds(@Param("beforeTime") LocalDateTime beforeTime, @Param("limit") int limit);
+
+    /**
      * 撤回消息，条件里带 {@code is_recalled = 0}，兼作并发防护：
      * 两个人同时撤回同一条消息时只有一个能成功。
      *

@@ -38,25 +38,27 @@
           <div v-if="msgType === 1" class="bubble__text">{{ textContent }}</div>
 
           <!-- 图片 -->
-          <el-image
-            v-else-if="msgType === 2"
-            class="im-msg-image"
-            :src="imageUrl"
-            :preview-src-list="settings.imagePreview && imageUrl ? [imageUrl] : []"
-            :preview-teleported="true"
-            :style="imageStyle"
-            fit="cover"
-            hide-on-click-modal
-          >
-            <template #placeholder>
-              <div class="bubble__media-loading">
-                <el-icon class="is-loading"><Loading /></el-icon>
-              </div>
-            </template>
-            <template #error>
-              <div class="bubble__media-loading">图片加载失败</div>
-            </template>
-          </el-image>
+          <div v-else-if="msgType === 2" class="bubble__image-wrap" @click="onImageClick">
+            <el-image
+              class="im-msg-image"
+              :src="imageUrl"
+              :preview-src-list="imagePreviewList"
+              :preview-teleported="true"
+              :style="imageStyle"
+              fit="cover"
+              hide-on-click-modal
+            >
+              <template #placeholder>
+                <div class="bubble__media-loading">
+                  <el-icon class="is-loading"><Loading /></el-icon>
+                </div>
+              </template>
+              <template #error>
+                <div class="bubble__media-loading">图片加载失败</div>
+              </template>
+            </el-image>
+            <WatermarkOverlay v-if="attachWatermark && senderWatermarkText" :text="senderWatermarkText" />
+          </div>
 
           <!-- 视频 -->
           <div v-else-if="isVideoFile" class="bubble__video">
@@ -71,6 +73,7 @@
               <el-icon class="is-loading"><Loading /></el-icon>
               <span>视频加载中</span>
             </div>
+            <WatermarkOverlay v-if="attachWatermark && senderWatermarkText" :text="senderWatermarkText" />
           </div>
 
           <!-- 文件 -->
@@ -78,7 +81,10 @@
             <el-icon class="bubble__file-icon" :size="30"><Document v-if="!canPreview" /><View v-else /></el-icon>
             <div class="bubble__file-meta">
               <div class="bubble__file-name im-ellipsis">{{ fileName }}</div>
-              <div class="bubble__file-size">{{ canPreview ? '点击预览' : fileSize }}</div>
+              <div class="bubble__file-size">
+                {{ canPreview ? '点击预览' : fileSize }}
+                <span v-if="attachWatermark" class="bubble__file-wm">· 带水印</span>
+              </div>
             </div>
           </div>
 
@@ -116,9 +122,10 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Document, Loading, View, VideoPause, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
+import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
-import { mediaUrl, downloadFile, isViewableText, isVideo } from '@/utils/media'
+import { mediaUrl, downloadFile, isPreviewableFile, isVideo } from '@/utils/media'
 import { formatDuration, formatFileSize } from '@/utils/format'
 
 /**
@@ -136,7 +143,7 @@ const props = defineProps({
   isGroup: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'jump-quote'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'jump-quote'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -144,6 +151,16 @@ const settings = useSettingsStore()
 const msgType = computed(() => Number(props.message.msgType))
 const isSystem = computed(() => msgType.value === 5)
 const extra = computed(() => props.message.extra || {})
+
+/** 本条附件是否带发送者水印（发送时选择，随 message.extra 传递到接收端） */
+const attachWatermark = computed(() => extra.value.watermark === true)
+/**
+ * 附件预览水印文字：直接用消息自带的发送者昵称——它是服务端权威数据，
+ * 无需客户端自填一段可被伪造的水印文案。
+ */
+const senderWatermarkText = computed(
+  () => props.message.fromNickname || (props.message.self ? auth.nickname : '')
+)
 
 const plainText = computed(() => {
   if (props.message.recalled) {
@@ -234,6 +251,25 @@ const readInfoText = computed(() => {
 const imageUrl = computed(() => mediaUrl(extra.value.fileUrl))
 
 /**
+ * 图片放大预览列表。
+ *
+ * 带水印时故意置空，禁用 el-image 内置灯箱（它只显示 <img>，盖不上水印层），
+ * 改由 onImageClick 走自绘弹窗；不带水印时维持原有内置预览。
+ */
+const imagePreviewList = computed(() => {
+  if (attachWatermark.value) {
+    return []
+  }
+  return settings.imagePreview && imageUrl.value ? [imageUrl.value] : []
+})
+
+function onImageClick() {
+  if (attachWatermark.value && imageUrl.value) {
+    emit('view-image', { url: imageUrl.value, watermark: senderWatermarkText.value })
+  }
+}
+
+/**
  * 先按 extra 里的原始尺寸占位。
  *
  * 后端不回填 width / height，这两个值是发送方上传前自己读出来塞进 extra 的。
@@ -255,7 +291,7 @@ const fileName = computed(() => extra.value.fileName || '未命名文件')
 const fileSize = computed(() => formatFileSize(extra.value.fileSize))
 
 /** 文件是否属于可预览的文本类型，命中时点击打开预览弹窗而不是直接下载 */
-const canPreview = computed(() => isViewableText(extra.value.fileName))
+const canPreview = computed(() => isPreviewableFile(extra.value.fileName))
 
 /** 文件是否属于视频类型，命中时渲染内联播放器而不是文件卡片 */
 const isVideoFile = computed(() => msgType.value === 3 && isVideo(extra.value.fileName))
@@ -281,7 +317,12 @@ const videoStyle = computed(() => {
 
 function onFileClick() {
   if (canPreview.value && extra.value.fileUrl) {
-    emit('view-file', { fileUrl: extra.value.fileUrl, fileName: fileName.value })
+    emit('view-file', {
+      fileUrl: extra.value.fileUrl,
+      fileName: fileName.value,
+      fileSize: extra.value.fileSize,
+      watermark: attachWatermark.value ? senderWatermarkText.value : ''
+    })
   } else {
     onDownload()
   }
@@ -385,6 +426,13 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 手机端放宽气泡：窄屏下 62% 会把一句话说成三行，可读性太差 */
+@media (max-width: 768px) {
+  .bubble__main {
+    max-width: min(640px, 88%);
+  }
 }
 
 .bubble--self .bubble__main {
@@ -530,6 +578,18 @@ onBeforeUnmount(() => {
   margin-top: 2px;
   font-size: 11px;
   color: var(--im-text-secondary);
+}
+
+.bubble__image-wrap {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.bubble__file-wm {
+  color: var(--im-primary);
 }
 
 .bubble__voice {

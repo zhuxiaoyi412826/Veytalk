@@ -28,6 +28,14 @@ public interface FriendRelationSpi {
     boolean isBlockedEitherWay(Long a, Long b);
 
     /**
+     * 静默解除 a 对 b 的拉黑：未拉黑时什么也不做，不校验不报错。
+     *
+     * <p>用于「单向阻断」：A 拉黑 B 后只拦 B→A 的入站消息，A 主动给 B 发消息时
+     * 发送成功后自动解除拉黑，不能让发送方因为一次正常发送而收到异常。
+     */
+    void unblockSilently(Long a, Long b);
+
+    /**
      * 获取 a 对 b 的好友备注。
      *
      * @return 无备注时返回 {@code null}

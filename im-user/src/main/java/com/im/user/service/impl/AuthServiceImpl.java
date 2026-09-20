@@ -197,31 +197,18 @@ public class AuthServiceImpl implements AuthService {
 
     /**
      * 完成 Sa-Token 登录并组装返回体。
+     *
+     * <p>不再做同设备顶号：同一浏览器的多个标签页、同一桌面端的多个窗口共用一个设备位，
+     * 顶号会把用户已经打开的其它页面挤下线（两端拿的是同一个登录 token，被顶的一方既没换账号也没断网）。
+     * 配置 is-concurrent=true + is-share=false，每次登录签发独立 token，各端互不影响。
      */
     private LoginVO doLogin(User user, String deviceId) {
         String device = DeviceType.codeOf(deviceId);
-        kickSameDevice(user.getId(), device);
 
         StpUtil.login(user.getId(), StpUtil.createSaLoginParameter().setDeviceType(device));
         userService.touchLogin(user.getId(), SecurityUtil.getClientIp());
         notifyOnlineState(user.getId(), true);
         return buildLoginVO(StpUtil.getTokenInfo(), device, userService.getProfile(user.getId()));
-    }
-
-    /**
-     * 同设备重复登录时顶掉旧连接：先推 kickout 报文让客户端收到明确原因，再注销服务端会话。
-     */
-    private void kickSameDevice(Long userId, String device) {
-        List<String> tokens = StpUtil.getTokenValueListByLoginId(userId, device);
-        if (tokens == null || tokens.isEmpty()) {
-            return;
-        }
-        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
-        if (pushSpi != null) {
-            pushSpi.kickOut(userId, device, ResultCode.USER_KICKED_OUT.getMessage());
-        }
-        StpUtil.kickout(userId, device);
-        log.info("用户 {} 在设备 {} 上的 {} 个旧会话已被顶下线", userId, device, tokens.size());
     }
 
     private LoginVO buildLoginVO(SaTokenInfo info, String device, UserVO userInfo) {

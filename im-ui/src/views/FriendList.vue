@@ -22,6 +22,7 @@
         </el-tabs>
         <div class="friend-list__header-actions">
           <template v-if="activeTab === 'friends'">
+            <el-button text :icon="CircleClose" @click="openBlacklist">黑名单</el-button>
             <el-badge :value="friend.pendingCount" :max="99" :hidden="!friend.pendingCount">
               <el-button text :icon="Bell" @click="router.push({ name: 'friend-requests' })">申请</el-button>
             </el-badge>
@@ -157,6 +158,28 @@
 
     <CreateGroupDialog v-model="showCreateGroup" />
 
+    <!--
+      黑名单集中管理：名单存在服务端（im_friend.status=2），多端看到的是同一份。
+      单向阻断下拉黑只拦对方发来的消息，自己仍可发消息（发送即自动解除），
+      所以这里的主要价值是「回看并移出误拉黑的人」，而不是找回被堵住的发送入口。
+    -->
+    <el-dialog v-model="blacklist.visible" title="黑名单" width="420px">
+      <div v-loading="blacklist.loading" class="blacklist__body im-scroll">
+        <div v-for="item in blacklist.items" :key="item.friendId" class="blacklist__item">
+          <UserAvatar :src="item.avatar" :name="item.displayName || item.nickname" :size="36" />
+          <div class="blacklist__info">
+            <div class="blacklist__name im-ellipsis">{{ item.displayName || item.nickname }}</div>
+            <div class="blacklist__sub im-ellipsis">@{{ item.username }}</div>
+          </div>
+          <el-button text @click="openProfile(item)">资料</el-button>
+          <el-button type="primary" text :loading="blacklist.acting === item.friendId" @click="unblockFromBlacklist(item)">
+            移出
+          </el-button>
+        </div>
+        <el-empty v-if="!blacklist.loading && blacklist.items.length === 0" description="没有拉黑任何人" :image-size="60" />
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="remarkDialog.visible" title="修改备注" width="360px" @opened="focusRemark">
       <el-input
         ref="remarkInputRef"
@@ -179,11 +202,12 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Bell, ChatDotRound, Plus, Search, User } from '@element-plus/icons-vue'
+import { Bell, ChatDotRound, CircleClose, Plus, Search, User } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import CreateGroupDialog from '@/components/CreateGroupDialog.vue'
 import { useFriendStore, DEFAULT_GROUP } from '@/stores/friend'
+import { fetchBlacklist } from '@/api/friend'
 import { useConversationStore } from '@/stores/conversation'
 import { useGroupStore } from '@/stores/group'
 import { asId } from '@/utils/id'
@@ -389,7 +413,7 @@ async function toggleBlock(target) {
   if (!blocked) {
     try {
       await ElMessageBox.confirm(
-        `拉黑后「${target.displayName || target.nickname}」发来的消息将不再推送给你，你们的好友关系保留。`,
+        `拉黑后「${target.displayName || target.nickname}」发来的消息将被拦截；你仍可主动发消息，发送后自动解除拉黑。你们的好友关系保留。`,
         '拉黑好友',
         { confirmButtonText: '拉黑', cancelButtonText: '取消', type: 'warning' }
       )
@@ -402,6 +426,36 @@ async function toggleBlock(target) {
   }
   await friend.unblock(target.friendId)
   ElMessage.success('已取消拉黑')
+}
+
+/* ------------------------------ 黑名单管理 ------------------------------ */
+
+const blacklist = reactive({ visible: false, loading: false, acting: 0, items: [] })
+
+async function openBlacklist() {
+  blacklist.visible = true
+  blacklist.loading = true
+  try {
+    blacklist.items = (await fetchBlacklist()) || []
+  } catch {
+    // 提示已弹出，保留空列表比关掉对话框更能让用户意识到没加载成功
+    blacklist.items = []
+  } finally {
+    blacklist.loading = false
+  }
+}
+
+async function unblockFromBlacklist(item) {
+  blacklist.acting = item.friendId
+  try {
+    await friend.unblock(item.friendId)
+    blacklist.items = blacklist.items.filter((row) => row.friendId !== item.friendId)
+    ElMessage.success('已移出黑名单')
+  } catch {
+    // 提示已弹出
+  } finally {
+    blacklist.acting = 0
+  }
 }
 
 /**
@@ -647,6 +701,33 @@ onMounted(async () => {
   flex: 1;
   min-width: 0;
   background: var(--im-chat-bg);
+}
+
+/* ------------------------------ 黑名单弹窗 ------------------------------ */
+.blacklist__body {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.blacklist__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.blacklist__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.blacklist__name {
+  font-size: 14px;
+}
+
+.blacklist__sub {
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
 }
 
 /* ------------------------------ 窄屏 ------------------------------ */

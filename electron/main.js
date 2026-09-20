@@ -3,6 +3,7 @@ const path = require('path')
 const os = require('os')
 const fs = require('fs')
 const { spawn, execFile } = require('child_process')
+const { setupLocalDb } = require('./localdb')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -220,6 +221,7 @@ function setupVideoCompress() {
 app.whenReady().then(() => {
   setupDownload()
   setupVideoCompress()
+  setupLocalDb()
   createWindow()
 
   app.on('activate', () => {

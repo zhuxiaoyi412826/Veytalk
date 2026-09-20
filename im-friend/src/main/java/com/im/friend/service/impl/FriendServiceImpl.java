@@ -62,6 +62,22 @@ public class FriendServiceImpl implements FriendService {
     }
 
     @Override
+    public List<FriendVO> blacklist(Long userId) {
+        // 复用好友列表的一次取数，只过滤出拉黑态的行；黑名单量级远小于好友数，不会退化成全表
+        List<Friend> blocked = friendMapper.selectByUserId(userId).stream()
+                .filter(Friend::isBlocked)
+                .toList();
+        if (blocked.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> friendIds = blocked.stream().map(Friend::getFriendId).distinct().toList();
+        Map<Long, UserBriefDTO> peers = userQuerySpi.listByIds(friendIds);
+        return blocked.stream()
+                .map(relation -> FriendConvert.toVO(relation, peers.get(relation.getFriendId())))
+                .toList();
+    }
+
+    @Override
     public List<String> listGroups(Long userId) {
         List<String> groups = new ArrayList<>(friendMapper.selectByUserId(userId).stream()
                 .map(relation -> TextUtil.isBlank(relation.getGroupName())

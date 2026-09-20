@@ -207,14 +207,14 @@ sa-token:
   # -1 表示不做「最低活跃频率」检查：IM 客户端可能整夜挂着不操作，
   # 设成正数会把人半夜踢下线。真正的连接活性由 WebSocket 心跳负责。
   active-timeout: -1
-  # 允许同一账号多端同时在线（web / pc / android 各自独立）。
-  # 这里必须保持 true：同设备顶号由 AuthServiceImpl#kickSameDevice 自己实现
-  # （先推 kickout 报文让客户端拿到明确原因，再注销服务端会话）。
-  # 若改成 false，Sa-Token 会在登录流程里抢先调用 replaced(loginId, device)，
-  # 旧 token 在我们推送之前就被标记失效，客户端只能看到一个「登录凭证无效」。
+  # 允许同一账号多端同时在线（web / pc / android 各自独立），且同设备位也允许多条会话共存：
+  # 同一浏览器的多个标签页、Electron 的多个窗口都不再互相顶号（多标签互踢 bug 的修复项）。
+  # 历史行为：登录时由 AuthServiceImpl#kickSameDevice 顶掉同设备旧会话，该方法已移除；
+  # 踢下线能力仅保留给管理操作（封号、改密码后全端下线，见 WsSessionManager#kickOut）。
+  # 若改成 false，Sa-Token 会在登录流程里抢先调用 replaced(loginId, device)，第二个标签页登录会顶掉第一个。
   is-concurrent: true
   # 必须为 false：StpLogicJwtForSimple 的 isSupportShareToken() 返回 false，
-  # 设成 true 会导致同账号第二次登录复用第一个 token，多端踢下线逻辑失效。
+  # 设成 true 会导致同账号第二次登录复用第一个 token，各端会话无法独立管理与独立注销。
   is-share: false
   # JWT 模式下 token 本身就是一个 JWT，这个 token-style 实际不生效，
   # 保留仅为与 Sa-Token 默认值显式对齐，便于日后关掉 JWT 插件时对照。
@@ -323,6 +323,14 @@ im:
     recall-limit-seconds: 7200
     history-page-size: 20
     max-text-length: 5000
+    # 敏感词过滤：命中后遮成 * 再落库投递（不拒发），词库在 im-common 的
+    # wordlists/sensitive_words.txt，DFA 字典树匹配时原地跳过干扰字符
+    sensitive-filter-enabled: true
+    # 消息保留天数：超过后由定时任务物理删除（含回执与单端删除记录）。
+    # 0 = 永不清理（默认）；聊天历史删除必须显式开启，不要依赖默认值意外丢数据。
+    retention-days: 0
+    # 清理任务 cron，默认每天凌晨 3:30 低峰执行，仅在 retention-days > 0 时生效
+    clean-cron: 0 30 3 * * ?
 
   websocket:
     # 建议客户端心跳间隔，握手成功后随欢迎帧下发，前端不必硬编码

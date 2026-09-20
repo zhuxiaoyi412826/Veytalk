@@ -67,31 +67,38 @@
     </div>
 
     <!-- ==================== 消息区 ==================== -->
+    <div class="chat-window__main">
     <div ref="scrollRef" class="chat-window__body im-scroll" @scroll.passive="onScroll">
-      <div v-if="hasMore" class="chat-window__more">
-        <el-button link type="primary" :loading="loadingMore" @click="loadMore">查看更早的消息</el-button>
-      </div>
-      <div v-else-if="messages.length" class="chat-window__more chat-window__more--end">没有更早的消息了</div>
-
-      <template v-for="(item, index) in messages" :key="item.messageId || item.clientMsgId">
-        <div v-if="showDivider(index)" class="chat-window__divider">{{ formatMsgTime(item.sendTime) }}</div>
-        <div :data-msg-id="item.messageId ? asId(item.messageId) : undefined">
-          <MessageBubble
-            :message="item"
-            :show-sender="isGroup"
-            :is-group="isGroup"
-            @menu="(event) => onBubbleMenu(event, item)"
-            @resend="onResend"
-            @discard="onDiscard"
-            @view-file="onViewFile"
-            @jump-quote="onJumpQuote"
-          />
+      <!-- 内容层：给 ResizeObserver 监听高度变化，图片加载/气泡重排后才能补钉到底部 -->
+      <div ref="contentRef" class="chat-window__content">
+        <div v-if="hasMore" class="chat-window__more">
+          <el-button link type="primary" :loading="loadingMore" @click="loadMore">查看更早的消息</el-button>
         </div>
-      </template>
+        <div v-else-if="messages.length" class="chat-window__more chat-window__more--end">没有更早的消息了</div>
 
-      <div v-if="!messages.length && !loading" class="chat-window__empty">
-        <el-empty description="还没有消息，发一条打个招呼吧" :image-size="80" />
+        <template v-for="(item, index) in messages" :key="item.messageId || item.clientMsgId">
+          <div v-if="showDivider(index)" class="chat-window__divider">{{ formatMsgTime(item.sendTime) }}</div>
+          <div :data-msg-id="item.messageId ? asId(item.messageId) : undefined">
+            <MessageBubble
+              :message="item"
+              :show-sender="isGroup"
+              :is-group="isGroup"
+              @menu="(event) => onBubbleMenu(event, item)"
+              @resend="onResend"
+              @discard="onDiscard"
+              @view-file="onViewFile"
+              @view-image="onViewImage"
+              @jump-quote="onJumpQuote"
+            />
+          </div>
+        </template>
+
+        <div v-if="!messages.length && !loading" class="chat-window__empty">
+          <el-empty description="还没有消息，发一条打个招呼吧" :image-size="80" />
+        </div>
       </div>
+    </div>
+      <WatermarkOverlay v-if="settings.chatWatermark && selfWatermark" :text="selfWatermark" />
     </div>
 
     <!-- 滚上去看历史时来了新消息，不强行拽回底部，改成给一个入口 -->
@@ -123,6 +130,14 @@
         </el-tooltip>
         <el-tooltip v-if="canUpload" content="发送文件（音频会作为语音消息）" placement="top">
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
+        </el-tooltip>
+
+        <el-tooltip
+          v-if="canUpload"
+          content="开启后本次发送的图片/文件/视频会带上你的昵称水印，接收方查看时可见"
+          placement="top"
+        >
+          <el-checkbox v-model="attachWatermark" class="chat-window__wm-check">附件加水印</el-checkbox>
         </el-tooltip>
 
         <span
@@ -225,7 +240,26 @@
       v-model:visible="viewer.visible"
       :file-url="viewer.fileUrl"
       :file-name="viewer.fileName"
+      :file-size="viewer.fileSize"
+      :watermark="viewer.watermark"
+      :allow-download="!settings.previewNoDownload"
     />
+
+    <!-- 带水印图片的放大预览：内置灯箱只显示 <img>、盖不上水印层，故用自绘弹窗 -->
+    <el-dialog
+      v-model="imageViewer.visible"
+      title="图片预览"
+      width="70vw"
+      top="5vh"
+      append-to-body
+      destroy-on-close
+      class="im-image-viewer"
+    >
+      <div class="im-image-viewer__stage">
+        <img v-if="imageViewer.url" :src="imageViewer.url" alt="图片预览" />
+        <WatermarkOverlay v-if="imageViewer.watermark" :text="imageViewer.watermark" />
+      </div>
+    </el-dialog>
 
     <ForwardDialog
       v-model:visible="forwardDialog.visible"
@@ -249,9 +283,10 @@ import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import FileViewer from '@/components/FileViewer.vue'
+import WatermarkOverlay from '@/components/WatermarkOverlay.vue'
 import GroupSettings from '@/components/GroupSettings.vue'
 import ForwardDialog from '@/components/ForwardDialog.vue'
-import { useChatStore } from '@/stores/chat'
+import { useChatStore, newClientMsgId } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -370,6 +405,7 @@ function openProfile() {
 /* -------------------------------- 滚动 -------------------------------- */
 
 const scrollRef = ref(null)
+const contentRef = ref(null)
 const showJump = ref(false)
 const loading = ref(false)
 
@@ -389,15 +425,38 @@ function isNearBottom() {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
 
+/** 平滑滚动动画期间的豁免窗口：不让锚底观察器用瞬时滚动打断动画 */
+let animatingUntil = 0
+/** 前插历史消息期间的豁免窗口：补偿 scrollTop 后不应被钉回底部 */
+let pinSuspendUntil = 0
+let contentObserver = null
+
+function applyScrollToBottom(behavior = 'auto') {
+  const el = scrollRef.value
+  if (el) {
+    el.scrollTo({ top: el.scrollHeight, behavior })
+  }
+}
+
 function scrollToBottom(smooth = false) {
   nextTick(() => {
     const el = scrollRef.value
     if (!el) {
       return
     }
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
     nearBottom = true
     showJump.value = false
+    if (smooth) {
+      animatingUntil = Date.now() + 400
+    }
+    applyScrollToBottom(smooth ? 'smooth' : 'auto')
+    // nextTick 时拿到的 scrollHeight 还是「半成品高度」：气泡/图片在其后才完成布局，
+    // 短消息不滚动、平滑滚动差一截够不到底都是这个原因；双 rAF 后按最新高度再补一次
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (nearBottom) {
+        applyScrollToBottom('auto')
+      }
+    }))
   })
 }
 
@@ -432,6 +491,8 @@ async function loadMore() {
   }
   const prevHeight = el.scrollHeight
   const prevTop = el.scrollTop
+  // 前插会让内容层高跳一截，观察器不能把它当成「用户贴底时来了新消息」钉回底部
+  pinSuspendUntil = Date.now() + 600
   await chat.loadHistory(props.conversationId, false)
   await nextTick()
   el.scrollTop = prevTop + (el.scrollHeight - prevHeight)
@@ -646,8 +707,12 @@ async function sendText() {
       atAll: atAll || undefined,
       quoteMsgId
     })
-  } catch {
-    // 占位消息已被 store 标成「发送失败」，错误提示也由 request.js 弹过了
+  } catch (error) {
+    // 网络类失败：气泡红叹号 + 离线队列自动重发，断网时不弹 toast；
+    // 业务类拒绝（敏感词/限流）：重试一万次也不会成，必须把原因弹出来
+    if (isBusinessError(error)) {
+      ElMessage.error(error.message || '发送失败')
+    }
   } finally {
     sending.value = false
   }
@@ -869,6 +934,18 @@ const uploadStageText = computed(() => {
 /** 没有上传权限就把入口藏掉：种子数据里 user 角色是有 file:upload 的，管理员同样有 */
 const canUpload = computed(() => auth.hasPermission('file:upload'))
 
+/** 本次发送是否为图片/文件/视频附加发送者水印（作为发送时的模式开关，跨多条保持） */
+const attachWatermark = ref(false)
+
+/**
+ * 聊天窗口全局水印文字：当前登录账号的昵称 + 账号标识。
+ * 只有查看者看得到自己的水印（仅本机生效），不泄露他人账号。
+ */
+const selfWatermark = computed(() => {
+  const idPart = auth.username || auth.phone || (auth.userId ? 'ID' + auth.userId : '')
+  return [auth.nickname, idPart].filter(Boolean).join(' ')
+})
+
 function pickImage() {
   imageInputRef.value?.click()
 }
@@ -897,8 +974,39 @@ async function onPicked(event) {
   await uploadAndSend(file)
 }
 
-async function uploadAndSend(file) {
+/**
+ * 上传 + 发送一条龙。
+ *
+ * 先挂「发送中」占位气泡再上传：上传同样要走网络，等上传成功才挂气泡的话，
+ * 断网时界面上什么都不会出现，刷新后更会彻底找不到这些没发出去的消息。
+ * 上传失败的 File 暂存进 store，网络恢复自动补传、手动重发直接复用；
+ * 上传成功即移交 pending 队列/手动重发（fileId 已在手，不必再传字节）。
+ *
+ * @param retryClientMsgId 重发时带原占位的 clientMsgId，就地升级而不是新增气泡
+ */
+async function uploadAndSend(file, retryClientMsgId = null) {
   const kind = kindOf(file)
+  const msgType = kind === 'image' ? TYPE_IMAGE : kind === 'voice' ? TYPE_VOICE : TYPE_FILE
+  const clientMsgId = retryClientMsgId || newClientMsgId()
+  chat.appendMessage(
+    props.conversationId,
+    {
+      clientMsgId,
+      conversationId: props.conversationId,
+      fromUserId: auth.userId,
+      fromNickname: auth.nickname,
+      fromAvatar: auth.avatarRaw,
+      msgType,
+      content: file.name || '',
+      extra: { fileName: file.name || '', fileSize: file.size, contentType: file.type || '' },
+      seq: null,
+      status: 0,
+      recalled: false,
+      sendTime: new Date().toISOString()
+    },
+    true
+  )
+  chat.rememberRetryFile(clientMsgId, file, props.conversationId)
   // 桌面端视频压缩后，真正上传的是压缩产物；其余情况就是原文件
   let uploadTarget = file
   uploading.value = true
@@ -963,23 +1071,33 @@ async function uploadAndSend(file) {
       }
       uploadChunkInfo.value = chunkInfo || null
     })
+    // 文件已经在服务器上，本地不用再留字节：后续失败由 pending 队列与手动重发接管
+    chat.forgetRetryFile(clientMsgId)
 
     // 这里传的 fileName / fileSize / fileUrl 会被服务端按文件记录覆盖（防越权改写），
     // 但仍然要传：本地占位气泡要靠它在服务端响应回来之前就把内容渲染出来
     await chat.sendAttachment(props.conversationId, {
-      msgType: kind === 'image' ? TYPE_IMAGE : kind === 'voice' ? TYPE_VOICE : TYPE_FILE,
+      msgType,
       fileId: vo.fileId,
+      clientMsgId,
       extra: {
         ...extra,
         fileName: vo.originalName,
         fileSize: vo.size,
         contentType: vo.contentType,
         ext: vo.ext,
-        fileUrl: vo.url
+        fileUrl: vo.url,
+        // 语音没有可视化预览界面，水印只对图片/文件/视频有意义；关时传 undefined 避免存个 false
+        watermark: kind !== 'voice' && attachWatermark.value ? true : undefined
       }
     })
-  } catch {
-    // 上传失败或发送失败都已由 request.js / store 处理，这里只负责收尾
+  } catch (error) {
+    // sendMessage 与上传链路都已 silent：业务类拒绝要在这里弹出原因；
+    // 网络类只标失败（红叹号 + 恢复后自动重发），不弹「网络有问题」toast
+    chat.markFailed(props.conversationId, clientMsgId)
+    if (isBusinessError(error)) {
+      ElMessage.error(error.message || '发送失败')
+    }
   } finally {
     uploading.value = false
     uploadPercent.value = 0
@@ -1031,12 +1149,22 @@ function isVideoFile(file) {
 
 /* ------------------------------ 文件预览 ------------------------------ */
 
-const viewer = reactive({ visible: false, fileUrl: '', fileName: '' })
+const viewer = reactive({ visible: false, fileUrl: '', fileName: '', fileSize: 0, watermark: '' })
+/** 带水印图片的自绘预览弹窗状态 */
+const imageViewer = reactive({ visible: false, url: '', watermark: '' })
 
-function onViewFile({ fileUrl, fileName }) {
+function onViewFile({ fileUrl, fileName, fileSize, watermark }) {
   viewer.fileUrl = fileUrl
   viewer.fileName = fileName
+  viewer.fileSize = Number(fileSize) || 0
+  viewer.watermark = watermark || ''
   viewer.visible = true
+}
+
+function onViewImage({ url, watermark }) {
+  imageViewer.url = url
+  imageViewer.watermark = watermark || ''
+  imageViewer.visible = true
 }
 
 /* ------------------------------ 右键菜单 ------------------------------ */
@@ -1248,27 +1376,79 @@ async function confirmDelete(message) {
 
 /* ------------------------------ 失败重发 ------------------------------ */
 
+/** 区分业务失败与网络失败：传输层错误 code 固定 -1（见 request.js）；1002/2010 由跳登录逻辑接管不重复弹 */
+function isBusinessError(error) {
+  const code = Number(error && error.code)
+  return code > 0 && code !== 1002 && code !== 2010
+}
+
+/** 网络恢复：上传阶段失败的附件自动重走上传+发送（文本类由 WS 重连的 pending 队列接管） */
+async function onOnline() {
+  const waiting = chat.pendingRetryFiles(props.conversationId)
+  for (const item of waiting) {
+    // 循环途中已被手动处理（重发/删除）就跳过
+    if (!chat.retryFileOf(item.clientMsgId)) {
+      continue
+    }
+    await uploadAndSend(item.file, item.clientMsgId)
+  }
+}
+
 async function onResend(message) {
+  const isAttachment = [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType))
+  // extra.fileId 为空说明死在上传阶段（还没拿到文件 ID），走本地 File 重传
+  if (isAttachment && !message.messageId && !message.extra?.fileId) {
+    const entry = chat.retryFileOf(message.clientMsgId)
+    if (entry) {
+      await uploadAndSend(entry.file, message.clientMsgId)
+    } else {
+      // 刷新后内存里的 File 已丢失，这条占位再也发不出去了：提示重新选择并清掉僵尸气泡
+      ElMessage.warning('原文件已无法取回，请重新选择发送')
+      chat.discard(props.conversationId, message.clientMsgId)
+    }
+    return
+  }
   try {
     await chat.resend(props.conversationId, message)
-  } catch {
-    // 已标记为失败并弹过提示
+  } catch (error) {
+    if (isBusinessError(error)) {
+      ElMessage.error(error.message || '发送失败')
+    }
   }
 }
 
 function onDiscard(message) {
   chat.discard(props.conversationId, message.clientMsgId)
+  chat.forgetRetryFile(message.clientMsgId)
 }
 
 /* ------------------------------ 生命周期 ------------------------------ */
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('online', onOnline)
+  // 内容高度变化（图片加载完成、气泡重排）且当前贴着底时，跟随钉回底部：
+  // 首次进会话时列表渲染是分批完成的，只在 nextTick 滚一次会落在中途，
+  // 表现为「重进同一会话却从头显示」
+  if (contentRef.value && typeof ResizeObserver !== 'undefined') {
+    contentObserver = new ResizeObserver(() => {
+      if (!nearBottom || Date.now() < animatingUntil || Date.now() < pinSuspendUntil) {
+        return
+      }
+      applyScrollToBottom('auto')
+    })
+    contentObserver.observe(contentRef.value)
+  }
   await loadInitial()
 })
 
 onBeforeUnmount(() => {
+  if (contentObserver) {
+    contentObserver.disconnect()
+    contentObserver = null
+  }
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('online', onOnline)
   // 离开会话时把已经看到的消息标成已读，避免回到列表还挂着红点
   if (document.visibilityState === 'visible') {
     markAllRead()
@@ -1339,6 +1519,36 @@ watch(key, async () => {
   flex: 1;
   overflow-y: auto;
   padding: 8px 0 12px;
+}
+
+/* 消息区外层：作为全局水印定位宿主，水印绝对铺满此区且不随消息滚动 */
+.chat-window__main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 工具栏里的「附件加水印」复选框，高度与相邻图标按钮对齐 */
+.chat-window__wm-check {
+  margin-left: 4px;
+  height: 32px;
+}
+
+/* 带水印图片的放大预览舞台 */
+.im-image-viewer__stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 78vh;
+  overflow: hidden;
+}
+
+.im-image-viewer__stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
 }
 
 .chat-window__more {

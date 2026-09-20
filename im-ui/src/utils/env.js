@@ -29,6 +29,19 @@ export function apiBaseURL() {
 }
 
 /**
+ * 媒体内容的请求前缀：专门给 fetchBlobMeta(rawUrl) 这类「rawUrl 已含 /api」的请求用。
+ *
+ * 后端存下来的受控地址（/api/file/download/{id}）本身就带 /api 前缀：
+ * - Web 同源部署：相对路径直接解析到当前站点，前缀给空串即可；
+ * - Electron：页面从 file:// 加载，相对路径会解析成 file:///api/...，必然失败，
+ *   必须补上后端绝对地址（不含 /api，因为 rawUrl 自己带了）。
+ */
+export function mediaBaseURL() {
+  const base = serverBase()
+  return isElectron() && base ? base.replace(/\/+$/, '') : ''
+}
+
+/**
  * WebSocket 根地址（协议 + host，不含 /ws 路径与 query）：
  * Electron 把后端 http(s) 换成 ws(s)，Web 按当前页面协议与 host 推导。
  */

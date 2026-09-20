@@ -4,6 +4,7 @@ import * as userApi from '@/api/user'
 import { getToken, setToken, clearToken, getDeviceId } from '@/utils/token'
 import { resetRedirectFlag } from '@/api/request'
 import { clearMediaCache, mediaUrl } from '@/utils/media'
+import { initLocalDb } from '@/utils/localdb'
 import { setUnreadCount } from '@/utils/title'
 import { connect, disconnect } from '@/ws/socket'
 
@@ -99,6 +100,8 @@ export const useAuthStore = defineStore('auth', {
       // 否则本次登录后再遇到任何 1002 都不会跳登录页了
       resetRedirectFlag()
       connect()
+      // 登录成功后打开当前用户的本地消息库（切换账号时会先关掉上一个用户的库）
+      initLocalDb(this.userId)
     },
 
     /**
@@ -114,6 +117,8 @@ export const useAuthStore = defineStore('auth', {
       }
       try {
         this.userInfo = await userApi.fetchProfile()
+        // 刷新页面后没走登录流程，这里补齐本地库的初始化（内部幂等）
+        initLocalDb(this.userId)
       } catch {
         this.teardown()
         return null

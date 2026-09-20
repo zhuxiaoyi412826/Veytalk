@@ -5,6 +5,7 @@ import com.im.common.api.ResultCode;
 import com.im.common.constant.RedisKeys;
 import com.im.common.domain.ConversationBriefDTO;
 import com.im.common.domain.GroupBriefDTO;
+import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.domain.WsPacket;
@@ -109,8 +110,9 @@ public class ConversationServiceImpl implements ConversationService {
 
         FriendRelationSpi friendSpi = friendRelationSpiProvider.getIfAvailable();
         if (friendSpi != null) {
+            // 单向阻断：只拦「对方已把我拉黑」这一方向；我拉黑了对方时仍可主动发起，
+            // 消息发送成功会在 im-message 里顺带自动解除拉黑，因此这里不再拦「我拉黑对方」
             BusinessException.throwIf(friendSpi.isBlockedBy(targetUserId, userId), ResultCode.FRIEND_BLOCKED);
-            BusinessException.throwIf(friendSpi.isBlockedBy(userId, targetUserId), ResultCode.FRIEND_BLOCKED_BY_ME);
             BusinessException.throwUnless(friendSpi.isFriend(userId, targetUserId), ResultCode.FRIEND_NOT_FOUND);
         }
         return getOrCreateSingle(userId, targetUserId);
@@ -336,6 +338,27 @@ public class ConversationServiceImpl implements ConversationService {
     }
 
     @Override
+    public long readPosition(Long userId, Long conversationId) {
+        if (userId == null || conversationId == null) {
+            return 0L;
+        }
+        return memberMapper.selectReadSeq(conversationId, userId);
+    }
+
+    @Override
+    public List<MemberPositionDTO> memberPositions(Long conversationId, Long excludeUserId) {
+        if (conversationId == null) {
+            return Collections.emptyList();
+        }
+        return memberMapper.selectMemberPositions(conversationId, excludeUserId).stream()
+                .map(member -> MemberPositionDTO.builder()
+                        .ackSeq(member.getLastAckSeq() == null ? 0L : member.getLastAckSeq())
+                        .readSeq(member.getLastReadSeq() == null ? 0L : member.getLastReadSeq())
+                        .build())
+                .toList();
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public void addMembers(Long conversationId, Collection<Long> userIds) {
         requireConversation(conversationId);
@@ -427,6 +450,7 @@ public class ConversationServiceImpl implements ConversationService {
         member.setUserId(userId);
         member.setUnreadCount(0);
         member.setLastAckSeq(0L);
+        member.setLastReadSeq(0L);
         member.setTop(0);
         member.setMuted(0);
         member.setHidden(0);

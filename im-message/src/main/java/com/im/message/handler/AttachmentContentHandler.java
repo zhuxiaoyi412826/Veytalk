@@ -6,6 +6,7 @@ import com.im.common.domain.MessageExtra;
 import com.im.common.domain.MessageSendCmd;
 import com.im.common.enums.MsgType;
 import com.im.common.exception.BusinessException;
+import com.im.common.sensitive.SensitiveWordFilter;
 import com.im.common.spi.FileStorageSpi;
 import com.im.common.util.TextUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -23,15 +24,21 @@ import java.util.Set;
  * <p>元数据一律以文件服务的记录为准回填，不信任客户端上报的值——
  * 客户端可以把一张图片的 fileSize 报成 1KB，也可以把别人的文件 ID 填进来，
  * 前者污染展示，后者是越权，都必须由服务端按 fileId 重新取真值。
+ *
+ * <p>文件名同样过敏感词：上传接口不碰内容只存原名，若不在这里遮蔽，
+ * 「发个带脏字文件名的文件」就能绕过整条过滤链路（图片/视频展示区也叫文件名）。
  */
 @Slf4j
 @Component
 public class AttachmentContentHandler implements MessageContentHandler {
 
     private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
+    private final SensitiveWordFilter sensitiveWordFilter;
 
-    public AttachmentContentHandler(ObjectProvider<FileStorageSpi> fileStorageSpiProvider) {
+    public AttachmentContentHandler(ObjectProvider<FileStorageSpi> fileStorageSpiProvider,
+                                    SensitiveWordFilter sensitiveWordFilter) {
         this.fileStorageSpiProvider = fileStorageSpiProvider;
+        this.sensitiveWordFilter = sensitiveWordFilter;
     }
 
     @Override
@@ -66,7 +73,8 @@ public class AttachmentContentHandler implements MessageContentHandler {
                     ResultCode.FILE_DOWNLOAD_FORBIDDEN);
         }
 
-        extra.setFileName(file.getOriginalName());
+        // 文件名遮蔽后再入库：开关关时 mask() 原样返回，不在这里重复判断
+        extra.setFileName(sensitiveWordFilter.mask(file.getOriginalName()));
         extra.setFileSize(file.getSize());
         extra.setContentType(file.getContentType());
         extra.setExt(TextUtil.isBlank(file.getExt()) ? TextUtil.extension(file.getOriginalName()) : file.getExt());

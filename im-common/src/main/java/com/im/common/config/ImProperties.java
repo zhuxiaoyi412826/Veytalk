@@ -126,6 +126,13 @@ public class ImProperties {
         private int historyPageSize = 20;
         /** 文本消息最大长度 */
         private int maxTextLength = 5000;
+        /**
+         * 敏感词过滤开关：命中后遮成 * 再落库投递（非拒发）。
+         * 只在词库装载成功时生效，关掉可减少一条纯文本消息的扫描开销。
+         */
+        private boolean sensitiveFilterEnabled = true;
+        /** 消息保留天数，超期由定时任务物理清理；0 表示永不清理（默认） */
+        private int retentionDays = 0;
     }
 
     @Data

@@ -2,22 +2,40 @@ import { defineStore } from 'pinia'
 import * as messageApi from '@/api/message'
 import { asId, sameId } from '@/utils/id'
 import { isOpen as wsOpen, send as wsSend } from '@/ws/socket'
+import {
+  dbLoadRecent,
+  dbLoadBefore,
+  dbUpsertMessage,
+  dbUpsertMessages,
+  dbDeleteMessage,
+  dbDiscardLocal,
+  dbClearConversation,
+  dbEnqueuePending,
+  dbListPending,
+  dbRemovePending,
+  closeLocalDb
+} from '@/utils/localdb'
 import { useAuthStore } from './auth'
+import { useSettingsStore } from './settings'
 
 /**
  * 聊天消息：当前会话的消息列表、发送中的本地消息、历史分页游标与本地缓存。
  *
  * 消息按会话分桶存放（键是字符串化的会话 ID），切换会话不清空已加载的数据，
  * 来回切换时不必重新拉一次历史。
+ *
+ * 持久层是本地 SQLite（浏览器 sql.js WASM / Electron 主进程，见 utils/localdb）：
+ *  - 滚动加载优先读本地，本地缺更早历史时才向服务端拉并回写；
+ *  - 刷新页面后先渲染本地缓存再等网络，历史不丢；
+ *  - 断网发送入待发送队列，恢复后按 clientMsgId 幂等重提交，
+ *    服务端落库消息回来后与本地占位按 msgId 合并成一条。
  */
 
 /** 历史分页每页条数，与后端默认值一致（上限 100） */
 const PAGE_SIZE = 20
 
-/** 本地缓存每个会话保留的条数：localStorage 只有 5MB 左右，全量缓存几次就满了 */
-const CACHE_LIMIT = 100
-
-const CACHE_PREFIX = 'im_msgs_'
+/** 进入会话时本地预渲染的最大条数：比旧版 localStorage 的 100 宽裕，本地库没有 5MB 硬墙 */
+const LOCAL_LIMIT = 300
 
 /** 消息状态：与后端 MessageStatus 枚举一一对应 */
 const STATUS_TEXT = {
@@ -90,18 +108,18 @@ function normalizeMessage(raw, fallbackSelf) {
   }
 }
 
-function readCache(conversationId) {
-  try {
-    const text = localStorage.getItem(CACHE_PREFIX + asId(conversationId))
-    if (!text) {
-      return []
-    }
-    const parsed = JSON.parse(text)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    // 缓存被写坏（旧版本结构、超配额截断）时直接丢弃，不能让聊天窗口打不开
-    return []
-  }
+/**
+ * 判断是否是「网络层」失败（断网、超时、后端没起）而不是业务拒绝。
+ * request.js 里传输层错误固定 code=-1 且无 traceId，业务错误两者都有。
+ * 只有网络层失败才进离线待发送队列 —— 敏感词/限流这类拒绝重试一万次也不会成功。
+ */
+function isNetworkError(error) {
+  return !!error && error.code === -1 && !error.traceId
+}
+
+/** 把变化过的消息写进本地库（fire-and-forget：门面内部已兜住异常，不阻塞渲染） */
+function cacheMessages(conversationId, list) {
+  dbUpsertMessages(conversationId, list)
 }
 
 export const useChatStore = defineStore('chat', {
@@ -113,7 +131,15 @@ export const useChatStore = defineStore('chat', {
     /** { [convId]: boolean } 正在拉历史，防止滚动触顶时并发重复请求 */
     loadingHistory: {},
     /** 离线消息是否已经拉过一次，重连时用它避免重复拉取 */
-    offlinePulled: false
+    offlinePulled: false,
+    /** 离线队列重提交进行中，防多处同时触发互相抢发包 */
+    flushing: false,
+    /**
+     * clientMsgId -> { clientMsgId, file, conversationId }：上传阶段失败的附件本地 File。
+     * 挂在 store 单例而不是组件里：切换会话再回来不至于丢掉没发出去的文件；
+     * 页面刷新会丢（浏览器没法找回 File 对象），那时手动重发会提示重新选择。
+     */
+    retryFiles: {}
   }),
 
   getters: {
@@ -132,10 +158,11 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
-     * 加载历史消息。
+     * 加载历史消息：本地优先，服务端兼容更早历史。
      *
-     * @param reset true 表示进入会话时的首次加载（取最新一页并与本地缓存合并），
-     *              false 表示向上滚动加载更早的一页
+     * @param reset true 表示进入会话：先把本地库最新一屏直接渲染出来（不等网络），
+     *              再拉服务端最新一页合并回写；false 表示向上滚动：优先读本地游标页，
+     *              本地凑不出整页才向服务端拉更早的一页并回写本地。
      */
     async loadHistory(conversationId, reset = false) {
       const key = this.bucket(conversationId)
@@ -144,25 +171,42 @@ export const useChatStore = defineStore('chat', {
       }
       this.loadingHistory[key] = true
       try {
-        const current = this.messages[key]
-        const beforeSeq = reset ? null : (current.length ? seqOf(current[0]) : null)
-        if (!reset && beforeSeq === null) {
-          this.hasMore[key] = false
-          return current
-        }
-        const page = (await messageApi.fetchHistory(conversationId, beforeSeq, PAGE_SIZE)) || []
-        const normalized = page.map((item) => normalizeMessage(item, false))
         if (reset) {
-          // 本地缓存与服务端这一页合并去重：缓存里可能有刚发出还没落库的本地消息，
-          // 也可能有上次会话看到的更早内容，两者都不能直接丢掉
-          this.messages[key] = dedupe([...readCache(conversationId).map((m) => normalizeMessage(m, m.self)), ...normalized])
+          if (!this.messages[key].length) {
+            const local = await dbLoadRecent(conversationId, LOCAL_LIMIT)
+            if (local.length) {
+              this.messages[key] = dedupe(local.map((m) => normalizeMessage(m, !!m.self)))
+            }
+          }
+          const page = (await messageApi.fetchHistory(conversationId, null, PAGE_SIZE)) || []
+          const normalized = page.map((item) => normalizeMessage(item, false))
+          // 本地缓存/刚发出的占位与服务端这一页合并去重，两者都不能直接丢
+          this.messages[key] = dedupe([...this.messages[key], ...normalized])
+          this.messages[key].sort(compareMessages)
           this.hasMore[key] = page.length >= PAGE_SIZE
+          cacheMessages(conversationId, normalized)
         } else {
-          this.messages[key] = dedupe([...normalized, ...current])
-          this.hasMore[key] = page.length >= PAGE_SIZE
+          const current = this.messages[key]
+          const beforeSeq = current.length ? seqOf(current[0]) : null
+          if (beforeSeq === null) {
+            this.hasMore[key] = false
+            return current
+          }
+          const localPage = (await dbLoadBefore(conversationId, beforeSeq, PAGE_SIZE)).map((m) => normalizeMessage(m, !!m.self))
+          if (localPage.length >= PAGE_SIZE) {
+            // 本地就凑得出整页，不发网络请求
+            this.messages[key] = dedupe([...localPage, ...current])
+            this.messages[key].sort(compareMessages)
+            this.hasMore[key] = true
+          } else {
+            const page = (await messageApi.fetchHistory(conversationId, beforeSeq, PAGE_SIZE)) || []
+            const normalized = page.map((item) => normalizeMessage(item, false))
+            this.messages[key] = dedupe([...normalized, ...localPage, ...current])
+            this.messages[key].sort(compareMessages)
+            this.hasMore[key] = page.length >= PAGE_SIZE
+            cacheMessages(conversationId, normalized)
+          }
         }
-        this.messages[key].sort(compareMessages)
-        persist(key, this.messages[key])
         return this.messages[key]
       } finally {
         this.loadingHistory[key] = false
@@ -188,12 +232,12 @@ export const useChatStore = defineStore('chat', {
         // 替换会让 Vue 认为是新对象，气泡会重放一次进入动画
         Object.assign(existing, message)
         list.sort(compareMessages)
-        persist(key, list)
+        dbUpsertMessage(conversationId, existing)
         return existing
       }
       list.push(message)
       list.sort(compareMessages)
-      persist(key, list)
+      dbUpsertMessage(conversationId, message)
       return message
     },
 
@@ -241,6 +285,20 @@ export const useChatStore = defineStore('chat', {
         return vo
       } catch (error) {
         this.markFailed(conversationId, id)
+        if (isNetworkError(error)) {
+          // 断网发送：写入本地待发送队列，网络恢复后 flushPending 自动重提交。
+          // 占位仍是 status=5，界面上看得到「没发出去」，队列成功后自然升级状态
+          dbEnqueuePending({
+            clientMsgId: id,
+            msgType,
+            content,
+            conversationId,
+            atAll,
+            atUserIds,
+            extra,
+            quoteMsgId: quoteMsgId || undefined
+          })
+        }
         throw error
       }
     },
@@ -254,9 +312,11 @@ export const useChatStore = defineStore('chat', {
      *
      * content 传文件 ID，服务端按文件记录回填元数据；width / height 服务端不回填，
      * 由调用方在上传前读出来放进 extra，否则缩略图会在加载完成的瞬间跳一下。
+     * clientMsgId 可传：上传阶段已经挂过占位气泡的，发送时要复用同一个 ID 就地升级，
+     * 而不是 dedupe 后并出两个气泡。
      */
-    sendAttachment(conversationId, { msgType, fileId, extra }) {
-      return this.send(conversationId, { msgType, content: String(fileId), extra: { ...extra, fileId } })
+    sendAttachment(conversationId, { msgType, fileId, extra, clientMsgId }) {
+      return this.send(conversationId, { msgType, content: String(fileId), extra: { ...extra, fileId }, clientMsgId })
     },
 
     markFailed(conversationId, clientMsgId) {
@@ -265,7 +325,60 @@ export const useChatStore = defineStore('chat', {
       if (target) {
         target.status = 5
         target.statusDesc = STATUS_TEXT[5]
-        persist(key, this.messages[key])
+        dbUpsertMessage(conversationId, target)
+      }
+    },
+
+    /** 附件上传阶段失败（断网）时暂存本地 File，供自动/手动重发直接复用 */
+    rememberRetryFile(clientMsgId, file, conversationId) {
+      this.retryFiles[asId(clientMsgId)] = { clientMsgId: asId(clientMsgId), file, conversationId: asId(conversationId) }
+    },
+
+    forgetRetryFile(clientMsgId) {
+      delete this.retryFiles[asId(clientMsgId)]
+    },
+
+    retryFileOf(clientMsgId) {
+      return this.retryFiles[asId(clientMsgId)] || null
+    },
+
+    /** 本会话里等待网络恢复自动补传的附件 */
+    pendingRetryFiles(conversationId) {
+      const convId = asId(conversationId)
+      return Object.values(this.retryFiles).filter((item) => item.conversationId === convId)
+    },
+
+    /**
+     * 重提交离线队列（上线/重连后由 ws dispatch 触发）。
+     *
+     * 按入队顺序（create_time）逐条重发：clientMsgId 是幂等键，服务端重复提交
+     * 返回首次结果，所以「服务端已收到但本地没收到回包」的半截状态也能收敛。
+     * 业务错误（非网络层）从队列移除：那种失败重试也不会成，失败占位留给用户手动处理。
+     */
+    async flushPending() {
+      if (this.flushing) {
+        return
+      }
+      this.flushing = true
+      try {
+        const list = await dbListPending()
+        for (const payload of list) {
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            break
+          }
+          try {
+            const vo = await messageApi.sendMessage(payload)
+            this.appendMessage(payload.conversationId, vo, true)
+            await dbRemovePending(payload.clientMsgId)
+          } catch (error) {
+            if (isNetworkError(error)) {
+              break
+            }
+            await dbRemovePending(payload.clientMsgId)
+          }
+        }
+      } finally {
+        this.flushing = false
       }
     },
 
@@ -290,6 +403,8 @@ export const useChatStore = defineStore('chat', {
           quoteMsgId: message.quoteMsgId || undefined
         })
         this.appendMessage(conversationId, vo, true)
+        // 手动重发成功就把离线队列里的同一条清掉（不在队列时删除也是空操作）
+        dbRemovePending(message.clientMsgId)
         return vo
       } catch (error) {
         this.markFailed(conversationId, message.clientMsgId)
@@ -301,7 +416,7 @@ export const useChatStore = defineStore('chat', {
     discard(conversationId, clientMsgId) {
       const key = this.bucket(conversationId)
       this.messages[key] = this.messages[key].filter((item) => !sameId(item.clientMsgId, clientMsgId))
-      persist(key, this.messages[key])
+      dbDiscardLocal(conversationId, clientMsgId)
     },
 
     /**
@@ -322,12 +437,29 @@ export const useChatStore = defineStore('chat', {
      * 本地找不到这个 clientMsgId 时说明消息是在自己的另一台设备上发的，
      * 当作新消息追加即可 —— 多端同步不需要额外协议。
      * 两种情形走的是同一条 appendMessage，去重逻辑会把「HTTP 响应先到」与「ack 先到」两种顺序都收敛成一条。
+     *
+     * 多端信息共享开关（设置 → 隐私与安全）：关闭时兄弟设备的镜像 ack 不实时上屏，
+     * 本机自己发起的发送（能匹配到本地占位）不受影响；历史拉取链路也不受控，
+     * 重新进入会话时那些消息仍然会出现 —— 开关管的是「实时共享」而不是「可见性」。
      */
     applyAck(clientMsgId, dto) {
       if (!dto) {
         return
       }
-      return this.appendMessage(dto.conversationId, { ...dto, clientMsgId: clientMsgId || dto.clientMsgId }, true)
+      const id = clientMsgId || dto.clientMsgId
+      if (!useSettingsStore().shareMultiDevice) {
+        const list = this.messages[this.bucket(dto.conversationId)]
+        const matched = list.some((item) => {
+          if (dto.messageId && sameId(item.messageId, dto.messageId)) {
+            return true
+          }
+          return !item.messageId && !!id && sameId(item.clientMsgId, id)
+        })
+        if (!matched) {
+          return null
+        }
+      }
+      return this.appendMessage(dto.conversationId, { ...dto, clientMsgId: id }, true)
     },
 
     applyIncoming(dto) {
@@ -349,7 +481,7 @@ export const useChatStore = defineStore('chat', {
         target.status = 4
         target.statusDesc = STATUS_TEXT[4]
         target.recallSummary = payload.summary || ''
-        persist(key, this.messages[key])
+        dbUpsertMessage(payload.conversationId, target)
       }
     },
 
@@ -364,7 +496,7 @@ export const useChatStore = defineStore('chat', {
         return
       }
       Object.keys(this.messages).forEach((key) => {
-        let changed = false
+        const changed = []
         this.messages[key].forEach((item) => {
           if (!item.self || item.recalled) {
             return
@@ -375,11 +507,12 @@ export const useChatStore = defineStore('chat', {
           if (Number(item.status) < level) {
             item.status = level
             item.statusDesc = STATUS_TEXT[level]
-            changed = true
+            changed.push(item)
           }
         })
-        if (changed) {
-          persist(key, this.messages[key])
+        if (changed.length) {
+          // 分桶键就是会话 ID 的字符串形式，直接当 conversationId 用
+          dbUpsertMessages(key, changed)
         }
       })
     },
@@ -401,7 +534,7 @@ export const useChatStore = defineStore('chat', {
       await messageApi.deleteMessage(messageId)
       const key = this.bucket(conversationId)
       this.messages[key] = this.messages[key].filter((item) => !sameId(item.messageId, messageId))
-      persist(key, this.messages[key])
+      dbDeleteMessage(conversationId, messageId)
     },
 
     /**
@@ -440,21 +573,17 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
-     * 清空某会话的本地消息与 localStorage 缓存。
+     * 清空某会话的本地消息与本地库缓存。
      *
-     * <p>服务端「清空聊天记录」后必须调用：loadHistory(reset=true) 会把 readCache 的
-     * 本地缓存与服务端结果合并，不清缓存的话刚清掉的消息会从 localStorage 复活。
+     * <p>服务端「清空聊天记录」后必须调用：loadHistory(reset=true) 会把本地库的
+     * 缓存与服务端结果合并，不清缓存的话刚清掉的消息会从本地库复活。
      */
     clearConversation(conversationId) {
       const key = asId(conversationId)
       delete this.messages[key]
       delete this.hasMore[key]
       delete this.loadingHistory[key]
-      try {
-        localStorage.removeItem(CACHE_PREFIX + key)
-      } catch {
-        // 隐私模式等忽略，缓存只是优化项
-      }
+      dbClearConversation(conversationId)
     },
 
     /** 切换账号或退出时清空，避免把上一个人的聊天记录留给下一个登录者 */
@@ -463,6 +592,8 @@ export const useChatStore = defineStore('chat', {
       this.hasMore = {}
       this.loadingHistory = {}
       this.offlinePulled = false
+      // 先落盘再断开当前用户的库：账号切换必须释放旧连接（防句柄泄漏/读写错乱）
+      closeLocalDb()
     }
   }
 })
@@ -507,18 +638,4 @@ function dedupe(list) {
     result.push(item)
   })
   return result
-}
-
-function persist(key, list) {
-  if (!list || list.length === 0) {
-    return
-  }
-  try {
-    // 只缓存最近的若干条：全量写会很快撞上 localStorage 的配额，
-    // 而用户回看很久以前的消息本来就要走历史接口
-    const tail = list.slice(-CACHE_LIMIT)
-    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(tail))
-  } catch {
-    // 配额满或隐私模式禁用了存储，缓存只是优化项，写不进去不影响功能
-  }
 }

@@ -13,7 +13,9 @@ import http from './request'
  * 否则气泡里的缩略图只能靠加载完后重算，列表滚动时会跳动。
  */
 export function sendMessage(data) {
-  return http.post('/message/send', data)
+  // silent：失败不走全局 toast，由调用方在气泡上标红叹号 + 离线队列自动重发；
+  // 业务类拒绝（敏感词/限流）的提示文案由 ChatWindow 的 catch 统一补弹
+  return http.post('/message/send', data, { silent: true })
 }
 
 /**
@@ -91,4 +93,18 @@ export function searchMessages(params) {
  */
 export function forwardMessage(data) {
   return http.post('/message/forward', data)
+}
+
+/**
+ * 服务端全局敏感词过滤开关（高级设置-调试入口）。
+ *
+ * 状态是后端内存里的：关闭后全服文本与文件名都停止遮蔽，立即生效不需重启；
+ * 重启后回到配置文件 im.message.sensitive-filter-enabled 的值。
+ */
+export function fetchSensitiveFilter() {
+  return http.get('/message/sensitive-filter', { silent: true })
+}
+
+export function setSensitiveFilter(enabled) {
+  return http.put('/message/sensitive-filter', null, { params: { enabled }, silent: true })
 }

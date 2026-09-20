@@ -21,6 +21,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "localdb.js",
       "dist/**/*"
     ],
     "extraResources": [
@@ -52,5 +53,8 @@
   "devDependencies": {
     "electron": "37.10.3",
     "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0"
   }
 }

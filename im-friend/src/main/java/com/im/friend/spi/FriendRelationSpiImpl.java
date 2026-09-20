@@ -1,5 +1,7 @@
 package com.im.friend.spi;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.im.common.enums.FriendStatus;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.util.TextUtil;
 import com.im.friend.entity.Friend;
@@ -51,6 +53,19 @@ public class FriendRelationSpiImpl implements FriendRelationSpi {
             return false;
         }
         return friendMapper.selectBothDirections(a, b).stream().anyMatch(Friend::isBlocked);
+    }
+
+    @Override
+    public void unblockSilently(Long a, Long b) {
+        if (isInvalidPair(a, b)) {
+            return;
+        }
+        // 把「查了再改」压成一条条件更新：status 不是拉黑态时自然不命中，无需先读也不能报错
+        friendMapper.update(null, Wrappers.<Friend>lambdaUpdate()
+                .set(Friend::getStatus, FriendStatus.NORMAL.getCode())
+                .eq(Friend::getUserId, a)
+                .eq(Friend::getFriendId, b)
+                .eq(Friend::getStatus, FriendStatus.BLOCKED.getCode()));
     }
 
     @Override

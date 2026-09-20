@@ -92,7 +92,9 @@ http.interceptors.response.use(
   (response) => {
     const body = response.data
     if (!isResultBody(body)) {
-      return body
+      // 二进制响应：默认透传 Blob 本体；媒体缓存需要读 ETag 响应头，
+      // 这类调用方声明 withResponse 后拿完整 response（304 也必须能从 status 区分出来）
+      return response.config.withResponse ? response : body
     }
     if (body.code === 200) {
       return body.data
@@ -150,6 +152,45 @@ export async function fetchBlob(url, config = {}) {
     throw new ApiError(body.code ?? -1, body.message || '文件获取失败', body.traceId)
   }
   return blob
+}
+
+/**
+ * 带元信息的二进制下载：支持条件请求，用于媒体缓存的 ETag 失效策略。
+ *
+ * 返回 { notModified, etag, blob }：
+ *  - 传了 ifNoneMatch 且服务端确认未变更 → { notModified: true, etag }（不发字节体，省流量）；
+ *  - 正常拿到内容 → { notModified: false, etag, blob }，调用方据此写入/刷新本地缓存。
+ * 后端失败时同样是 HTTP 200 + JSON 错误体，沿用 fetchBlob 的 Content-Type 判别逻辑。
+ */
+export async function fetchBlobMeta(url, { ifNoneMatch, baseURL = '' } = {}) {
+  const response = await http.get(url, {
+    baseURL,
+    responseType: 'blob',
+    silent: true,
+    withResponse: true,
+    headers: ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : undefined,
+    // 304 是协商缓存命中的正常结果，不能让 axios 当错误抛
+    validateStatus: (status) => (status >= 200 && status < 300) || status === 304
+  })
+  const etag = response.headers && (response.headers.etag || response.headers.ETag)
+  if (response.status === 304) {
+    return { notModified: true, etag: etag || ifNoneMatch, blob: null }
+  }
+  const blob = response.data instanceof Blob ? response.data : new Blob([response.data])
+  if (blob.type && blob.type.includes('application/json')) {
+    const text = await blob.text()
+    let body = {}
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return { notModified: false, etag, blob }
+    }
+    if (body.code === CODE_UNAUTHORIZED || body.code === CODE_KICKED_OUT) {
+      toLogin(body.message)
+    }
+    throw new ApiError(body.code ?? -1, body.message || '文件获取失败', body.traceId)
+  }
+  return { notModified: false, etag, blob }
 }
 
 export default http

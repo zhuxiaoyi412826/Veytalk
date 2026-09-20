@@ -27,6 +27,9 @@ export function uploadFile(file, bizType, duration, onProgress) {
     // 手写一个不带 boundary 的 'multipart/form-data' 会让服务端无法切分请求体。
     // axios 在浏览器环境下遇到 FormData 会主动清掉该头，不写反而最稳。
     timeout: 120000,
+    // silent：上传链路的失败由 ChatWindow 的占位气泡/重发机制呈现，
+    // 断网时不再弹「无法连接服务器」的全局 toast
+    silent: true,
     onUploadProgress: (event) => {
       if (onProgress && event.total) {
         onProgress(Math.round((event.loaded * 100) / event.total))
@@ -71,7 +74,7 @@ const CHUNK_RETRIES = 2
 
 /** 初始化一次分片上传：上报整文件 MD5，可能直接秒传命中 */
 export function initChunkUpload(payload) {
-  return http.post('/file/upload/init', payload, { timeout: 30000 })
+  return http.post('/file/upload/init', payload, { timeout: 30000, silent: true })
 }
 
 /** 上传单个分片。uploadId / chunkIndex 走 query，分片体走 multipart 的 chunk 字段 */
@@ -80,14 +83,15 @@ export function uploadChunk(uploadId, chunkIndex, blob) {
   form.append('chunk', blob, `chunk-${chunkIndex}`)
   return http.post('/file/upload/chunk', form, {
     params: { uploadId, chunkIndex },
-    // 同 uploadFile：不手写 Content-Type，boundary 交给浏览器
-    timeout: 120000
+    // 同 uploadFile：不手写 Content-Type，boundary 交给浏览器；silent 同理交给占位气泡呈现
+    timeout: 120000,
+    silent: true
   })
 }
 
 /** 通知服务端合并分片并落库，返回最终的 FileVO */
 export function mergeChunkUpload(uploadId) {
-  return http.post('/file/upload/merge', null, { params: { uploadId }, timeout: 300000 })
+  return http.post('/file/upload/merge', null, { params: { uploadId }, timeout: 300000, silent: true })
 }
 
 /**

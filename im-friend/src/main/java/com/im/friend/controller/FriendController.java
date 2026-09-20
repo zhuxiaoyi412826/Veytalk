@@ -51,6 +51,12 @@ public class FriendController {
         return Result.ok(friendService.listGroups(SecurityUtil.getUserId()));
     }
 
+    @Operation(summary = "黑名单列表", description = "我拉黑的全部好友，存服务端因此多端同步；供集中查看与一键移出")
+    @GetMapping("/blacklist")
+    public Result<List<FriendVO>> blacklist() {
+        return Result.ok(friendService.blacklist(SecurityUtil.getUserId()));
+    }
+
     @Operation(summary = "好友资料卡片", description = "好友视角，带备注与拉黑状态；非好友返回 3001")
     @GetMapping("/{friendId}/card")
     public Result<FriendVO> card(@Parameter(description = "好友用户 ID") @PathVariable("friendId") Long friendId) {
