@@ -1,11 +1,13 @@
 package com.im.websocket.dispatch;
 
 import com.im.common.api.ResultCode;
+import com.im.common.config.ImProperties;
 import com.im.common.domain.MessageSendCmd;
 import com.im.common.domain.WsPacket;
 import com.im.common.enums.MsgType;
 import com.im.common.enums.WsMessageType;
 import com.im.common.exception.BusinessException;
+import com.im.common.security.ratelimit.RateLimiter;
 import com.im.common.spi.MessageSpi;
 import com.im.common.util.JsonUtil;
 import com.im.common.util.TextUtil;
@@ -41,6 +43,8 @@ public class WsInboundDispatcher {
     private final WsPresenceService presenceService;
     private final WsSessionManager sessionManager;
     private final JsonUtil jsonUtil;
+    private final RateLimiter rateLimiter;
+    private final ImProperties imProperties;
 
     /**
      * 消息模块是可选协作方：未装配时 WebSocket 仍然可以维持连接、心跳与在线状态，
@@ -139,6 +143,15 @@ public class WsInboundDispatcher {
             // 系统通知在客户端渲染成居中的灰字，且不做好友关系校验。
             // 允许客户端自选这个类型，等于允许任何人往任意会话里插一条看起来像官方通知的消息
             throw new BusinessException(ResultCode.BAD_REQUEST, "系统通知消息只能由服务端产生");
+        }
+
+        // 发消息频率限制：长连接不走 HTTP 拦截器，在这里补上同一道护栏，
+        // 否则脚本绕开 REST 直接从 WS 通道无限刷消息。超限抛业务异常，
+        // 由 dispatch 翻译成 error 帧回给客户端，不断连接
+        ImProperties.RateLimiting limit = imProperties.getRateLimit();
+        if (limit.isEnabled() && !rateLimiter.tryAcquire("ws.chat", String.valueOf(connection.userId()),
+                limit.getWsChatCount(), limit.getWsChatSeconds())) {
+            throw new BusinessException(ResultCode.TOO_MANY_REQUESTS);
         }
 
         MessageSendCmd cmd = MessageSendCmd.builder()

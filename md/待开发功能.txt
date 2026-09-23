@@ -24,13 +24,17 @@
 - NAT 穿透 fallback：P2P 优先，P2P 不通走服务端中继；中继带宽限流。
 - 被控端状态：离线、忙、拒绝接入。
 
-3. 安全防护功能
-1. XSS/CSRF 防护：聊天消息渲染转义，防止 XSS；接口 CSRF Token。
-2. 接口鉴权：所有 API 统一鉴权，防止越权访问别人视频、消息、文件。
-3. 限流：登录接口、上传接口、消息发送接口、远程控制接口，全接口限流防刷
+3. 安全防护功能（已完成，见 md/安全防护功能测试文档.md）
+1. XSS/CSRF 防护：聊天消息渲染转义，防止 XSS；接口 CSRF Token。✔ 渲染层插值转义 + 安全响应头；凭证 header-only（is-read-cookie:false）从机制上消除 CSRF
+2. 接口鉴权：所有 API 统一鉴权，防止越权访问别人视频、消息、文件。✔ Sa-Token 全局拦截 + 会话成员/文件访问权逐项校验
+3. 限流：登录接口、上传接口、消息发送接口、远程控制接口，全接口限流防刷。✔ @RateLimit 注解 + Redis 计数 + 全局按 IP 兜底 + WS 通道限流（远程控制接口尚未开发，开发时标注解即可纳入）
 
-4. AI-RAG
-你现在是后端/全栈高级面试官，基于上面【IM文件协作平台】知识库进行面试。
+4. AI-RAG（已完成：左侧控制栏「面试」入口 → 后端 Java 全栈面试页面）
+✔ 新增 im-ai 模块：知识库 RAG（BM25 检索，目录 D:/资料/知识库/面试官 可配置 im.ai.knowledge-dir，增删改文件自动重建索引无需重启）
+✔ 模型接入：阿里云百炼 DashScope compatible-mode（OpenAI 协议，JDK HttpClient 直连 SSE 流式），配置在 spring.ai.openai（base-url/api-key=ALI_BABA_API_KEY/model=AI_MODEL_NAME 默认 qwen-flash/temperature 0.7/timeout 60s）
+✔ 预设模板已改为「后端 Java 全栈面试」（InterviewService.INTERVIEWER_PERSONA）：考察 Java/JVM、并发、Spring、MySQL、Redis、分布式、安全与全栈协作；下面这段规则保留作方法论参考（循序渐进/每次只提1问/追问薄弱点/不直接给答案/打分总结），模板调整以代码里的系统提示词为准
+✔ 接口：POST /api/ai/interview/chat（SSE 流式，限流 20 次/分/用户）、GET /api/ai/interview/status（知识库/模型概况）；无数据库变更，重启后端即生效
+你现在是后端/全栈高级面试官，基于上面知识库进行面试。
 规则：
 1. 你只能基于知识库内容提问，不要凭空增加需求；可以深挖候选人给出方案里的漏洞。
 2. 面试采用循序渐进方式：先让候选人做整体架构设计，然后分模块深挖，每次只提1个问题，不要一次性抛出一堆问题。
@@ -45,9 +49,9 @@
     阶段4：异常场景、安全风险、性能瓶颈、灾备。
 8. 面试结束后，可以对候选人整体方案打分并总结。
 
+5. AI-RAG  腾讯TRTC
 
-
-
+6.实现缓存功能 前端缓存 后端缓存
 
 
 

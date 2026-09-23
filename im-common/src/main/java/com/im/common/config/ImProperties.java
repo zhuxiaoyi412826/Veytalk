@@ -22,6 +22,7 @@ public class ImProperties {
     private Websocket websocket = new Websocket();
     private Cors cors = new Cors();
     private Captcha captcha = new Captcha();
+    private RateLimiting rateLimit = new RateLimiting();
 
     @Data
     public static class Jwt {
@@ -213,5 +214,27 @@ public class ImProperties {
         private boolean imageRequired = true;
         /** 是否在响应中回显图形验证码答案，仅开发环境联调使用 */
         private boolean exposeImageCode = false;
+    }
+
+    /**
+     * 接口限流。端点级配额由 {@code @RateLimit} 注解声明，
+     * 这里只配总开关、全局按 IP 兜底与 WebSocket 发消息频率。
+     */
+    @Data
+    public static class RateLimiting {
+        /** 总开关：关掉后注解配额与全局兜底全部失效，仅供排障时临时使用 */
+        private boolean enabled = true;
+        /**
+         * 全局兜底：单 IP 在一个窗口内允许的最大请求数，覆盖所有未标注解的接口。
+         *
+         * <p>默认 300 次/10 秒（约 30 QPS/IP）：正常前端会话列表+历史分页+媒体拉取
+         * 的峰值远低于这个值，而脚本刷接口会在几秒内撞上它。
+         * 内网多人共用出口 IP 部署时需按人数上调。
+         */
+        private int globalCount = 300;
+        private int globalSeconds = 10;
+        /** WebSocket 通道单用户发消息频率：超限回 error 帧（code=1010），不断连接 */
+        private int wsChatCount = 60;
+        private int wsChatSeconds = 60;
     }
 }

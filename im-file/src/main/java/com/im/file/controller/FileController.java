@@ -8,6 +8,7 @@ import com.im.common.config.ImProperties;
 import com.im.common.constant.ImConstants;
 import com.im.common.domain.UploadCmd;
 import com.im.common.exception.BusinessException;
+import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.common.util.TextUtil;
 import com.im.file.convert.FileConvert;
@@ -53,6 +54,10 @@ import java.nio.charset.StandardCharsets;
  * 而本项目又关掉了 Sa-Token 的 Cookie 读取来规避 CSRF，于是图片只能靠 URL 上的短时票据认证。
  * 其余端点逐个标注 {@code @SaCheckLogin}，认证要求写在每个方法上而不是靠类级默认值兜底。
  *
+ * <p>上传类端点全部标了按用户的 {@code @RateLimit}：上传是全站写磁盘/对象存储成本最高的操作，
+ * 不限频的话一个登录用户就能用脚本把存储刷爆。分片端点配额单独放宽：
+ * 2GB 文件按 5MB 切片就有 400 个分片，配额必须容得下一次完整的大文件上传。
+ *
  * <p>下载之所以直接写 {@link HttpServletResponse} 而不是返回 {@code ResponseEntity<Resource>}：
  * 流的关闭必须自己握着。鉴权全部发生在写第一个字节之前，因此失败时响应还没提交，
  * 全局异常处理器照样能返回标准的 JSON 错误体。
@@ -72,6 +77,7 @@ public class FileController {
     @Operation(summary = "上传文件", description = "bizType 可选 avatar / chat_image / chat_file / chat_voice，缺省按 chat_file 处理")
     @SaCheckLogin
     @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @RateLimit(count = 30, dimension = RateLimit.Dimension.USER, key = "file.upload")
     @PostMapping("/upload")
     public Result<FileVO> upload(@RequestPart("file") MultipartFile file,
                                  @Parameter(description = "业务类型") @RequestParam(value = "bizType", required = false) String bizType,
@@ -83,6 +89,7 @@ public class FileController {
 
     @Operation(summary = "上传头像", description = "上传成功后同步写入当前用户的资料，无需再调一次修改资料接口")
     @SaCheckLogin
+    @RateLimit(count = 10, dimension = RateLimit.Dimension.USER, key = "file.avatar")
     @PostMapping("/avatar")
     public Result<FileVO> avatar(@RequestPart("file") MultipartFile file) {
         Long userId = SecurityUtil.getUserId();
@@ -93,6 +100,7 @@ public class FileController {
     @Operation(summary = "分片上传初始化", description = "上报整文件 MD5：命中秒传直接返回文件信息（uploaded=true），否则下发分片大小与会话 ID 用于断点续传")
     @SaCheckLogin
     @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @RateLimit(count = 30, dimension = RateLimit.Dimension.USER, key = "file.upload.init")
     @PostMapping("/upload/init")
     public Result<UploadInitVO> initUpload(@Valid @RequestBody UploadInitReq req) {
         return Result.ok(chunkUploadService.init(SecurityUtil.getUserId(), req));
@@ -101,6 +109,7 @@ public class FileController {
     @Operation(summary = "上传分片", description = "逐片上传，重复投递同一分片幂等；返回服务端当前已收到的分片下标")
     @SaCheckLogin
     @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @RateLimit(count = 1200, dimension = RateLimit.Dimension.USER, key = "file.upload.chunk")
     @PostMapping("/upload/chunk")
     public Result<UploadChunkVO> uploadChunk(@Parameter(description = "init 下发的会话 ID") @RequestParam("uploadId") String uploadId,
                                              @Parameter(description = "分片下标，从 0 开始") @RequestParam("chunkIndex") int chunkIndex,
@@ -111,6 +120,7 @@ public class FileController {
     @Operation(summary = "合并分片", description = "全部分片到位后合并落库，服务端重算 MD5 与大小并核对，成功后返回文件信息")
     @SaCheckLogin
     @SaCheckPermission(ImConstants.PERM_FILE_UPLOAD)
+    @RateLimit(count = 30, dimension = RateLimit.Dimension.USER, key = "file.upload.merge")
     @PostMapping("/upload/merge")
     public Result<FileVO> mergeUpload(@Parameter(description = "init 下发的会话 ID") @RequestParam("uploadId") String uploadId) {
         Long userId = SecurityUtil.getUserId();

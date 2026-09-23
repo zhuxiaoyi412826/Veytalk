@@ -18,6 +18,7 @@ public enum ResultCode {
     SYSTEM_ERROR(1007, "系统繁忙，请稍后重试"),
     VALIDATE_FAILED(1008, "参数校验失败：{}"),
     UPLOAD_TOO_LARGE(1009, "上传内容超过大小限制"),
+    TOO_MANY_REQUESTS(1010, "操作过于频繁，请稍后再试"),
 
     /* ==================== 2xxx 用户 ==================== */
     USER_NOT_FOUND(2001, "用户不存在"),

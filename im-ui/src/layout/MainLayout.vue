@@ -62,7 +62,7 @@
 import { computed, onBeforeMount, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Bell, ChatDotRound, Setting, SwitchButton, User } from '@element-plus/icons-vue'
+import { ChatDotRound, Microphone, Setting, SwitchButton, User } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
@@ -84,14 +84,16 @@ const chat = useChatStore()
 /**
  * 导航项。
  *
- * 「申请」单独占一项而不是塞进好友页：它是唯一需要用户及时处理的东西，
- * 藏一层会让红点失去意义。
+ * 「申请」不再占独立导航项：好友页顶部已有带红点的「申请」入口，
+ * 侧边栏再放一个是重复占用宝贵的一格位置（尤其窄屏底栏）。
+ * 待处理红点由好友页内那个入口承接。
  * badge 用 computed 求值，保持响应式。
  */
 const navItems = computed(() => [
   { name: 'chat', label: '消息', icon: ChatDotRound, badge: conversation.totalUnread, match: 'chat' },
   { name: 'friends', label: '好友', icon: User, badge: 0, match: 'friends' },
-  { name: 'friend-requests', label: '申请', icon: Bell, badge: friend.pendingCount, match: 'friend-requests' },
+  // 后端 Java 全栈面试：基于知识库 RAG 的模拟面试，无未读概念，badge 恒为 0
+  { name: 'interview', label: '面试', icon: Microphone, badge: 0, match: 'interview' },
   // 齿轮图标不变，但入口由「我的（个人信息）」改为「设置（全局页面设置）」；
   // 个人信息仍由顶部头像进入，窄屏下头像隐藏时改由设置页内的入口兼顾
   { name: 'settings', label: '设置', icon: Setting, badge: 0, match: 'settings' }

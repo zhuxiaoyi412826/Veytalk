@@ -6,6 +6,7 @@ import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.sensitive.SensitiveWordFilter;
+import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageIdsRequest;
@@ -78,6 +79,7 @@ public class MessageController {
                     + "附件类消息的 content 传文件 ID，服务端会按文件记录回填元数据")
     @PostMapping("/send")
     @SaCheckPermission(ImConstants.PERM_MESSAGE_SEND)
+    @RateLimit(count = 120, dimension = RateLimit.Dimension.USER, key = "message.send")
     public Result<MessageVO> send(@RequestBody @Valid SendMessageRequest request) {
         return Result.ok(messageService.sendForView(SecurityUtil.getUserId(), request));
     }

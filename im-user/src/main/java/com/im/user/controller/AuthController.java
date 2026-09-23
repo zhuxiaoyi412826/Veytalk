@@ -2,6 +2,7 @@ package com.im.user.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.im.common.api.Result;
+import com.im.common.security.ratelimit.RateLimit;
 import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
@@ -26,6 +27,9 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code SaTokenConfigure} 的路由白名单中放行；{@code logout} / {@code refresh} / {@code me}
  * 同属 {@code /api/auth}，但通过 {@link SaCheckLogin} 注解要求登录态——
  * 这也是「白名单只放在 SaRouter 层、不放在 Spring MVC 拦截器排除列表」的原因。
+ *
+ * <p>四个匿名入口全部标了按 IP 的 {@code @RateLimit}：此时还没有可信的用户身份，
+ * 只能按来源地址限。登录另有图形验证码闸门，限流拦的是「绕过页面直接刷接口」的脚本。
  */
 @Tag(name = "01-认证", description = "注册、登录、注销与续签")
 @RestController
@@ -36,24 +40,28 @@ public class AuthController {
     private final AuthService authService;
 
     @Operation(summary = "注册", description = "注册成功后直接返回登录态，前端无需再次登录")
+    @RateLimit(count = 5, key = "auth.register")
     @PostMapping("/register")
     public Result<LoginVO> register(@RequestBody @Valid RegisterRequest request) {
         return Result.ok(authService.register(request), "注册成功");
     }
 
     @Operation(summary = "账号密码登录", description = "loginType 为 phone 时 account 传手机号，否则传账号")
+    @RateLimit(count = 10, key = "auth.login")
     @PostMapping("/login")
     public Result<LoginVO> login(@RequestBody @Valid LoginRequest request) {
         return Result.ok(authService.login(request), "登录成功");
     }
 
     @Operation(summary = "短信验证码登录", description = "手机号未注册时自动建号后登录")
+    @RateLimit(count = 10, key = "auth.login.sms")
     @PostMapping("/login/sms")
     public Result<LoginVO> loginBySms(@RequestBody @Valid SmsLoginRequest request) {
         return Result.ok(authService.loginBySms(request), "登录成功");
     }
 
     @Operation(summary = "邮箱验证码登录", description = "邮箱未注册时自动建号后登录")
+    @RateLimit(count = 10, key = "auth.login.email")
     @PostMapping("/login/email")
     public Result<LoginVO> loginByEmail(@RequestBody @Valid EmailLoginRequest request) {
         return Result.ok(authService.loginByEmail(request), "登录成功");

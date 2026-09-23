@@ -27,6 +27,7 @@
         <module>im-group</module>
         <module>im-file</module>
         <module>im-websocket</module>
+        <module>im-ai</module>
         <module>im-bootstrap</module>
     </modules>
 
@@ -113,6 +114,11 @@
             <dependency>
                 <groupId>com.im</groupId>
                 <artifactId>im-websocket</artifactId>
+                <version>${im.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.im</groupId>
+                <artifactId>im-ai</artifactId>
                 <version>${im.version}</version>
             </dependency>
 

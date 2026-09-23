@@ -58,6 +58,12 @@ const routes = [
         meta: { title: '设置' }
       },
       {
+        path: 'interview',
+        name: 'interview',
+        component: () => import('@/views/Interview.vue'),
+        meta: { title: '后端 Java 全栈面试' }
+      },
+      {
         path: 'user/:id',
         name: 'user-profile',
         component: () => import('@/views/UserProfile.vue'),

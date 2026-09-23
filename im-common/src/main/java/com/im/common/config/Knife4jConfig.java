@@ -88,6 +88,11 @@ public class Knife4jConfig {
         return build("07-实时推送", "/api/ws/**");
     }
 
+    @Bean
+    public GroupedOpenApi aiApi() {
+        return build("08-后端 Java 全栈面试", "/api/ai/**");
+    }
+
     /**
      * 按路径前缀分组，而不是按包名。
      *

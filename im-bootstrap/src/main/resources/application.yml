@@ -139,6 +139,25 @@ spring:
         debug: false
     test-connection: false
 
+  # ---------------------------------------------------------------------------
+  # AI 面试官（阿里云百炼 DashScope，OpenAI 兼容协议）
+  #
+  # 消费方是 im-ai 模块的 AiProperties（未引入 Spring AI 依赖，配置坐标保持
+  # spring.ai.openai 的写法，将来切真 Spring AI 时 yml 不用改）。
+  # ALI_BABA_API_KEY 未设置时面试接口返回明确的「API Key 未配置」错误，
+  # 不影响其余功能启动与使用。
+  # ---------------------------------------------------------------------------
+  ai:
+    openai:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      api-key: ${ALI_BABA_API_KEY:}
+      chat:
+        options:
+          # 模型名称可配置（百炼模型名，例如 qwen-flash / qwen-plus / qwen-max）
+          model: ${AI_MODEL_NAME:qwen-flash}
+          temperature: 0.7
+          timeout: 60s
+
 server:
   port: ${SERVER_PORT:8080}
   servlet:
@@ -279,6 +298,18 @@ im:
     # 切换后老密码仍然能校验（hash 自带算法标识），新密码按新算法写入。
     password-encoder: argon2
 
+  # 接口限流：端点级配额写在 @RateLimit 注解里（登录/验证码/上传/发消息），
+  # 这里只配总开关与全局按 IP 兜底。计数器优先落 Redis（多实例共享配额），
+  # Redis 不可用时退化为进程内计数（fail-open，限流是护栏不是闸门）。
+  rate-limit:
+    enabled: true
+    # 单 IP 全局兜底：300 次/10 秒。内网多人共用出口 IP 部署时需按人数上调
+    global-count: 300
+    global-seconds: 10
+    # WebSocket 通道单用户发消息频率：超限回 error 帧（code=1010），不断连接
+    ws-chat-count: 60
+    ws-chat-seconds: 60
+
   file:
     # local | minio。默认 local，没装 MinIO 也能跑通全部功能；
     # 改这一行即可切到 MinIO，无需改代码。
@@ -382,6 +413,22 @@ im:
     expose-image-code: false
     expose-email-code: false
     image-required: true
+
+  # AI 面试官（im-ai 模块 ImAiProperties）：模型接入参数在上面的 spring.ai.openai，
+  # 这里只管知识库与对话策略。
+  ai:
+    enabled: true
+    # 知识库目录，递归扫描 .md/.txt；目录内容增删改后自动重建索引（无需重启）。
+    # Windows 路径用正斜杠写法，避免 yml 转义问题。
+    knowledge-dir: ${IM_AI_KNOWLEDGE_DIR:D:/资料/知识库/面试官}
+    # 每轮注入提示词的知识片段条数与总字符上限
+    retrieve-top-k: 4
+    max-knowledge-chars: 6000
+    # 发送给模型的历史消息条数上限与单条长度上限（防御性裁剪）
+    max-history: 30
+    max-message-chars: 4000
+    # 目录重扫最小间隔（秒）
+    rescan-interval-seconds: 30
 
 # ==============================================================================
 # 日志
