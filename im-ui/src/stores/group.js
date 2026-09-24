@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import * as groupApi from '@/api/group'
+import { getCache, removeCache, setCache } from '@/utils/localCache'
 import { sameId } from '@/utils/id'
 
 /**
@@ -8,7 +9,13 @@ import { sameId } from '@/utils/id'
  * 群列表按入群时间倒序（后端已排好），成员列表分页加载。
  * 群详情（含 myRole / myMuted 等视角字段）不能跨用户缓存，
  * 但同一用户在同一次登录内可以放心使用。
+ *
+ * 我的群列表与好友列表同理，初始值从 localStorage 快照恢复，
+ * 后台接口返回后覆盖并写回；快照只负责首屏提速，不负责准确。
  */
+
+/** 群列表的 localStorage 快照键 */
+const SNAPSHOT_MY_GROUPS = 'group:my-list'
 
 /** 群角色常量，与后端 GroupMember.role 对齐 */
 export const ROLE_OWNER = 1
@@ -26,8 +33,8 @@ export function roleDesc(role) {
 
 export const useGroupStore = defineStore('group', {
   state: () => ({
-    /** 我的群聊列表 */
-    myGroups: [],
+    /** 我的群聊列表（初始值来自上次会话的快照） */
+    myGroups: getCache(SNAPSHOT_MY_GROUPS) || [],
     loading: false,
     /** 当前正在查看的群详情（GroupVO） */
     currentGroup: null,
@@ -48,6 +55,7 @@ export const useGroupStore = defineStore('group', {
       this.loading = true
       try {
         this.myGroups = (await groupApi.fetchMyGroups()) || []
+        setCache(SNAPSHOT_MY_GROUPS, this.myGroups)
       } finally {
         this.loading = false
       }
@@ -194,6 +202,8 @@ export const useGroupStore = defineStore('group', {
       this.members = []
       this.membersTotal = 0
       this.membersLoading = false
+      // 与 friend store 同样：退出登录清快照，防止换账号后首屏看到上一个人的群列表
+      removeCache(SNAPSHOT_MY_GROUPS)
     }
   }
 })

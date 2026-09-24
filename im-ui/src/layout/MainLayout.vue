@@ -62,7 +62,7 @@
 import { computed, onBeforeMount, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ChatDotRound, Microphone, Setting, SwitchButton, User } from '@element-plus/icons-vue'
+import { ChatDotRound, Microphone, Monitor, Setting, SwitchButton, User } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
@@ -94,6 +94,8 @@ const navItems = computed(() => [
   { name: 'friends', label: '好友', icon: User, badge: 0, match: 'friends' },
   // 后端 Java 全栈面试：基于知识库 RAG 的模拟面试，无未读概念，badge 恒为 0
   { name: 'interview', label: '面试', icon: Microphone, badge: 0, match: 'interview' },
+  // 远程控制：被控设备清单与远程会话入口，同样无未读概念
+  { name: 'remote', label: '远程', icon: Monitor, badge: 0, match: 'remote' },
   // 齿轮图标不变，但入口由「我的（个人信息）」改为「设置（全局页面设置）」；
   // 个人信息仍由顶部头像进入，窄屏下头像隐藏时改由设置页内的入口兼顾
   { name: 'settings', label: '设置', icon: Setting, badge: 0, match: 'settings' }

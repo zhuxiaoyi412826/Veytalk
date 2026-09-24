@@ -29,6 +29,19 @@
         "from": "bin",
         "to": "ffmpeg",
         "filter": ["**/*"]
+      },
+      {
+        "from": "../im-remote-agent/target/im-remote-agent-jar-with-dependencies.jar",
+        "to": "agent/im-remote-agent.jar"
+      },
+      {
+        "from": "jre",
+        "to": "jre",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "launch/启动被控端.bat",
+        "to": "启动被控端.bat"
       }
     ],
     "win": {

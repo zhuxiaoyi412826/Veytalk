@@ -1,13 +1,17 @@
 # IM 即时通讯系统
 
 基于 **Spring Boot 4 + JDK 21** 的多模块即时通讯后端，配套 **Vue 3** 前端。
-后端 9 个 Maven 模块最终打成**一个可执行 jar**（`im-bootstrap/target/im-server.jar`）；
+后端 11 个 Maven 模块最终打成**一个可执行 jar**（`im-bootstrap/target/im-server.jar`）；
+被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上，不打进后端；
 前端是独立工程，通过 Vite 代理与后端通信，不参与 Maven 构建。
 
 功能覆盖：注册登录（图形/短信验证码）、JWT 鉴权与 RBAC 权限、好友申请与管理、
 单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
 文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB）、
-WebSocket 实时推送（心跳/重连/多端踢下线）；前端另可用 **Electron 打包为 Windows 桌面客户端**。
+WebSocket 实时推送（心跳/重连/多端踢下线）、
+**远程桌面控制**（服务端中继 + AES-GCM 端到端加密 + 识别码跨账号，见「十二」）、
+**AI 面试官**（本地知识库 BM25 RAG + SSE 流式，见「十三」）；
+前端另可用 **Electron 打包为 Windows 桌面客户端**（安装包内置被控端 Agent 与裁剪 JRE）。
 
 > 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
 
@@ -49,7 +53,10 @@ im-parent (pom)
 ├── im-group         群组管理：建群、改群、成员管理、群主/管理员权限、禁言、@提醒、解散
 ├── im-file          文件存储：图片/文件/语音上传、访问鉴权、元数据保存（MinIO + 本地双实现）
 ├── im-websocket     实时推送：连接管理、心跳、断线重连、消息路由分发、多端踢下线
+├── im-ai            AI 面试官：知识库 BM25 检索（RAG）、DashScope SSE 客户端、面试会话与限流
+├── im-remote        远程控制服务端：会话状态机、Agent/控制端双 WS 中继、审计与限流
 ├── im-bootstrap     启动模块：唯一的 main 类 + application.yml，repackage 成单 jar
+├── im-remote-agent  被控端 Agent：独立 fat jar（纯 JDK 零依赖），不进上面那个单 jar，单独部署在被控机
 └── im-ui            Vue 3 前端（独立工程，不在 Maven modules 里）
 ```
 
@@ -62,10 +69,15 @@ im-parent (pom)
       im-message ┼──► im-common ◄──┐   （SPI 契约 + 工具类）
         im-group ┤                 │
          im-file ┤                 │
-    im-websocket ┘                 │
+    im-websocket ┤                 │
+           im-ai ┤                 │
+       im-remote ┘                 │
                                    │
-              im-bootstrap ────────┴──► 依赖全部 9 个模块，负责装配启动
+              im-bootstrap ────────┴──► 依赖全部 11 个模块，负责装配启动
 ```
+
+`im-remote-agent` 不在星型图里：它是跑在被控机器上的独立进程，与 `im-remote` 只通过
+WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 
 业务模块之间**从不直接依赖**。跨模块调用一律走 `im-common` 里定义的 SPI 接口，
 由目标模块提供实现，调用方用 `ObjectProvider` 注入（拿不到就降级，不报启动失败）：
@@ -129,6 +141,9 @@ im-parent (pom)
 | `MINIO_SECRET_KEY` | `minioadmin` | |
 | `MINIO_BUCKET` | `im-files` | 启动时自动创建，无需手动建桶（桶名须≥3字符符合 S3 规范） |
 | `LOG_PATH` | `logs` | 日志目录（相对启动路径） |
+| `ALI_BABA_API_KEY` | 空 | AI 面试官的百炼（DashScope）API Key；未设置时仅面试功能不可用，其余功能照常 |
+| `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
+| `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
 
 PowerShell 设置示例：
 
@@ -197,7 +212,7 @@ java -jar im-bootstrap/target/im-server.jar
 
 | 地址 | 用途 |
 |---|---|
-| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分成 7 个分组 |
+| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分成 9 个分组（01-09，含 AI 面试与远程控制） |
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
 | http://localhost:8080/api/** | 全部 REST 接口 |
@@ -268,10 +283,13 @@ npm run preview    # 本地预览构建产物
 cd im-ui; npm run build:electron          # 相对 base './' + hash 路由
 Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
 cd ..\electron; npm install; npm run build
-# 产物：electron\release\IM通讯 Setup 1.0.0.exe（约 90MB）
+# 产物：electron\release\IM通讯 Setup 1.0.0.exe（约 160MB，含内置裁剪 JRE 与被控端 Agent）
 ```
 
 > ⚠️ 分发前先改 `electron/main.js` 的 `SERVER_BASE` 为实际后端地址。
+> 安装包经 `extraResources` 内置 `im-remote-agent` 的 fat jar 与 jlink 裁剪 JRE，桌面端启动时
+> 自动后台拉起被控端 Agent（双击 `resources\启动被控端.bat` 亦可），被控机**无需安装任何 Java**；
+> 见 [`md/Electron打包指南.md`](md/Electron打包指南.md) 十二节。
 > 完整的环境准备、打包流程图、踩坑（SSL 证书拦截、`file://` 白屏、大文件下载）与注意事项，
 > 见 [`md/Electron打包指南.md`](md/Electron打包指南.md)。
 
@@ -312,7 +330,8 @@ cd ..\electron; npm install; npm run build
 
 **所有失败也是 HTTP 200**，靠 `code` 区分（`GlobalExceptionHandler` 上没有 `@ResponseStatus`）。
 鉴权失败 `code=1002`，权限不足 `code=403`，业务错误码见 `ResultCode` 枚举
-（1xxx 通用 / 2xxx 用户 / 3xxx 好友 / 4xxx 会话 / 5xxx 消息 / 6xxx 群组 / 7xxx 文件）。
+（1xxx 通用 / 2xxx 用户 / 3xxx 好友 / 4xxx 会话 / 5xxx 消息 / 6xxx 群组 / 7xxx 文件 /
+8xxx WS 票据 / 9xxx 远程控制）。
 
 | 模块 | 前缀 | 放行 |
 |---|---|---|
@@ -325,6 +344,8 @@ cd ..\electron; npm install; npm run build
 | 群组 | `/api/group` | |
 | 文件 | `/api/file` | 下载走一次性票据 |
 | WS 票据 | `/api/ws` | |
+| AI 面试 | `/api/ai` | 对话接口是 SSE 流，不走 Result JSON |
+| 远程控制 | `/api/remote` | 凭识别码邀请也要求登录（控制方必须有自己的账号） |
 
 token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie 与 body 读取都已关闭）。
 
@@ -386,6 +407,9 @@ sequenceDiagram
 2. `ws://localhost:8080/ws?ticket=<票据>&deviceId=web` → `WsHandshakeInterceptor` 验票后放行
 
 票据 TTL 由 `im.jwt.ticket-ttl-seconds` 控制（默认 60 秒）。
+
+远程控制的两条数据面端点 `/ws/remote/agent` 与 `/ws/remote/control` 与这个通用端点**相互独立**：
+握手拦截器、票据体系、帧协议（文本信封 + 定长头二进制帧）都是另一套，见「十二、远程控制」。
 
 报文类型定义在 `im-common` 的 `WsMessageType` 枚举里，客户端发与服务端推是两套：
 
@@ -515,7 +539,71 @@ java -jar im-bootstrap/target/im-server.jar
 
 ---
 
-## 十二、已知坑（踩过的，别再踩）
+## 十二、远程控制（远程桌面）
+
+类 ToDesk 的分工：**服务端只中继、不解密**，画面与输入流在控制端与被控端之间端到端加密。三个部件：
+
+| 部件 | 位置 | 职责 |
+|---|---|---|
+| 中继服务端 | `im-remote` | 会话状态机、两条 WS 端点、脏块转发、只读策略、审计与限流 |
+| 被控端 Agent | `im-remote-agent` | 独立 fat jar（纯 JDK 零依赖）：截屏、输入注入、文件操作、授权弹窗 |
+| 控制端 | `im-ui` 的 `Remote.vue` | 画面渲染（关键帧定尺寸 + 脏块按坐标贴图）、输入采集、工具面板 |
+
+**连接链路**（控制方必须登录；被控方可免账号走识别码模式）：
+
+1. Agent 长连 `/ws/remote/agent`：带账号 token 则绑定该账号的设备；不带 token 则进入**识别码模式**
+   （userId=0，凭 6-12 位大写字母数字识别码跨账号路由），被控机无需注册账号；
+2. 控制端发起邀请（`/api/remote/session/invite` 或凭识别码 `invite-by-code`，后者限流 5 次/分/用户）→
+   Agent 弹确认框（可把 operate 降档为 readonly）→ 同意后会话 `inviting → active`；
+3. 控制端轮询 `/api/remote/session/{id}` 拿一次性 ticket → 连 `/ws/remote/control` 发 `control-ready`
+   消费票据 → 中继双向绑定，并经各自已鉴权通道下 `session-start` 帧下发会话 AES 密钥；
+4. 画面走二进制帧 `[1B 类型][8B 会话ID][4B 元数据长度][元数据JSON][载荷]`，载荷为 AES-256-GCM 密文
+   （12B IV + 密文 + 16B Tag，与 WebCrypto 互相兼容）；中继只解析信封头做路由与策略，**看不到画面内容**。
+
+会话状态机 `inviting → active → ended / rejected`，库里的状态是唯一事实，WS 帧只是它的投影；
+超时巡检收尾悬空的 inviting 会话。流量在内存绑定里计数，收尾时一次性落库。
+
+**本机识别码面板**：Agent 在 `127.0.0.1:18923/local-info`（`local.infoPort` 可配）绑一个只读回环接口，
+浏览器「远程」页探测到就展示绿色「本机识别码」面板——本机跑着 Agent 就能直接看到码，不用去 Agent 窗口抄。
+
+**被控机零 Java**：桌面安装包经 `extraResources` 内置 `agent/im-remote-agent.jar` 与 jlink 裁剪 JRE（约 74MB），
+桌面端启动时自动后台拉起 Agent（已在运行则跳过），或双击 `resources\启动被控端.bat`；详见
+[`md/Electron打包指南.md`](md/Electron打包指南.md) 十二节与 [`md/远程控制Agent使用说明.md`](md/远程控制Agent使用说明.md)。
+
+主要配置（`im.remote.*`）：`enabled` 总开关、`aes` 端到端加密开关、`invite-timeout-seconds` 授权超时、
+`control-ticket-ttl-seconds` 票据 TTL、`max-frame-bytes` 单帧上限。
+
+---
+
+## 十三、AI 面试官（知识库 RAG）
+
+基于本地知识库 RAG 的「后端 Java 全栈」模拟面试，前端是 `Interview.vue`「面试」页。
+
+**模型接入**：阿里云百炼 DashScope（OpenAI 兼容协议），配置复用 `spring.ai.openai.*` 坐标
+（im-ai 模块未引入 Spring AI 依赖，用自己的 `AiProperties` 读取，将来切真 Spring AI 时 yml 不用改）：
+
+| 配置 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| `spring.ai.openai.api-key` | `ALI_BABA_API_KEY` | 空 | 未设置时面试接口返回明确的「API Key 未配置」，**不影响其余功能** |
+| `spring.ai.openai.chat.options.model` | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名 |
+| `im.ai.knowledge-dir` | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | 知识库目录，递归扫 `.md`/`.txt` |
+
+**接口**：`POST /api/ai/interview/chat` 返回 **SSE 流**（事件 `delta`/`done`/`error`；模型逐 token 生成，
+等全文再返回意味着候选人盯着空屏等十几秒），请求体携带完整对话历史（空数组 = 开始新面试）；
+按用户限流 20 次/分钟——每次调用都是一次真实的大模型计费请求。进入流之前的失败仍走全局异常处理器的
+HTTP 200 + Result JSON，前端按 Content-Type 区分两条路径。`GET /api/ai/interview/status` 返回知识库
+目录、文件数、片段数，供前端状态条展示。
+
+**RAG 的 R 用 BM25 关键词检索而非向量检索**，是几百文件规模下的刻意取舍：不依赖 embedding 模型
+（少一个网络调用、少一份计费、少一种失败模式）、索引纯内存构建、文件变更后秒级重建（热更新不用重启）；
+面试查询与文档用词高度重合，正是关键词检索最擅长的分布。实现要点（`KnowledgeBaseService`）：
+中文不引分词器、按二元组切，英文/数字按连续词切；分块目标 500 字、超 900 硬切、Markdown 标题强制开新块；
+每轮检索前对比目录签名（相对路径+大小+修改时间），变了才重建并受 30 秒限频；每轮注入 top-4 片段、
+总计 ≤6000 字进提示词，历史消息防御性裁剪 30 条 / 单条 4000 字。知识库为空时面试照常进行，只是没有检索增强。
+
+---
+
+## 十四、已知坑（踩过的，别再踩）
 
 **1. OkHttp 5.x 必须显式声明**
 `minio:8.6.0` 依赖 `com.squareup.okhttp3:okhttp:5.1.0`，但 OkHttp 从 5.x 起改成了 Gradle 多平台产物，
@@ -566,15 +654,16 @@ im-file    ─► io.minio:minio:8.6.0 ─────────────�
 
 ---
 
-## 十三、目录结构
+## 十五、目录结构
 
 ```
 spring-boot-duomokuia/
-├── pom.xml                  父 POM：版本统一管理、9 个 module、编译插件配置
+├── pom.xml                  父 POM：版本统一管理、12 个 module、编译插件配置
 ├── README.md                本文件
 ├── sql/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
 │   └── im_data.sql          演示数据（用户/角色/权限/好友/会话/消息）
+├── md/                      专项文档（架构与请求链路图、Electron 打包指南、远程控制 Agent 使用说明、MinIO 部署指南等）
 ├── im-common/               公共层 + SPI 契约
 ├── im-user/                 用户中心
 ├── im-friend/               好友关系
@@ -583,6 +672,8 @@ spring-boot-duomokuia/
 ├── im-group/                群组管理
 ├── im-file/                 文件存储（MinIO + 本地）
 ├── im-websocket/            实时推送
+├── im-ai/                   AI 面试官（BM25 知识库检索 + DashScope SSE 客户端）
+├── im-remote/               远程控制服务端（会话状态机 + 双 WS 中继）
 ├── im-bootstrap/            启动模块
 │   ├── src/main/java/.../ImApplication.java     唯一的 main 类 + 启动横幅
 │   ├── src/main/resources/application.yml       主配置（16 KB，逐项带注释）
@@ -590,43 +681,46 @@ spring-boot-duomokuia/
 │   ├── src/main/resources/application-prod.yml  生产环境：关闭全部回显与 DEBUG 日志
 │   ├── src/main/resources/logback-spring.xml    控制台 + 按天滚动文件（pattern 含 traceId/userId）
 │   └── target/im-server.jar                     打包产物（单 jar）
+├── im-remote-agent/         被控端 Agent（独立 fat jar，纯 JDK 零依赖，Swing UI + 回环识别码接口）
 ├── im-ui/                   Vue 3 前端（独立工程，浏览器 / Electron 两用）
 │   ├── README.md            前端专项说明
 │   ├── vite.config.js       含 /api 与 /ws 代理；--mode electron 时 base 切 './'
 │   └── src/
-│       ├── api/             7 个接口模块
-│       ├── components/      6 个可复用组件
+│       ├── api/             9 个接口模块
+│       ├── components/      9 个可复用组件
 │       ├── layout/          主框架（左侧导航 + 路由出口）
-│       ├── stores/          5 个 Pinia store
+│       ├── stores/          7 个 Pinia store
 │       ├── router/          路由与登录守卫（Electron 用 hash 模式）
 │       ├── styles/          全局样式与 CSS 变量
 │       ├── utils/           格式化、ID 归一化、媒体地址/下载、标题、token、env（环境适配）
-│       ├── views/           7 个页面
+│       ├── views/           10 个页面（含远程控制 Remote 与面试 Interview）
 │       └── ws/              WebSocket 客户端（连接管理 + 报文分发）
 └── electron/                Electron 桌面端（前端壳 + electron-builder，连远程后端）
-    ├── main.js              主进程：窗口 / 下载处理 / 跨域 / 注入后端地址
+    ├── main.js              主进程：窗口 / 下载处理 / 跨域 / 注入后端地址 / Agent 自启
     ├── preload.js           contextBridge 注入 window.__IM_SERVER__
-    ├── package.json         electron-builder 配置（electronDist 指向本地 electron）
+    ├── package.json         electron-builder 配置（electronDist 指向本地 electron；extraResources 内置 agent/jre/bat）
+    ├── launch/              启动被控端.bat（双击用内置 JRE 拉起 Agent）
+    ├── jre/                 jlink 裁剪 JRE（随安装包分发，被控机免装 Java）
     ├── dist/                从 im-ui/dist 复制来的前端产物
     └── release/             打包产物（IM通讯 Setup 1.0.0.exe）
 ```
 
 ---
 
-## 十四、验证清单
+## 十六、验证清单
 
 按顺序执行，每步都有明确的通过标志：
 
-1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，10 个模块全部通过，
-   生成 `im-bootstrap/target/im-server.jar`
+1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，12 个模块全部通过，
+   生成 `im-bootstrap/target/im-server.jar` 与 `im-remote-agent/target/*-jar-with-dependencies.jar`
 2. **依赖抽查** — `mvn dependency:tree` → 确认 30 个 `org.springframework.boot:*` 构件全部是 4.0.8、
    Spring Framework 一致为 7.0.9，无 Boot 3 残留；Jackson 2 只允许从 knife4j 与 minio 两条链进来
    （见「已知坑」第 3 条）
 3. **建库** — 执行 `sql/im_schema.sql` 与 `sql/im_data.sql`，无报错
 4. **启动** — `java -jar im-bootstrap/target/im-server.jar` → 8080 端口起来了，
    控制台打出上述横幅，`logs/im-server.log` 里没有 `ERROR`
-5. **文档** — 浏览器打开 http://localhost:8080/doc.html，左侧 7 个分组齐全
-   （也可以直接请 `GET /v3/api-docs/swagger-config`，返回的 `urls` 数组应当是 7 项）
+5. **文档** — 浏览器打开 http://localhost:8080/doc.html，左侧 9 个分组齐全
+   （也可以直接请 `GET /v3/api-docs/swagger-config`，返回的 `urls` 数组应当是 9 项）
 6. **接口串测** — 注册 → 登录取 token → `/api/user/profile` → 搜索用户 →
    发起好友申请 → 对方登录同意 → `/api/conversation/single` → `/api/message/send` 双向收发 →
    `/api/message/history` 分页 → 撤回 → `/api/conversation/list` 看未读数 →
@@ -635,14 +729,23 @@ spring-boot-duomokuia/
 7. **WebSocket** — 取 ticket → 连接 → ping/pong → 双端实时收发 →
    断网重连 → 同设备二次登录触发 `kickout`
 8. **前端** — `cd im-ui; npm install; npm run dev` → 用 alice / bob
-   开两个不同浏览器，验证 7 个页面的交互闭环
+   开两个不同浏览器，验证 10 个页面的交互闭环
+9. **远程控制** — `java -jar im-remote-agent/target/im-remote-agent-jar-with-dependencies.jar` 起 Agent →
+   网页「远程」页出现绿色「本机识别码」面板 → 另一个登录账号凭识别码发起连接 →
+   Agent 弹窗点同意 → 控制端看到画面；降档为仅观看后输入操作被拒
+10. **AI 面试** — 设置 `ALI_BABA_API_KEY` 后打开「面试」页开始新面试 → SSE 逐 token 流式输出；
+    不设 Key 时返回明确的「API Key 未配置」，其余功能不受影响
 
-已实测通过的项：1、2、3、4、5（7 个分组已核实）、以及 6/7 中的
-「登录 → WS 握手 → 双向收发 → 未读数 → 已读回执 → 顶下线」这条主链路。
+已实测通过的项：1、2、3、4、5（9 个分组已核实）、6/7 中的
+「登录 → WS 握手 → 双向收发 → 未读数 → 已读回执 → 顶下线」主链路，
+以及 9 的远程控制主链路（Agent 识别码注册 → 凭码跨账号邀请 → 弹窗同意 →
+票据消费 → 中继绑定 → 出画面，含桌面端自启 Agent 与内置 JRE）。
+第 10 项需自备 `ALI_BABA_API_KEY` 实测。
 
-> 群聊后端功能完整实现，但前端按页面清单只做了单聊相关的 7 个页面，**群聊 UI 不在交付范围内**。
+> 群聊后端功能完整实现，前端聊天页以单聊交互为主，**群聊 UI 不在交付范围内**。
 > 单元测试不纳入本次交付，验证以真实启动 + 接口/WebSocket 串测为准。
 >
 > **桌面端（可选）**：`cd im-ui; npm run build:electron` → 复制 dist 到 `electron/` →
-> `npm install; npm run build` 生成 `release/IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked/IM通讯.exe`
-> 应能登录、收发、上传、下载大文件（前提：`main.js` 的 `SERVER_BASE` 指向的后端已启动）。
+> `npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
+> 应能登录、收发、上传、下载大文件（前提：`main.js` 的 `SERVER_BASE` 指向的后端已启动）；
+> 启动后还会自动后台拉起内置的被控端 Agent（回环接口 `127.0.0.1:18923/local-info` 可验证）。

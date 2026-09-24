@@ -13,7 +13,7 @@ import java.io.Serializable;
  * 群组精简信息，跨模块传输使用。
  */
 @Data
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 @Schema(description = "群组精简信息")

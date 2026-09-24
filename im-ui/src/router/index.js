@@ -64,6 +64,12 @@ const routes = [
         meta: { title: '后端 Java 全栈面试' }
       },
       {
+        path: 'remote',
+        name: 'remote',
+        component: () => import('@/views/Remote.vue'),
+        meta: { title: '远程控制' }
+      },
+      {
         path: 'user/:id',
         name: 'user-profile',
         component: () => import('@/views/UserProfile.vue'),

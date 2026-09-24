@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-remote-agent</artifactId>
+    <name>im-remote-agent</name>
+    <description>被控端 Agent：纯 JDK 实现（截屏/键鼠/文件/系统控制），独立 fat jar，不被 im-bootstrap 依赖</description>
+
+    <properties>
+        <!-- 被控端刻意零框架依赖：Robot/Swing/java.net.http 全部来自 JDK，
+             为的是单个 ~5MB 的 jar 拷到任意装有 JRE 21 的机器就能跑 -->
+    </properties>
+
+    <dependencies>
+        <!-- 无第三方依赖：JSON 用极简手写解析，加密用 javax.crypto -->
+    </dependencies>
+
+    <build>
+        <finalName>im-remote-agent</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.im.remote.agent.AgentApplication</mainClass>
+                        </manifest>
+                    </archive>
+                    <descriptorRefs>
+                        <descriptorRef>jar-with-dependencies</descriptorRef>
+                    </descriptorRefs>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>make-fat-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

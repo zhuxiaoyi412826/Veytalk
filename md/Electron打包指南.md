@@ -251,6 +251,7 @@ npm run build
 | 点下载**没反应** | Electron 渲染进程不自动接管下载 | 主进程监听 `will-download` + `setSavePath`（见第六节③） |
 | 请求后端**跨域被拦** | `file://` 页面访问 `http://后端` 非同源 | `webSecurity: false`（或后端配 CORS） |
 | PowerShell 读不到刚设的环境变量 | cmd 的 `set` 是会话级，不跨 shell | 每个 shell 用 `$env:xxx=` 重设，或 `setx` 设系统级 |
+| `mvn clean` 报「另一个程序正在使用此文件」删不掉 target | 删不掉的是 target **根目录**：被 IDE 文件监视/资源管理器/杀软的目录 watch 句柄占用（子文件都能删、唯独根目录删不掉） | 用 `Remove-Item <模块>\target\* -Recurse -Force` 清**内容**留根目录（效果等同 clean，还能防旧 class 残留），或直接关掉占用方再 clean |
 
 ---
 
@@ -336,3 +337,55 @@ $env:ELECTRON_SKIP_BINARY_DOWNLOAD=1; npm install
 ```
 
 > 记得把 `electron/package.json` 里的 `electronDist` 改成新电脑上本地 electron 的路径。
+
+---
+
+## 十二、安装包内置被控端 Agent + 免装 JRE（全量一键包）
+
+安装包除控制端外还携带三样东西（`electron/package.json` 的 `extraResources`），
+装完即是「控制端 + 被控端」二合一，被控机**无需安装任何 Java**：
+
+| 安装包内位置（`<安装目录>\resources\`） | 来源 | 用途 |
+|---|---|---|
+| `agent\im-remote-agent.jar` | `im-remote-agent/target/*-jar-with-dependencies.jar` | 被控端程序 |
+| `jre\` | jlink 裁剪的 JRE 21（约 74MB，仅含 Agent 所需模块） | 免装 Java 运行被控端 |
+| `启动被控端.bat` | `electron/launch/启动被控端.bat` | 双击即用内置 JRE 拉起被控端，配置落在 `%USERPROFILE%\im-remote-agent` |
+
+桌面端启动时会**自动后台拉起 Agent**（main.js 的 `setupAgentAutostart`）：先探测回环接口
+`127.0.0.1:18923/local-info`，无响应才用内置 JRE 起 jar（工作目录同 bat），已在运行则跳过；
+Agent 生命周期独立于 IM 窗口，关窗口不杀它，被控机才能保持可远程。bat 留给不想开 IM 主程序
+只跑被控端的场景。
+
+jlink 模块集与 Agent 依赖一一对应：`java.desktop`（Swing/Robot 截屏）、
+`java.net.http`（WS 长连接）、`jdk.httpserver`（本机识别码回环接口）、
+`jdk.charsets`（cmd 输出 GBK 解码）、`java.base`（含 javax.crypto）、
+`jdk.crypto.ec`（https/wss 的 ECDHE 套件）、`jdk.crypto.mscapi`（Windows 系统证书库，
+宿主机设了 `JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT` 时缺它会
+让 Agent 起身即死：SSLContext 初始化抛 NoSuchAlgorithmException，表现是一直不在线）。
+
+**全量一键打包命令**（PowerShell，`;` 分隔）：
+
+```powershell
+cd d:\daima\Lianshi\spring-boot-duomokuia
+# ① 被控端 fat jar：清 target 内容而非 mvn clean（根目录常被 IDE 文件监视的目录句柄占用删不掉；
+#    清内容既绕开锁，又避免增量编译留下已删源文件的旧 .class 被装进 jar）
+Remove-Item im-remote-agent\target\* -Recurse -Force -ErrorAction SilentlyContinue
+mvn -q -pl im-remote-agent -am package -DskipTests
+# ② jlink 裁剪 JRE（输出目录必须不存在，先删）
+Remove-Item electron\jre -Recurse -Force -ErrorAction SilentlyContinue
+& "D:\software\jdk\jdk21\bin\jlink.exe" --add-modules java.base,java.desktop,java.net.http,jdk.charsets,jdk.httpserver,jdk.crypto.ec,jdk.crypto.mscapi --strip-debug --no-man-pages --no-header-files --output electron\jre
+# ③ 前端 Electron 模式构建；拷入前先清空 electron/dist（Copy-Item 只覆盖不删除，
+#    不清会堆积历代哈希 chunk 并被打进 asar）
+cd im-ui; npm run build:electron
+Remove-Item "..\electron\dist" -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "..\electron\dist" | Out-Null
+Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
+# ④ 打安装包
+cd ..\electron
+$env:ELECTRON_SKIP_BINARY_DOWNLOAD=1; $env:NODE_TLS_REJECT_UNAUTHORIZED=0; $env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
+npm run build
+```
+
+验证：`release\win-unpacked\resources\` 下应同时有 `app.asar`、`agent\im-remote-agent.jar`、
+`jre\bin\javaw.exe`、`启动被控端.bat`。jar 或 jre 目录缺失时 electron-builder 会直接报错，
+所以①②两步不能省。

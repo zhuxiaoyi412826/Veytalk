@@ -3,7 +3,7 @@ package com.im.common.api;
 /**
  * 全局响应码。
  *
- * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接。
+ * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接、9xxx 远程控制。
  */
 public enum ResultCode {
 
@@ -88,7 +88,18 @@ public enum ResultCode {
 
     /* ==================== 8xxx 长连接 ==================== */
     WS_TICKET_INVALID(8001, "连接票据无效或已过期"),
-    WS_SESSION_NOT_FOUND(8002, "连接不存在");
+    WS_SESSION_NOT_FOUND(8002, "连接不存在"),
+
+    /* ==================== 9xxx 远程控制 ==================== */
+    REMOTE_DEVICE_NOT_FOUND(9001, "设备不存在"),
+    REMOTE_DEVICE_OFFLINE(9002, "设备不在线，无法发起远程"),
+    REMOTE_DEVICE_BUSY(9003, "设备正被其他会话占用"),
+    REMOTE_DEVICE_REFUSED(9004, "设备已设置拒绝接入"),
+    REMOTE_SESSION_NOT_FOUND(9005, "远程会话不存在或已结束"),
+    REMOTE_SESSION_FORBIDDEN(9006, "无权访问该远程会话"),
+    REMOTE_TICKET_INVALID(9007, "远程连接票据无效、已使用或已过期"),
+    REMOTE_READONLY(9008, "当前会话为只读模式，禁止输入操作"),
+    REMOTE_FRAME_TOO_LARGE(9009, "中继帧超过大小限制");
 
     private final int code;
     private final String message;

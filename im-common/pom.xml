@@ -30,10 +30,15 @@
             <artifactId>spring-boot-starter-aspectj</artifactId>
         </dependency>
 
-        <!-- Redis（在线状态、验证码、消息序列、未读缓存） -->
+        <!-- Redis（在线状态、验证码、消息序列、未读缓存、三级缓存 L2） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!-- 三级缓存 L1（JVM 本地缓存），版本由 Spring Boot BOM 统一管理 -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.commons</groupId>

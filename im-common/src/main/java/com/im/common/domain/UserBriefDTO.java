@@ -13,7 +13,7 @@ import java.io.Serializable;
  * 用户精简信息，跨模块传输使用，不含任何敏感字段。
  */
 @Data
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 @Schema(description = "用户精简信息")

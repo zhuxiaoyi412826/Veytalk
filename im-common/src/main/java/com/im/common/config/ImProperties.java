@@ -23,6 +23,7 @@ public class ImProperties {
     private Cors cors = new Cors();
     private Captcha captcha = new Captcha();
     private RateLimiting rateLimit = new RateLimiting();
+    private Cache cache = new Cache();
 
     @Data
     public static class Jwt {
@@ -236,5 +237,29 @@ public class ImProperties {
         /** WebSocket 通道单用户发消息频率：超限回 error 帧（code=1010），不断连接 */
         private int wsChatCount = 60;
         private int wsChatSeconds = 60;
+    }
+
+    /**
+     * 后端三级缓存（L1 Caffeine 本地 → L2 Redis 分布式 → L3 MySQL）。
+     *
+     * <p>读写约定见 {@code com.im.common.cache.ThreeLevelCache}：读路径逐层回源、
+     * 命中后逐层回填；写路径由业务在更新后主动 evict（失效 L1+L2）。
+     * CDN 层本期不实现：静态资源缓存由部署层 Nginx 的 Cache-Control 承担。
+     *
+     * <p>多节点部署时 evict 只失效本节点的 L1，其他节点靠 {@link #l1TtlSeconds}
+     * 的短 TTL 兜底收敛，因此 L1 的 TTL 是「脏读窗口上限」，不要调得过大。
+     */
+    @Data
+    public static class Cache {
+        /** 总开关：关掉后所有 get 直接回源，排查缓存一致性问题时可临时使用 */
+        private boolean enabled = true;
+        /** L1 最多缓存多少个 key（按条目数淘汰，防堆内存膨胀） */
+        private long l1MaxSize = 10_000;
+        /** L1 写入后过期秒数，也是多节点间脏数据的最大收敛窗口 */
+        private long l1TtlSeconds = 120;
+        /** L2（Redis）默认过期秒数，单个调用点可用 get 的重载覆盖 */
+        private long l2TtlSeconds = 1800;
+        /** 空值哨兵在 L2 的过期秒数：防缓存穿透，又不至于让新建数据长期隐身 */
+        private long nullTtlSeconds = 60;
     }
 }

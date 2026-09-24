@@ -14,6 +14,10 @@ public final class ImConstants {
     /** WebSocket 端点 */
     public static final String WS_ENDPOINT = "/ws";
 
+    /** 远程控制端点：被控端 Agent（sa-token 登录 token 握手）与控制端（一次性 ticket 握手） */
+    public static final String WS_REMOTE_AGENT_ENDPOINT = "/ws/remote/agent";
+    public static final String WS_REMOTE_CONTROL_ENDPOINT = "/ws/remote/control";
+
     /** Sa-Token 登录体系标识 */
     public static final String LOGIN_TYPE = "login";
 
@@ -56,4 +60,14 @@ public final class ImConstants {
     public static final String PERM_GROUP_CREATE = "group:create";
     public static final String PERM_FILE_UPLOAD = "file:upload";
     public static final String PERM_SYSTEM_MANAGE = "system:manage";
+
+    /**
+     * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
+     *
+     * <p>读方（UserQuerySpiImpl / GroupSpiImpl）与失效方（UserServiceImpl /
+     * GroupServiceImpl）分布在不同类里，key 格式必须收口在这里引用，
+     * 任何一处手打错前缀都会表现为「改了资料但缓存永远不失效」。
+     */
+    public static final String CACHE_USER_BRIEF_PREFIX = "user:brief:";
+    public static final String CACHE_GROUP_BRIEF_PREFIX = "group:brief:";
 }

@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
+import com.im.common.cache.ThreeLevelCache;
 import com.im.common.constant.ImConstants;
 import com.im.common.exception.BusinessException;
 import com.im.common.security.PasswordEncryptor;
@@ -61,6 +62,8 @@ public class UserServiceImpl implements UserService {
     private final ObjectProvider<FriendRelationSpi> friendRelationSpiProvider;
     /** 绑定手机号时需校验短信验证码；CaptchaService 不依赖 UserService，无循环依赖 */
     private final CaptchaService captchaService;
+    /** 资料变更后失效 UserQuerySpiImpl 写入的三级缓存，key 前缀收口在 ImConstants */
+    private final ThreeLevelCache cache;
 
     @Override
     public User requireById(Long userId) {
@@ -234,6 +237,7 @@ public class UserServiceImpl implements UserService {
             throw new BusinessException(ResultCode.BAD_REQUEST, "没有需要修改的字段");
         }
         userMapper.updateById(patch);
+        cache.evict(ImConstants.CACHE_USER_BRIEF_PREFIX + userId);
         return getProfile(userId);
     }
 
@@ -287,6 +291,7 @@ public class UserServiceImpl implements UserService {
         patch.setId(userId);
         patch.setAvatar(avatarUrl);
         userMapper.updateById(patch);
+        cache.evict(ImConstants.CACHE_USER_BRIEF_PREFIX + userId);
     }
 
     @Override

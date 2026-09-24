@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import * as friendApi from '@/api/friend'
+import { getCache, removeCache, setCache } from '@/utils/localCache'
 import { sameId } from '@/utils/id'
 
 /**
@@ -7,15 +8,23 @@ import { sameId } from '@/utils/id'
  *
  * 列表按 groupName 分组展示，但分组数据本身不在 FriendVO 之外单独维护 ——
  * FriendVO.groupName 已经是权威值，这里只做一次派生分组，避免两份数据对不上。
+ *
+ * 初始值从 localStorage 快照恢复（stale-while-revalidate）：首屏直接渲染上次
+ * 的列表，后台 fetchFriends 返回后覆盖并写回新快照。在线状态等实时字段
+ * 以接口/WS 为准，快照只负责“先看到内容”，不负责准确。
  */
 
 /** 未设置分组的好友归到这一组，排在最后 */
 const DEFAULT_GROUP = '我的好友'
 
+/** localStorage 快照键 */
+const SNAPSHOT_FRIENDS = 'friend:list'
+const SNAPSHOT_GROUPS = 'friend:groups'
+
 export const useFriendStore = defineStore('friend', {
   state: () => ({
-    friends: [],
-    groups: [],
+    friends: getCache(SNAPSHOT_FRIENDS) || [],
+    groups: getCache(SNAPSHOT_GROUPS) || [],
     loading: false,
     keyword: '',
     /** 收到的申请，按状态过滤后的当前页 */
@@ -64,6 +73,10 @@ export const useFriendStore = defineStore('friend', {
       try {
         this.keyword = keyword || ''
         this.friends = (await friendApi.fetchFriends(keyword)) || []
+        // 只把「无关键词的全量列表」写进快照：搜索结果是一次性视图，存进去会污染首屏
+        if (!this.keyword) {
+          setCache(SNAPSHOT_FRIENDS, this.friends)
+        }
       } finally {
         this.loading = false
       }
@@ -72,6 +85,7 @@ export const useFriendStore = defineStore('friend', {
 
     async fetchGroups() {
       this.groups = (await friendApi.fetchFriendGroups()) || []
+      setCache(SNAPSHOT_GROUPS, this.groups)
       return this.groups
     },
 
@@ -191,6 +205,9 @@ export const useFriendStore = defineStore('friend', {
       this.sentTotal = 0
       this.pendingCount = 0
       this.keyword = ''
+      // 退出登录必须清快照：否则同一台机器换账号登录，首屏会先看到上一个人的好友列表
+      removeCache(SNAPSHOT_FRIENDS)
+      removeCache(SNAPSHOT_GROUPS)
     }
   }
 })

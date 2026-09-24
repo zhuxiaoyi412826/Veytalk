@@ -218,10 +218,77 @@ function setupVideoCompress() {
   })
 }
 
+/* ======================= 被控端 Agent 随桌面端自启 =======================
+ * 打包安装包经 extraResources 内置了被控端 Agent（resources/agent/im-remote-agent.jar）
+ * 与裁剪 JRE（resources/jre）。桌面端启动时后台拉起 Agent，被控机装完包无需再手动
+ * 双击 bat：Agent 起身后按识别码模式自动连中继，网页绿色「本机识别码」面板随即
+ * 经回环接口读到识别码。
+ *
+ * 防重复启动：先探测 Agent 回环接口（127.0.0.1:18923/local-info），有响应即认为
+ * 已在运行（自启过 / bat 拉过 / 手动跑的 jar 都算）直接跳过，避免第二个 JVM 去争
+ * WS 连接与回环端口。Agent 生命周期独立于 IM 窗口：关窗口不杀它，被控机才能保持
+ * 可远程；要停请在 Agent 窗口退出或任务管理器结束 javaw.exe。
+ * 开发模式下 electron/ 目录只有 jre 没有 agent/ jar，探测自然跳过，不影响调试。
+ */
+const AGENT_LOCAL_INFO_URL = 'http://127.0.0.1:18923/local-info'
+
+/** 定位内置 JRE 与 Agent jar：优先安装包 resources 目录，回退主脚本同目录 */
+function resolveAgentPaths() {
+  const roots = []
+  if (process.resourcesPath) roots.push(process.resourcesPath)
+  roots.push(__dirname)
+  for (const root of roots) {
+    const javaw = path.join(root, 'jre', 'bin', 'javaw.exe')
+    const jar = path.join(root, 'agent', 'im-remote-agent.jar')
+    try {
+      if (fs.existsSync(javaw) && fs.existsSync(jar)) return { javaw, jar }
+    } catch { /* 忽略单个候选探测失败 */ }
+  }
+  return null
+}
+
+/** 探测本机 Agent 是否已在运行：回环接口有响应即在运行 */
+function probeLocalAgent() {
+  return fetch(AGENT_LOCAL_INFO_URL, { signal: AbortSignal.timeout(800) })
+    .then((r) => r.ok)
+    .catch(() => false)
+}
+
+/** 后台拉起 Agent：工作目录固定 %USERPROFILE%\im-remote-agent（与 bat 一致，配置和日志同落一处） */
+async function setupAgentAutostart() {
+  const paths = resolveAgentPaths()
+  if (!paths) return
+  if (await probeLocalAgent()) return
+  const workDir = path.join(os.homedir(), 'im-remote-agent')
+  try {
+    fs.mkdirSync(workDir, { recursive: true })
+    // 清掉宿主机的 JAVA_TOOL_OPTIONS 再传给内置 JRE：例如 trustStoreType=WINDOWS-ROOT
+    // 依赖 jdk.crypto.mscapi 模块，环境残留会让 Agent 起身即死
+    const env = { ...process.env }
+    delete env.JAVA_TOOL_OPTIONS
+    spawn(paths.javaw, ['-jar', paths.jar], { cwd: workDir, stdio: 'ignore', windowsHide: true, env })
+      .on('error', () => { /* 拉起失败静默降级：只影响被控能力，不影响 IM 主功能 */ })
+  } catch { /* 建目录或启动失败都不阻塞主进程 */ }
+}
+
+// 单实例：防止双击两次图标起两个主进程、在回环探测窗口期内竞相拉起 Agent
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+  })
+}
+
 app.whenReady().then(() => {
   setupDownload()
   setupVideoCompress()
   setupLocalDb()
+  setupAgentAutostart()
   createWindow()
 
   app.on('activate', () => {

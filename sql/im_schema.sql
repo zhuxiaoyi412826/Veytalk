@@ -21,6 +21,9 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_remote_audit_log`;
+DROP TABLE IF EXISTS `im_remote_session`;
+DROP TABLE IF EXISTS `im_remote_device`;
 DROP TABLE IF EXISTS `im_file`;
 DROP TABLE IF EXISTS `im_group_member`;
 DROP TABLE IF EXISTS `im_group`;
@@ -334,3 +337,68 @@ CREATE TABLE `im_file`
     KEY `idx_uploader` (`uploader_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='文件元数据表';
+
+-- =====================================================================================
+--  七、远程控制（im-remote）
+--
+--  三张表均继承 AuditEntity（只有 create_time / update_time，无逻辑删除列）：
+--  设备与会话采用物理更新而非删除，审计日志只增不改不删。
+--  识别码模式的设备不归属任何账号，user_id 固定为 0，只凭 access_code 被路由。
+--  注意：控制端一次性 ticket、会话级 aesKey、路由用的 device 都是实体里的
+--  @TableField(exist=false) 内存字段，故意不落库——密钥入库会让审计库变成能解密历史流量的地方。
+-- =====================================================================================
+
+CREATE TABLE `im_remote_device`
+(
+    `id`               BIGINT      NOT NULL COMMENT '主键（雪花）',
+    `user_id`          BIGINT      NOT NULL COMMENT '设备归属用户 ID',
+    `device_id`        VARCHAR(64) NOT NULL COMMENT 'Agent 安装时生成的设备唯一标识，重装系统前不变',
+    `device_name`      VARCHAR(128)         DEFAULT NULL COMMENT '设备名（计算机名），列表展示用',
+    `os`               VARCHAR(128)         DEFAULT NULL COMMENT '操作系统描述（os.name + os.arch）',
+    `access_code`      VARCHAR(16)          DEFAULT NULL COMMENT '识别码（ToDesk 式接入码，Agent 本地设置上报）；非空时任意登录用户可凭码发起邀请（仍需弹窗同意）',
+    `status`           TINYINT     NOT NULL DEFAULT 0 COMMENT '状态：0 离线 1 空闲 2 忙 3 拒绝接入',
+    `last_online_time` DATETIME             DEFAULT NULL COMMENT '最近一次心跳在线时间',
+    `create_time`      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 一台机器一行：同一 (user_id, device_id) 重新上线只更新这行，不会越积越多
+    UNIQUE KEY `uk_user_device` (`user_id`, `device_id`),
+    KEY `idx_device` (`device_id`),
+    KEY `idx_access_code` (`access_code`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='被控端设备表';
+
+CREATE TABLE `im_remote_session`
+(
+    `id`               BIGINT      NOT NULL COMMENT '会话 ID（雪花）',
+    `invitee_user_id`  BIGINT      NOT NULL COMMENT '被控方（设备归属人）用户 ID',
+    `device_id`        VARCHAR(64) NOT NULL COMMENT '被控设备标识',
+    `inviter_user_id`  BIGINT      NOT NULL COMMENT '控制方用户 ID',
+    `permission`       VARCHAR(16) NOT NULL DEFAULT 'operate' COMMENT '权限：readonly 只读 / operate 可操作，被控端授权时可降档',
+    `status`           VARCHAR(16) NOT NULL DEFAULT 'inviting' COMMENT '状态：inviting 待授权 / active 进行中 / rejected 被拒绝 / ended 已结束',
+    `start_time`       DATETIME             DEFAULT NULL COMMENT '会话开始（中继建立）时间',
+    `end_time`         DATETIME             DEFAULT NULL COMMENT '会话结束时间',
+    `end_reason`       VARCHAR(32)          DEFAULT NULL COMMENT '结束原因：inviter-end / invitee-end / timeout / rejected / offline / control-offline',
+    `bytes`            BIGINT      NOT NULL DEFAULT 0 COMMENT '中继转发总字节数（双向合计），内存累加收尾落库',
+    `create_time`      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '邀请创建时间',
+    `update_time`      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 会话历史按控制方 / 被控方两个视角查询，各建一条联合索引覆盖「我的会话列表」倒序分页
+    KEY `idx_inviter_time` (`inviter_user_id`, `create_time`),
+    KEY `idx_invitee_time` (`invitee_user_id`, `create_time`),
+    KEY `idx_status` (`status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='远程会话表';
+
+CREATE TABLE `im_remote_audit_log`
+(
+    `id`          BIGINT   NOT NULL COMMENT '主键（雪花）',
+    `session_id`  BIGINT   NOT NULL COMMENT '所属远程会话 ID',
+    `action`      VARCHAR(32) NOT NULL COMMENT '动作标识：session-start / session-end / file-rm / ps-kill / exec / power / input-blocked ...',
+    `detail`      VARCHAR(1000)   DEFAULT NULL COMMENT '动作详情（路径、命令、拦截原因等），写入前截断到 1000 字符',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间',
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_session_time` (`session_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='远程会话审计日志（只增不改不删）';

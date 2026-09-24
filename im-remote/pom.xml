@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-remote</artifactId>
+    <name>im-remote</name>
+    <description>远程控制：被控端设备注册、会话邀请/授权、控制端与 Agent 之间的双向中继转发、审计</description>
+
+    <dependencies>
+        <!-- 业务模块只依赖 im-common，跨模块协作全部走 com.im.common.spi 契约 -->
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-common</artifactId>
+        </dependency>
+        <!-- 中继通道用的是原生 WebSocket（BinaryWebSocketHandler），与 im-websocket 的 JSON 协议通道相互独立 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+    </dependencies>
+</project>

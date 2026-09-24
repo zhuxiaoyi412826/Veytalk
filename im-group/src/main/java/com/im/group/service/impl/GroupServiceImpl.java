@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
+import com.im.common.cache.ThreeLevelCache;
 import com.im.common.constant.ImConstants;
 import com.im.common.domain.ConversationBriefDTO;
 import com.im.common.domain.PageQuery;
@@ -98,6 +99,8 @@ public class GroupServiceImpl implements GroupService {
     private final GroupMemberMapper groupMemberMapper;
     private final GroupPermissionChecker permissionChecker;
     private final UserQuerySpi userQuerySpi;
+    /** 群静态资料的失效入口，读路径在 GroupSpiImpl；提交后再失效，避免事务内被并发读回填旧值 */
+    private final ThreeLevelCache cache;
     private final ObjectProvider<ConversationSpi> conversationSpiProvider;
     private final ObjectProvider<MessageSpi> messageSpiProvider;
     private final ObjectProvider<PushSpi> pushSpiProvider;
@@ -208,8 +211,11 @@ public class GroupServiceImpl implements GroupService {
             groupMapper.update(null, wrapper);
             // 改群资料不发群通知：改名改公告是高频操作，每次都刷一条系统消息会淹没正常聊天；
             // 只推 NOTIFY 让在线客户端刷新群头部即可
-            afterCommit(() -> pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(groupId),
-                    groupEvent(ACTION_UPDATED, groupId, conversationId, null)));
+            afterCommit(() -> {
+                cache.evict(ImConstants.CACHE_GROUP_BRIEF_PREFIX + groupId);
+                pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(groupId),
+                        groupEvent(ACTION_UPDATED, groupId, conversationId, null));
+            });
         }
         return toVO(group, context.member(), conversationId);
     }
@@ -416,6 +422,8 @@ public class GroupServiceImpl implements GroupService {
         Map<String, Object> event = groupEvent(ACTION_TRANSFERRED, groupId, conversationId,
                 Map.of("ownerId", newOwnerId));
         afterCommit(() -> {
+            // ownerId 是缓存的静态字段，转让后必须失效
+            cache.evict(ImConstants.CACHE_GROUP_BRIEF_PREFIX + groupId);
             noticeQuietly(conversationId, "群主已转让给 " + nameOf(newOwnerId));
             pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(groupId), event);
         });
@@ -440,6 +448,8 @@ public class GroupServiceImpl implements GroupService {
         // 用户想让它从列表消失可以自己调会话的删除接口（只隐藏本端）
         Map<String, Object> event = groupEvent(ACTION_DISMISSED, groupId, conversationId, null);
         afterCommit(() -> {
+            // 解散不改静态字段，但顺手失效一次：，下次读重新回源，不留残留哨兵
+            cache.evict(ImConstants.CACHE_GROUP_BRIEF_PREFIX + groupId);
             noticeQuietly(conversationId, nameOf(operatorId) + " 解散了群聊");
             pushQuietlyAll(members, event);
         });

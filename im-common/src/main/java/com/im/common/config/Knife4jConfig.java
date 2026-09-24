@@ -93,6 +93,11 @@ public class Knife4jConfig {
         return build("08-后端 Java 全栈面试", "/api/ai/**");
     }
 
+    @Bean
+    public GroupedOpenApi remoteApi() {
+        return build("09-远程控制", "/api/remote/**");
+    }
+
     /**
      * 按路径前缀分组，而不是按包名。
      *

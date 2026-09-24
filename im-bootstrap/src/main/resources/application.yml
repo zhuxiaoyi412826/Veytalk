@@ -251,7 +251,7 @@ sa-token:
 
 # ==============================================================================
 # 接口文档（Knife4j / springdoc）
-# 分组由 Knife4jConfig 的 7 个 GroupedOpenApi Bean 定义，按模块划分。
+# 分组由 Knife4jConfig 的 9 个 GroupedOpenApi Bean 定义，按模块划分。
 # ==============================================================================
 knife4j:
   enable: true
@@ -429,6 +429,55 @@ im:
     max-message-chars: 4000
     # 目录重扫最小间隔（秒）
     rescan-interval-seconds: 30
+
+  # 三级缓存：L1 Caffeine（JVM 本地）→ L2 Redis（分布式）→ L3 MySQL。
+  # 读路径逐层回源并回填，写路径由业务更新后主动失效；Redis 不可用时自动退化为 L1+DB。
+  # 已接入：用户精简资料（user:brief:*）、群静态资料（group:brief:*）。
+  # CDN 层本期不实现：静态资源缓存由部署层 Nginx 的 Cache-Control 承担。
+  cache:
+    enabled: true
+    # L1 最多缓存多少个 key，防堆内存膨胀
+    l1-max-size: 10000
+    # L1 过期秒数：也是多节点间脏数据的最大收敛窗口（evict 只失效本节点 L1），不要调大
+    l1-ttl-seconds: 120
+    # L2（Redis）默认过期秒数
+    l2-ttl-seconds: 1800
+    # 空值哨兵在 L2 的过期秒数：防穿透，又不让新建数据长期隐身
+    null-ttl-seconds: 60
+
+  # ---------------------------------------------------------------------------
+  # 远程控制（im-remote 中继模块）
+  #
+  # 拓扑：被控端 Agent 与控制端浏览器/Electron 都主动连服务器，服务端按会话双向转发。
+  # 中继带宽是这个功能最容易被误配的地方：一屏增量 JPEG 约几十 KB、20fps 就是单会话
+  # 1MB/s 上行，所以帧大小上限与空闲超时都必须有服务端硬限制，不能指望两端客户端自觉。
+  # 键名对应 com.im.remote.config.RemoteProperties（kebab-case ↔ camelCase）。
+  # ---------------------------------------------------------------------------
+  remote:
+    # 总开关：关闭后 REST 与 /ws/remote/agent、/ws/remote/control 两个端点都拒绝服务，
+    # 已建立的 Agent 连接会被直接关闭。只想临时停用远程能力时改这一行即可，无需改代码。
+    enabled: true
+    # 屏幕/文件载荷的 AES-256-GCM 端到端加密。中继服务器设计上只路由不解密，
+    # 开着时它连画面内容都看不到；关掉仅用于内网演示排障——链路抓包即可还原屏幕。
+    aes: true
+    # 会话空闲多少分钟后服务端主动断开并通知双方（两端都没有任何帧往来）。
+    # 太短会在看静态页面时误杀会话，太长会让忘记结束的会话一直占着设备为「使用中」。
+    idle-timeout-minutes: 5
+    # 邀请发出后被控端多少秒内未弹窗授权则自动作废，控制端轮询到点也会收起「等待授权」。
+    # 与前端 startPolling 的 70s 上限配套：这个值必须小于轮询总时长，否则永远等不到超时。
+    invite-timeout-seconds: 60
+    # 单个二进制帧（屏幕块 / 文件块）的字节上限，超过即关闭连接，防恶意超大帧撑爆内存。
+    # 1MB 对 64x64 网格的 JPEG 脏块足够宽裕；文件分块固定 64KB，远不到这条线。
+    max-frame-bytes: 1048576
+    # 单条文本帧字节上限。cmd 回显、文件目录列表 JSON 都走文本帧，
+    # 256KB 能容纳两千条目录项或一大段命令输出，再大由业务侧截断。
+    max-text-bytes: 262144
+    # Agent 心跳建议间隔（秒），握手 ready 帧下发给 Agent；服务端按 3 倍（90s）判离线。
+    # 与 WebSocket 主通道一致，改这里要同步改 RemoteRelayService 里的离线倍率。
+    heartbeat-interval-seconds: 30
+    # 一次性控制端连接票据有效期（秒）。控制端拿到 ticket 后立刻发起 /ws/remote/control 握手，
+    # 握手成功即消费，60s 足够覆盖「前端拿到 ticket → 建连」的往返，设长会放大票据在 URL 里的暴露窗口。
+    control-ticket-ttl-seconds: 60
 
 # ==============================================================================
 # 日志

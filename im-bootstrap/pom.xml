@@ -51,6 +51,10 @@
             <groupId>com.im</groupId>
             <artifactId>im-ai</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-remote</artifactId>
+        </dependency>
 
         <!-- 运行期驱动，编译期不需要 -->
         <dependency>
