@@ -18,6 +18,14 @@ im:
     # 因此不再回显到响应体，避免验证码在页面上暴露。
     expose-email-code: false
 
+  remote:
+    # 远程控制的 AES-256-GCM 端到端加密在 dev 下关闭。
+    # 原因：手机用局域网 http://<本机IP>:5173 访问时不是安全上下文，
+    # 浏览器不暴露 WebCrypto(crypto.subtle)，控制端会因拿不到密钥而连不上（画面一闪即断）。
+    # 关掉后走明文中继，画面链路抓包即可还原——仅限内网演示/排障。
+    # 主配置与 prod 仍为 true，切 profile 即恢复加密。
+    aes: false
+
 logging:
   level:
     # com.im 下的 Mapper 接口名就是 logger 名，DEBUG 级别会打出完整 SQL、

@@ -262,6 +262,25 @@ Windows 防火墙方面，首次运行 `node.exe` 与 `java.exe` 时弹窗点了
 > USB 共享网络下这个 IP 由手机分配，**重插 USB 或手机重启后可能变化**，届时以 Vite 控制台
 > 打印的 `Network` 行为准。
 
+#### 手机真机联调远程控制：需要 HTTPS
+
+用手机浏览器以 `http://<电脑IP>:5173` 访问时，**远程控制会报「当前环境不支持 WebCrypto」**——
+不是 bug，而是浏览器的**安全上下文**限制：`crypto.subtle`（远程控制做 AES-GCM 解密用）只在
+localhost、https、Electron 下暴露，`http + 局域网IP` 拿不到它（普通聊天不碰 WebCrypto 所以照常）。
+解法是给 dev server 上一张内网自签证书：
+
+```powershell
+cd im-ui
+npm run gen:cert     # 纯 Node（node-forge）生成根 CA + 服务器证书到 im-ui/certs/，SAN 含本机全部 IP
+npm run dev          # 证书存在即自动 https，Network 行变成 https://<电脑IP>:5173/
+```
+
+再把 `im-ui/certs/ca.pem` 传到手机装成受信任的 CA（Android：加密与凭据→安装 CA 证书；
+iOS 装完描述文件后还需在「证书信任设置」里开启全信任），手机用 **`https://<电脑IP>:5173`** 打开即可。
+WS 地址由前端按页面协议自动推导成 wss，`/api`、`/ws` 代理与后端都不用改。删掉 `certs/` 就回落 http，
+不影响 Web 部署与 Electron 构建。根因、换网段重签、两系统装证书的分步操作与排错，
+见 [`md/手机真机调试HTTPS配置指南.md`](md/手机真机调试HTTPS配置指南.md)。
+
 生产构建：
 
 ```powershell
@@ -663,7 +682,7 @@ spring-boot-duomokuia/
 ├── sql/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
 │   └── im_data.sql          演示数据（用户/角色/权限/好友/会话/消息）
-├── md/                      专项文档（架构与请求链路图、Electron 打包指南、远程控制 Agent 使用说明、MinIO 部署指南等）
+├── md/                      专项文档（架构与请求链路图、Electron 打包指南、远程控制 Agent 使用说明、手机真机调试 HTTPS 配置、MinIO 部署指南等）
 ├── im-common/               公共层 + SPI 契约
 ├── im-user/                 用户中心
 ├── im-friend/               好友关系
@@ -684,7 +703,9 @@ spring-boot-duomokuia/
 ├── im-remote-agent/         被控端 Agent（独立 fat jar，纯 JDK 零依赖，Swing UI + 回环识别码接口）
 ├── im-ui/                   Vue 3 前端（独立工程，浏览器 / Electron 两用）
 │   ├── README.md            前端专项说明
-│   ├── vite.config.js       含 /api 与 /ws 代理；--mode electron 时 base 切 './'
+│   ├── vite.config.js       含 /api 与 /ws 代理；--mode electron 时 base 切 './'；检测到 certs 则自动 https
+│   ├── scripts/gen-cert.cjs 内网自签证书生成（node-forge，纯 Node 免 OpenSSL，手机真机联调远程控制用）
+│   ├── certs/               自签 HTTPS 证书产物（ca/server 的 pem+key，已 gitignore，含私钥）
 │   └── src/
 │       ├── api/             9 个接口模块
 │       ├── components/      9 个可复用组件

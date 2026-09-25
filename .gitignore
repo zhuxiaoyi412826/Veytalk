@@ -52,8 +52,11 @@ im-files/
 .env.*
 !.env.example
 *.pem
+*.key
 *.p12
 *.jks
+# 开发期自签 HTTPS 证书目录（im-ui/scripts/gen-cert.cjs 生成，含私钥）
+im-ui/certs/
 
 # ==============================================================================
 # IDE / 编辑器

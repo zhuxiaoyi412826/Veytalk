@@ -382,12 +382,18 @@ im:
     send-buffer-size-bytes: 524288
 
   cors:
-    # 前端 vite 开发服务器与预览服务器
+    # 前端 vite 开发服务器与预览服务器。http 与 https 两种方案都要放行：
+    # 局域网真机联调远程控制时 dev server 会自签证书走 https（页面 Origin 变
+    # https://<host>:5173），只配 http 会让登录这类同源 POST 回 403 Invalid CORS request。
     allowed-origins:
       - http://localhost:5173
       - http://127.0.0.1:5173
       - http://localhost:4173
       - http://127.0.0.1:4173
+      - https://localhost:5173
+      - https://127.0.0.1:5173
+      - https://localhost:4173
+      - https://127.0.0.1:4173
       # 局域网真机联调（手机连电脑、或电脑连手机热点）：手机用电脑的局域网 IP 打开页面，
       # 浏览器发出的 /api 请求虽然经 vite 代理转发、看着是同源，但代理的 changeOrigin
       # 只改 Host 头不改 Origin 头，而 Spring 判定 CORS 请求只看有没有 Origin 头，
@@ -398,6 +404,8 @@ im:
       # 上线到公网前必须把这两条换成真实域名。
       - http://*.*.*.*:5173
       - http://*.*.*.*:4173
+      - https://*.*.*.*:5173
+      - https://*.*.*.*:4173
 
   captcha:
     image-ttl-seconds: 300

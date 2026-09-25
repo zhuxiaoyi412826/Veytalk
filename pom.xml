@@ -240,6 +240,19 @@
                         </annotationProcessorPaths>
                     </configuration>
                 </plugin>
+                <!--
+                  Windows 下 mvn clean 常因 IDE 的 Java 语言服务 / 资源管理器 / 杀软给 target 根目录
+                  挂目录 watch 句柄，导致最后一步删除空的 target 根目录时报「另一个程序正在使用此文件」而中断整个构建。
+                  target 里的子文件其实已全部删净、等同 clean，根目录删不掉不影响后续编译产物。
+                  failOnError=false 让这种目录锁只降级为一条告警，不再让 clean 失败——无需为此绕开 clean。
+                -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-clean-plugin</artifactId>
+                    <configuration>
+                        <failOnError>false</failOnError>
+                    </configuration>
+                </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>

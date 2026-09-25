@@ -303,7 +303,9 @@ public class AgentClient {
             }
             case "error" -> log("服务端错误: " + MiniJson.str(data, "code") + " " + MiniJson.str(data, "message"));
             case "screen-start" -> {
-                capturer.start(sid, MiniJson.integer(data, "fps", 10),
+                // full 默认 1：整屏完整推流（每帧都是完整画面），消除控制端“刷好几下才拼齐”的割裂感
+                capturer.setFullFrame(MiniJson.integer(data, "full", 1) != 0);
+                capturer.start(sid, MiniJson.integer(data, "fps", 15),
                         MiniJson.integer(data, "quality", 75), (int) MiniJson.lng(data, "monitor", -1));
             }
             case "screen-stop" -> capturer.stop();

@@ -1,6 +1,26 @@
 import { fileURLToPath, URL } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+
+const configDir = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * 开发期 HTTPS：存在 im-ui/certs/server.{pem,key} 就自动启用，否则回落 http。
+ *
+ * 为什么需要：浏览器只在「安全上下文」暴露 WebCrypto（crypto.subtle），
+ * http://<局域网IP>:5173 不是安全上下文，手机用 IP 访问时远程控制的
+ * AES-GCM 解密直接不可用。证书用 `npm run gen:cert` 自签（含根 CA + 服务器证书，
+ * SAN 覆盖本机全部 IPv4），手机装上 certs/ca.pem 后地址栏无警告。
+ * https 同时还是真机调试麦克风/摄像头的前置条件，一举多得。
+ */
+function devHttps() {
+  const key = join(configDir, 'certs', 'server.key')
+  const cert = join(configDir, 'certs', 'server.pem')
+  if (!existsSync(key) || !existsSync(cert)) return undefined
+  return { key: readFileSync(key), cert: readFileSync(cert) }
+}
 
 /**
  * 前端独立运行，不参与 Maven 构建。
@@ -35,6 +55,13 @@ export default defineConfig(({ mode }) => ({
     // 会多打一行 Network 地址，那就是给手机 / 外部访问用的。
     host: '0.0.0.0',
     port: 5173,
+    // 有证书就走 https（Network 行会变成 https://<IP>:5173），没有则仍是 http；
+    // 前端的 wsBaseURL() 已按 location.protocol 自动推导 wss/ws，代理无需改 target。
+    // 例外：`npm run dev:lan`（mode=lan）强制回落 http——手机装了自签根证书后，
+    // 部分浏览器仍会对 wss:// 静默拒绝（页面/fetch 能过、WebSocket 不给 bypass），
+    // 表现为远程控制画面一闪即断。此时配合后端 im.remote.aes=false 走明文 http 联调，
+    // 彻底绕开证书与 WebCrypto。想恢复 https 用默认 `npm run dev` 即可。
+    https: mode === 'lan' ? undefined : devHttps(),
     // 端口被占用时直接报错，而不是自动顺延到 5174。
     // README 与后端联调说明里写死的是 5173，静默换端口会让人以为文档过期了。
     strictPort: true,

@@ -182,6 +182,7 @@ import { sendSmsCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { signOut } from '@/stores'
 import { formatFileSize, formatDateTime, maskPhone } from '@/utils/format'
+import { openFilePicker } from '@/utils/picker'
 
 defineOptions({ name: 'Profile' })
 
@@ -260,7 +261,7 @@ function pickAvatar() {
   if (avatarUploading.value) {
     return
   }
-  avatarInputRef.value?.click()
+  openFilePicker(avatarInputRef.value)
 }
 
 async function onAvatarPicked(event) {
@@ -641,7 +642,17 @@ onMounted(async () => {
   color: #e6a23c;
 }
 
+/* 同聊天页：display:none 的 input 在部分手机浏览器上 click() 无效，改为渲染但不可见 */
 .profile__file-input {
-  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
 }
 </style>

@@ -121,3 +121,6 @@ java -jar im-remote-agent-jar-with-dependencies.jar
 - **画面花屏/丢块**：属增量截屏的丢帧现象，Agent 每 5 秒会补发全屏关键帧自愈；持续异常可下调画质/帧率。
 - **用内置 JRE 时一直不在线 / 窗口显示「启动失败」**：裁剪 JRE 缺加密模块（`jdk.crypto.ec`、`jdk.crypto.mscapi`）或宿主机 `JAVA_TOOL_OPTIONS` 污染内置 JRE；按《Electron打包指南》十二节的模块集重跑 jlink。bat 与桌面端自启已主动清空该环境变量。
 - **控制端提示「会话结束」但被控端明明点了同意**：后端还跑着旧代码（会话 ticket/密钥内存容器修复未生效），重启后端再试。
+- **手机浏览器连控制端报「当前环境不支持 WebCrypto」**：不是 Agent 的锅，是 `http://<局域网IP>:5173` 不是安全上下文、
+  拿不到 `crypto.subtle`（AES-GCM 解密依赖它）。把 dev server 上内网自签 HTTPS、手机以 `https://<IP>:5173` 访问即可，
+  详见同目录《手机真机调试HTTPS配置指南.md》；Electron 桌面端天然满足，无此问题。

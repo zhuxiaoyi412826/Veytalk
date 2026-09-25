@@ -21,6 +21,7 @@ import {
 } from '@/api/remote'
 import { FRAME_FILE, FRAME_SCREEN, RemoteControlSocket } from '@/utils/remoteWs'
 import { getToken } from '@/utils/token'
+import { openFilePicker } from '@/utils/picker'
 
 const STATUS_TEXT = { 0: '离线', 1: '空闲', 2: '使用中', 3: '拒绝接入' }
 const STATUS_TAG = { 0: 'info', 1: 'success', 2: 'warning', 3: 'danger' }
@@ -145,7 +146,7 @@ const session = ref(null) // { socket, sessionId, permission, deviceName, aesKey
 const socket = ref(null)
 const screenOn = ref(false)
 const quality = ref(75)
-const fps = ref(10)
+const fps = ref(20)
 const bytes = ref(0)
 const sessionLogs = ref([])
 const canvasRef = ref(null)
@@ -239,36 +240,148 @@ async function endSession() {
 /* ==================== 屏幕渲染 ==================== */
 
 const stageRef = ref(null)
-let renderChain = Promise.resolve()
+
+/* 双缓冲渲染：脏块先合成到离屏画布，再用 requestAnimationFrame 一次性贴到可见画布。
+   旧实现把每个 64x64 脏块在到达瞬间直绘到可见画布、且用 promise 链逐块串行解码，
+   于是一次真实变化会看到块「一块块蹦出来」（割裂感），突发帧堆积时还要「刷好几次才追上」。
+   现在：一帧内到达的所有块都并进离屏缓冲，只在 rAF 里原子呈现一次，观感接近商用远控。 */
+const backCanvas = document.createElement('canvas')
+const backCtx = backCanvas.getContext('2d')
+let blitScheduled = false
+let decodeQueue = []
+let activeDecoders = 0
+let frameGeneration = 0
+const DECODE_CONCURRENCY = 4
+
+function scheduleBlit() {
+  if (blitScheduled) {
+    return
+  }
+  blitScheduled = true
+  requestAnimationFrame(() => {
+    blitScheduled = false
+    const canvas = canvasRef.value
+    if (!canvas || !backCanvas.width || !backCanvas.height) {
+      return
+    }
+    if (canvas.width !== backCanvas.width) {
+      canvas.width = backCanvas.width
+    }
+    if (canvas.height !== backCanvas.height) {
+      canvas.height = backCanvas.height
+    }
+    canvas.getContext('2d').drawImage(backCanvas, 0, 0)
+  })
+}
 
 function handleBinaryFrame({ frameType, meta, payload }) {
   if (frameType === FRAME_SCREEN) {
-    renderChain = renderChain.then(() => drawScreen(meta, payload)).catch(() => {})
+    enqueueScreen(meta, payload)
   } else if (frameType === FRAME_FILE) {
     receiveChunk(meta, payload)
   }
 }
 
-async function drawScreen(meta, payload) {
-  const canvas = canvasRef.value
-  if (!canvas || !payload.length) {
+/* 全帧模式（默认，meta.full=1）：被控端每帧都发一整屏完整画面。用「最新帧优先」单路解码——
+   解码慢于帧到达时自动丢弃中间帧、只解最新的一帧，既不积压延迟、也永远不会把正在解码的帧
+   作废（这正是旧 key 逻辑每帧 frameGeneration++ 会闪白丢帧的原因），更不会像脏块那样「拼好几下
+   才完整」。整帧 drawImage 是一次原子操作，直接画到可见画布即可，无撕裂、无需双缓冲。
+   脏块模式（full=0 回退，meta.full 缺省）：保留下方 frameGeneration + 离屏双缓冲逻辑。 */
+let latestFullFrame = null
+let fullDecoding = false
+
+function enqueueScreen(meta, payload) {
+  if (!payload || !payload.length) {
     return
   }
-  const bitmap = await createImageBitmap(new Blob([payload], { type: 'image/jpeg' }))
-  if (meta.key) {
-    canvas.width = meta.screenW || meta.w
-    canvas.height = meta.screenH || meta.h
+  if (meta.full) {
+    // 完整帧：只保留最新的一帧待解码，晚到的旧帧直接覆盖丢弃（latest-wins）
+    latestFullFrame = { meta, payload }
+    if (!fullDecoding) {
+      pumpFullFrame()
+    }
+    return
   }
-  const ctx = canvas.getContext('2d')
-  ctx.drawImage(bitmap, meta.x, meta.y, meta.w, meta.h)
-  bitmap.close()
+  if (meta.key) {
+    // 关键帧自带整屏，此前排队的脏块全部作废，清空避免旧块覆盖新帧
+    decodeQueue.length = 0
+    frameGeneration++
+    backCanvas.width = meta.screenW || meta.w
+    backCanvas.height = meta.screenH || meta.h
+  }
+  decodeQueue.push({ meta, payload, gen: frameGeneration })
+  pumpDecoders()
+}
+
+/* 全帧解码循环：始终取最新帧解码并直绘，解完若又有新帧就继续，无帧则退出等待下次入队 */
+async function pumpFullFrame() {
+  while (latestFullFrame) {
+    const item = latestFullFrame
+    latestFullFrame = null
+    fullDecoding = true
+    try {
+      const bitmap = await createImageBitmap(new Blob([item.payload], { type: 'image/jpeg' }))
+      drawFullFrame(bitmap, item.meta)
+      bitmap.close()
+    } catch {
+      // 单帧解码失败跳过，下一帧是完整画面会立即覆盖，不会残留花屏
+    } finally {
+      fullDecoding = false
+    }
+  }
+}
+
+function drawFullFrame(bitmap, meta) {
+  const canvas = canvasRef.value
+  if (!canvas) {
+    return
+  }
+  const w = meta.screenW || meta.w
+  const h = meta.screenH || meta.h
+  // 仅尺寸变化时才重设画布（重设会清空画布），避免每帧清空造成闪白
+  if (canvas.width !== w) {
+    canvas.width = w
+  }
+  if (canvas.height !== h) {
+    canvas.height = h
+  }
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h)
+}
+
+function pumpDecoders() {
+  while (activeDecoders < DECODE_CONCURRENCY && decodeQueue.length) {
+    activeDecoders++
+    decodeOne(decodeQueue.shift())
+  }
+}
+
+async function decodeOne(item) {
+  try {
+    if (item.gen !== frameGeneration) {
+      return
+    }
+    const bitmap = await createImageBitmap(new Blob([item.payload], { type: 'image/jpeg' }))
+    // 解码期间可能已来新关键帧，过期块直接丢弃
+    if (item.gen === frameGeneration) {
+      backCtx.drawImage(bitmap, item.meta.x, item.meta.y, item.meta.w, item.meta.h)
+      scheduleBlit()
+    }
+    bitmap.close()
+  } catch {
+    // 单块解码失败不影响后续，关键帧会自愈
+  } finally {
+    activeDecoders--
+    pumpDecoders()
+  }
 }
 
 function startScreen() {
   socket.value?.sendEnvelope('screen-start', {
     fps: fps.value,
     quality: quality.value,
-    monitor: monitorIndex.value
+    monitor: monitorIndex.value,
+    // full=1：要求被控端整屏推流（每帧都是完整画面），而非脏块增量，彻底消除“刷好几下才完整”
+    full: 1
   })
   screenOn.value = true
 }
@@ -295,16 +408,29 @@ function switchMonitor(index) {
 
 let lastMoveSent = 0
 
-function normalized(event) {
+/** 客户端坐标 → 归一化 0~10000（canvas 以 CSS 缩放显示，按比例换算）。鼠标与触摸共用 */
+function pointFromClient(clientX, clientY) {
   const canvas = canvasRef.value
   if (!canvas) {
     return null
   }
   const rect = canvas.getBoundingClientRect()
-  // canvas 以 CSS 缩放显示，按比例换算回 0~10000
-  const x = Math.round(((event.clientX - rect.left) / rect.width) * 10000)
-  const y = Math.round(((event.clientY - rect.top) / rect.height) * 10000)
-  return { x: clamp(x), y: clamp(y) }
+  let nx
+  let ny
+  if (rotateFs.value) {
+    // CSS 伪全屏把画布顺时针旋转了 90°：画布局部 +x 轴指向屏幕下方、+y 轴指向屏幕左方，
+    // getBoundingClientRect 拿到的是旋转后的屏幕包围盒，需按此反向换算回画布坐标，否则点击错位。
+    nx = (clientY - rect.top) / rect.height
+    ny = 1 - (clientX - rect.left) / rect.width
+  } else {
+    nx = (clientX - rect.left) / rect.width
+    ny = (clientY - rect.top) / rect.height
+  }
+  return { x: clamp(Math.round(nx * 10000)), y: clamp(Math.round(ny * 10000)) }
+}
+
+function normalized(event) {
+  return pointFromClient(event.clientX, event.clientY)
 }
 
 function clamp(v) {
@@ -350,6 +476,134 @@ function onWheel(event) {
   }
   const point = normalized(event)
   point && socket.value.sendEnvelope('mouse', { action: 'wheel', deltaY: -event.deltaY, ...point })
+}
+
+/* 触摸输入：手机没有鼠标事件，单指按下/移动/抬起映射为左键 down/move/up，
+   双指竖向滑动映射为滚轮。preventDefault 抑制浏览器把触摸再合成一份鼠标事件（避免双发）。 */
+let lastTouchScrollY = 0
+
+function onTouchStart(event) {
+  if (!canInput()) {
+    return
+  }
+  event.preventDefault()
+  stageRef.value?.focus()
+  if (event.touches.length === 1) {
+    const t = event.touches[0]
+    const point = pointFromClient(t.clientX, t.clientY)
+    point && socket.value.sendEnvelope('mouse', { action: 'down', button: 'left', ...point })
+  } else if (event.touches.length === 2) {
+    lastTouchScrollY = event.touches[0].clientY
+  }
+}
+
+function onTouchMove(event) {
+  if (!canInput() || !screenOn.value) {
+    return
+  }
+  event.preventDefault()
+  if (event.touches.length === 1) {
+    const now = Date.now()
+    if (now - lastMoveSent < 40) {
+      return
+    }
+    lastMoveSent = now
+    const t = event.touches[0]
+    const point = pointFromClient(t.clientX, t.clientY)
+    point && socket.value.sendEnvelope('mouse', { action: 'move', ...point })
+  } else if (event.touches.length === 2) {
+    const y = event.touches[0].clientY
+    const delta = lastTouchScrollY - y
+    lastTouchScrollY = y
+    if (Math.abs(delta) < 4) {
+      return
+    }
+    const point = pointFromClient(event.touches[0].clientX, y)
+    point && socket.value.sendEnvelope('mouse', { action: 'wheel', deltaY: delta * 3, ...point })
+  }
+}
+
+function onTouchEnd(event) {
+  if (!canInput()) {
+    return
+  }
+  event.preventDefault()
+  const t = event.changedTouches[0]
+  if (!t) {
+    return
+  }
+  const point = pointFromClient(t.clientX, t.clientY)
+  point && socket.value.sendEnvelope('mouse', { action: 'up', button: 'left', ...point })
+}
+
+/* 横屏全屏：手机竖屏看电脑画面又小又扁，一键铺满屏幕操控更顺手，再一键回竖屏。
+   关键：原生 Fullscreen API 与 screen.orientation.lock 都只在「安全上下文」(https/localhost)
+   可用；手机用局域网 http://IP:5173 访问时 document.fullscreenEnabled=false，
+   requestFullscreen 会静默失败——这正是之前「点了没反应」的原因。
+   因此 http 下退化为 CSS 伪全屏（fixed 铺满视口），用户把手机横过来，浏览器会随设备
+   自然旋转页面（未做 CSS transform，getBoundingClientRect 始终正确，坐标映射不受影响）。 */
+const isFullscreen = ref(false) // 原生全屏状态（由 fullscreenchange 同步）
+const pseudoFs = ref(false) // http 下的 CSS 伪全屏状态
+const isFs = computed(() => isFullscreen.value || pseudoFs.value)
+/* 伪全屏即强制顺时针旋转 90° 铺满（http 非安全上下文无法用 orientation.lock，只能 CSS 转）。
+   不再依赖任何方向检测（@media/matchMedia 在部分手机浏览器上不生效），
+   改用内联样式直接旋转：优先级最高、不依赖媒体查询，任何浏览器点全屏都必定旋转。
+   rotateFs 与旋转同条件（=pseudoFs），供 pointFromClient 做坐标补偿。 */
+const rotateFs = computed(() => pseudoFs.value)
+// 伪全屏时给舞台加内联旋转样式：宽高对调 + rotate(90deg) 顺时针铺满
+const stageStyle = computed(() => {
+  if (!pseudoFs.value) return null
+  return {
+    width: '100dvh',
+    height: '100vw',
+    transformOrigin: '0 0',
+    transform: 'rotate(90deg) translateY(-100%)'
+  }
+})
+
+async function enterLandscapeFullscreen() {
+  const el = stageRef.value
+  let native = false
+  if (document.fullscreenEnabled && el?.requestFullscreen) {
+    try {
+      await el.requestFullscreen()
+      // 部分浏览器即便在不安全上下文也不报错，需用 fullscreenElement 兜底确认是否真进了全屏
+      native = !!(document.fullscreenElement || document.webkitFullscreenElement)
+    } catch {
+      native = false
+    }
+    if (native) {
+      try {
+        await screen.orientation?.lock?.('landscape')
+      } catch {
+        // iOS / 部分浏览器不支持方向锁，交由 CSS 旋转或系统随设备旋转
+      }
+    }
+  }
+  if (!native) {
+    // http 局域网 / 不支持原生全屏：CSS 伪全屏铺满，stageStyle 内联旋转 90° 强制横屏
+    pseudoFs.value = true
+  }
+}
+
+async function exitPortrait() {
+  pseudoFs.value = false
+  try {
+    screen.orientation?.unlock?.()
+  } catch {
+    // 不支持则忽略
+  }
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    try {
+      await (document.exitFullscreen?.() || document.webkitExitFullscreen?.())
+    } catch {
+      // 已不在全屏则忽略
+    }
+  }
+}
+
+function onFullscreenChange() {
+  isFullscreen.value = !!(document.fullscreenElement || document.webkitFullscreenElement)
 }
 
 function canInput() {
@@ -490,6 +744,10 @@ function clearTransfers() {
   for (const key of Object.keys(transfers)) {
     delete transfers[key]
   }
+}
+
+function pickUploadFile() {
+  openFilePicker(uploadInput.value)
 }
 
 async function uploadFiles(event) {
@@ -708,6 +966,8 @@ onMounted(() => {
   keyupHandler = (e) => onKeyUp(e)
   document.addEventListener('keydown', keydownHandler)
   document.addEventListener('keyup', keyupHandler)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
 })
 
 onBeforeUnmount(() => {
@@ -716,6 +976,10 @@ onBeforeUnmount(() => {
     document.removeEventListener('keydown', keydownHandler)
     document.removeEventListener('keyup', keyupHandler)
   }
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  decodeQueue.length = 0
+  latestFullFrame = null
   if (socket.value) {
     socket.value.close()
   }
@@ -859,7 +1123,7 @@ const inSession = computed(() => !!session.value)
                    @change="applyScreenParams" />
         <span class="toolbar-label">帧率</span>
         <el-select v-model="fps" size="small" class="toolbar-select" @change="applyScreenParams">
-          <el-option v-for="v in [5, 10, 15, 20]" :key="v" :label="`${v} fps`" :value="v" />
+          <el-option v-for="v in [10, 15, 20, 30]" :key="v" :label="`${v} fps`" :value="v" />
         </el-select>
         <el-button size="small" @click="switchMonitor(0)">屏1</el-button>
         <el-button size="small" @click="switchMonitor(1)">屏2</el-button>
@@ -869,11 +1133,24 @@ const inSession = computed(() => !!session.value)
       </div>
 
       <div class="remote-body">
-        <div ref="stageRef" class="remote-stage" tabindex="0"
+        <div ref="stageRef" class="remote-stage" :class="{ 'is-pseudo-fs': pseudoFs }" :style="stageStyle" tabindex="0"
              @mousemove="onMouseMove" @mousedown="onMouseDown" @mouseup="onMouseUp" @wheel.prevent="onWheel"
+             @touchstart="onTouchStart" @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd"
              @contextmenu.prevent>
           <canvas ref="canvasRef" class="remote-canvas" />
           <div v-if="!screenOn" class="remote-stage__hint">画面未开启，点击工具栏「开始画面」</div>
+          <!-- 全屏按钮浮在画面上：必须把它的触摸/鼠标事件全部 .stop 隔离，否则会冒泡到 .remote-stage
+               被 onTouchEnd/onMouseUp 的 preventDefault 拦截——尤其 touchend 被 preventDefault 后浏览器
+               不再合成 click，按钮就“点了没反应”（这正是之前手机点全屏无效的根因）。 -->
+          <div class="stage-fs" @mousedown.stop @mouseup.stop
+               @touchstart.stop @touchmove.stop @touchend.stop @touchcancel.stop>
+            <el-button v-if="!isFs" size="small" type="primary" plain @click="enterLandscapeFullscreen">
+              全屏
+            </el-button>
+            <el-button v-else size="small" type="info" plain @click="exitPortrait">
+              退出全屏
+            </el-button>
+          </div>
         </div>
 
         <div class="remote-side">
@@ -889,8 +1166,8 @@ const inSession = computed(() => !!session.value)
               </div>
               <div class="panel-toolbar">
                 <el-button size="small" @click="mkdir">新建目录</el-button>
-                <el-button size="small" @click="uploadInput && uploadInput.click()">上传文件</el-button>
-                <input ref="uploadInput" type="file" multiple style="display: none" @change="uploadFiles" />
+                <el-button size="small" @click="pickUploadFile">上传文件</el-button>
+                <input ref="uploadInput" type="file" multiple class="remote-upload-input" @change="uploadFiles" />
               </div>
               <div v-if="Object.keys(transfers).length" class="transfer-list">
                 <div v-for="(t, id) in transfers" :key="id" class="transfer-item">
@@ -1105,11 +1382,60 @@ const inSession = computed(() => !!session.value)
   outline: none;
   overflow: hidden;
   min-width: 0;
+  /* 手机触摸控制时禁止浏览器手势（下拉刷新/双指缩放/滚动），否则会吞掉 touchmove */
+  touch-action: none;
+}
+.remote-stage:fullscreen {
+  border-radius: 0;
+}
+.remote-stage:fullscreen .remote-canvas {
+  max-width: 100vw;
+  max-height: 100vh;
+}
+/* http 局域网下的 CSS 伪全屏：铺满视口、盖住其余 UI（原生 Fullscreen API 在非安全上下文不可用） */
+.remote-stage.is-pseudo-fs {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 3000;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  border-radius: 0;
+}
+/* 旋转改由 stageStyle 内联样式驱动（@media/matchMedia 在部分手机浏览器不生效），
+   此处不再用媒体查询旋转；.is-pseudo-fs 只负责铺满与层级，宽高/transform 由内联覆盖。 */
+/* 伪全屏（含旋转）下画布按舞台本地盒百分比自适应 contain：
+   旋转时本地盒是 100dvh×100vw，若用 vw/vh 视口单位会算错方向，必须用 100% 才不变形 */
+.remote-stage.is-pseudo-fs .remote-canvas {
+  max-width: 100%;
+  max-height: 100%;
 }
 .remote-canvas {
   max-width: 100%;
   max-height: 100%;
   cursor: crosshair;
+}
+.stage-fs {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+}
+/* 同聊天页：display:none 的 input 在部分手机浏览器上 click() 无效，改为渲染但不可见 */
+.remote-upload-input {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
 }
 .remote-stage__hint {
   position: absolute;

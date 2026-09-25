@@ -125,12 +125,17 @@
           <EmojiPicker @select="onEmoji" />
         </el-popover>
 
+        <!-- 图标按钮 + 隐藏 input（JS 调起）。注：荣耀自带浏览器会对本站点拦截
+             文件选择框（隔离测试页证实连原生可见 input 都不弹，微信内正常），
+             属浏览器站点级风控，非代码问题 -->
         <el-tooltip v-if="canUpload" content="发送图片" placement="top">
           <el-button text :icon="Picture" :disabled="uploading" @click="pickImage" />
         </el-tooltip>
         <el-tooltip v-if="canUpload" content="发送文件（音频会作为语音消息）" placement="top">
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
         </el-tooltip>
+        <input ref="imageInputRef" type="file" accept="image/*" class="chat-window__file-input" @change="onPicked" />
+        <input ref="fileInputRef" type="file" class="chat-window__file-input" @change="onPicked" />
 
         <el-tooltip
           v-if="canUpload"
@@ -219,13 +224,6 @@
         <el-button type="primary" :loading="sending" :disabled="!draft.trim()" @click="sendText">发送</el-button>
       </div>
 
-      <!--
-        用原生 input 而不是 el-upload：el-upload 内部走自己的 XHR，
-        不经过 api/request.js 那个实例，satoken 头、统一错误提示、1002 跳登录
-        全都要再配一遍。这里只需要「选一个文件」，原生 input 反而更直接。
-      -->
-      <input ref="imageInputRef" type="file" accept="image/*" class="chat-window__file-input" @change="onPicked" />
-      <input ref="fileInputRef" type="file" class="chat-window__file-input" @change="onPicked" />
     </footer>
 
     <ContextMenu
@@ -294,6 +292,7 @@ import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
 import { uploadFileSmart } from '@/api/file'
 import { searchMessages, clearConversationMessages } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo } from '@/utils/media'
+import { openFilePicker } from '@/utils/picker'
 // 视频压缩只在桌面端启用：调 Electron 主进程的原生 ffmpeg（GPU 硬件编码）压缩后上传；
 // Web 端不压缩、直传原片（window.__IM_NATIVE__ 只在 Electron 里存在，据此区分）。
 import { isElectron } from '@/utils/env'
@@ -946,12 +945,14 @@ const selfWatermark = computed(() => {
   return [auth.nickname, idPart].filter(Boolean).join(' ')
 })
 
+/** 点「发送图片」图标：调起隐藏的图片 input（showPicker 优先，见 utils/picker.js） */
 function pickImage() {
-  imageInputRef.value?.click()
+  openFilePicker(imageInputRef.value)
 }
 
+/** 点「发送文件」图标：调起隐藏的文件 input */
 function pickFile() {
-  fileInputRef.value?.click()
+  openFilePicker(fileInputRef.value)
 }
 
 /**
@@ -1628,9 +1629,19 @@ watch(key, async () => {
   margin-top: 8px;
 }
 
-/* 原生 input 只是用来弹出选择框，不参与布局 */
+/* 隐藏的文件 input：渲染但不可见（不能 display:none，部分手机浏览器会拒绝对其
+   调起选择框），由图标按钮经 openFilePicker() 调起 */
 .chat-window__file-input {
-  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
 }
 
 /* 输入框去掉边框，聊天场景里外层已经有分隔线了 */

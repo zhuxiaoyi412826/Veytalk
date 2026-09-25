@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文件选择器隔离测试</title>
+  <style>
+    body { font-family: sans-serif; padding: 24px; line-height: 2; }
+    .box { border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    input[type="file"] { display: block; margin: 8px 0; }
+    #log { background: #f5f5f5; padding: 8px; font-size: 13px; white-space: pre-wrap; min-height: 60px; }
+  </style>
+</head>
+<body>
+  <h3>文件选择器隔离测试（无 Vue / 无 Element Plus / 无构建）</h3>
+
+  <div class="box">
+    <b>测试 A：最普通的可见 input</b><br />
+    直接点下面这个系统原生「选择文件」按钮：
+    <input id="a" type="file" accept="image/*" />
+  </div>
+
+  <div class="box">
+    <b>测试 B：JS click() 调起隐藏 input</b><br />
+    <button id="btnB" type="button">点我用 JS 调起下面的隐藏 input</button>
+    <input id="b" type="file" style="display: none" />
+  </div>
+
+  <div class="box">
+    <b>事件日志</b>
+    <div id="log">（等待操作…）</div>
+  </div>
+
+  <script>
+    var log = document.getElementById('log')
+    function addLog(msg) {
+      log.textContent = new Date().toLocaleTimeString() + ' ' + msg + '\n' + log.textContent
+    }
+    document.getElementById('a').addEventListener('click', function () { addLog('A: input 收到 click') })
+    document.getElementById('a').addEventListener('change', function (e) {
+      addLog('A: ✅ 选择成功 → ' + (e.target.files[0] ? e.target.files[0].name : '(空)'))
+    })
+    document.getElementById('b').addEventListener('change', function (e) {
+      addLog('B: ✅ 选择成功 → ' + (e.target.files[0] ? e.target.files[0].name : '(空)'))
+    })
+    document.getElementById('btnB').addEventListener('click', function () {
+      addLog('B: 按钮被点，执行 input.click()')
+      document.getElementById('b').click()
+    })
+    // 取消选择也能看到（focus 回来但没 change ≈ 弹了选择框又被取消）
+    window.addEventListener('focus', function () { addLog('window 重新获得焦点（可能刚从选择框返回）') })
+  </script>
+</body>
+</html>

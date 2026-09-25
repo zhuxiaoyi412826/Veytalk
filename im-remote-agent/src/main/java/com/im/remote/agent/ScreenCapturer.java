@@ -28,6 +28,13 @@ public class ScreenCapturer {
     private static final int BLOCK = 64;
     /** 全屏关键帧间隔（毫秒） */
     private static final long KEYFRAME_INTERVAL_MS = 5000;
+    /**
+     * 全帧模式传输分辨率长边上限：超过则等比缩小。
+     * 纯 JDK 的 JPEG 编码是这里最贵的一步，1080p 整屏一帧要几十毫秒；先把长边压到
+     * 1600 以内，编码更快、体积更小，才能在 LAN 上跑到 15~25fps 的「整屏完整刷新」。
+     * 前端 canvas 会按此尺寸建、再 CSS 缩放铺满手机屏，清晰度足够操控。
+     */
+    private static final int MAX_TRANSMIT_SIDE = 1600;
 
     private final AgentClient client;
     private final AtomicBoolean running = new AtomicBoolean();
@@ -36,6 +43,12 @@ public class ScreenCapturer {
     private volatile int fps = 10;
     private volatile float quality = 0.75f;
     private volatile int monitorIndex = 0;
+    /**
+     * true=全帧模式（默认）：画面有变化就发一整屏完整帧，控制端每帧都是完整画面，
+     * 不会「刷好几下才拼齐」。false=旧的 64x64 脏块增量模式（省带宽，但一次大变化要
+     * 多帧才收敛，观感割裂）。由控制端 screen-start 的 full 参数切换。
+     */
+    private volatile boolean fullFrameMode = true;
 
     public ScreenCapturer(AgentClient client) {
         this.client = client;
@@ -73,6 +86,14 @@ public class ScreenCapturer {
         this.lastKeyframeMs = 0;
     }
 
+    /** 切换全帧/脏块推流模式；切换后强制下一帧重发完整画面 */
+    public void setFullFrame(boolean full) {
+        if (full != this.fullFrameMode) {
+            this.fullFrameMode = full;
+            this.lastKeyframeMs = 0;
+        }
+    }
+
     /** 开始推流；已在推流时只更新参数 */
     public void start(long sid, int fps, int qualityPercent, int monitor) {
         configure(fps, qualityPercent, monitor);
@@ -108,15 +129,25 @@ public class ScreenCapturer {
                     sleep(200);
                     continue;
                 }
-                boolean keyRequired = frame.getWidth() != (previous == null ? -1 : previous.getWidth())
-                        || frame.getHeight() != (previous == null ? -1 : previous.getHeight())
-                        || frameStart - lastKeyframeMs > KEYFRAME_INTERVAL_MS;
-                if (keyRequired) {
-                    sendFullFrame(sid, frame, bounds);
-                    previous = copy(frame);
+                if (fullFrameMode) {
+                    // 整屏推流：先等比缩小到传输分辨率，画面有变化才发一整帧（静态画面零流量）。
+                    // 每一帧都是完整画面，控制端一次就能刷出完整图像，不存在“拼块”过程。
+                    BufferedImage scaled = scaleDown(frame, MAX_TRANSMIT_SIDE);
+                    if (previous == null || frameChanged(previous, scaled)) {
+                        sendScaledFrame(sid, scaled);
+                        previous = scaled;
+                    }
                 } else {
-                    sendDirtyBlocks(sid, previous, frame, bounds);
-                    previous = frame;
+                    boolean keyRequired = frame.getWidth() != (previous == null ? -1 : previous.getWidth())
+                            || frame.getHeight() != (previous == null ? -1 : previous.getHeight())
+                            || frameStart - lastKeyframeMs > KEYFRAME_INTERVAL_MS;
+                    if (keyRequired) {
+                        sendFullFrame(sid, frame, bounds);
+                        previous = copy(frame);
+                    } else {
+                        sendDirtyBlocks(sid, previous, frame, bounds);
+                        previous = frame;
+                    }
                 }
             } catch (Exception e) {
                 if (!running.get()) {
@@ -129,6 +160,74 @@ public class ScreenCapturer {
             sleep(Math.max(5, 1000L / Math.max(fps, 1) - cost));
         }
         running.set(false);
+    }
+
+    /**
+     * 全帧模式发送：整屏（可能已等比缩小）编成一张 JPEG 发出，元数据的
+     * w/h/screenW/screenH 全部等于传输帧尺寸，控制端据此建画布并 1:1 铺满——
+     * 这样「缩小后的帧只覆盖画布一部分、要几帧才拼齐」的割裂问题从根上消失。
+     * 超单帧上限时只降质量、不缩尺寸，保证永远铺满整屏。
+     */
+    private void sendScaledFrame(long sid, BufferedImage frame) {
+        frame = toRgb(frame);
+        byte[] jpeg = toJpeg(frame);
+        float q = quality;
+        while (jpeg.length + 64 > client.maxFrameBytes() && q > 0.3f) {
+            q -= 0.15f;
+            jpeg = toJpeg(frame, q);
+        }
+        if (jpeg.length + 64 > client.maxFrameBytes()) {
+            client.log("全屏帧超限，跳过: " + jpeg.length);
+            return;
+        }
+        int w = frame.getWidth();
+        int h = frame.getHeight();
+        // full=1 明确告诉控制端「这是一整屏完整帧」，走最新帧优先的直绘路径，
+        // 与脏块模式的关键帧(key=true 但 full 缺省)区分开，避免两套渲染逻辑互相干扰。
+        String meta = MiniJson.write(Map.of(
+                "x", 0, "y", 0,
+                "w", w, "h", h,
+                "screenW", w, "screenH", h,
+                "key", true, "full", 1));
+        client.sendBinaryFrame(AgentClient.FRAME_SCREEN, sid, meta, jpeg);
+        this.lastKeyframeMs = System.currentTimeMillis();
+    }
+
+    /** 等比缩小到长边不超过 maxSide；本就不超则原样返回（避免无谓拷贝） */
+    private BufferedImage scaleDown(BufferedImage src, int maxSide) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        int longest = Math.max(w, h);
+        if (longest <= maxSide) {
+            return src;
+        }
+        double ratio = (double) maxSide / longest;
+        int nw = Math.max(1, (int) Math.round(w * ratio));
+        int nh = Math.max(1, (int) Math.round(h * ratio));
+        BufferedImage out = new BufferedImage(nw, nh, BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = out.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(src, 0, 0, nw, nh, null);
+        g.dispose();
+        return out;
+    }
+
+    /** 整屏粗采样比对（每 16px 一点）：完全没变化就不发帧，静态画面零流量 */
+    private boolean frameChanged(BufferedImage a, BufferedImage b) {
+        if (a.getWidth() != b.getWidth() || a.getHeight() != b.getHeight()) {
+            return true;
+        }
+        int w = a.getWidth();
+        int h = a.getHeight();
+        for (int y = 0; y < h; y += 16) {
+            for (int x = 0; x < w; x += 16) {
+                if (a.getRGB(x, y) != b.getRGB(x, y)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private void sendFullFrame(long sid, BufferedImage frame, Rectangle bounds) {

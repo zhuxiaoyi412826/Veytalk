@@ -53,6 +53,10 @@ public class ControlHandshakeInterceptor implements HandshakeInterceptor {
         // 握手阶段还要求登录态有效——否则拿到一个泄露的 ticket 字符串就能匿名接入
         Long userId = currentUserId(request);
         if (userId == null) {
+            // 这条分支曾经完全静默：ticket 校验通过后 satoken 换不到登录态，直接回 401 且不留一行日志，
+            // 现象是「控制端 WS 一连就上、半秒后被踢回设备列表」，与 ticket 过期、证书未信任都难以区分。
+            // 明确记一条 WARN，把「没带 satoken / 换取失败(返回 null) / 校验抛异常」三种成因分开，见 currentUserId。
+            log.warn("控制端握手被拒绝: satoken 登录态校验未通过, remote={}", request.getRemoteAddress());
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
@@ -78,12 +82,24 @@ public class ControlHandshakeInterceptor implements HandshakeInterceptor {
     private Long currentUserId(ServerHttpRequest request) {
         String token = AgentHandshakeInterceptor.resolveParam(request.getURI().toString(), "satoken");
         if (token == null || token.isBlank()) {
+            log.warn("控制端握手未携带有效 satoken 参数, remote={}", request.getRemoteAddress());
             return null;
+        }
+        // 合法 JWT 恒为 base64url.header.payload.signature，绝不含空格；出现空格几乎必然是
+        // 传输途中 '+' 被按 application/x-www-form-urlencoded 规则误解码成了 ' '（双重解码），
+        // 会让 token 与 Redis 里的登录态对不上——单独记一条以便一眼定位该成因。
+        if (token.indexOf(' ') >= 0) {
+            log.warn("控制端 satoken 含空格(疑似 '+' 被误解码为空格), len={}", token.length());
         }
         try {
             Object loginId = StpUtil.getLoginIdByToken(token);
+            if (loginId == null) {
+                log.warn("控制端 satoken 换取登录态为空(token 无效/已注销), len={}, segments={}",
+                        token.length(), token.split("\\.").length);
+            }
             return loginId == null ? null : Long.valueOf(String.valueOf(loginId));
         } catch (Exception e) {
+            log.warn("控制端 satoken 校验抛异常: {}", e.toString());
             return null;
         }
     }

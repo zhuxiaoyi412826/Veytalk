@@ -73,7 +73,7 @@
               size="small"
             />
             <template v-if="chatBgType === 'image'">
-              <el-button size="small" :icon="Picture" @click="bgInputRef?.click()">选择图片</el-button>
+              <el-button size="small" :icon="Picture" @click="openFilePicker(bgInputRef)">选择图片</el-button>
               <el-button v-if="chatBgValue" size="small" link type="danger" @click="settings.clearChatBackground()">
                 清除
               </el-button>
@@ -342,6 +342,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { dbStats, dbClearAllMessages, dbExportAll, localDbEnabled } from '@/utils/localdb'
 import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
 import { clearMediaCache } from '@/utils/media'
+import { openFilePicker } from '@/utils/picker'
 import { fetchSensitiveFilter, setSensitiveFilter } from '@/api/message'
 
 defineOptions({ name: 'Settings' })
@@ -719,8 +720,18 @@ async function onReset() {
   flex-wrap: wrap;
 }
 
+/* 同聊天页：display:none 的 input 在部分手机浏览器上 click() 无效，改为渲染但不可见 */
 .settings__file {
-  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
 }
 
 .settings__preview {
