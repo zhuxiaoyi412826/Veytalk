@@ -181,6 +181,76 @@ public class AgentConfig {
         save();
     }
 
+    /* ==================== 直连（P2P）与硬件编码 ==================== */
+
+    /**
+     * 被控端是否允许开直连监听口。默认 false 是刻意的：开了就有两个常开端口，
+     * 这是整套被控能力里唯一「往外网开口子」的变化，必须由使用者显式勾选；
+     * 且服务端 {@code im.remote.direct.enabled} 也为真时才真正生效（两道门）。
+     */
+    public boolean directEnabled() {
+        return Boolean.parseBoolean(get("direct.enabled", "false"));
+    }
+
+    public void setDirectEnabled(boolean value) {
+        set("direct.enabled", String.valueOf(value));
+        save();
+    }
+
+    /** 局域网直连端口（TCP，同一端口兼容 WebSocket 升级与裸帧） */
+    public int directTcpPort() {
+        return intOf("direct.tcpPort", 18924);
+    }
+
+    /** 打洞直连端口（UDP），必须与反射服务回显的公网映射端口一致才好复用同一 socket */
+    public int directUdpPort() {
+        return intOf("direct.udpPort", 18925);
+    }
+
+    /** 关掉后只接受 UDP 打洞直连，不监听局域网端口 */
+    public boolean directAllowLan() {
+        return Boolean.parseBoolean(get("direct.allowLan", "true"));
+    }
+
+    public void setDirectAllowLan(boolean value) {
+        set("direct.allowLan", String.valueOf(value));
+        save();
+    }
+
+    /** ffmpeg 可执行文件路径；留空按「jar 同级 ../ffmpeg/ffmpeg.exe → IM_FFMPEG_PATH → PATH」找 */
+    public String ffmpegPath() {
+        return get("ffmpeg.path", "");
+    }
+
+    /** 编码器：auto 按 nvenc → qsv → amf → libx264 顺序探测 */
+    public String ffmpegEncoder() {
+        String value = get("ffmpeg.encoder", "auto");
+        return value.isEmpty() ? "auto" : value;
+    }
+
+    /** 是否允许 screen-start 请求 h264；关掉表示无论控制端要什么都只发 JPEG */
+    public boolean h264Enabled() {
+        return Boolean.parseBoolean(get("h264.enabled", "true"));
+    }
+
+    public void setH264Enabled(boolean value) {
+        set("h264.enabled", String.valueOf(value));
+        save();
+    }
+
+    /** H.264 目标码率（bps），屏幕推流默认 2.5Mbps 已够 1280 宽的办公画面 */
+    public int h264Bitrate() {
+        return intOf("h264.bitrate", 2_500_000);
+    }
+
+    private int intOf(String key, int def) {
+        try {
+            return Integer.parseInt(get(key, String.valueOf(def)));
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
     /** 本机所有盘符根，Windows 形如 [C:\, D:\]，Linux/macOS 返回 [/] */
     static final class FileRoots {
         static java.util.List<Path> list() {

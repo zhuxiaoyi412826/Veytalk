@@ -487,6 +487,56 @@ im:
     # 握手成功即消费，60s 足够覆盖「前端拿到 ticket → 建连」的往返，设长会放大票据在 URL 里的暴露窗口。
     control-ticket-ttl-seconds: 60
 
+    # -------------------------------------------------------------------------
+    # 直连（P2P）：控制端与被控端之间绕过中继的第三条通路
+    #
+    # 默认 enabled: false 是有意的——开启后被控机会常开两个监听端口
+    # （TCP 18924 / UDP 18925，由 Agent 侧配置决定），这是整套远程能力里唯一
+    # 「往内网开口子」的变化，必须由部署方显式决定。关闭时中继行为与引入
+    # 直连之前逐字节一致，两端只会走中继。
+    #
+    # ★ 需要放行的端口（Windows 防火墙示例，管理员 PowerShell 执行一次）：
+    #     服务器：netsh advfirewall firewall add rule name="IM Punch" dir=in action=allow protocol=UDP localport=8947
+    #     被控机：netsh advfirewall firewall add rule name="IM Direct TCP" dir=in action=allow protocol=TCP localport=18924
+    #     被控机：netsh advfirewall firewall add rule name="IM Direct UDP" dir=in action=allow protocol=UDP localport=18925
+    #   被控机那两条只在「同网段直连 / 打洞直连」时用得到；不开 direct 就不用放行。
+    #   首次启动 Agent 时 Windows 也会自己弹确认框，点「允许」等价于上面两条规则。
+    #
+    # ★ PUNCH_HOST 必须是客户端真能访问到的公网地址（公网 IP 或已解析到它的域名），
+    #   留空等于放弃 UDP 打洞档，只剩局域网直连与中继，不会报错也不会重试。
+    #   服务器在 NAT / 云厂商安全组后面时，除了放行 UDP 8947 入站，还要做端口转发，
+    #   且转发的必须是同一个 UDP 端口（反射服务靠收包源的 ip:port 判断「你是谁」，
+    #   经端口转换后回显的就是转换前的地址，打洞会打进错误的地方）。
+    #
+    # ★ 直连失败永远不是错误：对称 NAT、对方防火墙拒连、Agent 没开直连开关都是常态，
+    #   中继 WS 全程另开一条兜住，用户视角最坏就是「和没做直连之前一样」。
+    #
+    # 键名对应 com.im.remote.config.RemoteProperties.Direct（kebab-case ↔ camelCase）。
+    # -------------------------------------------------------------------------
+    direct:
+      # 服务端侧总开关：关闭后不下发直连票据、不透传候选帧，两端只会走中继
+      enabled: ${IM_DIRECT_ENABLED:false}
+      # 局域网直连（TCP + 被控端自实现的 WebSocket）：同网段零配置可用，不需要打洞
+      lan-enabled: true
+      # UDP 打洞（仅 Electron 桌面端可用：浏览器开不了原始 UDP，手机浏览器永远享受不到这一档）
+      udp-enabled: true
+      # 打洞地址反射服务对外可达的地址。NAT 后的两端看不到自己对外暴露的 ip:port，
+      # 必须问服务端「我看起来是谁」；这个值没法由服务端猜，只有部署方知道自己是否直连公网。
+      punch-host: ${IM_DIRECT_PUNCH_HOST:}
+      # 反射服务监听的 UDP 端口，与 HTTP 端口无关，需单独放行 UDP 入站
+      punch-port: ${IM_DIRECT_PUNCH_PORT:8947}
+      # 反射服务对单个来源地址的问答次数上限（滑动 60 秒窗口）。
+      # 这个接口无状态、无鉴权，不限流就会被当成 UDP 放大/反射探测的免费跳板。
+      punch-rate-limit: 20
+      # 直连票据有效期（秒）：只覆盖「建会话到直连握手完成」这段窗口，不做长期凭证。
+      # 调大并不会让直连更稳（握手成功即失效），只会延长票据在日志里的可被利用时间。
+      token-ttl-seconds: 60
+      # 单个 DXP 报文的字节上限（UDP 分片尺寸）。1200 加 IP/UDP 头正好一个以太网帧，
+      # 抬高到 1400 以上会在部分链路上触发 IP 分片，分片包被路由器丢弃的概率远高于整包。
+      mtu: 1200
+      # 直连握手尝试预算（毫秒）：超时即判该档不可用，落回下一档，不反复重试
+      handshake-timeout-ms: 3000
+
 # ==============================================================================
 # 日志
 # 具体格式与滚动策略在 im-common 的 logback-spring.xml 里，

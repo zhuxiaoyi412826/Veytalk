@@ -39,6 +39,15 @@ public class AgentClient {
     public static final byte FRAME_SCREEN = 1;
     public static final byte FRAME_FILE = 2;
 
+    /**
+     * 可以交给直连的文本信封类型。
+     *
+     * <p>白名单而不是黑名单：{@code audit}/{@code ping}/{@code direct-*} 这些帧的
+     * 唯一消费者是服务端，走直连会它们静默消失（审计断链、会话被空闲巡检误杀），
+     * 后果比「少一条优化」严重得多。
+     */
+    private static final java.util.Set<String> DIRECT_TEXT_TYPES = java.util.Set.of("result", "error");
+
     /** UI 桥接：AgentClient 不直接触碰 Swing，便于无 UI 场景测试 */
     public interface AgentUi {
         void log(String message);
@@ -58,7 +67,9 @@ public class AgentClient {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final AtomicLong seq = new AtomicLong();
 
-    private final ScreenCapturer capturer = new ScreenCapturer(this);
+    private final ScreenCapturer capturer;
+    /** 直连通道（与中继并存）：不在白名单里的帧永远走中继，本类只负责「能走直连就走直连」 */
+    private final DirectChannel direct;
     private final FileOps fileOps;
     private final SystemOps systemOps;
     private final InputHandler inputHandler;
@@ -99,6 +110,9 @@ public class AgentClient {
     public AgentClient(AgentConfig config, AgentUi ui) {
         this.config = config;
         this.ui = ui;
+        // capturer 要在 direct 之前建：InputHandler 拿的是它的坐标映射，而它自己拿 config
+        this.capturer = new ScreenCapturer(this, config);
+        this.direct = new DirectChannel(this, config);
         this.fileOps = new FileOps(this, config);
         this.systemOps = new SystemOps(this, config);
         this.inputHandler = new InputHandler(this, capturer);
@@ -142,6 +156,7 @@ public class AgentClient {
 
     public void stop() {
         stopRequested = true;
+        direct.shutdown();
         WebSocket current = ws;
         if (current != null) {
             current.sendClose(WebSocket.NORMAL_CLOSURE, "agent-stop");
@@ -303,8 +318,10 @@ public class AgentClient {
             }
             case "error" -> log("服务端错误: " + MiniJson.str(data, "code") + " " + MiniJson.str(data, "message"));
             case "screen-start" -> {
-                // full 默认 1：整屏完整推流（每帧都是完整画面），消除控制端“刷好几下才拼齐”的割裂感
-                capturer.setFullFrame(MiniJson.integer(data, "full", 1) != 0);
+                // full 参数现为推流模式：0=纯脏块 1=纯整帧 2=自适应（默认）。
+                // 旧版控制端只发 0/1，语义与以前一致；新版发 2 才能拿到自适应推流。
+                capturer.setPushMode(MiniJson.integer(data, "full", ScreenCapturer.MODE_ADAPTIVE));
+                capturer.setCodec(MiniJson.str(data, "codec"));
                 capturer.start(sid, MiniJson.integer(data, "fps", 15),
                         MiniJson.integer(data, "quality", 75), (int) MiniJson.lng(data, "monitor", -1));
             }
@@ -326,6 +343,10 @@ public class AgentClient {
             case "monitor-switch" -> {
                 capturer.configure(0, 0, (int) MiniJson.lng(data, "index", 0));
                 sendResult(reqSeq, Map.of("monitor", MiniJson.lng(data, "index", 0)));
+            }
+            case "direct-candidates" -> {
+                // 控制端的候选对本端无用（建连总是由控制端发起），只留一条线索便于排查
+                log("收到控制端直连候选: " + MiniJson.write(data));
             }
             case "list-dir" -> sendResult(reqSeq, fileOpsSafeList(MiniJson.str(data, "path")));
             case "file-get" -> {
@@ -426,6 +447,9 @@ public class AgentClient {
         heartbeatTask = scheduler.scheduleAtFixedRate(() -> {
             try {
                 sendEnvelope("ping", null, Map.of("ts", System.currentTimeMillis()));
+                // 直连活着就顺带上报本端字节：服务端只看得见中继，不补这一帧
+                // 就会被空闲巡检误判为「无活动」而中断一个正常的直连会话
+                direct.reportStats();
             } catch (Exception e) {
                 log("心跳发送失败: " + e.getMessage());
             }
@@ -467,16 +491,24 @@ public class AgentClient {
         sid = MiniJson.lng(data, "sessionId", 0);
         permission = MiniJson.str(data, "permission") == null ? "readonly" : MiniJson.str(data, "permission");
         String keyB64 = MiniJson.str(data, "aesKey");
-        if (aesEnabled && keyB64 != null && !keyB64.isBlank()) {
-            cipher = new AesCipher(java.util.Base64.getDecoder().decode(keyB64));
+        byte[] keyBytes = keyB64 == null || keyB64.isBlank() ? null : java.util.Base64.getDecoder().decode(keyB64);
+        if (aesEnabled && keyBytes != null) {
+            cipher = new AesCipher(keyBytes);
         } else {
             cipher = null;
         }
         if (inviterNickname.isEmpty()) {
             inviterNickname = "控制端";
         }
+        // 直连参数随 session-start 一起下发（服务端把它们放在同一个 data.direct 里），
+        // 密钥用原始字节而不是 AesCipher：握手算 HMAC 需要密钥本体，而 AesCipher 不外泄
+        @SuppressWarnings("unchecked")
+        Map<String, Object> directParams = data.get("direct") instanceof Map
+                ? (Map<String, Object>) data.get("direct") : Map.of();
+        direct.onSessionStart(sid, directParams, keyBytes);
         SwingSupport.onEdt(() -> ui.onSessionStarted(inviterNickname, permission));
-        log("会话开始: sid=" + sid + ", permission=" + permission + ", aes=" + (cipher != null));
+        log("会话开始: sid=" + sid + ", permission=" + permission + ", aes=" + (cipher != null)
+                + (direct.available() ? ", 直连就绪" : ""));
         sendAudit("agent-ready", "permission=" + permission);
     }
 
@@ -495,6 +527,9 @@ public class AgentClient {
         if (sid == 0) {
             return;
         }
+        // 先把本端直连字节报上去再拆链路：服务端落库的总流量靠这一帧补齐
+        direct.reportStats();
+        direct.onSessionEnd(reason);
         sid = 0;
         cipher = null;
         permission = "readonly";
@@ -505,10 +540,6 @@ public class AgentClient {
     /* ==================== 帧收发原语 ==================== */
 
     public void sendEnvelope(String type, Long envelopeSid, Map<String, Object> data) {
-        WebSocket socket = ws;
-        if (socket == null || socket.isOutputClosed()) {
-            return;
-        }
         Map<String, Object> env = new LinkedHashMap<>();
         env.put("v", 1);
         env.put("type", type);
@@ -520,15 +551,21 @@ public class AgentClient {
         if (data != null && !data.isEmpty()) {
             env.put("data", data);
         }
-        socket.sendText(MiniJson.write(env), true);
-    }
-
-    /** 二进制帧：[1B 类型][8B sid][4B metaLen][meta][payload]，载荷按会话密钥加密 */
-    public void sendBinaryFrame(byte frameType, long envelopeSid, String meta, byte[] plainPayload) {
+        String json = MiniJson.write(env);
+        // 同一份信封 JSON，直连与中继只是两个载体，控制端的接收入口也是同一个
+        if (DIRECT_TEXT_TYPES.contains(type)
+                && direct.sendReliable(Dxp.KIND_TEXT, json.getBytes(StandardCharsets.UTF_8))) {
+            return;
+        }
         WebSocket socket = ws;
         if (socket == null || socket.isOutputClosed()) {
             return;
         }
+        socket.sendText(json, true);
+    }
+
+    /** 二进制帧：[1B 类型][8B sid][4B metaLen][meta][payload]，载荷按会话密钥加密 */
+    public void sendBinaryFrame(byte frameType, long envelopeSid, String meta, byte[] plainPayload) {
         try {
             byte[] payload = cipher == null ? plainPayload : cipher.encrypt(plainPayload);
             byte[] metaBytes = meta.getBytes(StandardCharsets.UTF_8);
@@ -538,11 +575,58 @@ public class AgentClient {
             buffer.putInt(metaBytes.length);
             buffer.put(metaBytes);
             buffer.put(payload);
-            buffer.flip();
-            socket.sendBinary(buffer, true).get(10, TimeUnit.SECONDS);
+            byte[] raw = buffer.array();
+            // 画面走不可靠通道（发不出去就丢这一帧，下一帧自然新），
+            // 文件块走可靠通道（直连排不下就回落中继，不能断文件）
+            boolean taken = frameType == FRAME_SCREEN
+                    ? direct.sendScreen(Dxp.KIND_BINARY, raw)
+                    : direct.sendReliable(Dxp.KIND_BINARY, raw);
+            if (taken) {
+                return;
+            }
+            WebSocket socket = ws;
+            if (socket == null || socket.isOutputClosed()) {
+                return;
+            }
+            socket.sendBinary(ByteBuffer.wrap(raw), true).get(10, TimeUnit.SECONDS);
         } catch (Exception e) {
             log("二进制帧发送失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 直连收到的文本信封。
+     *
+     * <p>与中继共用 handleText，但多一道会话号校验：中继上的帧由服务端按绑定关系路由，
+     * 本来就不会串会话；直连是一条真通向本机的链路，伪造一个 sid 不同的信封
+     * 不能让它作用到当前会话上。
+     */
+    void receiveDirectText(String json) {
+        try {
+            Map<String, Object> env = MiniJson.parseObject(json);
+            long frameSid = MiniJson.lng(env, "sid", 0);
+            if (frameSid != 0 && frameSid != sid) {
+                log("直连信封会话号不符，丢弃: sid=" + frameSid + ", type=" + MiniJson.str(env, "type"));
+                return;
+            }
+            handleText(json);
+        } catch (Exception e) {
+            log("直连文本帧处理异常: " + e.getMessage());
+        }
+    }
+
+    /** 直连收到的二进制帧：handleBinary 内部已按头部 sid 比对，不匹配直接丢 */
+    void receiveDirectBinary(byte[] raw) {
+        try {
+            handleBinary(raw);
+        } catch (Exception e) {
+            log("直连二进制帧处理异常: " + e.getMessage());
+        }
+    }
+
+    /** 供 UI 与其他组件查询直连状态 */
+    public DirectChannel directChannel() {
+        return direct;
     }
 
     private void handleBinary(byte[] raw) {
@@ -598,6 +682,16 @@ public class AgentClient {
 
     public long currentSid() {
         return sid;
+    }
+
+    /** 当前推流编码（jpeg/h264），UI 状态行用它判断有没有真走进硬件编码 */
+    public String screenCodec() {
+        return capturer.currentCodec();
+    }
+
+    /** 直连链路一句话状态，供 UI 状态行显示（排查「到底走没走直连」的第一手依据） */
+    public String directSummary() {
+        return direct.summary();
     }
 
     public boolean allowInput() {

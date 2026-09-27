@@ -90,6 +90,23 @@ public final class RemoteProtocol {
     /** Agent → 服务端：高危操作审计上报（服务端落库，不转发） */
     public static final String TYPE_AUDIT = "audit";
 
+    /* ==================== 直连协商帧（只走中继，永不走直连） ==================== */
+
+    /**
+     * 任意端 → 服务端 → 对方：交换直连候选（内网 ip、TCP/UDP 端口、反射器回显的公网映射）。
+     *
+     * <p>刻意继续走中继而不是新开一条信令通道：候选交换只发生在建连那一两秒、
+     * 总共两帧，为它再造一套鉴权与重连逻辑不划算；且中继是这条链路上唯一
+     * 「两端都确定可达」的通道，拿它做 bootstrap 不需要任何额外假设。
+     */
+    public static final String TYPE_DIRECT_CANDIDATES = "direct-candidates";
+    /** 控制端 → 服务端：直连握手成功（path=tcp/udp、对端地址），服务端据此改流量与日志口径 */
+    public static final String TYPE_DIRECT_UP = "direct-up";
+    /** 控制端 → 服务端：直连失败原因（防火墙拒连、对称 NAT 打洞失败等），仍走中继不影响使用 */
+    public static final String TYPE_DIRECT_FAILED = "direct-failed";
+    /** 任意端 → 服务端：本端在直连通道上实际收发过的字节，会话收尾时并入落库流量 */
+    public static final String TYPE_DIRECT_STATS = "direct-stats";
+
     /* ==================== 二进制帧类型 ==================== */
 
     /** 屏幕增量块，元数据 {x,y,w,h,screenW,screenH,key} */
@@ -101,4 +118,7 @@ public final class RemoteProtocol {
 
     /** 控制端一次性连接票据：remote:ticket:{ticket} -> sessionId */
     public static final String REDIS_TICKET_PREFIX = "remote:ticket:";
+    // 直连票据不占 Redis key：它跟着 SessionSecrets 存在内存里，与会话同生同灭。
+    // ticket 必须进 Redis 是因为它要跨「REST 发票 → WS 消费」这次跳转交给另一个进程上下文，
+    // 而 directToken 从 session-start 直接下发给两端，服务端自己不参与数据面校验。
 }

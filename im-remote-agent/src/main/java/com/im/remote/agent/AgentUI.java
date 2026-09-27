@@ -34,11 +34,20 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
     private final JTextField accessCodeField;
     private final JCheckBox refuseBox;
     private final JCheckBox dangerBox;
+    private final JCheckBox directBox;
+    private final JCheckBox directLanBox;
+    private final JCheckBox h264Box;
     private final javax.swing.JTextArea logArea;
     private final JLabel statusLabel;
     private volatile AgentClient client;
     private volatile Thread clientThread;
     private volatile AlertUI.AlertBar alertBar;
+    /** 状态行定时器：直连链路没有本端回调点，只能定时抓快照 */
+    private volatile javax.swing.Timer statusTimer;
+    /** 当前会话的控制端昵称，空串表示无会话；状态行靠它拼接，不直接写 label */
+    private volatile String sessionPeer = "";
+    /** 本次会话授予的权限（operate/view），与昵称一样只是状态行的拼接材料 */
+    private volatile String sessionPermission = "";
 
     public AgentUI(AgentConfig config) {
         this.config = config;
@@ -72,6 +81,22 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         form.add(refuseBox);
         form.add(dangerBox);
 
+        /*
+         * 直连与硬件编码都是「默认关、用户显式勾选」：前者会在被控机上开两个常听口，
+         * 后者会拉起外部 ffmpeg 进程，两者都不是应当静默打开的行为。
+         * 勾选即时落盘，下个会话生效（监听口已在听则下一轮握手自然接受）。
+         */
+        directBox = new JCheckBox("允许直连（本机开监听口：TCP 18924 / UDP 18925，需服务端也启用）",
+                config.directEnabled());
+        directLanBox = new JCheckBox("局域网直连（不勾则只保留 UDP 打洞）", config.directAllowLan());
+        h264Box = new JCheckBox("允许 H.264 硬编（需本机 ffmpeg，不具备则自动走 JPEG）", config.h264Enabled());
+        directBox.addActionListener(e -> config.setDirectEnabled(directBox.isSelected()));
+        directLanBox.addActionListener(e -> config.setDirectAllowLan(directLanBox.isSelected()));
+        h264Box.addActionListener(e -> config.setH264Enabled(h264Box.isSelected()));
+        form.add(directBox);
+        form.add(directLanBox);
+        form.add(h264Box);
+
         JButton connectButton = new JButton("保存并连接");
         JButton disconnectButton = new JButton("断开");
         disconnectButton.setEnabled(false);
@@ -97,6 +122,13 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         form.add(statusLabel);
         add(form, BorderLayout.NORTH);
 
+        /*
+         * 状态行定时刷：直连链路是控制端发起的，本端没有任何业务回调点可挂；
+         * 而「到底走没走直连、用的什么编码」恰恰是现场排查时最先要看的一行。
+         */
+        statusTimer = new javax.swing.Timer(2000, e -> refreshStatus());
+        statusTimer.start();
+
         logArea = new javax.swing.JTextArea(12, 40);
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -108,6 +140,9 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
+                if (statusTimer != null) {
+                    statusTimer.stop();
+                }
                 stopClient();
                 dispose();
                 System.exit(0);
@@ -137,6 +172,26 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         fileMenu.add(exit);
         menuBar.add(fileMenu);
         return menuBar;
+    }
+
+    /**
+     * 状态行文本由一个方法统一拼：多个事件源（注册/会话开始结束/定时刷新）各写各的
+     * 只会互相覆盖，出现「会话结束了还显示正在被谁谁谁」。
+     */
+    private void refreshStatus() {
+        StringBuilder text = new StringBuilder("识别码: " + config.accessCode() + "　设备ID: " + config.deviceId());
+        AgentClient current = client;
+        if (current == null) {
+            text.append("　状态: 未连接");
+        } else if (current.currentSid() != 0) {
+            text.append("　正在被 ").append(sessionPeer.isEmpty() ? "控制端" : sessionPeer)
+                    .append(" ").append("operate".equals(sessionPermission) ? "操作" : "查看")
+                    .append("　编码 ").append(current.screenCodec())
+                    .append("　").append(current.directSummary());
+        } else {
+            text.append(current.isOnline() ? "　状态: 在线" : "　状态: 连接中…");
+        }
+        statusLabel.setText(text.toString());
     }
 
     private JPanel fieldRow(String label, java.awt.Component field) {
@@ -206,7 +261,9 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         }
         client = null;
         clientThread = null;
-        statusLabel.setText("识别码: " + config.accessCode() + "　设备ID: " + config.deviceId() + "　状态: 已断开");
+        sessionPeer = "";
+        sessionPermission = "";
+        refreshStatus();
     }
 
     /* ==================== AgentClient.AgentUi ==================== */
@@ -216,8 +273,9 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
         SwingUtilities.invokeLater(() -> {
             logArea.append(message + "\n");
             logArea.setCaretPosition(logArea.getDocument().getLength());
-            if (message.contains("设备已注册")) {
-                statusLabel.setText("识别码: " + config.accessCode() + "　设备ID: " + config.deviceId() + "　状态: 在线");
+            // 直连与编码的状态就写在日志里，出现相关条目时顺手刷一次状态行，不等下个定时周期
+            if (message.contains("设备已注册") || message.contains("直连") || message.contains("H.264")) {
+                refreshStatus();
             }
         });
     }
@@ -229,8 +287,9 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
 
     @Override
     public void onSessionStarted(String nickname, String permission) {
-        statusLabel.setText("设备ID: " + config.deviceId() + "　状态: 正在被 " + nickname + " "
-                + ("operate".equals(permission) ? "操作" : "查看"));
+        this.sessionPeer = nickname == null ? "" : nickname;
+        this.sessionPermission = permission == null ? "" : permission;
+        SwingUtilities.invokeLater(this::refreshStatus);
         AlertUI.AlertBar bar = new AlertUI.AlertBar(nickname, () -> {
             AgentClient current = client;
             if (current != null) {
@@ -247,6 +306,8 @@ public class AgentUI extends JFrame implements AgentClient.AgentUi {
             alertBar.hide();
             alertBar = null;
         }
-        statusLabel.setText("设备ID: " + config.deviceId() + "　状态: 在线（会话已结束: " + reason + "）");
+        this.sessionPeer = "";
+        this.sessionPermission = "";
+        SwingUtilities.invokeLater(this::refreshStatus);
     }
 }

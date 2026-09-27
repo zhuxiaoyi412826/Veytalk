@@ -1,10 +1,8 @@
 /**
- * 远程控制数据面 WS 客户端（控制端侧）。
+ * 远程控制数据面 WS 客户端（控制端侧，中继档）。
  *
- * 协议与后端 com.im.remote.protocol 严格对应：
- *  - 文本帧：JSON 信封 {v:1, type, sid, seq, ts, data}
- *  - 二进制帧：[1B 帧类型][8B 会话ID][4B 元数据长度][元数据JSON][载荷]
- *  - 载荷加密：12B IV + AES-256-GCM 密文（Tag 拼在密文尾部，与 Java Cipher 输出一致）
+ * 报文格式与加解密都抽到了 utils/remoteCodec.js，与直连档共用一份；
+ * 本类只负责「怎么把帧搬过去」这一件事。
  *
  * 握手 URL 同时带 ticket（一次性会话凭证）与 satoken（登录态），后者是
  * 浏览器 WS 无法自定义请求头条件下唯一的身份来源；两者缺一服务端都拒绝。
@@ -14,9 +12,17 @@
  * 此时若会话启用了 AES 会直接报错提示，而不是静默丢帧。
  */
 import { wsBaseURL } from '@/utils/env'
+import {
+  buildEnvelope,
+  decodeFrame,
+  encodeFrame,
+  importAesKey,
+  parseEnvelope,
+  textBytes
+} from '@/utils/remoteCodec'
 
-export const FRAME_SCREEN = 1
-export const FRAME_FILE = 2
+// 协议常量从共用模块转出一道出口，页面层的 import 不必跟着改
+export { FRAME_SCREEN, FRAME_FILE } from '@/utils/remoteCodec'
 
 export class RemoteControlSocket {
   /**
@@ -46,26 +52,44 @@ export class RemoteControlSocket {
     this.pending = new Map()
     this.heartbeatTimer = null
     this.closedByUser = false
+    this.opened = false
+    this.openResolve = null
+    this.openReject = null
+    /* 流量计数：按「实际上链路的字节」累加，与后端中继 binding.bytes 同一口径
+       （含帧头与密文开销），所以两端数字应当对得上，能相互印证。 */
+    this.rxBytes = 0
+    this.txBytes = 0
+    this.startedAt = 0
   }
 
+  /**
+   * 建立数据通道，**等真正 open 后才返回**。
+   *
+   * 浏览器里 `new WebSocket()` 不抛错，握手被 TLS / 代理拦下时只在稍后发一个 close 事件。
+   * 早先这里没等，于是手机上的现象是：页面先打一行「已连接中继」，半秒后被 onclose 踢回
+   * 设备列表，一条错误提示都没有——即「画面闪一下就退出」，用户与日志两头都查不出原因。
+   * 现在把 open/close 收敛成一个 promise，失败直接带原因抛出，由页面层给可读提示。
+   */
   async connect() {
-    if (this.aesKeyB64) {
-      if (!globalThis.crypto?.subtle) {
-        throw new Error('当前环境不支持 WebCrypto（请用 localhost / HTTPS / Electron 打开）')
-      }
-      const raw = base64ToBytes(this.aesKeyB64)
-      this.key = await globalThis.crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, [
-        'encrypt',
-        'decrypt'
-      ])
-    }
+    this.key = await importAesKey(this.aesKeyB64)
     const url =
       `${wsBaseURL()}/ws/remote/control` +
       `?ticket=${encodeURIComponent(this.ticket)}` +
       `&satoken=${encodeURIComponent(this.satoken)}`
     this.ws = new WebSocket(url)
     this.ws.binaryType = 'arraybuffer'
+    const ready = new Promise((resolve, reject) => {
+      this.openResolve = resolve
+      this.openReject = reject
+    })
+    // 8 秒：比一次正常的 TLS + 代理转发慢得多，又比用户的耐心短
+    const watchdog = setTimeout(() => {
+      this.rejectOpen(new Error('数据通道 8 秒内未建立（常见原因：手机未完全信任 certs/ca.pem，wss 被静默拒绝）'))
+    }, 8000)
     this.ws.onopen = () => {
+      clearTimeout(watchdog)
+      this.opened = true
+      this.startedAt = Date.now()
       // 就绪帧是票据的真正消费点：连接活着 + 客户端明确就绪，才绑定中继
       this.sendEnvelope('control-ready', {})
       this.heartbeatTimer = setInterval(() => {
@@ -76,29 +100,56 @@ export class RemoteControlSocket {
         }
       }, 30000)
       this.onOpen && this.onOpen()
+      this.resolveOpen()
     }
     this.ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
+        // 文本帧按 UTF-8 字节数计，中文日志/目录列表 JSON 按字符数会低估一大截
+        this.rxBytes += textBytes(event.data)
         this.handleText(event.data)
       } else {
+        this.rxBytes += event.data.byteLength
         this.handleBinary(event.data).catch((e) => console.warn('[remote] 二进制帧处理失败', e))
       }
     }
     this.ws.onclose = (event) => {
+      clearTimeout(watchdog)
       this.stopHeartbeat()
       this.rejectAllPending(new Error('连接已断开'))
-      this.onClose && this.onClose(event)
+      // 还没 open 就断了 => 握手根本没成功（证书、ticket、代理三种成因之一），
+      // 把 close code 带上，至少能把「手机端静默拒绝」与服务端主动踢连分开
+      if (!this.opened) {
+        this.rejectOpen(new Error(`数据通道握手失败（code=${event.code || '无'}）`))
+      }
+      // 从未建立成功过的连接不走页面层的「连接断开」收尾：那条路径会记一条 0 字节的
+      // 会话结束审计，而真正的原因已经由上面的 reject 交给页面层提示了
+      if (this.opened || this.closedByUser) {
+        this.onClose && this.onClose(event)
+      }
     }
     this.ws.onerror = () => {
       // 规范保证 error 之后必有 close 事件，这里不重复处理
     }
+    await ready
+  }
+
+  resolveOpen() {
+    const resolve = this.openResolve
+    this.openResolve = null
+    this.openReject = null
+    resolve && resolve()
+  }
+
+  rejectOpen(error) {
+    const reject = this.openReject
+    this.openResolve = null
+    this.openReject = null
+    reject && reject(error)
   }
 
   handleText(raw) {
-    let env
-    try {
-      env = JSON.parse(raw)
-    } catch {
+    const env = parseEnvelope(raw)
+    if (!env) {
       return
     }
     const data = env.data || {}
@@ -116,37 +167,21 @@ export class RemoteControlSocket {
   }
 
   async handleBinary(buffer) {
-    const view = new DataView(buffer)
-    if (buffer.byteLength < 13) {
+    const frame = await decodeFrame(buffer, this.key)
+    if (!frame) {
       return
     }
-    const frameType = view.getUint8(0)
-    // 8B sid 用 BigUint64 读，超过 MAX_SAFE_INTEGER 的精度丢失无碍——我们只按 frameType 分发
-    const metaLen = view.getInt32(9)
-    const metaBytes = new Uint8Array(buffer, 13, metaLen)
-    const meta = JSON.parse(new TextDecoder().decode(metaBytes))
-    let payload = new Uint8Array(buffer, 13 + metaLen)
-    if (this.key && payload.length > 12) {
-      payload = new Uint8Array(
-        await globalThis.crypto.subtle.decrypt(
-          { name: 'AES-GCM', iv: payload.slice(0, 12) },
-          this.key,
-          payload.slice(12)
-        )
-      )
-    }
-    this.onBinaryFrame && this.onBinaryFrame({ frameType, meta, payload })
+    this.onBinaryFrame && this.onBinaryFrame(frame)
   }
 
   sendEnvelope(type, data) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return null
     }
-    const packet = { v: 1, type, sid: Number(this.sessionId), seq: ++this.seq, ts: Date.now() }
-    if (data && Object.keys(data).length) {
-      packet.data = data
-    }
-    this.ws.send(JSON.stringify(packet))
+    const packet = buildEnvelope(type, this.sessionId, ++this.seq, data)
+    const json = JSON.stringify(packet)
+    this.txBytes += textBytes(json)
+    this.ws.send(json)
     return packet.seq
   }
 
@@ -177,23 +212,18 @@ export class RemoteControlSocket {
 
   /** 发送二进制文件块（上传路径，载荷加密后拼接 12B IV） */
   async sendBinaryFrame(frameType, meta, payload) {
-    let body = payload
-    if (this.key) {
-      const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
-      const encrypted = new Uint8Array(
-        await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.key, payload)
-      )
-      body = concat(iv, encrypted)
-    }
-    const metaBytes = new TextEncoder().encode(JSON.stringify(meta))
-    const packet = new Uint8Array(13 + metaBytes.length + body.length)
-    const view = new DataView(packet.buffer)
-    view.setUint8(0, frameType)
-    view.setBigUint64(1, BigInt(this.sessionId))
-    view.setInt32(9, metaBytes.length)
-    packet.set(metaBytes, 13)
-    packet.set(body, 13 + metaBytes.length)
+    const packet = await encodeFrame({ frameType, sessionId: this.sessionId, meta, payload, key: this.key })
+    this.txBytes += packet.byteLength
     this.ws.send(packet.buffer)
+  }
+
+  /** 本会话累计流量与时长，供页面实时展示与结束时汇总（单位：字节 / 秒） */
+  stats() {
+    return {
+      rx: this.rxBytes,
+      tx: this.txBytes,
+      seconds: this.startedAt ? Math.max(0, Math.round((Date.now() - this.startedAt) / 1000)) : 0
+    }
   }
 
   close() {
@@ -201,7 +231,7 @@ export class RemoteControlSocket {
     this.stopHeartbeat()
     if (this.ws && this.ws.readyState <= WebSocket.OPEN) {
       try {
-        this.ws.send(JSON.stringify({ v: 1, type: 'session-end', sid: Number(this.sessionId), ts: Date.now() }))
+        this.ws.send(JSON.stringify(buildEnvelope('session-end', this.sessionId, 0, null)))
       } catch {
         // 已经断了就无所谓
       }
@@ -227,20 +257,4 @@ export class RemoteControlSocket {
     }
     this.pending.clear()
   }
-}
-
-function base64ToBytes(b64) {
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes
-}
-
-function concat(a, b) {
-  const out = new Uint8Array(a.length + b.length)
-  out.set(a)
-  out.set(b, a.length)
-  return out
 }

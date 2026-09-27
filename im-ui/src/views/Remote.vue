@@ -6,10 +6,11 @@
  * 会话进行中切换成「画面 + 右侧工具面板」的全宽工作区。
  *
  * 授权链路：invite → 被控端弹窗 → 轮询 detail 拿 ticket/aesKey → 建数据面 WS。
- * 屏幕渲染用「关键帧定尺寸 + 脏块按坐标贴图」，与 Agent 端 64x64 网格协议对应。
+ * 屏幕渲染统一走「离屏底图 + rAF 原子贴屏」：整帧刷底图、脏块按坐标并进底图，
+ * 与 Agent 端 64x64 网格协议对应；两种帧可以混着来（自适应模式正是这么发的）。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import {
   endRemoteSession,
   fetchRemoteAudit,
@@ -20,6 +21,8 @@ import {
   inviteRemoteByCode
 } from '@/api/remote'
 import { FRAME_FILE, FRAME_SCREEN, RemoteControlSocket } from '@/utils/remoteWs'
+import { DirectChannel } from '@/utils/directChannel'
+import { AvcDecoder } from '@/utils/avc'
 import { getToken } from '@/utils/token'
 import { openFilePicker } from '@/utils/picker'
 
@@ -144,6 +147,20 @@ function stopPolling() {
 
 const session = ref(null) // { socket, sessionId, permission, deviceName, aesKey }
 const socket = ref(null)
+/* 直连链路：与中继并存而非替换——服务端发起的帧（会话关闭/错误）与发往服务端的
+   direct-stats 永远走中继，被控端则是逐消息选路（直连通了就发直连），
+   所以两条链路都常开，业务发送口按 link() 实时挑，用户感知不到切换。 */
+const direct = ref(null)
+const directInfo = ref(null) // 服务端 session-start/detail 下发的 direct 节点（含 token）
+const directCandidates = ref(null) // 被控端上报的可连地址（lan/tcpPort/udpPort/公网映射）
+const linkPath = ref('relay') // relay | tcp（局域网）| udp（打洞）
+/* 工具栏两个开关：连接方式用于打洞异常时快速排除变量，编码用于绕开解不动的显卡 */
+const directMode = ref('auto') // auto=尽力直连 relay=强制中继 lan=仅局域网
+const codecWanted = ref('auto') // auto=优先 H.264 jpeg=强制 JPEG
+const codecActual = ref('') // 被控端 screen-codec 回报：h264 / jpeg
+const codecNote = ref('') // 编码器名或回落原因
+const LINK_TEXT = { relay: '中继', tcp: '局域网直连', udp: 'UDP 直连' }
+let directOpening = false
 const screenOn = ref(false)
 const quality = ref(75)
 const fps = ref(20)
@@ -151,36 +168,180 @@ const bytes = ref(0)
 const sessionLogs = ref([])
 const canvasRef = ref(null)
 
+/* 推流模式：auto=自适应（默认，小变化发脏块、大变化发整帧）tile=纯脏块 full=纯整帧。
+   取值直接作为 screen-start 的 full 参数下发（0/1/2），与 Agent 端同一套语义。 */
+const screenMode = ref('auto')
+const MODE_PARAM = { tile: 0, full: 1, auto: 2 }
+
+/* 会话流量：ws 层按链路真实字节累加，这里每秒取一次快照做实时展示 */
+const traffic = ref({ rx: 0, tx: 0, seconds: 0 })
+let trafficTimer = null
+/** 中继与直连的字节合并展示：直连时服务器看到的为 0，只有本端计数能反映真实带宽 */
+function combinedStats() {
+  const relay = socket.value ? socket.value.stats() : null
+  const lan = direct.value && direct.value.currentPath ? direct.value.stats() : null
+  if (!relay) {
+    return lan || { rx: 0, tx: 0, seconds: 0 }
+  }
+  if (!lan) {
+    return relay
+  }
+  return {
+    rx: relay.rx + lan.rx,
+    tx: relay.tx + lan.tx,
+    seconds: Math.max(relay.seconds, lan.seconds)
+  }
+}
+
 async function openSession(detail, deviceName) {
+  const aesKey = detail.aesKey || ''
   const sock = new RemoteControlSocket({
     sessionId: detail.sessionId,
     ticket: detail.ticket,
     satoken: getToken(),
-    aesKeyB64: detail.aesKey || '',
+    aesKeyB64: aesKey,
     onEnvelope: handleEnvelope,
     onBinaryFrame: handleBinaryFrame,
     onClose: () => {
       if (session.value) {
         pushLog('连接已断开，会话结束')
-        teardownSession()
+        teardownSession('连接断开')
       }
     }
   })
   session.value = {
     sessionId: detail.sessionId,
     permission: detail.permission,
-    deviceName: deviceName || detail.deviceName || '设备'
+    deviceName: deviceName || detail.deviceName || '设备',
+    aesKey
   }
   socket.value = sock
+  // REST 轮询也能拿到 direct 节点：session-start 那一帧万一丢了，这里就是唯一凭据
+  directInfo.value = detail.direct || null
+  avc = new AvcDecoder({ onFrame: drawH264Frame, onFail: onAvcFail })
+  startTraffic()
   try {
     await sock.connect()
     pushLog(`已连接中继，权限：${detail.permission === 'operate' ? '可操作' : '只读'}`)
     loadDevices()
   } catch (e) {
-    ElMessage.error(e.message || '数据通道建立失败')
-    teardownSession()
+    const reason = e.message || '数据通道建立失败'
+    // 浏览器（尤其手机）对不受信任的自签证书：页面能点「继续访问」绕过，wss 不能，
+    // 于是表现为“授权成功但一闪即退”。这个分辨不开的错误直接附上对应处置法。
+    const browser = globalThis.location?.protocol === 'https:' && !globalThis.window?.__IM_DIRECT__?.isDesktop
+    ElMessage.error(browser ? `${reason}；手机需将 certs/ca.pem 装为 CA 证书并开启完全信任，或改走 npm run dev:lan` : reason)
+    pushLog(`数据通道未建立：${reason}`)
+    teardownSession('数据通道未建立')
   }
 }
+
+/** 当前该用哪条链路发业务帧：直连就绪就用它，否则中继 */
+function link() {
+  const lan = direct.value
+  return lan && lan.ready ? lan : socket.value
+}
+
+/** 业务发送口：ready 与否都按中继的语义返回（未就绪返回 null / 抛「连接未就绪」） */
+function sendEnvelope(type, data) {
+  return link()?.sendEnvelope(type, data) ?? null
+}
+
+function request(type, data, timeoutMs) {
+  const target = link()
+  if (!target) {
+    return Promise.reject(new Error('连接未就绪'))
+  }
+  return target.request(type, data, timeoutMs)
+}
+
+/** 上传块：直连侧写不进（刚断链/窗口满）就立刻改投中继，文件不能断在半截 */
+async function sendFileFrame(meta, payload) {
+  const lan = direct.value
+  if (lan && lan.ready && (await lan.sendBinaryFrame(FRAME_FILE, meta, payload))) {
+    return
+  }
+  const relay = socket.value
+  if (!relay || !relay.ready) {
+    throw new Error('连接已断开')
+  }
+  await relay.sendBinaryFrame(FRAME_FILE, meta, payload)
+}
+
+/**
+ * 按阶梯尝试直连：局域网 WebSocket → Electron UDP 打洞。
+ *
+ * 只在拿到被控端候选地址后才有意义（地址只能经中继送过来），
+ * 失败不重试：对称 NAT、防火墙拒连这类原因不会因为再试一次而变通，
+ * 需要重试时工具栏「连接方式」切一下即可。
+ */
+async function tryDirect() {
+  const info = directInfo.value
+  const candidates = directCandidates.value
+  if (!info || !info.enabled || !candidates || directOpening || !session.value) {
+    return
+  }
+  if (directMode.value === 'relay' || (direct.value && direct.value.currentPath)) {
+    return
+  }
+  directOpening = true
+  const channel = new DirectChannel({
+    sessionId: session.value.sessionId,
+    aesKeyB64: session.value.aesKey,
+    // 「仅局域网」就是把 UDP 档关掉：同一套握手与选路，少一个分支少一处分裂
+    direct: directMode.value === 'lan' ? { ...info, udp: false } : info,
+    candidates,
+    onEnvelope: handleEnvelope,
+    onBinaryFrame: handleBinaryFrame,
+    onPath: (path) => {
+      linkPath.value = path || 'relay'
+    },
+    onFallback: (reason) => noteDirectFailure(reason)
+  })
+  try {
+    const path = await channel.connect()
+    if (!path) {
+      channel.close()
+      return
+    }
+    direct.value = channel
+    linkPath.value = path
+    pushLog(`直连已建立（${LINK_TEXT[path] || path}），画面与输入不再过服务器`)
+  } catch (e) {
+    noteDirectFailure(e && e.message ? e.message : String(e))
+  } finally {
+    directOpening = false
+  }
+}
+
+function noteDirectFailure(reason) {
+  linkPath.value = 'relay'
+  pushLog(`直连未生效：${reason || 'unknown'}（继续走中继）`)
+}
+
+/** 拆掉直连链路：中继不受影响，业务帧自然回到服务器上 */
+function stopDirect() {
+  const channel = direct.value
+  direct.value = null
+  linkPath.value = 'relay'
+  if (channel) {
+    channel.close()
+  }
+}
+
+function applyDirectMode() {
+  stopDirect()
+  tryDirect()
+}
+
+/** 链路标签：中继/局域网直连/UDP 直连，直连时提示服务器看到的字节为 0 */
+const linkLine = computed(() => {
+  const codec = codecActual.value === 'h264' ? 'H.264' : codecActual.value === 'jpeg' ? 'JPEG' : ''
+  const parts = [`链路 ${LINK_TEXT[linkPath.value] || '中继'}`]
+  if (codec) {
+    parts.push(`编码 ${codec}${codecNote.value ? `(${codecNote.value})` : ''}`)
+  }
+  return parts.join(' · ')
+})
 
 function pushLog(text) {
   sessionLogs.value.unshift(`${new Date().toLocaleTimeString()}　${text}`)
@@ -189,16 +350,140 @@ function pushLog(text) {
   }
 }
 
+/* ==================== 会话流量 ==================== */
+
+function startTraffic() {
+  stopTraffic()
+  traffic.value = { rx: 0, tx: 0, seconds: 0 }
+  let ticks = 0
+  trafficTimer = setInterval(() => {
+    traffic.value = combinedStats()
+    // 直连字节不过服务器，落库总量全靠两端自报；30 秒一次与 Agent 同频，
+    // 频繁了只会把审计表刷满同样的数字
+    if (++ticks % 30 === 0) {
+      reportDirectStats()
+    }
+  }, 1000)
+}
+
+/** 把本端直连字节报给服务端（必定走中继：这帧的用途就是告诉服务器直连通没通） */
+function reportDirectStats() {
+  const channel = direct.value
+  if (!channel || !socket.value || !socket.value.ready) {
+    return
+  }
+  const stats = channel.stats()
+  if (!stats.rx && !stats.tx) {
+    return
+  }
+  socket.value.sendEnvelope('direct-stats', { down: stats.rx, up: stats.tx, path: channel.currentPath })
+}
+
+function stopTraffic() {
+  if (trafficTimer) {
+    clearInterval(trafficTimer)
+    trafficTimer = null
+  }
+}
+
+function formatBytes(value) {
+  const v = Number(value) || 0
+  if (v < 1024) return `${v} B`
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`
+  if (v < 1024 * 1024 * 1024) return `${(v / 1024 / 1024).toFixed(2)} MB`
+  return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0))
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`
+}
+
+/** 平均码率：bytesPerSecond → Mbps（按 10^6 而非 2^20，与云厂商带宽口径一致，能直接对规格表） */
+function formatMbps(bytesPerSecond) {
+  const m = ((Number(bytesPerSecond) || 0) * 8) / 1000 / 1000
+  return m >= 1 ? `${m.toFixed(1)} Mbps` : `${(m * 1000).toFixed(0)} kbps`
+}
+
+/** 工具栏一屏内看得完的简讯：下行/上行/合计 + 时长 + 平均下行码率 */
+const trafficLine = computed(() => {
+  const t = traffic.value
+  if (!t.rx && !t.tx) {
+    return ''
+  }
+  const rate = t.seconds ? formatMbps(t.rx / t.seconds) : '—'
+  const via = linkPath.value === 'relay' ? '' : ` · ${LINK_TEXT[linkPath.value]}`
+  return `↓${formatBytes(t.rx)} ↑${formatBytes(t.tx)} · 计${formatBytes(t.rx + t.tx)} · ${formatDuration(t.seconds)} · ${rate}${via}`
+})
+
+/**
+ * 会话结束汇总。用常驻通知（duration 0）而不是 toast：验收带宽时就是要把它住在那儿
+ * 让人抄数字；不阻断操作也不强迫点确认，路由已切回设备列表也不会报错。
+ * deviceName 是被控端自填的字符串，拼 HTML 前必须转义。
+ */
+function reportTraffic(summary, deviceName, reason) {
+  if (!summary || (!summary.rx && !summary.tx)) {
+    return
+  }
+  const total = summary.rx + summary.tx
+  const esc = (s) =>
+    String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const perHour = summary.seconds > 30 ? formatBytes((total * 3600) / summary.seconds) : ''
+  // 链路取收尾前抓的快照：那时 linkPath 已被 teardown 复位成中继，不存下来就永远报「中继」
+  const path = summary.path || linkPath.value
+  const codec = summary.codec || codecActual.value
+  ElNotification({
+    title: `会话结束 · ${esc(deviceName || '设备')}`,
+    dangerouslyUseHTMLString: true,
+    message:
+      `时长 ${formatDuration(summary.seconds)}（${esc(reason || '已关闭')}）<br>` +
+      `接收 ${formatBytes(summary.rx)}　发送 ${formatBytes(summary.tx)}　合计 ${formatBytes(total)}<br>` +
+      `平均下行 ${summary.seconds ? formatMbps(summary.rx / summary.seconds) : '—'}` +
+      (perHour ? `<br>按此速率 1 小时约 ${perHour}` : '') +
+      `<br>链路 ${esc(LINK_TEXT[path] || '中继')}　编码 ${esc(codec || '—')}` +
+      (path !== 'relay'
+        ? '<br>本会话为直连，服务器看到的字节仅中继部分，实测带宽以本通知为准'
+        : ''),
+    type: 'info',
+    duration: 0
+  })
+}
+
 function handleEnvelope(env) {
   const data = env.data || {}
   switch (env.type) {
     case 'session-start':
+      // 直连参数与会话参数同一帧下发，token 不另开一条帧只会多一个丢帧重来的机会
+      if (data.direct && data.direct.enabled) {
+        directInfo.value = data.direct
+      }
       pushLog('会话已绑定，可以开启画面')
       startScreen()
       break
+    case 'direct-candidates':
+      // 被控端可能发两次（先局域网、拿到公网映射再补一次），后者覆盖前者
+      directCandidates.value = data
+      if (linkPath.value === 'relay') {
+        tryDirect()
+      }
+      break
+    case 'screen-codec':
+      codecActual.value = data.codec || ''
+      codecNote.value = data.info || ''
+      pushLog(
+        data.codec === 'h264'
+          ? `硬编推流已开启：${data.info || 'h264'} @${data.fps || 0}fps`
+          : `画面编码 JPEG${data.info ? `（${data.info}）` : ''}`
+      )
+      if (data.codec !== 'h264' && codecWanted.value !== 'jpeg') {
+        // 被控端不具备硬编条件，记住它的选择别再每帧重复回落
+        codecWanted.value = 'jpeg'
+      }
+      break
     case 'session-closed':
       pushLog(`会话结束：${data.reason || '对方关闭'}`)
-      teardownSession()
+      teardownSession(data.reason || '对方关闭')
       break
     case 'error':
       if (data.code === 'READONLY') {
@@ -212,16 +497,40 @@ function handleEnvelope(env) {
   }
 }
 
-async function teardownSession() {
+async function teardownSession(reason) {
+  // 幂等：握手失败时 onclose 与 connect() 的 catch 会各进来一次，第二次直接返回，
+  // 否则会往审计里写两条 0 字节的收尾、并把设备/会话列表刷两遍
+  if (!session.value && !socket.value) {
+    return
+  }
+  // 收尾前先把统计取出来：socket 一 close 就再也读不到本轮会话的字节了
+  const summary = combinedStats()
+  const deviceName = session.value?.deviceName
+  const path = linkPath.value
+  const codec = codecActual.value
+  stopTraffic()
+  stopDirect()
+  // 全屏层是盖在整页上的：会话一结束不退出，回到设备列表时会被一层黑屏顶掉（只能刷新页面）
+  exitPortrait()
+  if (avc) {
+    avc.close()
+    avc = null
+  }
   if (socket.value) {
     socket.value.close()
     socket.value = null
   }
   session.value = null
   screenOn.value = false
+  directInfo.value = null
+  directCandidates.value = null
+  codecActual.value = ''
+  codecNote.value = ''
+  linkPath.value = 'relay'
   clearTransfers()
   loadDevices()
   loadSessions()
+  reportTraffic({ ...summary, path, codec }, deviceName, reason)
 }
 
 async function endSession() {
@@ -252,6 +561,9 @@ let decodeQueue = []
 let activeDecoders = 0
 let frameGeneration = 0
 const DECODE_CONCURRENCY = 4
+/* H.264 解码器：每个会话新建一个实例（解帧回调要回到本会话的背缓冲），
+   会话收尾时 close。 JPEG 路走的是 createImageBitmap，两者互不干扰。 */
+let avc = null
 
 function scheduleBlit() {
   if (blitScheduled) {
@@ -282,46 +594,71 @@ function handleBinaryFrame({ frameType, meta, payload }) {
   }
 }
 
-/* 全帧模式（默认，meta.full=1）：被控端每帧都发一整屏完整画面。用「最新帧优先」单路解码——
+/* 整帧模式（meta.full=1）：被控端发来的是一整屏完整画面。用「最新帧优先」单路解码——
    解码慢于帧到达时自动丢弃中间帧、只解最新的一帧，既不积压延迟、也永远不会把正在解码的帧
-   作废（这正是旧 key 逻辑每帧 frameGeneration++ 会闪白丢帧的原因），更不会像脏块那样「拼好几下
-   才完整」。整帧 drawImage 是一次原子操作，直接画到可见画布即可，无撕裂、无需双缓冲。
-   脏块模式（full=0 回退，meta.full 缺省）：保留下方 frameGeneration + 离屏双缓冲逻辑。 */
+   作废（这正是旧 key 逻辑每帧 frameGeneration++ 会闪白丢帧的原因）。
+   脏块（meta.full=0）：走并发解码 + 坐标贴图。两种帧都合进同一张离屏底图再贴屏，
+   自适应模式下一整帧 + 若干脏块混发时，底图才是它们共同的合成结果，不会出现两套渲染各自为政。 */
 let latestFullFrame = null
 let fullDecoding = false
+/* 到达序号与「最后一次完整帧的序号」：自适应模式下一整帧与脏块混发，
+   两者又分别在异步解码，光靠「清队列」无法说明谁更新——
+   比整帧早到的块被整帧涵盖（该丢），比整帧晚到的块必须活下来（不然那块区域
+   会一直停在旧画面上，直到它下次变化才被修正）。用单调序号判定就能两全。 */
+let arrivalSeq = 0
+let fullDrawnSeq = 0
+
+/** 载荷编码格式由 Agent 逐帧标注：平色/文字块走 PNG 无损，照片类走 JPEG */
+function mimeOf(meta) {
+  return meta && meta.fmt === 'png' ? 'image/png' : 'image/jpeg'
+}
 
 function enqueueScreen(meta, payload) {
   if (!payload || !payload.length) {
     return
   }
+  if (meta.codec === 'h264' || meta.fmt === 'h264') {
+    if (!avc) {
+      return
+    }
+    // 一个访问单元就是一整屏：没脏块概念，但序号照进，并把它记为最新完整帧，
+    // 才能让在途中还没解完的 JPEG 脏块不会盖回已经刷新的 H.264 画面上
+    fullDrawnSeq = ++arrivalSeq
+    avc.push(meta, payload)
+    return
+  }
   if (meta.full) {
     // 完整帧：只保留最新的一帧待解码，晚到的旧帧直接覆盖丢弃（latest-wins）
-    latestFullFrame = { meta, payload }
+    const seq = ++arrivalSeq
+    // 比这一整帧早到的脏块已被它涵盖，从队列里清掉省得白解码；
+    // 已在解码中的，由 decodeOne 里那个 fullDrawnSeq 事后检查兜住
+    decodeQueue.length = 0
+    latestFullFrame = { meta, payload, seq }
     if (!fullDecoding) {
       pumpFullFrame()
     }
     return
   }
   if (meta.key) {
-    // 关键帧自带整屏，此前排队的脏块全部作废，清空避免旧块覆盖新帧
+    // 脏块序列起始的关键帧自带整屏，此前排队的脏块全部作废，清空避免旧块覆盖新帧
     decodeQueue.length = 0
     frameGeneration++
     backCanvas.width = meta.screenW || meta.w
     backCanvas.height = meta.screenH || meta.h
   }
-  decodeQueue.push({ meta, payload, gen: frameGeneration })
+  decodeQueue.push({ meta, payload, gen: frameGeneration, seq: ++arrivalSeq })
   pumpDecoders()
 }
 
-/* 全帧解码循环：始终取最新帧解码并直绘，解完若又有新帧就继续，无帧则退出等待下次入队 */
+/* 整帧解码循环：始终取最新帧解码并合进底图，解完若又有新帧就继续，无帧则退出等待下次入队 */
 async function pumpFullFrame() {
   while (latestFullFrame) {
     const item = latestFullFrame
     latestFullFrame = null
     fullDecoding = true
     try {
-      const bitmap = await createImageBitmap(new Blob([item.payload], { type: 'image/jpeg' }))
-      drawFullFrame(bitmap, item.meta)
+      const bitmap = await createImageBitmap(new Blob([item.payload], { type: mimeOf(item.meta) }))
+      drawFullFrame(bitmap, item.meta, item.seq)
       bitmap.close()
     } catch {
       // 单帧解码失败跳过，下一帧是完整画面会立即覆盖，不会残留花屏
@@ -331,21 +668,57 @@ async function pumpFullFrame() {
   }
 }
 
-function drawFullFrame(bitmap, meta) {
-  const canvas = canvasRef.value
-  if (!canvas) {
-    return
-  }
+function drawFullFrame(bitmap, meta, seq) {
   const w = meta.screenW || meta.w
   const h = meta.screenH || meta.h
-  // 仅尺寸变化时才重设画布（重设会清空画布），避免每帧清空造成闪白
-  if (canvas.width !== w) {
-    canvas.width = w
+  if (!w || !h) {
+    return
   }
-  if (canvas.height !== h) {
-    canvas.height = h
+  // 尺寸变化就要重设底图（重设会清空内容），此时旧脏块已无意义，一律作废
+  if (backCanvas.width !== w || backCanvas.height !== h) {
+    backCanvas.width = w
+    backCanvas.height = h
   }
-  canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h)
+  // 整帧覆盖全图，把底图重建到这一帧的状态；记下它的到达序号，
+  // 比它更早的脏块就再也不会往回盖（晚于它的块序号更大，不受影响）
+  backCtx.drawImage(bitmap, 0, 0, w, h)
+  fullDrawnSeq = seq
+  scheduleBlit()
+}
+
+/** H.264 解出来就是一整屏：尺寸取 displayWidth/Height（裁剪窗与编码尺寸不一致时它以 display 为准） */
+function drawH264Frame(frame) {
+  try {
+    const w = frame.displayWidth || frame.codedWidth
+    const h = frame.displayHeight || frame.codedHeight
+    if (!w || !h) {
+      return
+    }
+    if (backCanvas.width !== w || backCanvas.height !== h) {
+      backCanvas.width = w
+      backCanvas.height = h
+      // 分辨率变了（切显示器/改帧率重开 ffmpeg）：旧脏块坐标全废，只能作废重等关键帧
+      frameGeneration++
+    }
+    backCtx.drawImage(frame, 0, 0, w, h)
+    scheduleBlit()
+  } finally {
+    // VideoFrame 不显式 close 很快就会把解码器的帧池耗光，表现为「看几秒就定住」
+    try {
+      frame.close()
+    } catch {
+      // 已被回收
+    }
+  }
+}
+
+/** 解不动就换回 JPEG：没硬件解码、显卡驱动太老、连续丢包都可能，不能把画面整条搞死 */
+function onAvcFail(reason) {
+  pushLog(`H.264 解码失败，回落 JPEG：${reason || 'unknown'}`)
+  codecWanted.value = 'jpeg'
+  if (session.value && screenOn.value) {
+    startScreen()
+  }
 }
 
 function pumpDecoders() {
@@ -360,9 +733,10 @@ async function decodeOne(item) {
     if (item.gen !== frameGeneration) {
       return
     }
-    const bitmap = await createImageBitmap(new Blob([item.payload], { type: 'image/jpeg' }))
-    // 解码期间可能已来新关键帧，过期块直接丢弃
-    if (item.gen === frameGeneration) {
+    const bitmap = await createImageBitmap(new Blob([item.payload], { type: mimeOf(item.meta) }))
+    // 解码期间可能已来新关键帧，过期块直接丢弃；
+    // 比最后一整帧还旧的块同样丢弃，否则会把新画面退回去
+    if (item.gen === frameGeneration && item.seq > fullDrawnSeq) {
       backCtx.drawImage(bitmap, item.meta.x, item.meta.y, item.meta.w, item.meta.h)
       scheduleBlit()
     }
@@ -376,18 +750,31 @@ async function decodeOne(item) {
 }
 
 function startScreen() {
-  socket.value?.sendEnvelope('screen-start', {
+  sendEnvelope('screen-start', {
     fps: fps.value,
     quality: quality.value,
     monitor: monitorIndex.value,
-    // full=1：要求被控端整屏推流（每帧都是完整画面），而非脏块增量，彻底消除“刷好几下才完整”
-    full: 1
+    // 推流模式：0=纯脏块 1=纯整帧 2=自适应（默认）。自适应把脏块的带宽优势和
+    // 整帧的观感各拿到一半：变化面积小就只发脏块，拖窗口/切屏这类全屏变化直接发整帧。
+    full: MODE_PARAM[screenMode.value] ?? 2,
+    /* 编码偏好：h264 时被控端自抓屏走硬编，不具备条件（无 ffmpeg/无硬件编码器/
+       非 Windows）它自己回 jpeg 并用 screen-codec 帧告知原因，所以这里「auto」
+       不是猜测而是直接要求，失败信息反而更完整。 */
+    codec: codecParam()
   })
   screenOn.value = true
 }
 
+/** 本端能不能解 H.264：WebCodecs 与 WebCrypto 同样只在 secure context 存在 */
+function codecParam() {
+  if (codecWanted.value === 'jpeg') {
+    return 'jpeg'
+  }
+  return avc && avc.supported ? 'h264' : 'jpeg'
+}
+
 function stopScreen() {
-  socket.value?.sendEnvelope('screen-stop', {})
+  sendEnvelope('screen-stop', {})
   screenOn.value = false
 }
 
@@ -401,7 +788,9 @@ function applyScreenParams() {
 const monitorIndex = ref(0)
 function switchMonitor(index) {
   monitorIndex.value = index
-  socket.value?.request('monitor-switch', { index }).catch(() => {})
+  // 切屏会让背缓冲尺寸突变：先清 H.264 解码器状态，等新一路的关键帧
+  avc && avc.reset()
+  request('monitor-switch', { index }).catch(() => {})
 }
 
 /* ==================== 输入采集 ==================== */
@@ -449,7 +838,7 @@ function onMouseMove(event) {
   }
   lastMoveSent = now
   const point = normalized(event)
-  point && socket.value.sendEnvelope('mouse', { action: 'move', ...point })
+  point && sendEnvelope('mouse', { action: 'move', ...point })
 }
 
 function onMouseDown(event) {
@@ -459,7 +848,7 @@ function onMouseDown(event) {
   event.preventDefault()
   stageRef.value?.focus()
   const point = normalized(event)
-  point && socket.value.sendEnvelope('mouse', { action: 'down', button: buttonName(event), ...point })
+  point && sendEnvelope('mouse', { action: 'down', button: buttonName(event), ...point })
 }
 
 function onMouseUp(event) {
@@ -467,7 +856,7 @@ function onMouseUp(event) {
     return
   }
   const point = normalized(event)
-  point && socket.value.sendEnvelope('mouse', { action: 'up', button: buttonName(event), ...point })
+  point && sendEnvelope('mouse', { action: 'up', button: buttonName(event), ...point })
 }
 
 function onWheel(event) {
@@ -475,7 +864,7 @@ function onWheel(event) {
     return
   }
   const point = normalized(event)
-  point && socket.value.sendEnvelope('mouse', { action: 'wheel', deltaY: -event.deltaY, ...point })
+  point && sendEnvelope('mouse', { action: 'wheel', deltaY: -event.deltaY, ...point })
 }
 
 /* 触摸输入：手机没有鼠标事件，单指按下/移动/抬起映射为左键 down/move/up，
@@ -491,7 +880,7 @@ function onTouchStart(event) {
   if (event.touches.length === 1) {
     const t = event.touches[0]
     const point = pointFromClient(t.clientX, t.clientY)
-    point && socket.value.sendEnvelope('mouse', { action: 'down', button: 'left', ...point })
+    point && sendEnvelope('mouse', { action: 'down', button: 'left', ...point })
   } else if (event.touches.length === 2) {
     lastTouchScrollY = event.touches[0].clientY
   }
@@ -510,7 +899,7 @@ function onTouchMove(event) {
     lastMoveSent = now
     const t = event.touches[0]
     const point = pointFromClient(t.clientX, t.clientY)
-    point && socket.value.sendEnvelope('mouse', { action: 'move', ...point })
+    point && sendEnvelope('mouse', { action: 'move', ...point })
   } else if (event.touches.length === 2) {
     const y = event.touches[0].clientY
     const delta = lastTouchScrollY - y
@@ -519,7 +908,7 @@ function onTouchMove(event) {
       return
     }
     const point = pointFromClient(event.touches[0].clientX, y)
-    point && socket.value.sendEnvelope('mouse', { action: 'wheel', deltaY: delta * 3, ...point })
+    point && sendEnvelope('mouse', { action: 'wheel', deltaY: delta * 3, ...point })
   }
 }
 
@@ -533,40 +922,43 @@ function onTouchEnd(event) {
     return
   }
   const point = pointFromClient(t.clientX, t.clientY)
-  point && socket.value.sendEnvelope('mouse', { action: 'up', button: 'left', ...point })
+  point && sendEnvelope('mouse', { action: 'up', button: 'left', ...point })
 }
 
 /* 横屏全屏：手机竖屏看电脑画面又小又扁，一键铺满屏幕操控更顺手，再一键回竖屏。
    关键：原生 Fullscreen API 与 screen.orientation.lock 都只在「安全上下文」(https/localhost)
    可用；手机用局域网 http://IP:5173 访问时 document.fullscreenEnabled=false，
    requestFullscreen 会静默失败——这正是之前「点了没反应」的原因。
-   因此 http 下退化为 CSS 伪全屏（fixed 铺满视口），用户把手机横过来，浏览器会随设备
-   自然旋转页面（未做 CSS transform，getBoundingClientRect 始终正确，坐标映射不受影响）。 */
+   因此 http 下退化为 CSS 伪全屏（fixed 铺满视口）。
+   而「进了全屏」与「页面真的转成横屏」是两件事：微信/QQ/UC 这类内置浏览器 requestFullscreen 会成功，
+   但系统不把页面转横、orientation.lock 一律 reject，表现就是「点了全屏、画面还是竖着一条」。
+   所以统一按「已全屏 且 视口仍是竖的」补一层 CSS 顺时针旋转，浏览器真转横了就立刻不叠加。 */
 const isFullscreen = ref(false) // 原生全屏状态（由 fullscreenchange 同步）
 const pseudoFs = ref(false) // http 下的 CSS 伪全屏状态
 const isFs = computed(() => isFullscreen.value || pseudoFs.value)
-/* 伪全屏即强制顺时针旋转 90° 铺满（http 非安全上下文无法用 orientation.lock，只能 CSS 转）。
-   不再依赖任何方向检测（@media/matchMedia 在部分手机浏览器上不生效），
-   改用内联样式直接旋转：优先级最高、不依赖媒体查询，任何浏览器点全屏都必定旋转。
-   rotateFs 与旋转同条件（=pseudoFs），供 pointFromClient 做坐标补偿。 */
-const rotateFs = computed(() => pseudoFs.value)
-// 伪全屏时给舞台加内联旋转样式：宽高对调 + rotate(90deg) 顺时针铺满
-const stageStyle = computed(() => {
-  if (!pseudoFs.value) return null
-  return {
-    width: '100dvh',
-    height: '100vw',
-    transformOrigin: '0 0',
-    transform: 'rotate(90deg) translateY(-100%)'
-  }
-})
+/* 全屏且视口仍是竖的 → 顺时针旋转 90° 铺满。不再依赖 @media/matchMedia 的方向检测
+   （部分手机浏览器根本不改视口方向），也不限定只有伪全屏才转：原生全屏转不动时同样要转。
+   rotateFs 与旋转同条件，供 pointFromClient 做坐标补偿。 */
+const portraitVp = ref(false) // 当前视口是竖的（innerHeight > innerWidth）
+function syncPortraitViewport() {
+  portraitVp.value = window.innerHeight > window.innerWidth
+}
+const rotateFs = computed(() => isFs.value && portraitVp.value)
+// 旋转样式：宽高对调 + rotate(90deg) 顺时针铺满；dvh 排在 vh 之后，老内核认不了就自动退回 vh
+const stageStyle = computed(() =>
+  rotateFs.value
+    ? 'width:100vh;width:100dvh;height:100vw;transform-origin:0 0;transform:rotate(90deg) translateY(-100%)'
+    : null
+)
 
 async function enterLandscapeFullscreen() {
   const el = stageRef.value
+  // X5 / IE 系内核只给带前缀的版本，拿不到方法就直接走伪全屏
+  const request = el?.requestFullscreen || el?.webkitRequestFullscreen || el?.msRequestFullscreen
   let native = false
-  if (document.fullscreenEnabled && el?.requestFullscreen) {
+  if (request) {
     try {
-      await el.requestFullscreen()
+      await request.call(el)
       // 部分浏览器即便在不安全上下文也不报错，需用 fullscreenElement 兜底确认是否真进了全屏
       native = !!(document.fullscreenElement || document.webkitFullscreenElement)
     } catch {
@@ -576,18 +968,23 @@ async function enterLandscapeFullscreen() {
       try {
         await screen.orientation?.lock?.('landscape')
       } catch {
-        // iOS / 部分浏览器不支持方向锁，交由 CSS 旋转或系统随设备旋转
+        // iOS 与几乎所有国产内置浏览器都拒绝方向锁，交由下面的 CSS 旋转兜住
       }
     }
   }
   if (!native) {
-    // http 局域网 / 不支持原生全屏：CSS 伪全屏铺满，stageStyle 内联旋转 90° 强制横屏
+    // http 局域网 / 不支持原生全屏：CSS 伪全屏铺满，旋转与否由 rotateFs 按视口方向决定
     pseudoFs.value = true
   }
+  // 内置浏览器不一定补发 fullscreenchange，这里直接按实测结果同步，否则按钮与旋转状态会卡在旧值
+  isFullscreen.value = native
+  // 全屏切换后视口尺寸要稍后才稳定：延一拍再判方向，否则会多转或漏转一次
+  setTimeout(syncPortraitViewport, 320)
 }
 
 async function exitPortrait() {
   pseudoFs.value = false
+  isFullscreen.value = false
   try {
     screen.orientation?.unlock?.()
   } catch {
@@ -600,14 +997,16 @@ async function exitPortrait() {
       // 已不在全屏则忽略
     }
   }
+  setTimeout(syncPortraitViewport, 120)
 }
 
 function onFullscreenChange() {
   isFullscreen.value = !!(document.fullscreenElement || document.webkitFullscreenElement)
+  syncPortraitViewport()
 }
 
 function canInput() {
-  return session.value && session.value.permission === 'operate' && socket.value?.ready
+  return session.value && session.value.permission === 'operate' && link()?.ready
 }
 
 /** JS keyCode → Java KeyEvent.VK_*：只有符号键编号体系不同，其余直通 */
@@ -631,7 +1030,7 @@ function onKeyDown(event) {
     return
   }
   event.preventDefault()
-  socket.value.sendEnvelope('key', { action: 'press', keyCode: javaKeyCode(event.keyCode) })
+  sendEnvelope('key', { action: 'press', keyCode: javaKeyCode(event.keyCode) })
 }
 
 function onKeyUp(event) {
@@ -642,7 +1041,7 @@ function onKeyUp(event) {
     return
   }
   event.preventDefault()
-  socket.value.sendEnvelope('key', { action: 'release', keyCode: javaKeyCode(event.keyCode) })
+  sendEnvelope('key', { action: 'release', keyCode: javaKeyCode(event.keyCode) })
 }
 
 /* ==================== 文件面板 ==================== */
@@ -655,12 +1054,12 @@ const transfers = reactive({})
 const uploadInput = ref(null)
 
 async function listDir(path) {
-  if (!socket.value?.ready) {
+  if (!link()?.ready) {
     return
   }
   fileLoading.value = true
   try {
-    const result = await socket.value.request('list-dir', path ? { path } : {}, 30000)
+    const result = await request('list-dir', path ? { path } : {}, 30000)
     if (result.error) {
       ElMessage.error(result.error)
       return
@@ -695,7 +1094,7 @@ async function downloadItem(row) {
   const transferId = randomId()
   transfers[transferId] = { name: row.name, total: 0, size: Number(row.size) || 0, chunks: {}, received: 0, done: false }
   try {
-    await socket.value.request('file-get', { transferId, path: row.path }, 120000)
+    await request('file-get', { transferId, path: row.path }, 120000)
     finishDownload(transferId)
   } catch (e) {
     delete transfers[transferId]
@@ -775,14 +1174,10 @@ async function uploadOne(file) {
   const CHUNK = 64 * 1024
   const total = Math.max(1, Math.ceil(file.size / CHUNK))
   // file-put 的 result 即「可以开始灌块」信号（被控端已建好 .part 临时文件）
-  await socket.value.request(
-    'file-put',
-    { transferId, name: file.name, dir: filePath.value, size: file.size },
-    10000
-  )
+  await request('file-put', { transferId, name: file.name, dir: filePath.value, size: file.size }, 10000)
   for (let i = 0; i < total; i++) {
     const slice = new Uint8Array(await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer())
-    await socket.value.sendBinaryFrame(FRAME_FILE, { transferId, name: file.name, index: i, total }, slice)
+    await sendFileFrame({ transferId, name: file.name, index: i, total }, slice)
   }
   ElMessage.success(`已上传 ${file.name}`)
 }
@@ -792,7 +1187,7 @@ async function removeItem(row) {
     type: 'warning'
   })
   try {
-    await socket.value.request('rm', { path: row.path }, 60000)
+    await request('rm', { path: row.path }, 60000)
     ElMessage.success('已删除')
     listDir(filePath.value)
   } catch (e) {
@@ -808,7 +1203,7 @@ async function renameItem(row) {
   const sep = row.path.includes('\\') ? '\\' : '/'
   const parent = row.path.replace(/[\\/]+$/, '').replace(/[^\\/]+$/, '')
   try {
-    await socket.value.request('rename', { from: row.path, to: parent + value }, 15000)
+    await request('rename', { from: row.path, to: parent + value }, 15000)
     listDir(filePath.value)
   } catch (e) {
     ElMessage.error(e.message)
@@ -822,7 +1217,7 @@ async function mkdir() {
   }
   const sep = (filePath.value.includes('\\') ? '\\' : '/')
   try {
-    await socket.value.request('mkdir', { path: joinPath(filePath.value, value) }, 15000)
+    await request('mkdir', { path: joinPath(filePath.value, value) }, 15000)
     listDir(filePath.value)
   } catch (e) {
     ElMessage.error(e.message)
@@ -852,7 +1247,7 @@ const execRunning = ref(false)
 async function loadProcesses() {
   psLoading.value = true
   try {
-    const result = await socket.value.request('ps-list', {}, 15000)
+    const result = await request('ps-list', {}, 15000)
     processes.value = result.items || []
   } catch (e) {
     ElMessage.error(e.message)
@@ -866,7 +1261,7 @@ async function killProcess(row) {
     type: 'warning'
   })
   try {
-    await socket.value.request('ps-kill', { pid: Number(row.pid) }, 15000)
+    await request('ps-kill', { pid: Number(row.pid) }, 15000)
     ElMessage.success('已结束')
     loadProcesses()
   } catch (e) {
@@ -881,7 +1276,7 @@ async function runExec() {
   execRunning.value = true
   execOutput.value = '执行中…'
   try {
-    const result = await socket.value.request('exec', { cmd: execCmd.value }, 40000)
+    const result = await request('exec', { cmd: execCmd.value }, 40000)
     execOutput.value = result.output || '(无输出)'
   } catch (e) {
     execOutput.value = `失败：${e.message}`
@@ -894,7 +1289,7 @@ async function power(action) {
   const text = { shutdown: '关机', reboot: '重启', lock: '锁屏' }[action]
   await ElMessageBox.confirm(`确定对被控端执行「${text}」？`, '高危操作', { type: 'warning' })
   try {
-    await socket.value.request('power', { action }, 15000)
+    await request('power', { action }, 15000)
     ElMessage.success(`已发出${text}指令`)
   } catch (e) {
     ElMessage.error(e.message)
@@ -908,7 +1303,7 @@ async function pushClipboard() {
       ElMessage.info('剪贴板为空')
       return
     }
-    await socket.value.request('clip-sync', { text }, 10000)
+    await request('clip-sync', { text }, 10000)
     ElMessage.success('已同步到对端剪贴板')
   } catch (e) {
     ElMessage.error(e.message || '读取剪贴板失败')
@@ -968,10 +1363,16 @@ onMounted(() => {
   document.addEventListener('keyup', keyupHandler)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+  // 全屏旋转只看视口宽高，而转屏、地址栏收起、原生全屏进出都只反映在 resize 上
+  syncPortraitViewport()
+  window.addEventListener('resize', syncPortraitViewport)
+  window.addEventListener('orientationchange', syncPortraitViewport)
 })
 
 onBeforeUnmount(() => {
   stopPolling()
+  window.removeEventListener('resize', syncPortraitViewport)
+  window.removeEventListener('orientationchange', syncPortraitViewport)
   if (keydownHandler) {
     document.removeEventListener('keydown', keydownHandler)
     document.removeEventListener('keyup', keyupHandler)
@@ -980,6 +1381,16 @@ onBeforeUnmount(() => {
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   decodeQueue.length = 0
   latestFullFrame = null
+  stopTraffic()
+  // 全屏是盖在整页上的固定层：会话结束不退出，设备列表就会被一层永久黑屏顶掉（只能刷新页面）
+  exitPortrait()
+  // 先补报一次直连字节再拆链：服务端落库的总量靠这一帧，路由切走不报就成了直连白跑
+  reportDirectStats()
+  stopDirect()
+  if (avc) {
+    avc.close()
+    avc = null
+  }
   if (socket.value) {
     socket.value.close()
   }
@@ -1125,9 +1536,53 @@ const inSession = computed(() => !!session.value)
         <el-select v-model="fps" size="small" class="toolbar-select" @change="applyScreenParams">
           <el-option v-for="v in [10, 15, 20, 30]" :key="v" :label="`${v} fps`" :value="v" />
         </el-select>
+        <el-tooltip
+          effect="dark"
+          placement="bottom"
+          content="自适应：小变化只发脏块（文字区走 PNG 无损），拖窗口/切屏这类全屏变化才发整帧；最省流量=纯脏块，最清晰=纯整帧"
+        >
+          <span class="toolbar-field">
+            <span class="toolbar-label">推流</span>
+            <el-select v-model="screenMode" size="small" class="toolbar-select mode-select" @change="applyScreenParams">
+              <el-option label="自适应" value="auto" />
+              <el-option label="最省流量" value="tile" />
+              <el-option label="最清晰" value="full" />
+            </el-select>
+          </span>
+        </el-tooltip>
         <el-button size="small" @click="switchMonitor(0)">屏1</el-button>
         <el-button size="small" @click="switchMonitor(1)">屏2</el-button>
         <el-button size="small" @click="pushClipboard">发剪贴板</el-button>
+        <el-divider direction="vertical" />
+        <el-tooltip
+          effect="dark"
+          placement="bottom"
+          content="自动=尽力直连（局域网/打洞），失败自动回落中继；强制中继用于打洞异常时排除变量；仅局域网=只试同网段 WebSocket，不碰 UDP"
+        >
+          <span class="toolbar-field">
+            <span class="toolbar-label">链路</span>
+            <el-select v-model="directMode" size="small" class="toolbar-select mode-select" @change="applyDirectMode">
+              <el-option label="自动" value="auto" />
+              <el-option label="强制中继" value="relay" />
+              <el-option label="仅局域网" value="lan" />
+            </el-select>
+          </span>
+        </el-tooltip>
+        <el-tooltip
+          effect="dark"
+          placement="bottom"
+          content="H.264 需被控端有 ffmpeg 与硬件编码器；不具备时它自己回落 JPEG 并用 screen-codec 帧告知原因，本端解不动也会连续失败后换回"
+        >
+          <span class="toolbar-field">
+            <span class="toolbar-label">编码</span>
+            <el-select v-model="codecWanted" size="small" class="toolbar-select mode-select" @change="applyScreenParams">
+              <el-option label="H.264 优先" value="auto" />
+              <el-option label="JPEG" value="jpeg" />
+            </el-select>
+          </span>
+        </el-tooltip>
+        <el-tag size="small" :type="linkPath === 'relay' ? 'info' : 'success'">{{ linkLine }}</el-tag>
+        <span v-if="trafficLine" class="toolbar-traffic">{{ trafficLine }}</span>
         <div class="remote-toolbar__spacer" />
         <el-button size="small" type="danger" @click="endSession">结束会话 (Esc)</el-button>
       </div>
@@ -1365,6 +1820,25 @@ const inSession = computed(() => !!session.value)
 .toolbar-select {
   width: 88px;
 }
+.mode-select {
+  width: 96px;
+}
+.toolbar-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 实时流量：等宽字防数字跳动把布局挤得抽跳，色调走次要信息不抢画面 */
+.toolbar-traffic {
+  padding: 2px 8px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  white-space: nowrap;
+}
 .remote-body {
   flex: 1;
   display: flex;
@@ -1382,15 +1856,21 @@ const inSession = computed(() => !!session.value)
   outline: none;
   overflow: hidden;
   min-width: 0;
+  /* 画面区绝对不能没：flex:1 的基准是 0，手机上一旦工具栏换行占高、侧栏定高，
+     剩下的空间可以被压到 0——表现就是「流量在涨、画面区一点不剩」的黑屏错觉 */
+  min-height: 200px;
   /* 手机触摸控制时禁止浏览器手势（下拉刷新/双指缩放/滚动），否则会吞掉 touchmove */
   touch-action: none;
 }
 .remote-stage:fullscreen {
   border-radius: 0;
 }
-.remote-stage:fullscreen .remote-canvas {
-  max-width: 100vw;
-  max-height: 100vh;
+/* 全屏（含伪全屏、含旋转）下画布一律按舞台本地盒百分比自适应 contain：
+   旋转时本地盒是 100dvh×100vw，若用 vw/vh 视口单位会算错方向，必须用 100% 才不变形 */
+.remote-stage:fullscreen .remote-canvas,
+.remote-stage.is-pseudo-fs .remote-canvas {
+  max-width: 100%;
+  max-height: 100%;
 }
 /* http 局域网下的 CSS 伪全屏：铺满视口、盖住其余 UI（原生 Fullscreen API 在非安全上下文不可用） */
 .remote-stage.is-pseudo-fs {
@@ -1401,16 +1881,11 @@ const inSession = computed(() => !!session.value)
   width: 100vw;
   height: 100vh;
   height: 100dvh;
+  min-height: 0;
   border-radius: 0;
 }
-/* 旋转改由 stageStyle 内联样式驱动（@media/matchMedia 在部分手机浏览器不生效），
-   此处不再用媒体查询旋转；.is-pseudo-fs 只负责铺满与层级，宽高/transform 由内联覆盖。 */
-/* 伪全屏（含旋转）下画布按舞台本地盒百分比自适应 contain：
-   旋转时本地盒是 100dvh×100vw，若用 vw/vh 视口单位会算错方向，必须用 100% 才不变形 */
-.remote-stage.is-pseudo-fs .remote-canvas {
-  max-width: 100%;
-  max-height: 100%;
-}
+/* 旋转由 stageStyle 内联样式驱动（@media/matchMedia 在部分手机浏览器不生效），
+   .is-pseudo-fs 只负责铺满与层级，宽高/transform 由内联覆盖。 */
 .remote-canvas {
   max-width: 100%;
   max-height: 100%;
@@ -1509,8 +1984,41 @@ const inSession = computed(() => !!session.value)
   margin-top: 8px;
 }
 @media (max-width: 900px) {
+  /* 窄屏下工具栏改单行横向滚动：不再换行堆出六七排，把画面区顶到屏外
+     （这正是手机浏览器「连上了却看不到画面」的直接原因） */
+  .remote-toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    align-items: center;
+  }
+  .remote-toolbar > * {
+    flex-shrink: 0;
+  }
+  .remote-toolbar .el-tag {
+    max-width: 46vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* 画面区给一个按宽算的高度（16:9 约 56vw），侧栏定高，整页交给 .remote-page 滚动
+     ——不再让三块内容去抢那一点 flex 剩余空间 */
+  .remote-work {
+    height: auto;
+  }
   .remote-body {
+    flex: none;
     flex-direction: column;
+  }
+  .remote-stage {
+    flex: none;
+    height: 56vw;
+    min-height: 220px;
+  }
+  /* 手机横过来（视口宽 < 900）且是原生全屏时，浏览器自己转了横、我们不叠加旋转，
+     上面那条 height:56vw 会照样命中 :fullscreen 元素把画面压成一条，用更高优先级的选择器复位。 */
+  .remote-stage:fullscreen {
+    height: 100%;
+    min-height: 0;
   }
   .remote-side {
     width: 100%;

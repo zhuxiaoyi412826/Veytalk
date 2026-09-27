@@ -25,6 +25,13 @@ im:
     # 关掉后走明文中继，画面链路抓包即可还原——仅限内网演示/排障。
     # 主配置与 prod 仍为 true，切 profile 即恢复加密。
     aes: false
+    # 本地联调直接打开服务端侧直连开关（prod 仍默认关，靠 IM_DIRECT_ENABLED 显式开）。
+    # 两道门都在才算开：被控端 Agent 窗口里的「允许局域网/打洞直连」勾选也要打开。
+    # 同机或同网段不配 IM_DIRECT_PUNCH_HOST 也能验到局域网 WebSocket 档；
+    # UDP 打洞档需要一个公网可达的反射地址，本机联调时它自然回落，不影响其余功能。
+    # 注意 aes=false 时握手密钥证明退化为 SHA-256(token+sid+nonce)，两端一致即可通过。
+    direct:
+      enabled: true
 
 logging:
   level:

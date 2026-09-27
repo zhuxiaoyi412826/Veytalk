@@ -87,7 +87,70 @@ public class RemoteRelayService {
         public final byte[] aesKey;
         public final long createdAtMs;
         public volatile long lastActivityMs;
-        public final AtomicLong bytes = new AtomicLong();
+        /**
+         * 下行字节：Agent → 控制端（画面块、文件内容），几乎占据全部带宽；
+         * 上行字节：控制端 → Agent（鼠标键盘、指令）。分开记才能一眼看出
+         * 「服务器上行被谁吃掉了」，合计值就是落库到 im_remote_session.bytes 的数。
+         */
+        public final AtomicLong downBytes = new AtomicLong();
+        public final AtomicLong upBytes = new AtomicLong();
+        /**
+         * 直连流量（不过服务器，拿不到就是 0）：由两端各自的 direct-stats 帧报上来。
+         * 控制端看到的是「下行=画面、上行=输入」，Agent 看到的方向正好相反，
+         * 所以按角色各存一份，汇总时取大者而不是相加。
+         */
+        @Setter
+        private volatile String directPath;
+        private final AtomicLong directDown = new AtomicLong();
+        private final AtomicLong directUp = new AtomicLong();
+
+        /** 中继累计字节（含帧头与密文开销），与控制端/Agent 自行统计的口径一致 */
+        public long totalBytes() {
+            return downBytes.get() + upBytes.get();
+        }
+
+        /** 直连累计字节（两端口径取大者） */
+        public long directBytes() {
+            return Math.max(directDown.get(), directUp.get());
+        }
+
+        /** 会话真实总流量：中继 + 直连，落库到 im_remote_session.bytes 的就是它 */
+        public long grandTotalBytes() {
+            return totalBytes() + directBytes();
+        }
+
+        /** 收一端的直连上报：同一角色重报取大值（会话结束时的是最终值） */
+        public void applyDirectStats(String role, long down, long up, String path) {
+            boolean fromControl = "control".equals(role);
+            // Agent 侧的 down 是它发出去的画面，对应控制端的 rx：统一换算成「控制端视角」
+            long controlDown = fromControl ? down : up;
+            long controlUp = fromControl ? up : down;
+            accumulate(directDown, controlDown);
+            accumulate(directUp, controlUp);
+            if (path != null && !path.isBlank()) {
+                this.directPath = path;
+            }
+        }
+
+        private static void accumulate(AtomicLong holder, long value) {
+            long current;
+            do {
+                current = holder.get();
+                if (value <= current) {
+                    return;
+                }
+            } while (!holder.compareAndSet(current, value));
+        }
+
+        /** 直连路径（tcp=局域网直连 udp=打洞直连 null=仍走中继） */
+        public String directPath() {
+            return directPath;
+        }
+
+        /** 绑定建好到现在的秒数（至少算 1 秒，避开除以 0） */
+        public long activeSeconds() {
+            return Math.max(1, (System.currentTimeMillis() - createdAtMs) / 1000);
+        }
 
         Binding(AgentRegistry.AgentInfo agent, ControlInfo control, String permission, byte[] aesKey) {
             this.agent = agent;
@@ -142,6 +205,70 @@ public class RemoteRelayService {
         return parse(json);
     }
 
+    /**
+     * 直连协商帧：这些帧只负责「把直连谈成」，永远不走直连本身。
+     *
+     * <p>候选帧双向透传（内容对服务器是 opaque：内网 IP、端口、公网映射）；
+     * up/failed 只上报服务端留审计，不回给对端（对端自己知道成不成）；
+     * stats 交会话服务记账。
+     */
+    private DirectIntent directIntent(RemoteEnvelope env) {
+        String type = env.getType();
+        if (RemoteProtocol.TYPE_DIRECT_CANDIDATES.equals(type)) {
+            return DirectIntent.RELAY;
+        }
+        if (RemoteProtocol.TYPE_DIRECT_UP.equals(type)
+                || RemoteProtocol.TYPE_DIRECT_FAILED.equals(type)) {
+            return DirectIntent.EVENT;
+        }
+        if (RemoteProtocol.TYPE_DIRECT_STATS.equals(type)) {
+            return DirectIntent.STATS;
+        }
+        return DirectIntent.OTHER;
+    }
+
+    private enum DirectIntent { RELAY, EVENT, STATS, OTHER }
+
+    private void handleDirectFrame(boolean fromAgent, Binding binding, RemoteEnvelope env) {
+        if (binding == null) {
+            return;
+        }
+        // 直连的字节根本不过服务器，中继侧的 lastActivityMs 不会被这些数据推进，而空闲巡检
+        // （RemoteIdleCheckTask）判活恰恰只看这个字段：不在这里补记一次，纯直连会话即使
+        // 每 30 秒上报一次 direct-stats，也会在 idle-timeout 到点后被判成「没人用」而关掉
+        binding.touch();
+        long sessionId = binding.control.getSessionId();
+        Map<String, Object> data = env.getData() == null ? Map.of() : env.getData();
+        switch (directIntent(env)) {
+            case RELAY -> {
+                String json = jsonUtil.toJson(env);
+                if (fromAgent) {
+                    relayToControl(binding.agent, binding, json);
+                } else {
+                    relayToAgent(binding.control, binding, json, env);
+                }
+                sessionServiceProvider.getObject().recordDirectEvent(sessionId,
+                        "direct-candidates", fromAgent ? "from=agent" : "from=control");
+            }
+            case EVENT -> sessionServiceProvider.getObject().recordDirectEvent(sessionId,
+                    env.getType(), String.valueOf(data.getOrDefault("reason",
+                            data.getOrDefault("path", ""))) + ", peer=" + data.get("peer"));
+            case STATS -> sessionServiceProvider.getObject().recordDirectStats(sessionId,
+                    fromAgent ? "agent" : "control",
+                    asLong(data.get("down")), asLong(data.get("up")), str(data.get("path")));
+            default -> {
+            }
+        }
+    }
+
+    private static long asLong(Object value) {
+        return value instanceof Number n ? n.longValue() : 0L;
+    }
+
+    private static String str(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
     public ControlInfo registerControl(WebSocketSession raw, Long userId, long sessionId, String ticket) {
         ConcurrentWebSocketSessionDecorator session = new ConcurrentWebSocketSessionDecorator(
                 raw, 10_000, 4 * 1024 * 1024);
@@ -164,17 +291,20 @@ public class RemoteRelayService {
         bindings.put(session.getId(), binding);
         // 给两端的会话参数帧：aesKey 走各自的已鉴权通道，一次一发不落日志
         String aesKeyB64 = binding.aesKey == null ? "" : java.util.Base64.getEncoder().encodeToString(binding.aesKey);
-        sendEnvelope(agent, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_START, session.getId(),
-                Map.of("sessionId", String.valueOf(session.getId()),
-                        "permission", session.getPermission(),
-                        "aesKey", aesKeyB64)));
-        sendEnvelopeControl(control, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_START, session.getId(),
-                Map.of("sessionId", String.valueOf(session.getId()),
-                        "permission", session.getPermission(),
-                        "aesKey", aesKeyB64)));
+        Map<String, Object> startPayload = new java.util.LinkedHashMap<>();
+        startPayload.put("sessionId", String.valueOf(session.getId()));
+        startPayload.put("permission", session.getPermission());
+        startPayload.put("aesKey", aesKeyB64);
+        // 直连参数（含 token）随 session-start 一并下发：单开一条帧只会多一次丢帧重来的机会，
+        // 而 session-start 是两端都保证收到的那一帧
+        startPayload.put("direct", sessionServiceProvider.getObject().directParams(session.getId()));
+        sendEnvelope(agent, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_START, session.getId(), startPayload));
+        sendEnvelopeControl(control, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_START,
+                session.getId(), startPayload));
         sessionServiceProvider.getObject().onControlBound(session.getId());
-        log.info("远程中继已建立: sessionId={}, inviter={}, deviceId={}",
-                session.getId(), control.getUserId(), agent.getDeviceId());
+        log.info("远程中继已建立: sessionId={}, inviter={}, deviceId={}, 直连={}",
+                session.getId(), control.getUserId(), agent.getDeviceId(),
+                sessionServiceProvider.getObject().directAvailable() ? "可尝试" : "服务端未启用");
     }
 
     public Binding binding(long sessionId) {
@@ -197,6 +327,9 @@ public class RemoteRelayService {
                     sessionServiceProvider.getObject().recordFrameAudit(binding.control.getSessionId(), env);
                 }
             }
+            case RemoteProtocol.TYPE_DIRECT_CANDIDATES, RemoteProtocol.TYPE_DIRECT_UP,
+                 RemoteProtocol.TYPE_DIRECT_FAILED, RemoteProtocol.TYPE_DIRECT_STATS ->
+                    handleDirectFrame(true, binding, env);
             case RemoteProtocol.TYPE_SESSION_END -> {
                 if (binding != null) {
                     closeBinding(binding, "invitee-end");
@@ -219,6 +352,9 @@ public class RemoteRelayService {
                     Map.of("ts", System.currentTimeMillis())));
             case RemoteProtocol.TYPE_CONTROL_READY -> sessionServiceProvider.getObject()
                     .consumeTicketAndBind(control);
+            case RemoteProtocol.TYPE_DIRECT_CANDIDATES, RemoteProtocol.TYPE_DIRECT_UP,
+                 RemoteProtocol.TYPE_DIRECT_FAILED, RemoteProtocol.TYPE_DIRECT_STATS ->
+                    handleDirectFrame(false, binding, env);
             case RemoteProtocol.TYPE_SESSION_END -> {
                 if (binding != null) {
                     closeBinding(binding, "inviter-end");
@@ -249,7 +385,11 @@ public class RemoteRelayService {
         }
         WebSocketSession peer = fromAgent ? binding.control.getSession() : binding.agent.getSession();
         sendBinary(peer, raw);
-        binding.bytes.addAndGet(raw.length);
+        if (fromAgent) {
+            binding.downBytes.addAndGet(raw.length);
+        } else {
+            binding.upBytes.addAndGet(raw.length);
+        }
         binding.touch();
     }
 
@@ -292,7 +432,7 @@ public class RemoteRelayService {
             return;
         }
         sendText(binding.control.getSession(), json);
-        binding.bytes.addAndGet(json.getBytes(StandardCharsets.UTF_8).length);
+        binding.downBytes.addAndGet(json.getBytes(StandardCharsets.UTF_8).length);
         binding.touch();
     }
 
@@ -308,7 +448,7 @@ public class RemoteRelayService {
             return;
         }
         sendText(binding.agent.getSession(), json);
-        binding.bytes.addAndGet(json.getBytes(StandardCharsets.UTF_8).length);
+        binding.upBytes.addAndGet(json.getBytes(StandardCharsets.UTF_8).length);
         binding.touch();
     }
 
@@ -318,19 +458,35 @@ public class RemoteRelayService {
             return;
         }
         sessionServiceProvider.getObject().finishSession(binding.control.getSessionId(),
-                reason, binding.bytes.get());
+                reason, binding.grandTotalBytes());
         sendEnvelope(binding.agent, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_CLOSED,
                 binding.control.getSessionId(), Map.of("reason", reason)));
         sendEnvelopeControl(binding.control, RemoteEnvelope.of(RemoteProtocol.TYPE_SESSION_CLOSED,
                 binding.control.getSessionId(), Map.of("reason", reason)));
         closeQuietly(binding.control.getSession(), CloseStatus.NORMAL);
-        log.info("远程中继已结束: sessionId={}, reason={}, bytes={}",
-                binding.control.getSessionId(), reason, binding.bytes.get());
+        // 一行就能拿去做带宽核算。直连部分服务器看不见，只能拿两端上报，
+        // 所以日志里明确标出「中继 / 直连」两段，不然行外人会误以为直连会话零流量。
+        long relayBytes = binding.totalBytes();
+        long directBytes = binding.directBytes();
+        long total = relayBytes + directBytes;
+        long seconds = binding.activeSeconds();
+        long downlink = Math.max(binding.downBytes.get(), directBytes / 2);
+        log.info("远程中继已结束: sessionId={}, reason={}, 路径={}, 时长={}s, 中继={}MB(下行{}KB/上行{}KB), 直连={}MB, 合计={}MB, 平均下行={}Mbps",
+                binding.control.getSessionId(), reason,
+                binding.directPath() == null ? "relay" : binding.directPath(), seconds,
+                mb(relayBytes), binding.downBytes.get() / 1024, binding.upBytes.get() / 1024,
+                mb(directBytes), mb(total),
+                String.format("%.2f", downlink * 8.0 / seconds / 1_000_000));
     }
 
+    private static String mb(long bytes) {
+        return String.format("%.2f", bytes / 1024.0 / 1024);
+    }
+
+    /** 会话累计流量（中继 + 直连），给前端实时展示与落库用 */
     public long boundBytes(long sessionId) {
         Binding binding = bindings.get(sessionId);
-        return binding == null ? 0 : binding.bytes.get();
+        return binding == null ? 0 : binding.grandTotalBytes();
     }
 
     /* ==================== 收发工具 ==================== */

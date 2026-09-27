@@ -1,10 +1,57 @@
 import { fileURLToPath, URL } from 'node:url'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { networkInterfaces } from 'node:os'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import forge from 'node-forge'
 
 const configDir = dirname(fileURLToPath(import.meta.url))
+
+/** 本机全部非回环 IPv4，与 scripts/gen-cert.cjs 的取法保持一致 */
+function localIPv4s() {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((i) => i && i.family === 'IPv4' && !i.address.startsWith('127.'))
+    .map((i) => i.address)
+}
+
+/**
+ * 启动前自检：证书的 SAN 是否还盖得住当前这些 IP。
+ *
+ * 这是手机端「远程控制画面一闪即退回设备列表」的真因：笔记本换网段后 DHCP 重分了 IP，
+ * 证书里写的还是旧 IP，于是 https 页面点「继续访问」能打开（fetch/XHR 可绕过），
+ * 但同源 wss 握手会被浏览器直接静默丢弃——服务端连一行拒绝日志都不会有，
+ * 从后端看完全不像出了问题。SAN 与本机 IP 对不上时在这里喊出来，
+ * 免得下一次又去翻会话状态机和加密协商。
+ */
+function checkCertSan() {
+  const certPath = join(configDir, 'certs', 'server.pem')
+  if (!existsSync(certPath)) return
+  try {
+    const cert = forge.pki.certificateFromPem(readFileSync(certPath, 'utf8'))
+    const alt = cert.extensions.find((e) => e.name === 'subjectAltName')
+    const covered = new Set(['localhost', '127.0.0.1'])
+    for (const item of alt ? alt.altNames : []) {
+      if (item.type === 7) {
+        covered.add([...item.value].map((c) => c.charCodeAt(0)).join('.'))
+      } else if (item.type === 2) {
+        covered.add(item.value)
+      }
+    }
+    const missing = localIPv4s().filter((ip) => !covered.has(ip))
+    if (missing.length) {
+      console.warn(
+        `\n[证书过期于网段] 本机 IP ${missing.join(', ')} 不在 certs/server.pem 的 SAN 里，` +
+          `手机能打开页面但 wss 会被静默拒绝（远程控制一闪即断）。\n` +
+          `  修复：npm run gen:cert 然后重启 dev server（根 CA 会被复用，手机无需重装 ca.pem）\n`
+      )
+    }
+  } catch (e) {
+    // 自检失败不能拖住启动，最坏情况就是回到原来的现象
+    console.warn('[gen-cert 自检跳过] certs/server.pem 解析失败：', e.message)
+  }
+}
 
 /**
  * 开发期 HTTPS：存在 im-ui/certs/server.{pem,key} 就自动启用，否则回落 http。
@@ -29,7 +76,12 @@ function devHttps() {
  * 始终是同源请求（不管是 localhost:5173 还是局域网 IP:5173），不必在 axios
  * 里拼绝对地址，WebSocket 地址也由 socket.js 按 location.host 动态推导。
  */
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ mode, command }) => {
+  // 只在起 dev server 时自检证书（vite build 不需要局域网地址，刷一行警告只会干扰打包日志）
+  if (command !== 'build') {
+    checkCertSan()
+  }
+  return {
   // Electron 桌面端从 file:// 加载，必须用相对路径 ./ 才能定位到 assets；Web 部署仍用根路径 /
   // （配合 history 路由，避免深层刷新时相对路径错乱）。Electron 打包走 `vite build --mode electron`
   // （见 package.json 的 build:electron），与 Web 构建互不影响。
@@ -97,4 +149,5 @@ export default defineConfig(({ mode }) => ({
     // element-plus 全量引入后单包偏大，抬高告警阈值避免每次构建都刷一屏无意义的提示
     chunkSizeWarningLimit: 1500
   }
-}))
+  }
+})

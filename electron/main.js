@@ -4,6 +4,7 @@ const os = require('os')
 const fs = require('fs')
 const { spawn, execFile } = require('child_process')
 const { setupLocalDb } = require('./localdb')
+const { setupDirectBridge, closeDirectLink } = require('./direct')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -271,6 +272,21 @@ async function setupAgentAutostart() {
   } catch { /* 建目录或启动失败都不阻塞主进程 */ }
 }
 
+/**
+ * UDP 直连桥：打洞、DXP 分片、GBN 重传全在主进程做（见 direct.js），
+ * 渲染进程只收「完整消息」，避免同一份 ARQ 状态被两处各持一半。
+ * 浏览器 Web 部署没有 preload，前端拿不到 window.__IM_DIRECT__ 就自动跳过 UDP 档。
+ */
+function setupDirect() {
+  const send = (channel, payload) => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, payload)
+    }
+  }
+  setupDirectBridge(ipcMain, send)
+}
+
 // 单实例：防止双击两次图标起两个主进程、在回环探测窗口期内竞相拉起 Agent
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -288,6 +304,7 @@ app.whenReady().then(() => {
   setupDownload()
   setupVideoCompress()
   setupLocalDb()
+  setupDirect()
   setupAgentAutostart()
   createWindow()
 
@@ -299,6 +316,8 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  // 直连 socket 先礼貌收掉，免得被控端干等一轮 ARQ 超时才判死
+  closeDirectLink()
   if (process.platform !== 'darwin') {
     app.quit()
   }

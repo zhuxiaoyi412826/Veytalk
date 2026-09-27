@@ -90,3 +90,30 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
     trim: (maxBytes) => call('im:media-trim', { maxBytes })
   }
 })
+
+/**
+ * UDP 直连桥：只有桌面端有。
+ *
+ * 浏览器既开不了原始 UDP 也发不了裸 TCP，所以 Web 部署下 window.__IM_DIRECT__ 不存在，
+ * 前端 utils/directChannel.js 据此跳过 UDP 打洞档（局域网 WebSocket 档不依赖它）。
+ *
+ * 契约：open/write/close 走 invoke（主进程统一返回 {ok, data|error}，本侧拆包），
+ * onData/onState 是主进程推来的事件。打洞、DXP 分片、GBN 重传全在主进程做，
+ * 渲染侧只收「完整消息」：text 给字符串、bin 给 ArrayBuffer（结构化克隆零拷贝）。
+ */
+contextBridge.exposeInMainWorld('__IM_DIRECT__', {
+  isDesktop: true,
+  /** params: {host, udpPort, token, aesKeyB64, sessionId, mtu, punchHost, punchPort} */
+  open: (params) => call('im:direct-open', params),
+  /** packet: {channel:'reliable'|'screen', kind:0|1, data:ArrayBuffer|Uint8Array} */
+  write: (packet) => call('im:direct-write', packet),
+  close: () => call('im:direct-close', null),
+  stats: () => call('im:direct-stats', null),
+  localCandidates: () => call('im:direct-local-candidates', null),
+  onData: (callback) => {
+    ipcRenderer.on('im:direct-data', (event, message) => callback(message))
+  },
+  onState: (callback) => {
+    ipcRenderer.on('im:direct-state', (event, state) => callback(state))
+  }
+})

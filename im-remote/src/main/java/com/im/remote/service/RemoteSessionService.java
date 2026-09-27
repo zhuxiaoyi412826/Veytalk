@@ -54,6 +54,7 @@ public class RemoteSessionService {
     private final RemoteProperties properties;
     private final RedisUtil redisUtil;
     private final JsonUtil jsonUtil;
+    private final RemotePunchService punchService;
     private final org.springframework.beans.factory.ObjectProvider<RemoteRelayService> relayServiceProvider;
     private final ObjectProvider<UserQuerySpi> userQuerySpiProvider;
     private final SecureRandom secureRandom = new SecureRandom();
@@ -70,6 +71,8 @@ public class RemoteSessionService {
         volatile String ticket;
         volatile byte[] aesKey;
         volatile String deviceKey;
+        /** 直连一次性凭证：Agent 与控端各拿一份，握手时两端比对；不落库、不进日志 */
+        volatile String directToken;
     }
 
     /** 延迟取中继 Bean：Relay ↔ SessionService 互为调用但构造不成环 */
@@ -206,7 +209,64 @@ public class RemoteSessionService {
                 result.put("aesKey", sec.aesKey == null ? null : Base64.getEncoder().encodeToString(sec.aesKey));
             }
         }
+        result.put("direct", directInfo(session, true));
         return result;
+    }
+
+    /**
+     * 直连能力与凭证：控端据此决定要不要试 LAN/打洞，Agent 据此决定要不要起监听口。
+     *
+     * <p>{@code punchAvailable} 为假时控端不会去问反射器（开发环境 punch-host 通不通往往取决于
+     * 本机防火墙，少一次无效往返少一个不确定因素）；{@code active} 为假时直连已无意义，
+     * 不再下发 token，避免一个已结束的会话还能凭旧 token 去敲被控端的端口。
+     */
+    private Map<String, Object> directInfo(RemoteSession session, boolean includeToken) {
+        Map<String, Object> direct = new LinkedHashMap<>();
+        RemoteProperties.Direct config = properties.getDirect();
+        boolean usable = directAvailable() && session != null
+                && RemoteSession.STATUS_ACTIVE.equals(session.getStatus());
+        SessionSecrets sec = session == null ? null : secrets.get(session.getId());
+        direct.put("enabled", usable && sec != null && sec.directToken != null);
+        direct.put("lan", config.isLanEnabled());
+        direct.put("udp", config.isUdpEnabled() && punchService.isRunning());
+        direct.put("punchHost", config.getPunchHost() == null ? "" : config.getPunchHost());
+        direct.put("punchPort", config.getPunchPort());
+        direct.put("mtu", config.getMtu());
+        direct.put("handshakeTimeoutMs", config.getHandshakeTimeoutMs());
+        direct.put("token", usable && includeToken && sec != null ? sec.directToken : null);
+        return direct;
+    }
+
+    /** 服务端侧直连是否可用：总开关 + 模块开关同时打开才算 */
+    public boolean directAvailable() {
+        return properties.isEnabled() && properties.getDirect().isEnabled();
+    }
+
+    /** 中继下发 session-start 时取直连参数（含 token），避开把密钥包外泄给其它调用方 */
+    public Map<String, Object> directParams(Long sessionId) {
+        RemoteSession session = sessionMapper.selectById(sessionId);
+        return directInfo(session, true);
+    }
+
+    /**
+     * 直连流量上报：服务端不加密也不能解密载荷，只记账。
+     *
+     * <p>两端口径必然不完全相等（丢包、重传、上报时刻不同），取大者作为会话总直连流量：
+     * 带宽评估宁可估高不可估低，估低了会让人误以为直连省得没那么多。
+     */
+    public void recordDirectStats(Long sessionId, String role, long down, long up, String path) {
+        RemoteRelayService.Binding binding = relayService().binding(sessionId);
+        if (binding != null) {
+            binding.applyDirectStats(role, down, up, path);
+        }
+        recordAudit(sessionId, "direct-stats", "role=" + role + ", path=" + path
+                + ", down=" + down + ", up=" + up);
+    }
+
+    /** 直连建立/失败的状态变更，只进审计与日志，不改会话状态机 */
+    public void recordDirectEvent(Long sessionId, String action, String detail) {
+        recordAudit(sessionId, action, detail);
+        log.info("远程直连事件: sessionId={}, action={}, detail={}", sessionId, action, detail);
     }
 
     /** Agent 上报 accept：校验归属 → 生成一次性 ticket → 会话转 active */
@@ -221,7 +281,13 @@ public class RemoteSessionService {
         String ticket = randomTicket();
         redisUtil.set(RemoteProtocol.REDIS_TICKET_PREFIX + ticket,
                 String.valueOf(session.getId()), Duration.ofSeconds(properties.getControlTicketTtlSeconds()));
-        secrets.computeIfAbsent(sessionId, k -> new SessionSecrets()).ticket = ticket;
+        SessionSecrets sec = secrets.computeIfAbsent(sessionId, k -> new SessionSecrets());
+        sec.ticket = ticket;
+        // 直连凭证与 ticket 同时生成：两端都在授权这一刻之后才尝试建直连，早生成没有额外暴露窗口；
+        // Agent 拿到的是一份内存副本、控端从 detail() 拿，服务端不再参与数据面校验
+        if (directAvailable()) {
+            sec.directToken = randomTicket();
+        }
         session.setTicket(ticket);
         session.setStatus(RemoteSession.STATUS_ACTIVE);
         session.setStartTime(LocalDateTime.now());
@@ -266,10 +332,14 @@ public class RemoteSessionService {
             return;
         }
         secrets.remove(sessionId);
+        LocalDateTime endTime = LocalDateTime.now();
+        // 时长是为了把总流量折算成平均码率：光有 bytes 分不清「短会话码率很高」还是「挂了一整晚」
+        long seconds = session.getStartTime() == null ? 0
+                : java.time.Duration.between(session.getStartTime(), endTime).getSeconds();
         RemoteSession patch = RemoteSession.builder()
                 .id(sessionId)
                 .status(RemoteSession.STATUS_ENDED)
-                .endTime(LocalDateTime.now())
+                .endTime(endTime)
                 .endReason(reason)
                 .bytes(bytes)
                 .build();
@@ -279,7 +349,11 @@ public class RemoteSessionService {
             deviceService.updateStatus(device.getId(), RemoteDevice.STATUS_IDLE);
         }
         recordAudit(sessionId, "session-end", "reason=" + reason + ", bytes=" + bytes);
-        log.info("远程会话已结束: sessionId={}, reason={}, bytes={}", sessionId, reason, bytes);
+        // 带宽核算用的一行：总流量（双向）+ 时长 + 平均码率（Mbps 按 10^6，与云厂商规格表同口径）
+        log.info("远程会话已结束: sessionId={}, reason={}, 时长={}s, 总流量={}MB, 平均码率={}Mbps",
+                sessionId, reason, seconds,
+                String.format("%.2f", bytes / 1024.0 / 1024),
+                String.format("%.2f", seconds > 0 ? bytes * 8.0 / seconds / 1_000_000 : 0));
     }
 
     /** 中继绑定成功后调用：控制端已凭票接入 */
