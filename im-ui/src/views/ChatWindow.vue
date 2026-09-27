@@ -1,5 +1,11 @@
 <template>
-  <div class="chat-window">
+  <div
+    class="chat-window"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <!-- ==================== 头部 ==================== -->
     <header class="chat-window__header">
       <!-- 窄屏下聊天窗口全屏，这是回到会话列表的唯一入口；宽屏有左侧列表，按钮隐藏 -->
@@ -131,7 +137,7 @@
         <el-tooltip v-if="canUpload" content="发送图片" placement="top">
           <el-button text :icon="Picture" :disabled="uploading" @click="pickImage" />
         </el-tooltip>
-        <el-tooltip v-if="canUpload" content="发送文件（音频会作为语音消息）" placement="top">
+        <el-tooltip v-if="canUpload" content="发送文件（也可直接把文件拖进聊天窗口；音频会作为语音消息）" placement="top">
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
         </el-tooltip>
         <input ref="imageInputRef" type="file" accept="image/*" class="chat-window__file-input" @change="onPicked" />
@@ -179,7 +185,7 @@
         ref="inputRef"
         v-model="draft"
         type="textarea"
-        :rows="isMobile ? 1 : 2"
+        :rows="isMobile ? 1 : 3"
         resize="none"
         :maxlength="MAX_TEXT_LENGTH"
         :show-word-limit="!isMobile"
@@ -225,6 +231,13 @@
       </div>
 
     </footer>
+
+    <!-- 拖拽发送（PC 浏览器 / Electron 桌面端）：手机没有 HTML5 拖放，acceptsDrop 里已排除 -->
+    <div v-if="dropActive" class="chat-window__drop">
+      <el-icon :size="30"><FolderOpened /></el-icon>
+      <span>松开即可发送到「{{ title }}」</span>
+      <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_DROP_FILES }} 个</span>
+    </div>
 
     <ContextMenu
       v-model:visible="menu.visible"
@@ -293,6 +306,7 @@ import { uploadFileSmart } from '@/api/file'
 import { searchMessages, clearConversationMessages } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
+import { riskCategoryOf, riskConfirmText } from '@/utils/riskFile'
 // 视频压缩只在桌面端启用：调 Electron 主进程的原生 ffmpeg（GPU 硬件编码）压缩后上传；
 // Web 端不压缩、直传原片（window.__IM_NATIVE__ 只在 Electron 里存在，据此区分）。
 import { isElectron } from '@/utils/env'
@@ -313,6 +327,9 @@ const MAX_TEXT_LENGTH = 5000
  *  >5MB 自动走分片上传，边切边传，单个分片请求体才 ~5MB，不受那道 100MB multipart 限制。
  *  要传更大的文件，需同时调大后端 im.file.upload.max-size 与 max-chunks。 */
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+
+/** 一次拖拽最多发几个文件：再多就该打包成压缩包，逐个排队上传太慢，进度条也看不清 */
+const MAX_DROP_FILES = 9
 
 /** 消息类型与文件业务类型，与后端 MsgType / im-file 的约定对齐 */
 const TYPE_IMAGE = 2
@@ -956,7 +973,7 @@ function pickFile() {
 }
 
 /**
- * 选完文件后统一走这里。
+ * 两个隐藏 input（图片 / 文件）选完都回到这里。
  *
  * input 的 value 必须清空：连续两次选同一个文件时，
  * 值没变则 change 事件不触发，表现为「第二次点没反应」。
@@ -965,6 +982,16 @@ async function onPicked(event) {
   const input = event.target
   const file = input.files && input.files[0]
   input.value = ''
+  await sendPickedFile(file)
+}
+
+/**
+ * 拿到一个待发文件后的统一入口（点图标选、拖拽进来都走这里）。
+ *
+ * 体积、风险确认、上传发送只写一份：拖拽如果另起一套校验，
+ * 就会出现「同一个文件点着发能过、拖着发能绕过风险提示」这类不一致。
+ */
+async function sendPickedFile(file) {
   if (!file) {
     return
   }
@@ -972,7 +999,102 @@ async function onPicked(event) {
     ElMessage.error(`文件不能超过 ${formatFileSize(MAX_UPLOAD_BYTES)}，当前 ${formatFileSize(file.size)}`)
     return
   }
+  // 高风险格式（安装包 / 证书私钥 / 凭据库）：后端已放行，但得让人知情后才继续（需求 2）。
+  // 取消则静默返回：input.value 已置空，没上挂占位气泡，界面不会残留任何东西
+  const risk = riskCategoryOf(file.name)
+  if (risk) {
+    try {
+      await ElMessageBox.confirm(riskConfirmText(file.name), '高风险文件提醒', {
+        confirmButtonText: '仍要发送',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+  }
   await uploadAndSend(file)
+}
+
+/* ---------------- 拖拽发送（PC 浏览器 / Electron 桌面端） ---------------- */
+
+/**
+ * dragenter / dragleave 的配对计数。
+ *
+ * 这两个事件会在每个子元素上冒泡到根节点，鼠标从消息气泡划过头像时
+ * 会连续 enter/leave，用布尔值判「离开了吗」会让提示遮罩一闪一闪。
+ */
+let dragDepth = 0
+const dropActive = ref(false)
+
+/** 只认真正在拖文件：从浏览器地址栏拖个链接进来不该触发发送 */
+function hasFilePayload(event) {
+  const types = event.dataTransfer && event.dataTransfer.types
+  return !!types && Array.from(types).includes('Files')
+}
+
+/** 遮罩只在「拖了文件 + 本机确实能发」时出现，否则给了入口又发不出去更让人火 */
+function acceptsDrop(event) {
+  return !isMobile.value && canUpload.value && !isMuted.value && hasFilePayload(event)
+}
+
+function onDragEnter(event) {
+  if (!acceptsDrop(event)) {
+    return
+  }
+  dragDepth += 1
+  dropActive.value = true
+}
+
+function onDragOver(event) {
+  if (!acceptsDrop(event)) {
+    return
+  }
+  // 不显式声明 copy，光标会按链接拖放显示成「移动/复制」，看着不像能发文件
+  event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  if (dragDepth > 0) {
+    dragDepth -= 1
+  }
+  if (dragDepth === 0) {
+    dropActive.value = false
+  }
+}
+
+async function onDrop(event) {
+  dragDepth = 0
+  dropActive.value = false
+  if (isMobile.value || !hasFilePayload(event)) {
+    return
+  }
+  if (!canUpload.value) {
+    ElMessage.warning('当前账号没有上传文件的权限')
+    return
+  }
+  if (isMuted.value) {
+    ElMessage.warning('本会话已禁言，无法发送文件')
+    return
+  }
+  let files = Array.from((event.dataTransfer && event.dataTransfer.files) || [])
+  // 文件夹与 0 字节文件后端一律拒（无扩展名 / FILE_EMPTY），先挑出来比让红条弹一排友好
+  const skipped = files.filter((f) => !f.size)
+  files = files.filter((f) => f.size > 0)
+  if (skipped.length) {
+    ElMessage.warning(`文件夹或空文件无法发送，已跳过 ${skipped.length} 项`)
+  }
+  if (!files.length) {
+    return
+  }
+  if (files.length > MAX_DROP_FILES) {
+    ElMessage.warning(`一次最多拖 ${MAX_DROP_FILES} 个文件，已取前 ${MAX_DROP_FILES} 个`)
+    files = files.slice(0, MAX_DROP_FILES)
+  }
+  // 串行发：uploadAndSend 会等上传 + 发送全部完成，并行会把进度条与占位气泡搅乱
+  for (const file of files) {
+    await sendPickedFile(file)
+  }
 }
 
 /**
@@ -1642,6 +1764,32 @@ watch(key, async () => {
   opacity: 0;
   pointer-events: none;
   z-index: -1;
+}
+
+/* 拖拽遮罩：盖满整个聊天区域提示「松手即发」。 */
+.chat-window__drop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 15px;
+  color: var(--im-primary);
+  background: rgba(64, 158, 255, 0.08);
+  border: 2px dashed var(--im-primary);
+  border-radius: 8px;
+
+  /* 必须穿透：不写 pointer-events:none，遮罩自己会变成新的 dragenter/dragleave 源，
+     提示条会一闪一闪，且鼠标落在遮罩上时反而接不到下面元素的 drop */
+  pointer-events: none;
+}
+
+.chat-window__drop-sub {
+  font-size: 12px;
+  color: var(--im-text-secondary);
 }
 
 /* 输入框去掉边框，聊天场景里外层已经有分隔线了 */

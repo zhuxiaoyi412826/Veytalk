@@ -156,11 +156,28 @@ onBeforeMount(() => {
   // 若顺序反过来，连接建立到列表拉完之间到达的推送会因为找不到会话而被丢弃
   installWsDispatch()
   bootstrap()
+  document.addEventListener('dragover', blockRawFileDrop)
+  document.addEventListener('drop', blockRawFileDrop)
 })
 
 onBeforeUnmount(() => {
   uninstallWsDispatch()
+  document.removeEventListener('dragover', blockRawFileDrop)
+  document.removeEventListener('drop', blockRawFileDrop)
 })
+
+/**
+ * 兜底：拦掉落在聊天区之外的文件拖放。
+ *
+ * 浏览器的默认行为是「拖放文件即导航到该文件」，会把整个 SPA 换成一张本地图片，
+ * 用户只能刷新回来。聊天窗自己接管了 drop，其余位置（会话列表/好友/设置）统一在这里挡掉。
+ */
+function blockRawFileDrop(event) {
+  const types = event.dataTransfer && event.dataTransfer.types
+  if (types && Array.from(types).includes('Files')) {
+    event.preventDefault()
+  }
+}
 
 async function onLogout() {
   try {

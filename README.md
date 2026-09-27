@@ -189,9 +189,13 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 ```powershell
 # 编译打包（跳过单元测试，本次交付不含测试用例）
 mvn clean package -DskipTests
-
 # 启动
 java -jar im-bootstrap/target/im-server.jar
+
+# 这样启动每次修改都要返回上层目录进去编译打包 ，只在im-bootstrap目录下即可
+mvn -f ..\pom.xml clean install -DskipTests
+mvn springboot:run    
+
 ```
 
 启动成功的标志是控制台打出这段横幅（由 `ImApplication#logStartupSummary` 打印，
@@ -215,7 +219,7 @@ java -jar im-bootstrap/target/im-server.jar
 | http://localhost:8080/doc.html | Knife4j 接口文档，按模块分成 9 个分组（01-09，含 AI 面试与远程控制） |
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
-| http://localhost:8080/api/** | 全部 REST 接口 |
+| http://localhost:8080/api/ | 全部 REST 接口 |
 
 ---
 
@@ -497,8 +501,6 @@ sequenceDiagram
     Note over DP,SK: 任一步失败 → reject 回 error 帧<br/>异常绝不逃逸到容器，否则会误判为断连
 ```
 
----
-
 ## 十一、文件存储：local / MinIO 切换
 
 默认 `IM_FILE_STORAGE=local`，文件落在 `${user.home}/im-files`，**不装 MinIO 也能完整跑通上传下载**。
@@ -623,55 +625,6 @@ HTTP 200 + Result JSON，前端按 Content-Type 区分两条路径。`GET /api/a
 ---
 
 ## 十四、已知坑（踩过的，别再踩）
-
-**1. OkHttp 5.x 必须显式声明**
-`minio:8.6.0` 依赖 `com.squareup.okhttp3:okhttp:5.1.0`，但 OkHttp 从 5.x 起改成了 Gradle 多平台产物，
-Maven 仓库里那个 jar 只有几百字节、**不含任何 class**（POM 里还标着 `do_not_remove: published-with-gradle-metadata`），
-真正的 JVM 实现被拆到了 `okhttp-jvm`。纯 Maven 构建必须在父 POM 里显式补上，
-否则编译期报 `cannot access okhttp3.HttpUrl`，运行期直接 `NoClassDefFoundError`。
-
-**2. Sa-Token JWT 不能用 Mixin 模式**
-`StpLogicJwtForMixin` 把 `_logout` / `_logoutByTokenValue` / `replaced` / `searchTokenValue`
-四个方法重写成了无条件 `throw new ApiDisabledException()`（默认文案 `this api is disabled`）。
-而 `StpUtil.kickout(userId, device)`、`StpUtil.logout(userId)`、`StpUtil.logoutByTokenValue(token)`
-最终都汇聚到这几个方法上。
-
-用 Mixin 的症状非常隐蔽：**首次登录成功**（此时该设备的 token 列表为空，`kickSameDevice` 提前 return），
-但只要 Redis 里留下了同设备的旧 token，**之后每一次登录都必然报错**。
-本项目改用 `StpLogicJwtForSimple`——它只重写 token 的生成方式和 `getExtra`，
-不禁用任何有状态 API，多端管理、顶号、注销、踢人全部正常，同时 token 依然是可离线验签的 JWT。
-
-配套约束：`sa-token.is-share` 必须为 `false`（Simple 模式的 `isSupportShareToken()` 返回 false），
-`sa-token.is-concurrent` 保持 `true`（同设备顶号由 `AuthServiceImpl#kickSameDevice` 自己实现，
-这样能先推 `kickout` 报文让客户端拿到明确原因，再注销服务端会话）。
-
-**3. 依赖树里会同时出现 Jackson 2 和 Jackson 3，这是正常的，不要排除**
-Spring Boot 4 的 HTTP 消息转换器用的是 Jackson 3（`tools.jackson.core:jackson-databind:3.1.5`），
-但 `mvn dependency:tree` 里依然能看到 Jackson 2（`com.fasterxml.jackson.core:jackson-databind:2.21.5`），
-它只从两条第三方链进来，两条都不可缺：
-
-```
-im-common ─► knife4j-openapi3-boot4-spring-boot-starter:5.6.0
-              └─► io.swagger.core.v3:swagger-core-jakarta:2.2.47 ─► Jackson 2
-im-file    ─► io.minio:minio:8.6.0 ──────────────────────────── ─► Jackson 2
-```
-
-`swagger-core` 是构建 OpenAPI 文档模型的库，目前没有 Jackson 3 版本；MinIO 客户端内部也用 Jackson 2
-做 XML/JSON 编解码。两者与 Jackson 3 的**包名完全不同**（`com.fasterxml.jackson` vs `tools.jackson`），
-在同一个 classpath 上共存不会有任何类冲突；加 `<exclusion>` 反而会把 knife4j 和文件上传直接弄坏。
-
-需要注意的是**注解包的归属**：Jackson 3 刻意把 `jackson-annotations` 留在 2.x 命名空间
-（`tools.jackson.core:jackson-databind:3.1.5` 自己就依赖 `com.fasterxml.jackson.core:jackson-annotations:2.21`）。
-所以本项目里 `@JsonValue` / `@JsonInclude` / `@JsonIgnore` 一律从
-`com.fasterxml.jackson.annotation` 导入是**正确写法**，而 `ObjectMapper`、自定义序列化器、
-`TypeReference` 这些则必须从 `tools.jackson.*` 导入。判断标准很简单：
-**注解用 `com.fasterxml`，运行时类用 `tools.jackson`；整个项目里不应该出现 `com.fasterxml.jackson.databind`。**
-
-**4. Knife4j 官方已停更**
-最后一个官方版是 4.5.0，不支持 Spring Boot 4。Boot 4 要用维护分支
-`com.baizhukui:knife4j-openapi3-boot4-spring-boot-starter:5.6.0`（groupId 不是 `com.github.xiaoymin`）。
-
----
 
 ## 十五、目录结构
 

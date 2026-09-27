@@ -167,10 +167,11 @@ a {
  * 消息气泡里的图片：限制最大宽度并保持比例。
  * 尺寸信息在 extra.width / height 里，组件会据此先占位，
  * 这里的 max-width 只是最后一道保险，防止超大原图撑破布局。
+ * 需求 7：显示框增大 1/3（240→320、320→427）。
  */
 .im-msg-image {
-  max-width: 240px;
-  max-height: 320px;
+  max-width: 320px;
+  max-height: 427px;
   display: block;
   border-radius: 4px;
   cursor: zoom-in;

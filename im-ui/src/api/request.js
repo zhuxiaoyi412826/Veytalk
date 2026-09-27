@@ -128,23 +128,44 @@ http.interceptors.response.use(
 )
 
 /**
+ * 判断一段解析后的 JSON 是否是后端 Result 错误体。
+ *
+ * 不能只看 Content-Type 含 application/json 就当错误：用户发的是真 .json 附件时，
+ * 后端按扩展名映射的 MIME 也是 application/json，成功体同样会被误判成「文件获取失败」
+ * （需求 8 的根因）。真正的错误体形状固定：数字 code + message/msg 或 success 布尔；
+ * 恰好解析成同形状的附件 JSON 几乎不存在，即使撞上也只是预览报错不丢数据。
+ */
+function isErrorEnvelope(parsed) {
+  return !!parsed
+    && typeof parsed === 'object'
+    && !Array.isArray(parsed)
+    && typeof parsed.code === 'number'
+    && (typeof parsed.message === 'string' || typeof parsed.msg === 'string' || typeof parsed.success === 'boolean')
+}
+
+/**
  * 下载二进制。
  *
- * 后端的下载接口失败时同样返回 HTTP 200 + JSON 错误体，所以这里必须按 Content-Type
- * 判别：拿到 JSON 就说明没取到文件，把它解析出来当成业务错误抛，
+ * 后端的下载接口失败时同样返回 HTTP 200 + JSON 错误体，所以这里要按 Content-Type
+ * 判别：拿到 JSON 错误体就说明没取到文件，把它解析出来当成业务错误抛，
  * 否则调用方会把一段 {"code":1002} 当成图片字节写进 blob，页面上表现为一张裂图且毫无提示。
+ * 注意区分真 .json 附件（同样是 application/json）：靠错误体的固定形状判别，见 isErrorEnvelope。
  */
 export async function fetchBlob(url, config = {}) {
   const response = await http.get(url, { ...config, responseType: 'blob', silent: true })
   const blob = response instanceof Blob ? response : response.data
   if (blob && blob.type && blob.type.includes('application/json')) {
     const text = await blob.text()
-    let body = {}
+    let body = null
     try {
       body = JSON.parse(text)
     } catch {
       // 非 JSON 内容被误标了类型，按原样当文件处理
       return blob
+    }
+    if (!isErrorEnvelope(body)) {
+      // 合法的 .json 附件本身，原样交给调用方
+      return new Blob([text], { type: blob.type })
     }
     if (body.code === CODE_UNAUTHORIZED || body.code === CODE_KICKED_OUT) {
       toLogin(body.message)
@@ -179,11 +200,15 @@ export async function fetchBlobMeta(url, { ifNoneMatch, baseURL = '' } = {}) {
   const blob = response.data instanceof Blob ? response.data : new Blob([response.data])
   if (blob.type && blob.type.includes('application/json')) {
     const text = await blob.text()
-    let body = {}
+    let body = null
     try {
       body = JSON.parse(text)
     } catch {
       return { notModified: false, etag, blob }
+    }
+    if (!isErrorEnvelope(body)) {
+      // 合法的 .json 附件本身，不能当错误体抛（否则 json 文件永远取不到内容）
+      return { notModified: false, etag, blob: new Blob([text], { type: blob.type }) }
     }
     if (body.code === CODE_UNAUTHORIZED || body.code === CODE_KICKED_OUT) {
       toLogin(body.message)

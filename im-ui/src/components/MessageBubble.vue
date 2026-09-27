@@ -85,6 +85,11 @@
                 {{ canPreview ? '点击预览' : fileSize }}
                 <span v-if="attachWatermark" class="bubble__file-wm">· 带水印</span>
               </div>
+              <!-- 高风险格式常驻警示（需求 2）：传输不拦，但接收方得知道自己拿到的是什么 -->
+              <div v-if="riskCategory" class="bubble__file-risk">
+                <el-icon :size="12"><WarningFilled /></el-icon>
+                <span>{{ riskCategory.label }}，请确认来源可信</span>
+              </div>
             </div>
           </div>
 
@@ -119,13 +124,14 @@
 
 <script setup>
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Loading, View, VideoPause, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { mediaUrl, downloadFile, isPreviewableFile, isVideo } from '@/utils/media'
+import { riskCategoryOf } from '@/utils/riskFile'
 import { formatDuration, formatFileSize } from '@/utils/format'
 
 /**
@@ -273,7 +279,7 @@ function onImageClick() {
  * 先按 extra 里的原始尺寸占位。
  *
  * 后端不回填 width / height，这两个值是发送方上传前自己读出来塞进 extra 的。
- * 有就按比例缩到 240px 宽以内，没有就不设尺寸，让图片加载完自然撑开。
+ * 有就按比例缩到 320px 宽以内，没有就不设尺寸，让图片加载完自然撑开。
  */
 const imageStyle = computed(() => {
   const width = Number(extra.value.width)
@@ -281,7 +287,7 @@ const imageStyle = computed(() => {
   if (!width || !height) {
     return {}
   }
-  const scale = Math.min(1, 240 / width)
+  const scale = Math.min(1, 320 / width)
   return { width: Math.round(width * scale) + 'px', height: Math.round(height * scale) + 'px' }
 })
 
@@ -328,10 +334,39 @@ function onFileClick() {
   }
 }
 
+/**
+ * 下载前对高风险格式再确认一次（需求 2）。
+ *
+ * 发送方的确认发生在选完文件时，接收方却没有这道工序：气泡上那行小字容易被忽略，
+ * 而「双击一个来路不明的 apk」才是真正的事故现场。菜单里的「下载」也走这里，
+ * 两个入口共用一份拦截。
+ */
+async function confirmRiskDownload() {
+  if (!riskCategory.value) {
+    return true
+  }
+  try {
+    await ElMessageBox.confirm(
+      `${fileName.value} 属于「${riskCategory.value.label}」。${riskCategory.value.hint}。仍要下载？`,
+      '高风险文件提醒',
+      { confirmButtonText: '仍要下载', cancelButtonText: '取消', type: 'warning' }
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 命中的风险分类，普通文件为 null */
+const riskCategory = computed(() => riskCategoryOf(extra.value.fileName))
+
 async function onDownload() {
   const url = extra.value.fileUrl
   if (!url) {
     ElMessage.warning('文件地址缺失，无法下载')
+    return
+  }
+  if (!(await confirmRiskDownload())) {
     return
   }
   try {
@@ -422,16 +457,17 @@ onBeforeUnmount(() => {
 }
 
 .bubble__main {
-  max-width: min(560px, 62%);
+  /* 需求 7：气泡宽度增大 1/3（560→745，62%→83%），长文本少折几行 */
+  max-width: min(745px, 83%);
   min-width: 0;
   display: flex;
   flex-direction: column;
 }
 
-/* 手机端放宽气泡：窄屏下 62% 会把一句话说成三行，可读性太差 */
+/* 手机端放宽气泡：窄屏下比例上限会把一句话说成三行，可读性太差 */
 @media (max-width: 768px) {
   .bubble__main {
-    max-width: min(640px, 88%);
+    max-width: min(745px, 92%);
   }
 }
 
@@ -535,8 +571,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 160px;
-  height: 100px;
+  /* 与图片显示框 1/3 增幅同步（160×100 → 213×133） */
+  width: 213px;
+  height: 133px;
   font-size: 12px;
   color: var(--im-text-secondary);
   background: var(--im-bg);
@@ -578,6 +615,16 @@ onBeforeUnmount(() => {
   margin-top: 2px;
   font-size: 11px;
   color: var(--im-text-secondary);
+}
+
+.bubble__file-risk {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #e6a23c;
 }
 
 .bubble__image-wrap {

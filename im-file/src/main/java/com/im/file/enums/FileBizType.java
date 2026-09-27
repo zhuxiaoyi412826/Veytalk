@@ -33,6 +33,12 @@ public enum FileBizType {
             // 安装包：下载时 Content-Type 归为 octet-stream、非图片/视频不会 inline，
             // 浏览器不会在本站源内渲染或执行它，风险与传一个 zip 等价（是否运行由接收方知情决定）
             "exe", "msi",
+            // 高风险格式（需求 2）：apk 等安装包、证书私钥、凭据库都是正当的传输需求，
+            // 一刀切拒掉只会把人逼到别的渠道传，这里放行但由前端「发送前风险确认 + 气泡警示标签」兜底。
+            // 它们都不在 FileConvert.CONTENT_TYPES 里，一律 octet-stream + attachment，不可能被同源渲染
+            "apk", "apks", "appx", "msix", "deb", "rpm", "jar", "scr", "vbs", "cmd",
+            "cer", "crt", "pem", "key", "p12", "pfx", "jks", "keystore", "truststore",
+            "kdbx", "reg",
             "mp4", "avi", "mov", "mkv", "webm", "flv", "wmv",
             "mp3", "wav", "flac", "aac", "ogg", "m4a")),
 

@@ -57,9 +57,7 @@
 ✔ 前端本地缓存：utils/localCache.js（localStorage + TTL 24h）；好友列表/分组、我的群列表快照 stale-while-revalidate（首屏先渲染缓存、后台接口覆盖并写回），退出登录清空防跨账号泄露
 ✔ CDN 层按要求暂不实现：静态资源缓存由部署层 Nginx 的 Cache-Control 承担；无数据库变更，重启后端 + 重新部署前端即生效
 
-7. 文本显示框太小了在增加三分之一 图片显示框也增加三分之一
-8. 打开json文件失败
-9. markdown文件 在本地进行渲染就是在客户端渲染，在网络传输是原始语法，
+
 
 
 
