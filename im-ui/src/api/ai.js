@@ -3,7 +3,7 @@ import { getToken, getTokenName } from '@/utils/token'
 import { apiBaseURL } from '@/utils/env'
 
 /**
- * AI 面试官接口。
+ * AI 相关接口：面试官对话 + 全网检索（消息搜索框的「网络」分组）。
  *
  * /chat 是 SSE 流式接口，不能走 axios（它要等整个响应体收完才回调），
  * 也不能走 EventSource（只支持 GET、不能带自定义请求头），
@@ -14,6 +14,17 @@ import { apiBaseURL } from '@/utils/env'
 /** 面试官状态：知识库目录/文件数/片段数、模型名、API Key 是否已配置 */
 export function fetchInterviewStatus() {
   return http.get('/ai/interview/status', { silent: true })
+}
+
+/**
+ * 全网关键字检索，供首页消息搜索框的「网络」分组使用。
+ *
+ * 与聊天消息检索是两个并行请求：本地结果不等外网，外网慢几秒也只空着自己那一栏。
+ * 后端把抓取失败、被限流、结果页改版都收敛成空 results，
+ * 所以这里 silent：不能让外网抖动弹一个全局 toast 打断本地搜索。
+ */
+export function searchWeb(keyword) {
+  return http.get('/ai/search/web', { params: { keyword }, silent: true })
 }
 
 /**

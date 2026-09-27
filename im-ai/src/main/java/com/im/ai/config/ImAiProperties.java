@@ -39,4 +39,45 @@ public class ImAiProperties {
      * 这个间隔限制的是「对比」本身的频率，目录里文件很多时避免每轮对话都走一遍文件系统。
      */
     private long rescanIntervalSeconds = 30;
+
+    /** 全网检索：消息搜索框「网络」分组的数据源，与面试功能互不影响 */
+    private WebSearch webSearch = new WebSearch();
+
+    /**
+     * 全网检索配置。
+     *
+     * <p>抓取入口做成可配置：结果页 HTML 结构属于外部站点，不受本项目控制，
+     * 换入口（或将来换成付费搜索 API）时只改配置不动代码。
+     */
+    @Data
+    public static class WebSearch {
+
+        /** 总开关。关闭后接口直接返回空结果，前端连「网络」分隔线都不渲染 */
+        private boolean enabled = true;
+
+        /** 抓取入口地址（国内网络可直连且返回标准结果页的是 Bing） */
+        private String endpoint = "https://cn.bing.com/search";
+
+        /**
+         * 单次抓取超时（秒）。
+         * 搜索框是即时交互，网络分组慢就等于没有——超时后宁可什么都不显示，
+         * 也不能让请求线程挂在一次跨网抓取上。
+         */
+        private int timeoutSeconds = 6;
+
+        /** 返回给前端的条数上限 */
+        private int maxResults = 10;
+
+        /** 关键字长度上限，超出截断（关键字会拼进抓取 URL，也参与缓存键计算） */
+        private int maxKeywordChars = 60;
+
+        /** 摘要片段截断长度，抓取页里的原始摘要可能很长 */
+        private int maxSnippetChars = 200;
+
+        /**
+         * 结果缓存有效期（秒）。同一关键字反复搜不必每次都打外网，
+         * 也让多用户搜同一个热词时只有一次真实抓取。
+         */
+        private long cacheSeconds = 600;
+    }
 }

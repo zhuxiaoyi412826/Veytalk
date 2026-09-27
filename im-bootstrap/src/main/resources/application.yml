@@ -422,8 +422,8 @@ im:
     expose-email-code: false
     image-required: true
 
-  # AI 面试官（im-ai 模块 ImAiProperties）：模型接入参数在上面的 spring.ai.openai，
-  # 这里只管知识库与对话策略。
+  # AI 面试官与全网检索（im-ai 模块 ImAiProperties）：模型接入参数在上面的 spring.ai.openai，
+  # 这里只管知识库、对话策略与网络检索入口。
   ai:
     enabled: true
     # 知识库目录，递归扫描 .md/.txt；目录内容增删改后自动重建索引（无需重启）。
@@ -437,6 +437,19 @@ im:
     max-message-chars: 4000
     # 目录重扫最小间隔（秒）
     rescan-interval-seconds: 30
+    # 全网检索：消息搜索框（搜索全部会话/网络）里「网络」分组的数据源。
+    # 实现是抓取结果页 HTML 再解析，入口改版会拿不到结果；所有失败都只让
+    # 网络分组空白，不影响本地消息检索，所以这里不需要开关以外的降级手段。
+    web-search:
+      enabled: true
+      endpoint: https://cn.bing.com/search
+      # 抓取超时（秒）：宁可不出网络结果，也不让请求线程挂在跨网抓取上
+      timeout-seconds: 6
+      max-results: 10
+      max-keyword-chars: 60
+      max-snippet-chars: 200
+      # 同一关键字的结果缓存有效期，命中后不打外网
+      cache-seconds: 600
 
   # 三级缓存：L1 Caffeine（JVM 本地）→ L2 Redis（分布式）→ L3 MySQL。
   # 读路径逐层回源并回填，写路径由业务更新后主动失效；Redis 不可用时自动退化为 L1+DB。

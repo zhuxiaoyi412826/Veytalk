@@ -14,18 +14,18 @@
         </el-tooltip>
       </header>
 
-      <!-- 全局消息搜索：跨全部会话检索，与聊天窗口内的「仅当前会话」搜索区分开 -->
+      <!-- 全局搜索：跨全部会话检索聊天消息 + 全网检索，与聊天窗口内的「仅当前会话」搜索区分开 -->
       <div class="chat-home__search">
         <el-input
           v-model.trim="globalKeyword"
-          placeholder="搜索全部会话的消息"
+          placeholder="搜索全部会话/网络"
           clearable
           :prefix-icon="Search"
           @clear="closeGlobalSearch"
         />
       </div>
 
-      <!-- 搜索结果面板：有关键字时替换会话列表展示，点击某条跳转到对应会话 -->
+      <!-- 搜索结果面板：有关键字时替换会话列表展示，上半本地消息、下半「网络」分组 -->
       <div v-if="globalSearching" v-loading="globalLoading" class="chat-home__search-results im-scroll">
         <div
           v-for="item in globalResults"
@@ -46,8 +46,35 @@
           <el-button link type="primary" :loading="globalLoading" @click="loadMoreGlobal">加载更多</el-button>
         </div>
         <div v-if="globalSearched && !globalResults.length && !globalLoading" class="gsearch__empty">
-          未找到匹配的消息
+          聊天记录中未找到匹配
         </div>
+
+        <!-- 本地与网络之间的分隔横杠：仿微信搜一搜的分节线（横线 + 居中小字） -->
+        <template v-if="webLoading || webSearched">
+          <div class="gsearch__divider">网络</div>
+
+          <div
+            v-for="item in webResults"
+            :key="item.url"
+            class="gsearch gsearch--web"
+            @click="openWebResult(item)"
+          >
+            <div class="gsearch__head">
+              <span class="gsearch__web-title im-ellipsis">{{ item.title }}</span>
+              <span class="gsearch__badge">网络</span>
+            </div>
+            <div class="gsearch__web-snippet">{{ item.snippet }}</div>
+            <div v-if="item.site" class="gsearch__web-site im-ellipsis">{{ item.site }}</div>
+          </div>
+
+          <div v-if="webLoading" class="gsearch__empty gsearch__empty--web">正在搜索网络…</div>
+          <div v-else-if="!webResults.length" class="gsearch__empty gsearch__empty--web">
+            网络暂无结果
+            <el-button v-if="webMoreUrl" link type="primary" @click="openWebResult({ url: webMoreUrl })">
+              在浏览器中打开搜索
+            </el-button>
+          </div>
+        </template>
       </div>
 
       <div v-else v-loading="conversation.loading && conversation.list.length === 0" class="chat-home__items im-scroll">
@@ -127,6 +154,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { useSettingsStore } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { clearConversationMessages, searchMessages } from '@/api/message'
+import { searchWeb } from '@/api/ai'
 import { formatConvTime } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
 
@@ -188,7 +216,7 @@ onMounted(() => {
   }
 })
 
-/* ------------------------------ 全局消息搜索 ------------------------------ */
+/* ------------------------------ 全局搜索：本地消息 + 网络 ------------------------------ */
 
 const globalKeyword = ref('')
 const globalResults = ref([])
@@ -200,20 +228,38 @@ const globalSearched = ref(false)
 const globalSearching = computed(() => !!globalKeyword.value)
 let globalTimer = null
 
+/** 「网络」分组：与本地消息并行检索，各拿一份状态，谁先回来谁先渲染 */
+const webResults = ref([])
+const webLoading = ref(false)
+const webSearched = ref(false)
+/** 后端返回的「用同一关键字在浏览器打开搜索页」地址，抓取拿不到结果时作为兜底入口 */
+const webMoreUrl = ref('')
+let webTimer = null
+/** 请求序号：关键字连续变化时用来丢弃过期响应，避免旧关键字的结果盖到新关键字上 */
+let webSeq = 0
+
 /** 300ms 防抖，避免每敲一个字就打一次跨会话检索 */
 watch(globalKeyword, (val) => {
   if (globalTimer) clearTimeout(globalTimer)
+  if (webTimer) clearTimeout(webTimer)
   if (!val) {
     globalResults.value = []
     globalHasMore.value = false
     globalSearched.value = false
     globalLoading.value = false
+    resetWebSearch()
+    // 清空关键字要让在途的网络请求作废，否则它回来会把分隔线和结果又刷出来
+    webSeq++
     return
   }
   // 关键字一变就进入 loading，防抖与请求期间面板显示转圈而不是闪一下空态
   globalLoading.value = true
   globalSearched.value = false
   globalTimer = setTimeout(doGlobalSearch, 300)
+  // 网络检索防抖更长：每个新关键字都是一次真实跨网抓取，边打字边搜会把限流配额耗光
+  resetWebSearch()
+  webLoading.value = true
+  webTimer = setTimeout(() => doWebSearch(val, ++webSeq), 700)
 })
 
 async function doGlobalSearch() {
@@ -250,11 +296,55 @@ async function loadMoreGlobal() {
 
 function closeGlobalSearch() {
   if (globalTimer) clearTimeout(globalTimer)
+  if (webTimer) clearTimeout(webTimer)
+  webSeq++
   globalKeyword.value = ''
   globalResults.value = []
   globalHasMore.value = false
   globalSearched.value = false
   globalLoading.value = false
+  resetWebSearch()
+}
+
+function resetWebSearch() {
+  webResults.value = []
+  webMoreUrl.value = ''
+  webLoading.value = false
+  webSearched.value = false
+}
+
+/**
+ * 拉网络结果。
+ *
+ * 失败不提示：后端把抓取超时、被限流、结果页改版都收敛成空 results，
+ * 网络分组空白就够了，本地消息的结果不能被外网拖死。seq 对不上说明关键字已经又改了。
+ */
+async function doWebSearch(keyword, seq) {
+  try {
+    const data = await searchWeb(keyword)
+    if (seq !== webSeq) {
+      return
+    }
+    webResults.value = (data && data.results) || []
+    webMoreUrl.value = (data && data.moreUrl) || ''
+  } catch {
+    if (seq === webSeq) {
+      webResults.value = []
+    }
+  } finally {
+    if (seq === webSeq) {
+      webLoading.value = false
+      webSearched.value = true
+    }
+  }
+}
+
+/** 网络结果在新标签页打开：本窗口跳转会把会话列表和聊天窗口一并弄没 */
+function openWebResult(item) {
+  if (!item || !item.url) {
+    return
+  }
+  window.open(item.url, '_blank', 'noopener')
 }
 
 /** 结果所属会话的展示名：优先取本地会话列表，隐藏会话等取不到时兜底 */
@@ -482,6 +572,68 @@ async function confirmRemove(target) {
   background: #fff3cd;
   padding: 0 2px;
   border-radius: 2px;
+}
+
+/* 本地与网络之间的分隔横杠：一行小字夹在两条细线中间，仿微信搜一搜的分节线 */
+.gsearch__divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 4px;
+  font-size: 11px;
+  color: var(--im-text-secondary);
+  user-select: none;
+}
+
+.gsearch__divider::before,
+.gsearch__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--im-border);
+}
+
+/* 网络结果：标题一行 + 摘要两行 + 来源站点小字 */
+.gsearch__web-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--im-text);
+}
+
+/* 每条都打上「网络」标签，与上面的聊天消息一眼分得开 */
+.gsearch__badge {
+  flex: none;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--im-primary);
+  border: 1px solid var(--im-primary);
+  border-radius: 3px;
+}
+
+.gsearch__web-snippet {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--im-text-secondary);
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.gsearch__web-site {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--im-text-secondary);
+  opacity: 0.8;
+}
+
+/* 网络分组的状态行（搜集中 / 暂无结果）只是局部提示，不能占满整块空态的高度 */
+.gsearch__empty--web {
+  padding: 10px 0;
 }
 
 .gsearch__more {

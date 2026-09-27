@@ -48,6 +48,14 @@ public final class RedisKeys {
     /** 文件 MD5 秒传索引：im:file:md5:{md5} -> fileId */
     public static final String FILE_MD5 = PREFIX + "file:md5:";
 
+    /**
+     * 全网检索结果缓存：im:web:search:{keywordMd5} -> WebSearchVO JSON。
+     *
+     * <p>键用关键字的 MD5 而不是原文：关键字是用户任意输入，可能含中文、空格、
+     * Redis 键分隔符 {@code :}，也可能是几百字的长句。
+     */
+    public static final String WEB_SEARCH = PREFIX + "web:search:";
+
     public static String captchaImage(String captchaKey) {
         return CAPTCHA_IMAGE + captchaKey;
     }
@@ -98,5 +106,9 @@ public final class RedisKeys {
 
     public static String fileMd5(String md5) {
         return FILE_MD5 + md5;
+    }
+
+    public static String webSearch(String keywordMd5) {
+        return WEB_SEARCH + keywordMd5;
     }
 }
