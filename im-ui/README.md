@@ -128,11 +128,11 @@ im-ui/
 | 路由 | 组件 | 说明 |
 | --- | --- | --- |
 | `/login` | `Login.vue` | 登录 / 短信登录 / 注册，三个 Tab |
-| `/chat/:conversationId?` | `ChatHome.vue` + `ChatWindow.vue` | 会话列表 + 聊天窗口；`:conversationId` 可选，刷新与复制链接都能落回同一会话 |
-| `/friends` | `FriendList.vue` | 好友列表，按分组展示，支持搜索、备注、分组、拉黑、删除 |
+| `/chat/:conversationId?` | `ChatHome.vue` + `ChatWindow.vue` | 会话列表 + 聊天窗口；附件三个入口（选 / 拖 / 粘）都先进「待发送托盘」，图片可点缩略图放大，点发送才串行上传；首页搜索框双路并行（本地全部会话消息 + 全网检索结果分节展示）；会话右键菜单可置顶/免打扰/已读/加入或移出黑名单（仅单聊且对方是好友）/删除；`:conversationId` 可选，刷新与复制链接都能落回同一会话 |
+| `/friends` | `FriendList.vue` | 好友列表，按分组展示，支持搜索、备注、分组、拉黑、删除；「黑名单」弹窗集中管理：可看已拉黑名单、逐行「移除黑名单」，也可点「添加黑名单」多选好友批量拉黑 |
 | `/friends/requests` | `FriendRequest.vue` | 搜索用户发起申请、收到的申请（同意/拒绝）、我发出的申请 |
 | `/profile` | `Profile.vue` | 个人中心：头像上传、资料编辑、修改密码、退出登录 |
-| `/user/:id` | `UserProfile.vue` | 他人资料卡片：资料、在线状态、发起聊天、加好友、备注、拉黑、删除 |
+| `/user/:id` | `UserProfile.vue` | 他人资料卡片：资料、在线状态、发起聊天、加好友、备注、加入/移出黑名单、删除 |
 
 `ChatHome` 被 `<keep-alive>` 缓存，切换页面回来时会话列表与滚动位置都还在。
 

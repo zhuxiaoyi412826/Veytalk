@@ -5,12 +5,13 @@
 被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上，不打进后端；
 前端是独立工程，通过 Vite 代理与后端通信，不参与 Maven 构建。
 
-功能覆盖：注册登录（图形/短信验证码）、JWT 鉴权与 RBAC 权限、好友申请与管理、
+功能覆盖：注册登录（图形/短信验证码）、JWT 鉴权与 RBAC 权限、好友申请与管理（含黑名单：多处拉黑入口 + 集中管理）、
 单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
-文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB）、
+文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB；聊天附件可选 / 可拖 / 可粘，
+三者都先进「待发送托盘」再手动发送）、
 WebSocket 实时推送（心跳/重连/多端踢下线）、
 **远程桌面控制**（服务端中继 + AES-GCM 端到端加密 + 识别码跨账号，见「十二」）、
-**AI 面试官**（本地知识库 BM25 RAG + SSE 流式，见「十三」）；
+**AI 面试官**（本地知识库 BM25 RAG + SSE 流式）与**全网检索**（消息搜索框的「网络」分组，见「十三」）；
 前端另可用 **Electron 打包为 Windows 桌面客户端**（安装包内置被控端 Agent 与裁剪 JRE）。
 
 > 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
@@ -30,7 +31,7 @@ WebSocket 实时推送（心跳/重连/多端踢下线）、
 | 框架 | Spring Boot | 4.0.8 | knife4j-next 基线 4.0.7、mybatis-plus 基线 4.0.1，取 4.0.8 兼容性最好 |
 | 持久层 | MyBatis-Plus | 3.5.17 | 用 `mybatis-plus-spring-boot4-starter`；分页插件 3.5.9+ 已拆分，需显式引入 |
 | 数据库 | MySQL | 8.x | 库名默认 `im_db` |
-| 缓存 | Redis | 5+ | Sa-Token 会话、验证码、在线状态、消息序号 |
+| 缓存 | Redis | 5+ | Sa-Token 会话、验证码、在线状态、消息序号、全网检索结果 |
 | 鉴权 | Sa-Token | 1.46.0 | `sa-token-spring-boot4-starter` + `sa-token-jwt` |
 | 接口文档 | Knife4j | 5.6.0 | 官方停更于 4.5.0，Boot 4 用维护分支 `knife4j-next` |
 | 对象存储 | MinIO | 8.6.0 | 可选，默认走本地磁盘 |
@@ -56,7 +57,8 @@ im-parent (pom)
 ├── im-group         群组管理：建群、改群、成员管理、群主/管理员权限、禁言、@提醒、解散
 ├── im-file          文件存储：图片/文件/语音上传、访问鉴权、元数据保存（MinIO + 本地双实现）
 ├── im-websocket     实时推送：连接管理、心跳、断线重连、消息路由分发、多端踢下线
-├── im-ai            AI 面试官：知识库 BM25 检索（RAG）、DashScope SSE 客户端、面试会话与限流
+├── im-ai            AI 能力：面试官（知识库 BM25 检索 RAG、DashScope SSE 客户端、会话与限流）+ 全网检索
+│                    （抓取搜索引擎结果页、Redis 结果缓存）
 ├── im-remote        远程控制服务端：会话状态机、Agent/控制端双 WS 中继、审计与限流
 ├── im-bootstrap     启动模块：唯一的 main 类 + application.yml，repackage 成单 jar
 ├── im-remote-agent  被控端 Agent：独立 fat jar（纯 JDK 零依赖），不进上面那个单 jar，单独部署在被控机
@@ -167,10 +169,14 @@ export MYSQL_PASSWORD=your-password
 
 ## 五、数据库初始化
 
-两个脚本按顺序执行即可，都是幂等设计（`CREATE TABLE IF NOT EXISTS` / 固定主键 `INSERT`）。
+两个脚本按顺序执行即可。
+
+> ⚠️ **`im_schema.sql` 头部是 `DROP TABLE IF EXISTS` + 重建，重跑一次就会清空全库数据**。
+> 它的「幂等」指的是重复执行得到同一套表结构，不是「不会动你的数据」。
+> 已经有数据的库不要重跑这个脚本，改用下面的增量升级方式。
 
 ```powershell
-# 1. 建表（含索引、虚拟生成列、外键约束）
+# 1. 建表（含索引、虚拟生成列、外键约束）——仅限全新库
 mysql -u $env:MYSQL_USER -p im_db < sql/im_schema.sql
 
 # 2. 灌入演示数据（3 个用户、角色权限、一对好友、1 个会话、若干历史消息）
@@ -184,6 +190,18 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 ```
 
 > 也可以直接 `source sql/im_schema.sql`，脚本头部已带 `CREATE DATABASE IF NOT EXISTS` 与 `USE`。
+
+### 已有库的增量升级
+
+本项目没有引入 Flyway/Liquibase，新增列靠手工 `ALTER`。已部署的库升到当前代码需要：
+
+```sql
+-- 远程审计新增「触发方」列（inviter 控制端 / invitee 被控端 Agent / system 服务端流程事件）
+-- 不加这一列，写入审计会直接报 Unknown column 'actor'；加列前的历史记录该列为 NULL，前端显示「—」
+ALTER TABLE `im_remote_audit_log`
+    ADD COLUMN `actor` VARCHAR(16) DEFAULT NULL
+    COMMENT '触发方：inviter 控制端 / invitee 被控端 Agent / system 服务端流程事件' AFTER `detail`;
+```
 
 ---
 
@@ -423,6 +441,44 @@ sequenceDiagram
 
 > 更多链路图（三层架构、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
 
+### 黑名单：一份名单、四处入口、单向拦截
+
+名单不建新表，就是 `im_friend.status = 2`（**只改我持有的那一行**，对方视角的关系仍在），
+所以多端看到的是同一份。后端三个接口早就到位：`PUT /api/friend/{id}/block`（拉黑）、
+`DELETE /api/friend/{id}/block`（移出）、`GET /api/friend/blacklist`（名单）。
+**拉黑要求好友关系存在**（`block` 走 `requireRelation`），所以所有入口的候选人都只能是好友。
+
+| 入口 | 位置 | 行为 |
+|---|---|---|
+| 加入 / 移出 | 好友列表右键菜单 | 单个切换，拉黑前弹确认 |
+| 加入 / 移出 | 他人资料页按钮（`UserProfile.vue`，仅好友可见） | 同上，成功后只改本地 `card.blocked` |
+| 加入 / 移出 | **会话列表右键菜单**（`ChatHome.vue`） | 只对单聊且 relation 存在的行出现（`blockableOf` 用 `friend.friendOf(target.targetId)` 判定），群聊没有「拉黑一个群」 |
+| **添加黑名单** | **黑名单对话框工具栏** | 开二级弹窗多选好友（已拉黑的不再列出）→ 一次确认 → 串行 `block` |
+
+黑名单对话框（`FriendList.vue` 的 `blacklist` / `blacklistAdd`）细节：
+
+- 工具栏左侧显「已拉黑 N 人」，右侧「添加黑名单」；每一行两个按钮：「资料」与「移除黑名单」；
+- 候选人列表**直接调 `fetchFriends()`**而不是取 `friend.friends`：store 里那份可能正被搜索关键字
+  过滤着，拿它当候选会少一批人，而为了拉全量去调 store 动作又会把用户当前的搜索结果洗掉；
+- 整行包成一个 `el-checkbox`（内容放在默认槽里）而不是 `<label>` 套 `el-checkbox`：
+  后者是嵌套 label（非法 HTML），点击有双触发风险；
+- 批量提交串行打接口，一个人失败不让整批停下，最后给「已加入 N 人，另有 M 人失败」的汇总；
+- **操作后必须按当前关键字重拉好友列表**：store 的 `block/unblock` 只能给已经在 `friends` 里的行
+  改状态位，对方被搜索过滤掉时就打不上补丁，表现为「拉黑了但好友行上没有「已拉黑」标签」；
+- 风险提示只在确认框里做一次：拉黑是单向阻断，对方发消息会被 `validateSendRight` 拦下，
+  而我主动发消息时后端会 `unblockSilently` 自动解除拉黑；
+- **自动解除是静默的，本地必须跟着改**：`unblockSilently` 只是一条条件 UPDATE（不是拉黑态就
+  不命中，所以每条单聊消息都打一次也不贵），改完不推任何帧。不跟着同步就会出现
+  「消息明明发出去了，右键菜单还写着移出黑名单」。处理方式：`stores/chat.js` 的
+  `syncSilentUnblock(conversationId)` 在四个提交入口（`send` / `resend` / `flushPending` / `forward`）
+  成功后各调一次：查会话拿 `targetId`（只处理 `type === 1` 的单聊）→ `friend.applySilentUnblock()`
+  把 `status` 从 2 改回 1，真的改到了才弹「发送成功，已自动解除对「X」的拉黑」。
+  抽成一个函数而不是四处各写一遍，是为了避免以后只改其中一个入口；
+- **被拉黑的一方（B → A）提示带名字**：`validateSendRight` 拒回去的是通用文案
+  「对方已将你加入黑名单」（3006），而 `ChatWindow.sendErrorText()` 在单聊里把它换成
+  「你已被「会话名」拉入黑名单，消息未送达」（`sendMessage` 走 `{ silent: true }`，
+  toast 由 ChatWindow 的 catch 统一补，所以改这一处就够，不必动后端文案）。
+
 ---
 
 ## 十、WebSocket
@@ -558,8 +614,68 @@ java -jar im-bootstrap/target/im-server.jar
 **前端体验**：`uploadFileSmart` 的进度条按阶段渲染——「计算文件中」（MD5，0~15%）、「上传中 N/M 片」
 （分片并发上传，15~95%）、「合并中…」（96~100%），命中秒传时直接显示「秒传完成」。
 前端选文件的总上限已对齐后端的 2GB（`ChatWindow.vue` 的 `MAX_UPLOAD_BYTES`）；类型白名单覆盖常见
-文档 / 图片 / 音视频 / 压缩包与 Windows 安装包（exe/msi）。要传更大文件，需同时调大后端
-`im.file.upload.max-size`、`max-chunks` 与前端这个常量。
+文档 / 图片 / 音视频 / 压缩包与 Windows 安装包（exe/msi），而高风险后缀（安装包 / 证书私钥 / 凭据库）
+还要前端二次确认才发（`utils/riskFile.js`）。要传更大文件，需同时调大后端 `im.file.upload.max-size`、
+`max-chunks` 与前端这个常量。
+
+### 聊天附件的三个入口（选 / 拖 / 粘）与待发送托盘
+
+`ChatWindow.vue` 里三条入口**都不直接发送**，而是先放进输入框上方的「待发送托盘」（`stageFile` → `tray`），
+点「发送」才按「先文字、后附件」一批批发出（`sendMessage`）。校验（权限 / 禁言 / 空文件 / 体积 /
+高风险格式确认）只在 `stageFile` 这一处写，所以三个入口行为完全一致——否则会出现
+「同一个文件点着进能过、拖着进绕过风险提示」这种不一致。
+
+| 入口 | 触发方式 | 说明 |
+|---|---|---|
+| 图标选文件 | 点「添加图片 / 添加文件」 | 隐藏 `<input type=file multiple>`，`showPicker` 优先（见 `utils/picker.js`）；`input.value` 必须清空，否则连着选同一个文件不再触发 change |
+| 拖拽 | 把文件拖进聊天窗口 | 仅 PC 浏览器 / Electron（手机没有 HTML5 拖放，`acceptsDrop` 里已排除）；提示文案为「松开即可添加到待发送」 |
+| 粘贴 | 窗口内 Ctrl+V / 手机长按粘贴 | 绑在 `document` 而不是输入框的 `@paste`：截完图回到窗口直接 Ctrl+V 时焦点多半不在输入框上，绑输入框会表现为「粘贴没反应」；焦点在其他可编辑区域（会话内搜索框等）时让开不抢 |
+
+托盘的行为细节：
+
+- 一次最多 9 个（`MAX_PENDING_FILES`），放不下时按剩余容量取前 N 个并提示；
+- 托盘在**输入框上方**，整行两栏（`.chat-window__tray` 是 `flex`）：左边 `.chat-window__tray-list`
+  （`flex: 1` + `min-width: 0`）一个挨着一个横向排，超过宽度就 `overflow-x: auto` 内部滚；
+  右边 `.chat-window__tray-side`（`flex: none`，右对齐）竖排放「待发送 N / 9」与「清空」。
+  右侧不参与压缩，所以卡片区宽度只随窗口变、不随名字长短变；
+- 一项一卡：图片给 68px 方形缩略图（**点开走与消息气泡同一个图片放大弹窗**），其余给 132×68 的
+  类型卡片（图标 + 名字 + 体积，名字 `im-ellipsis` 截断、悬停 `title` 看全名）；
+- **移除用的 ✕ 默认 `opacity: 0`，鼠标移到那张卡片上才显形**（`position: absolute` 但偏移是
+  `top/right: 2px` 的**卡片内部正值**——压到卡片外面会被 `overflow-x: auto` 裁掉半截）；
+  卡片因此要留 `padding-right: 20px`，否则名字末尾被按钮压住；隐藏时必须同时
+  `pointer-events: none`，否则看不见也能被点到，变成「没看到叉却把文件删了」；
+  触屏没得 hover，`@media (hover: none)` 下恢复常显；
+- 风险确认在入托盘时做完，**发送时不再弹任何确认框**，一批文件不会被弹窗逐个打断；
+- 与草稿同一套「按会话暂存」（模块级 `Map` + `ChatHome` 的 `:key` 重挂载），切会话再回来，挑了一半的附件还在；
+- 缩略图的 `objectURL` 是唯一要手动 `revokeObjectURL` 的东西（移除 / 清空 / 发送后都释放），不 revoke 会一直占着那份文件字节；
+- 附件严格串行发送：`uploadAndSend` 自带占位气泡与单槽进度条，并行会互相搅乱；
+  发送失败不回摆托盘——File 已存进 store，气泡上的红叹号「重发」直接复用。
+
+粘贴这一路有三个坑：① 富文本复制（Word / 网页）会同时带 `text/plain` 与图片，只有没文字时才
+`preventDefault`，有文字则「文字留在框里、图片进托盘」（与微信一致）；② 资源管理器里复制的文件，
+浏览器通常只给文件名不给字节，读不到 `file` 项时退化成普通文字粘贴，不弹「粘贴失败」这种无能为力的提示；
+③ 部分系统的截图 File 名字里没扩展名，而后端类型白名单按后缀放行（判不出类型就判不出风险），
+所以前端按 MIME 补一个 `粘贴图片_20260927-153012.png` 这样的名字再入托盘。
+
+**聊天附件的类型白名单（`FileBizType` 四个常量）**：
+
+| 分类 | 放行扩展名 |
+|---|---|
+| `avatar` / `chat_image` | `jpg` `jpeg` `png` `gif` `webp` `bmp` `avif` `jfif` |
+| `chat_voice` | `mp3` `wav` `aac` `m4a` `ogg` `opus` `amr` `flac` |
+| `chat_file` | 文档 / 代码 / 压缩包（`zip` `rar` `7z` `gz` `tar` `tgz`）/ 音视频 / 安装包与高风险后缀（需前端二次确认）；图片扩展名也在列，因为 `bizType` 是前端按 MIME 选的，部分安卓文件管理器只给 `application/octet-stream`，退化成普通文件后若不放行就成了「图明明选了却传不上去」 |
+
+两条易踩的规则：
+
+- **新增能在站内展示/播放的类型，`FileBizType` 与 `FileConvert.CONTENT_TYPES` 两处要一起改**。
+  只放白名单不补 MIME，会落到 `application/octet-stream` + `attachment`，表现为「能传上去但图片卡片
+  渲染不出来 / 语音只弹下载框」。`CONTENT_TYPES` 里没有的类型一律归 octet-stream，
+  这是故意的安全默认（宁可弹下载框，也不能让未知内容在本站的源里渲染）。
+- **扩展名取的是最后一个点之后的部分**（`TextUtil.extension`），所以 `a.tar.gz` 解析出的是 `gz`、
+  早就放行了，**不要往白名单里加 `tar.gz`**（列了也永不命中，反而让人以为支持复合后缀匹配）；
+  真正会漏的是 `a.tgz`（解析出 `tgz`）与 `avif`/`jfif`/`opus` 这类新格式。
+  `jfif` 的字节就是 JPEG、`opus` 装在 Ogg 容器里（MIME 同 `ogg`）、`avif` 是部分系统的截图默认格式，
+  不支持 avif 的浏览器会退到点卡片下载，也比伪造成 png 存进去好（实际字节仍是 avif，存下来就是坏图）。
 
 ---
 
@@ -586,6 +702,34 @@ java -jar im-bootstrap/target/im-server.jar
 
 会话状态机 `inviting → active → ended / rejected`，库里的状态是唯一事实，WS 帧只是它的投影；
 超时巡检收尾悬空的 inviting 会话。流量在内存绑定里计数，收尾时一次性落库。
+
+**会话历史与审计**：`GET /api/remote/session/page` 返回的是已补齐的展示视图而不是裸实体——
+设备名（批量查 `im_remote_device`，沿用 detail() 的归属优先级：先按被控方配对、退回控制方、再退回 deviceId）、
+我的角色（我控对方 / 对方控我）、对端昵称（批量走 `UserQuerySpi`，识别码接入无账号时前端显示「匿名设备」）、
+时长、平均码率与审计条数，全部在这一页里算好（每页固定几次批量 SQL，与条数无关），列表不再逐行回查；
+进行中会话的流量从内存绑定取实时值（库里那一行要到收尾才写）。可按 `status` 筛选。
+
+`GET /api/remote/session/{id}/audit` 是分页审计流水，只增不改不删，每条带 `actor` 标明触发方
+（`inviter` 控制端 / `invitee` 被控端 Agent / `system` 服务端流程事件）——超时、掉线、被新邀请顶替
+这些系统收尾记 `system` 而不是随便挑一方，否则事后追责会把人冤枉。前端把动作分三档配色
+（红＝删文件/重命名/结束进程/执行命令/电源这类不可逆操作），detail 解析成键值对并可展开看全文
+（裸命令文本不拆，按原样等宽展示），支持按 `action` 模糊过滤、每页 20/50/100、导出 CSV
+（前端循环翻页拉全量拼 Blob，不另开导出接口）。抽屉顶部还带一个会话概要头，交代「这是哪一次会话」。
+
+> 审计覆盖的动作：服务端写 `invite` / `accept` / `reject` / `control-bound` / `session-end` / `input-blocked`
+> （只读模式下被拦的输入帧）/ `direct-*`；Agent 自报 `agent-ready` / `file-get` / `file-put` /
+> `file-rm` / `file-rename` / `file-mkdir` / `ps-kill` / `ps-run` / `exec` / `power` / `clip-sync` /
+> `input-blocked` / `direct-rejected` / `danger-denied`（高危开关未开时的拒绝）。
+
+**录屏审计（仅桌面端）**：设置 →「远程控制录屏审计」里可开关会话录屏、自定义存储目录
+（默认系统「视频」\IM远程录屏）、决定是否附带操作审计。开启后每次远控会话都从画面 canvas 取流，
+录成 `远控录屏_<设备名>_<时间戳>.webm`（vp9 / 15fps / 2Mbps，约 15MB/分钟）；MediaRecorder 每秒切一片，
+经 IPC 交主进程**串行追加写盘**，因此内存占用有界、进程被强杀也只丢最后一片。同名 `.json` sidecar
+记录会话元信息（sessionId、设备名、权限、链路类型、编码、操作者、起止时间）与该会话的全部敏感操作事件。
+录像**只落本机、不上传**，与服务端 `im_remote_audit_log` 互补：前者是操作者本地的举证材料，后者是跨端可查的台账。
+浏览器端三项控件置灰并标「需桌面版」——Web 没有 preload 拿不到主进程录制桥，也不应在用户不知情下往磁盘落录像。
+录像用浏览器或 VLC 打开（`.webm` 不支持 Windows 自带播放器）；会话结束时弹「录屏已保存」通知，
+里面直接带「打开录像」按钮（走 `shell.showItemInFolder` 在资源管理器里选中文件），不用手拷路径。
 
 **直连（P2P）：绕开中继的第三条通路**。建会话后两端的候选地址经中继交换（`direct-candidates`），
 控制端按阶梯逐级尝试，**画面、输入、文件三条流量一起走直连**，哪档通了就走哪档：
@@ -623,7 +767,7 @@ UDP 档自带 Go-Back-N 重传与分片重组（画面走不可靠通道、丢�
 
 ---
 
-## 十三、AI 面试官（知识库 RAG）
+## 十三、AI 能力：面试官（知识库 RAG）与全网检索
 
 基于本地知识库 RAG 的「后端 Java 全栈」模拟面试，前端是 `Interview.vue`「面试」页。
 
@@ -656,16 +800,54 @@ HTTP 200 + Result JSON，前端按 Content-Type 区分两条路径。`GET /api/a
 本地结果永远排在上面，下面用一条带「网络」小字的分隔横线隔开（仿微信搜一搜的分节线），
 网络条目右侧标「网络」，点击在新标签页打开。聊天窗口内的「仅当前会话」搜索不受影响。
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant H as ChatHome.vue
+    participant MC as MessageController
+    participant WS as WebSearchController
+    participant RD as Redis
+    participant BG as cn.bing.com
+
+    U->>H: 输入关键字
+    par 本地路（300ms 防抖）
+        H->>MC: GET /api/message/search?keyword
+        MC-->>H: 本地消息（LIKE 匹配 + 权限校验 + 会话名回填）
+    and 网络路（700ms 防抖，不等本地结果）
+        H->>WS: GET /api/ai/search/web?keyword
+        WS->>RD: 查 im:web:search:{关键字 MD5}
+        alt 缓存命中
+            RD-->>WS: 上次结果（不再打外网）
+        else 未命中
+            WS->>BG: GET /search?q=...（浏览器 UA，6s 超时）
+            BG-->>WS: 结果页 HTML → 正则解析 b_algo 块
+            WS->>RD: 写缓存（空结果不写，免 TTL 内始终空白）
+        end
+        WS-->>H: { keyword, results, moreUrl }
+    end
+    H-->>U: 本地分组 + 带「网络」小字的分隔横线 + 网络分组
+    Note over H: 任一路失败只收自己那一路；关键字变化时旧请求的回调直接丢弃
+```
+
 **实现是抓取搜索引擎的结果页再解析 HTML**，而不是接搜索 API：主流的网页搜索接口都要密钥与配额。
-Bing 在国内可直连、结果页结构近年稳定，抓取入口与超时在 `im.ai.web-search` 下可配。
+Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-search`）：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 关掉就不打外网，前端的分隔线与「网络」栏直接不出现 |
+| `endpoint` | `https://cn.bing.com/search` | 抓取入口，换引擎只改这一处（`moreUrl` 由它拼出，前端不写死地址） |
+| `timeout-seconds` | `6` | 单次抓取超时，超时按空结果处理 |
+| `max-results` / `max-keyword-chars` / `max-snippet-chars` | `10` / `60` / `200` | 返回条数、关键字截断长度（整句话不适合打搜索引擎）、摘要截断长度 |
+| `cache-seconds` | `600` | 同一关键字的结果缓存时长（需 Redis） |
+
 代价是解析规则绑在对方的 class 名（`b_algo` / `b_lineclamp`）上，对方改版就取不到结果——
 因此**所有失败路径都收敛成空结果**（抓取超时、被限流、解析不到、Redis 不可用）：
 前端只是不渲染「网络」这一栏，本地消息的检索不能被外网拖死。
 
-**缓存与限流**：同一关键字的结果进 Redis（`im:web:search:{关键字 MD5}`，默认 600 秒），命中就不打外网；
-空结果不写缓存（抓不到多半是超时，存下来会让这个关键字在 TTL 内一直空白）；按用户限流 20 次/分钟。
-`results` 为空时返回体带 `moreUrl`（由配置的抓取入口拼出，前端写死引擎地址会跟配置漂移），
-前端据此渲染「在浏览器中打开搜索」兜底入口。整栏关掉：`im.ai.web-search.enabled: false`。
+**限流与兜底**：接口按用户限流 20 次/分钟（`@RateLimit`）——每一个未命中的关键字都是一次真实的跨网抓取；
+`results` 为空时返回体仍带 `moreUrl`，前端据此渲染「在浏览器中打开搜索」兜底入口。
+文档里该接口落在路径前缀 `/api/ai/**` 对应的分组（Knife4j 按路径分组，不新增分组数），Tag 为「10-全网搜索」。
 
 ---
 
@@ -689,7 +871,7 @@ spring-boot-duomokuia/
 ├── im-group/                群组管理
 ├── im-file/                 文件存储（MinIO + 本地）
 ├── im-websocket/            实时推送
-├── im-ai/                   AI 面试官（BM25 知识库检索 + DashScope SSE 客户端）
+├── im-ai/                   AI 面试官（BM25 知识库检索 + DashScope SSE 客户端）+ 全网检索（WebSearchService）
 ├── im-remote/               远程控制服务端（会话状态机 + 双 WS 中继）
 ├── im-bootstrap/            启动模块
 │   ├── src/main/java/.../ImApplication.java     唯一的 main 类 + 启动横幅
@@ -754,12 +936,17 @@ spring-boot-duomokuia/
    Agent 弹窗点同意 → 控制端看到画面；降档为仅观看后输入操作被拒
 10. **AI 面试** — 设置 `ALI_BABA_API_KEY` 后打开「面试」页开始新面试 → SSE 逐 token 流式输出；
     不设 Key 时返回明确的「API Key 未配置」，其余功能不受影响
+11. **全网检索** — 首页搜索框输入关键字（不选会话）→ 本地消息先出，短暂延迟后分隔横线下方出「网络」条目；
+    F12 应看到 `/api/message/search` 与 `/api/ai/search/web` **两个** 请求（只看到一个 = 前端未热更新或后端未重启）；
+    同一关键字再搜一次应秒回（走 Redis 缓存），`im-bootstrap/logs/im-server.log` 里不再打外网请求；
+    外网不可达时该栏整体隐藏且本地结果照常可用（失败收敛为空结果），结果为空时给「在浏览器中打开搜索」入口
 
 已实测通过的项：1、2、3、4、5（9 个分组已核实）、6/7 中的
 「登录 → WS 握手 → 双向收发 → 未读数 → 已读回执 → 顶下线」主链路，
 以及 9 的远程控制主链路（Agent 识别码注册 → 凭码跨账号邀请 → 弹窗同意 →
 票据消费 → 中继绑定 → 出画面，含桌面端自启 Agent 与内置 JRE）。
-第 10 项需自备 `ALI_BABA_API_KEY` 实测。
+第 10 项需自备 `ALI_BABA_API_KEY` 实测；第 11 项的前端分节布局已实测（本地/网络两段分隔正常），
+网络条目需重启后端加载新接口后才算跑通（旧进程里 `/api/ai/search/web` 会返回 404）。
 
 > 群聊后端功能完整实现，前端聊天页以单聊交互为主，**群聊 UI 不在交付范围内**。
 > 单元测试不纳入本次交付，验证以真实启动 + 接口/WebSocket 串测为准。

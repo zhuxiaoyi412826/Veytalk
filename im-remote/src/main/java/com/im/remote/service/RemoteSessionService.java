@@ -9,7 +9,9 @@ import com.im.common.spi.UserQuerySpi;
 import com.im.common.util.JsonUtil;
 import com.im.common.util.RedisUtil;
 import com.im.common.util.SecurityUtil;
+import com.im.common.util.TextUtil;
 import com.im.remote.config.RemoteProperties;
+import com.im.remote.dto.vo.RemoteSessionVO;
 import com.im.remote.entity.RemoteAuditLog;
 import com.im.remote.entity.RemoteDevice;
 import com.im.remote.entity.RemoteSession;
@@ -26,10 +28,14 @@ import org.springframework.stereotype.Service;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 远程会话状态机：inviting → active → ended / rejected。
@@ -169,7 +175,7 @@ public class RemoteSessionService {
         RemoteEnvelope invite = RemoteEnvelope.of(RemoteProtocol.TYPE_INVITE, data);
         invite.setSeq(agent.nextSeq());
         agentRegistry.send(agent, jsonUtil.toJson(invite));
-        recordAudit(session.getId(), "invite", "permission=" + perm);
+        recordAudit(session.getId(), "invite", "permission=" + perm, RemoteAuditLog.ACTOR_INVITER);
         log.info("远程邀请已发出: sessionId={}, deviceId={}, permission={}", session.getId(), deviceId, perm);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -260,13 +266,15 @@ public class RemoteSessionService {
             binding.applyDirectStats(role, down, up, path);
         }
         recordAudit(sessionId, "direct-stats", "role=" + role + ", path=" + path
-                + ", down=" + down + ", up=" + up);
+                        + ", down=" + down + ", up=" + up,
+                "agent".equals(role) ? RemoteAuditLog.ACTOR_INVITEE : RemoteAuditLog.ACTOR_INVITER);
     }
 
     /** 直连建立/失败的状态变更，只进审计与日志，不改会话状态机 */
-    public void recordDirectEvent(Long sessionId, String action, String detail) {
-        recordAudit(sessionId, action, detail);
-        log.info("远程直连事件: sessionId={}, action={}, detail={}", sessionId, action, detail);
+    public void recordDirectEvent(Long sessionId, String action, String detail, boolean fromAgent) {
+        recordAudit(sessionId, action, detail,
+                fromAgent ? RemoteAuditLog.ACTOR_INVITEE : RemoteAuditLog.ACTOR_INVITER);
+        log.info("远程直连事件: sessionId={}, action={}, detail={}, fromAgent={}", sessionId, action, detail, fromAgent);
     }
 
     /** Agent 上报 accept：校验归属 → 生成一次性 ticket → 会话转 active */
@@ -297,7 +305,8 @@ public class RemoteSessionService {
         if (device != null) {
             deviceService.updateStatus(device.getId(), RemoteDevice.STATUS_BUSY);
         }
-        recordAudit(sessionId, "accept", "grantedPermission=" + session.getPermission());
+        recordAudit(sessionId, "accept", "grantedPermission=" + session.getPermission(),
+                RemoteAuditLog.ACTOR_INVITEE);
         log.info("远程会话已授权: sessionId={}, deviceId={}", sessionId, agent.getDeviceId());
     }
 
@@ -306,7 +315,7 @@ public class RemoteSessionService {
         Long sessionId = resolveSessionId(env);
         requireActivePendingDevice(sessionId, agent);
         finishSession(sessionId, "rejected", 0L);
-        recordAudit(sessionId, "reject", null);
+        recordAudit(sessionId, "reject", null, RemoteAuditLog.ACTOR_INVITEE);
     }
 
     /** 控制端主动结束（REST 通道）：绑定中的走中继收尾（含双向通知），未绑定的直接落库 */
@@ -348,7 +357,7 @@ public class RemoteSessionService {
         if (device != null && device.getStatus() != null && device.getStatus() != RemoteDevice.STATUS_OFFLINE) {
             deviceService.updateStatus(device.getId(), RemoteDevice.STATUS_IDLE);
         }
-        recordAudit(sessionId, "session-end", "reason=" + reason + ", bytes=" + bytes);
+        recordAudit(sessionId, "session-end", "reason=" + reason + ", bytes=" + bytes, actorOfReason(reason));
         // 带宽核算用的一行：总流量（双向）+ 时长 + 平均码率（Mbps 按 10^6，与云厂商规格表同口径）
         log.info("远程会话已结束: sessionId={}, reason={}, 时长={}s, 总流量={}MB, 平均码率={}Mbps",
                 sessionId, reason, seconds,
@@ -358,7 +367,7 @@ public class RemoteSessionService {
 
     /** 中继绑定成功后调用：控制端已凭票接入 */
     public void onControlBound(long sessionId) {
-        recordAudit(sessionId, "control-bound", null);
+        recordAudit(sessionId, "control-bound", null, RemoteAuditLog.ACTOR_INVITER);
     }
 
     /** 消费一次性 ticket：校验 Redis 票据归属会话，成功后立即删除；回填内存路由字段 */
@@ -400,12 +409,12 @@ public class RemoteSessionService {
         }
     }
 
-    /** 中继转发的 audit 帧落库 */
+    /** 中继转发的 audit 帧落库（全部来自被控端 Agent 的自报） */
     public void recordFrameAudit(long sessionId, RemoteEnvelope env) {
         Map<String, Object> data = env.getData();
         String action = data == null ? "unknown" : str(data.get("action"));
         String detail = data == null ? null : str(data.get("detail"));
-        recordAudit(sessionId, action, detail);
+        recordAudit(sessionId, action, detail, RemoteAuditLog.ACTOR_INVITEE);
     }
 
     /** 只读模式下的输入帧拦截记录（同一会话高频触发，只留首个线索） */
@@ -416,7 +425,8 @@ public class RemoteSessionService {
         if (existing != null && existing > 10) {
             return;
         }
-        recordAudit(sessionId, "input-blocked", "type=" + frameType);
+        // 被拦下的是控制端发出的输入帧，责任在发起方而不是执行方
+        recordAudit(sessionId, "input-blocked", "type=" + frameType, RemoteAuditLog.ACTOR_INVITER);
     }
 
     /** 空闲/超时巡检入口：把超时未授权的 inviting 会话收尾 */
@@ -430,21 +440,140 @@ public class RemoteSessionService {
         }
     }
 
-    public Page<RemoteAuditLog> auditPage(Long sessionId, long current, long size) {
+    /**
+     * 审计流水分页。
+     *
+     * <p>排序键是 (createTime, id) 而不是 createTime：审计写入密集时同一秒可能落好几条，
+     * 只按时间排序在 MySQL 里属于「排序键不唯一」，翻页会出现同一条跨页重复或整条被跳过。
+     *
+     * @param action 动作名模糊过滤，null/空串表示不过滤
+     */
+    public Page<RemoteAuditLog> auditPage(Long sessionId, long current, long size, String action) {
         RemoteSession session = requireOwned(sessionId);
-        return auditLogMapper.selectPage(new Page<>(current, size),
-                new LambdaQueryWrapper<RemoteAuditLog>()
-                        .eq(RemoteAuditLog::getSessionId, session.getId())
-                        .orderByDesc(RemoteAuditLog::getCreateTime));
+        LambdaQueryWrapper<RemoteAuditLog> query = new LambdaQueryWrapper<RemoteAuditLog>()
+                .eq(RemoteAuditLog::getSessionId, session.getId())
+                .orderByDesc(RemoteAuditLog::getCreateTime)
+                .orderByDesc(RemoteAuditLog::getId);
+        if (!TextUtil.isBlank(action)) {
+            query.like(RemoteAuditLog::getAction, action.trim());
+        }
+        return auditLogMapper.selectPage(new Page<>(current, size), query);
     }
 
-    public Page<RemoteSession> sessionPage(long current, long size) {
+    /**
+     * 会话历史分页（展示视图）。
+     *
+     * <p>「我的历史」是双向的：既包含我发起的，也包含别人控我的，所以条件是两个用户列的 OR。
+     * 补齐关联信息时全部走批量查询，一页 N 条只多花固定几次 SQL，与 N 无关。
+     *
+     * @param status 状态筛选（inviting/active/rejected/ended），null/空串表示不过滤
+     */
+    public Page<RemoteSessionVO> sessionPage(long current, long size, String status) {
         Long userId = SecurityUtil.getUserId();
-        return sessionMapper.selectPage(new Page<>(current, size),
-                new LambdaQueryWrapper<RemoteSession>()
-                        .and(w -> w.eq(RemoteSession::getInviterUserId, userId)
-                                .or().eq(RemoteSession::getInviteeUserId, userId))
-                        .orderByDesc(RemoteSession::getCreateTime));
+        LambdaQueryWrapper<RemoteSession> query = new LambdaQueryWrapper<RemoteSession>()
+                .and(w -> w.eq(RemoteSession::getInviterUserId, userId)
+                        .or().eq(RemoteSession::getInviteeUserId, userId))
+                .orderByDesc(RemoteSession::getCreateTime)
+                .orderByDesc(RemoteSession::getId);
+        if (!TextUtil.isBlank(status)) {
+            query.eq(RemoteSession::getStatus, status.trim());
+        }
+        Page<RemoteSession> page = sessionMapper.selectPage(new Page<>(current, size), query);
+        Page<RemoteSessionVO> result = new Page<>(page.getCurrent(), page.getSize(), page.getTotal());
+        result.setRecords(toSessionViews(page.getRecords(), userId));
+        return result;
+    }
+
+    /**
+     * 会话实体 → 展示视图：批量补设备名、对端昵称、审计条数，并折算时长与平均码率。
+     *
+     * <p>设备名的归属优先级沿用 {@link #detail(Long)}：先按被控方 (inviteeUserId, deviceId) 配对，
+     * 配不上退回控制方，再配不上就只显示 deviceId——设备行可能已被清理，认不出机器时
+     * 机器指纹本身就是唯一线索，不能替换成占位符。
+     */
+    private List<RemoteSessionVO> toSessionViews(List<RemoteSession> records, Long userId) {
+        if (records == null || records.isEmpty()) {
+            return List.of();
+        }
+        Set<String> deviceIds = new HashSet<>();
+        Set<Long> sessionIds = new HashSet<>();
+        Set<Long> peerIds = new HashSet<>();
+        for (RemoteSession session : records) {
+            if (session.getDeviceId() != null) {
+                deviceIds.add(session.getDeviceId());
+            }
+            sessionIds.add(session.getId());
+            Long peer = peerOf(session, userId);
+            if (peer != null && peer > 0) {
+                peerIds.add(peer);
+            }
+        }
+
+        // 两张名字表：byOwner 精确到 (userId, deviceId)，byDevice 只按设备指纹兜底
+        Map<String, String> byOwner = new HashMap<>();
+        Map<String, String> byDevice = new HashMap<>();
+        for (RemoteDevice device : deviceService.listByDeviceIds(deviceIds)) {
+            if (device.getDeviceName() == null) {
+                continue;
+            }
+            byOwner.put(device.getUserId() + "|" + device.getDeviceId(), device.getDeviceName());
+            byDevice.putIfAbsent(device.getDeviceId(), device.getDeviceName());
+        }
+
+        Map<Long, UserBriefDTO> peers = peerIds.isEmpty() || userQuerySpiProvider.getIfAvailable() == null
+                ? Map.of() : userQuerySpiProvider.getObject().listByIds(peerIds);
+        Map<Long, Long> auditCounts = auditLogMapper.countBySessionIds(sessionIds);
+
+        List<RemoteSessionVO> views = new ArrayList<>(records.size());
+        for (RemoteSession session : records) {
+            String deviceName = byOwner.get(session.getInviteeUserId() + "|" + session.getDeviceId());
+            if (deviceName == null) {
+                deviceName = byOwner.get(session.getInviterUserId() + "|" + session.getDeviceId());
+            }
+            if (deviceName == null) {
+                deviceName = byDevice.get(session.getDeviceId());
+            }
+            Long peerId = peerOf(session, userId);
+            UserBriefDTO peer = peerId == null ? null : peers.get(peerId);
+
+            // 进行中的会话库里 bytes 还是 0（收尾才落库），实时值从内存绑定取
+            long bytes = session.getBytes() == null ? 0L : session.getBytes();
+            if (RemoteSession.STATUS_ACTIVE.equals(session.getStatus())) {
+                bytes = relayService().boundBytes(session.getId());
+            }
+            LocalDateTime end = session.getEndTime();
+            long seconds = session.getStartTime() == null ? 0
+                    : Duration.between(session.getStartTime(), end == null ? LocalDateTime.now() : end).getSeconds();
+            Double bitrate = seconds > 0
+                    ? Math.round(bytes * 8.0 / seconds / 1_000_000 * 100) / 100.0 : null;
+
+            views.add(RemoteSessionVO.builder()
+                    .id(session.getId())
+                    .deviceId(session.getDeviceId())
+                    .deviceName(deviceName == null ? session.getDeviceId() : deviceName)
+                    .role(userId.equals(session.getInviterUserId())
+                            ? RemoteSessionVO.ROLE_INVITER : RemoteSessionVO.ROLE_INVITEE)
+                    .peerUserId(peerId)
+                    .peerName(peer == null ? null : peer.getNickname())
+                    .permission(session.getPermission())
+                    .status(session.getStatus())
+                    .startTime(session.getStartTime())
+                    .endTime(end)
+                    .durationSeconds(seconds)
+                    .bytes(bytes)
+                    .bitrateMbps(bitrate)
+                    .endReason(session.getEndReason())
+                    .auditCount(auditCounts.getOrDefault(session.getId(), 0L))
+                    .createTime(session.getCreateTime())
+                    .build());
+        }
+        return views;
+    }
+
+    /** 对端 = 不是我自己的那一方用户 ID；匿名识别码接入时 inviteeUserId 为 0 */
+    private Long peerOf(RemoteSession session, Long userId) {
+        return userId.equals(session.getInviterUserId())
+                ? session.getInviteeUserId() : session.getInviterUserId();
     }
 
     /* ==================== 内部工具 ==================== */
@@ -474,14 +603,32 @@ public class RemoteSessionService {
         return session;
     }
 
-    private void recordAudit(Long sessionId, String action, String detail) {
+    private void recordAudit(Long sessionId, String action, String detail, String actor) {
         String truncated = detail == null ? null
                 : detail.length() > 1000 ? detail.substring(0, 1000) : detail;
         auditLogMapper.insert(RemoteAuditLog.builder()
                 .sessionId(sessionId)
                 .action(action)
                 .detail(truncated)
+                .actor(actor)
                 .build());
+    }
+
+    /**
+     * 会话结束原因 → 触发方。
+     *
+     * <p>只有「谁按了结束」才是人的行为：超时巡检、对端掉线、被新邀请顶替都是服务端
+     * 自己收尾的结果，记成 system 而不是随便挑一方——审计里把系统行为安到某个用户头上，
+     * 事后追责时是会把人冤枉的。
+     */
+    private static String actorOfReason(String reason) {
+        if ("inviter-end".equals(reason)) {
+            return RemoteAuditLog.ACTOR_INVITER;
+        }
+        if ("invitee-end".equals(reason) || "rejected".equals(reason)) {
+            return RemoteAuditLog.ACTOR_INVITEE;
+        }
+        return RemoteAuditLog.ACTOR_SYSTEM;
     }
 
     private Long resolveSessionId(RemoteEnvelope env) {

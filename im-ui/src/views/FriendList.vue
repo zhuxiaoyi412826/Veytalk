@@ -161,9 +161,13 @@
     <!--
       黑名单集中管理：名单存在服务端（im_friend.status=2），多端看到的是同一份。
       单向阻断下拉黑只拦对方发来的消息，自己仍可发消息（发送即自动解除），
-      所以这里的主要价值是「回看并移出误拉黑的人」，而不是找回被堵住的发送入口。
+      所以这里既是「回看并移出误拉黑的人」的地方，也是把别人补进来的地方。
     -->
     <el-dialog v-model="blacklist.visible" title="黑名单" width="420px">
+      <div class="blacklist__bar">
+        <span class="blacklist__total">已拉黑 {{ blacklist.items.length }} 人</span>
+        <el-button type="primary" plain size="small" :icon="Plus" @click="openBlacklistAdd">添加黑名单</el-button>
+      </div>
       <div v-loading="blacklist.loading" class="blacklist__body im-scroll">
         <div v-for="item in blacklist.items" :key="item.friendId" class="blacklist__item">
           <UserAvatar :src="item.avatar" :name="item.displayName || item.nickname" :size="36" />
@@ -173,11 +177,65 @@
           </div>
           <el-button text @click="openProfile(item)">资料</el-button>
           <el-button type="primary" text :loading="blacklist.acting === item.friendId" @click="unblockFromBlacklist(item)">
-            移出
+            移除黑名单
           </el-button>
         </div>
-        <el-empty v-if="!blacklist.loading && blacklist.items.length === 0" description="没有拉黑任何人" :image-size="60" />
+        <el-empty
+          v-if="!blacklist.loading && blacklist.items.length === 0"
+          description="还没有拉黑任何人，点上面的「添加黑名单」从好友里选"
+          :image-size="60"
+        />
       </div>
+    </el-dialog>
+
+    <!--
+      添加黑名单：候选人只能从好友里选（后端 block 走 requireRelation，不是好友拉不了），
+      已经拉黑的不再列出。多选一次批量提交，不必为一个人开一次确认框。
+    -->
+    <el-dialog v-model="blacklistAdd.visible" title="添加黑名单" width="420px" append-to-body>
+      <div class="blacklist__tip">
+        拉黑后对方发来的消息会被拦截，好友关系保留；你仍可主动发消息，发送后自动解除拉黑。
+      </div>
+      <el-input
+        v-model.trim="blacklistAdd.keyword"
+        placeholder="搜索备注、昵称或账号"
+        size="small"
+        clearable
+        :prefix-icon="Search"
+      />
+      <div v-loading="blacklistAdd.loading" class="blacklist__pick im-scroll">
+        <!-- 内容放在 el-checkbox 的默认槽里：整行就是一个 label，点哪里都只切一次 -->
+        <el-checkbox
+          v-for="item in blacklistPickCandidates"
+          :key="item.friendId"
+          class="blacklist__pick-item"
+          :model-value="blacklistAdd.selected.has(item.friendId)"
+          @change="(checked) => toggleBlacklistPick(item.friendId, checked)"
+        >
+          <UserAvatar :src="item.avatar" :name="item.displayName || item.nickname" :size="28" />
+          <span class="blacklist__pick-name im-ellipsis">{{ item.displayName || item.nickname }}</span>
+          <span class="blacklist__pick-sub im-ellipsis">@{{ item.username }}</span>
+        </el-checkbox>
+        <el-empty
+          v-if="!blacklistAdd.loading && blacklistPickCandidates.length === 0"
+          description="没有可拉黑的好友"
+          :image-size="60"
+        />
+      </div>
+      <template #footer>
+        <div class="blacklist__footer">
+          <span class="blacklist__pick-count">已选 {{ blacklistAdd.selected.size }} 人</span>
+          <el-button @click="blacklistAdd.visible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :disabled="!blacklistAdd.selected.size"
+            :loading="blacklistAdd.acting"
+            @click="submitBlacklistAdd"
+          >
+            加入黑名单
+          </el-button>
+        </div>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="remarkDialog.visible" title="修改备注" width="360px" @opened="focusRemark">
@@ -207,7 +265,7 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import CreateGroupDialog from '@/components/CreateGroupDialog.vue'
 import { useFriendStore, DEFAULT_GROUP } from '@/stores/friend'
-import { fetchBlacklist } from '@/api/friend'
+import { fetchBlacklist, fetchFriends } from '@/api/friend'
 import { useConversationStore } from '@/stores/conversation'
 import { useGroupStore } from '@/stores/group'
 import { asId } from '@/utils/id'
@@ -304,7 +362,7 @@ const menuItems = computed(() => {
     { key: 'profile', label: '查看资料' },
     { key: 'remark', label: '修改备注' },
     { key: 'group', label: '修改分组' },
-    { key: 'block', label: blocked ? '取消拉黑' : '拉黑', danger: !blocked },
+    { key: 'block', label: blocked ? '移出黑名单' : '加入黑名单', danger: !blocked },
     { key: 'delete', label: '删除好友', danger: true }
   ]
 })
@@ -414,26 +472,26 @@ async function toggleBlock(target) {
     try {
       await ElMessageBox.confirm(
         `拉黑后「${target.displayName || target.nickname}」发来的消息将被拦截；你仍可主动发消息，发送后自动解除拉黑。你们的好友关系保留。`,
-        '拉黑好友',
+        '加入黑名单',
         { confirmButtonText: '拉黑', cancelButtonText: '取消', type: 'warning' }
       )
     } catch {
       return
     }
     await friend.block(target.friendId)
-    ElMessage.success('已拉黑')
+    ElMessage.success('已加入黑名单')
     return
   }
   await friend.unblock(target.friendId)
-  ElMessage.success('已取消拉黑')
+  ElMessage.success('已移出黑名单')
 }
 
 /* ------------------------------ 黑名单管理 ------------------------------ */
 
 const blacklist = reactive({ visible: false, loading: false, acting: 0, items: [] })
 
-async function openBlacklist() {
-  blacklist.visible = true
+/** 拉黑 / 解除拉黑后都重拉一次名单，不本地拼数组：服务端才是名单的权威 */
+async function reloadBlacklist() {
   blacklist.loading = true
   try {
     blacklist.items = (await fetchBlacklist()) || []
@@ -445,16 +503,122 @@ async function openBlacklist() {
   }
 }
 
+async function openBlacklist() {
+  blacklist.visible = true
+  await reloadBlacklist()
+}
+
 async function unblockFromBlacklist(item) {
   blacklist.acting = item.friendId
   try {
     await friend.unblock(item.friendId)
     blacklist.items = blacklist.items.filter((row) => row.friendId !== item.friendId)
     ElMessage.success('已移出黑名单')
+    // store 里的行不在当前列表（被搜索关键字过滤掉了）时 block/unblock 的补丁打不上，
+    // 跟着当前关键字重拉一次保证左侧好友行的「已拉黑」标记同步；
+    // 重拉失败不影响已经生效的解除操作，静默吞掉，别让用户以为没拉黑成功
+    await friend.fetchFriends(keyword.value).catch(() => {})
   } catch {
     // 提示已弹出
   } finally {
     blacklist.acting = 0
+  }
+}
+
+/* ---------------------------- 添加黑名单 ---------------------------- */
+
+const blacklistAdd = reactive({
+  visible: false,
+  loading: false,
+  acting: false,
+  keyword: '',
+  /** 候选人（已从好友列表里刷掉拉黑态的） */
+  rows: [],
+  /** 已选 friendId；reactive 会把 Set 包成响应式代理，.size / .has() 都能被跟踪 */
+  selected: new Set()
+})
+
+/** 候选人按关键字本地过滤：数据一次就拉全了，没必要每敲一个字回服务端 */
+const blacklistPickCandidates = computed(() => {
+  const kw = blacklistAdd.keyword.toLowerCase()
+  if (!kw) {
+    return blacklistAdd.rows
+  }
+  return blacklistAdd.rows.filter((item) => {
+    const name = (item.displayName || item.nickname || '').toLowerCase()
+    const account = (item.username || '').toLowerCase()
+    return name.includes(kw) || account.includes(kw)
+  })
+})
+
+function toggleBlacklistPick(friendId, checked) {
+  if (checked) {
+    blacklistAdd.selected.add(friendId)
+  } else {
+    blacklistAdd.selected.delete(friendId)
+  }
+}
+
+async function openBlacklistAdd() {
+  blacklistAdd.keyword = ''
+  blacklistAdd.selected.clear()
+  blacklistAdd.rows = []
+  blacklistAdd.visible = true
+  blacklistAdd.loading = true
+  try {
+    // 直接走接口而不是 friend.friends：store 里那份可能正被搜索关键字过滤着，
+    // 拿它当候选人会少一批人；而不带关键字调 store 又会把用户当前的搜索结果洗掉
+    const rows = (await fetchFriends()) || []
+    const blockedIds = new Set(blacklist.items.map((item) => item.friendId))
+    blacklistAdd.rows = rows.filter((item) => item.status !== 2 && !blockedIds.has(item.friendId))
+  } catch {
+    // 提示已弹出，空列表配 el-empty 比直接关掉对话框更好解释
+    blacklistAdd.rows = []
+  } finally {
+    blacklistAdd.loading = false
+  }
+}
+
+async function submitBlacklistAdd() {
+  const ids = Array.from(blacklistAdd.selected)
+  if (!ids.length) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将把选中的 ${ids.length} 人加入黑名单，他们发来的消息会被拦截（好友关系保留，你主动发消息时自动解除拉黑）。`,
+      '加入黑名单',
+      { confirmButtonText: '加入黑名单', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  blacklistAdd.acting = true
+  // 后端没有批量拉黑接口，而 block 是单行状态更新，串行最直接；
+  // 一个人失败（关系已解除等）不中断整批，最后统一给条汇总提示
+  let failed = 0
+  for (const id of ids) {
+    try {
+      await friend.block(id)
+    } catch {
+      failed += 1
+    }
+  }
+  blacklistAdd.acting = false
+  blacklistAdd.selected.clear()
+  blacklistAdd.visible = false
+  const done = ids.length - failed
+  // 两个刷新都不能让异常外抛：这里不是 async 事件处理里的 try，冒上去就是一堆 unhandled rejection
+  await Promise.all([
+    reloadBlacklist(),
+    friend.fetchFriends(keyword.value).catch(() => {})
+  ])
+  if (failed && done) {
+    ElMessage.warning(`已加入 ${done} 人，另有 ${failed} 人失败`)
+  } else if (failed) {
+    ElMessage.error('加入黑名单失败')
+  } else {
+    ElMessage.success(`已把 ${done} 人加入黑名单`)
   }
 }
 
@@ -726,6 +890,87 @@ onMounted(async () => {
 }
 
 .blacklist__sub {
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+/* 工具栏：左边人数、右边「添加黑名单」，放在名单上方而不是对话框标题里，
+   避开 el-dialog 的头部结构，也不用给关闭按钮让位 */
+.blacklist__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.blacklist__total {
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+/* ---------------------------- 添加黑名单弹窗 ---------------------------- */
+.blacklist__tip {
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--im-text-secondary, #909399);
+}
+
+.blacklist__pick {
+  max-height: 260px;
+  margin-top: 8px;
+  overflow-y: auto;
+}
+
+/* 整行一个 el-checkbox（渲染出来就是一个 label），点名字与点勾效果一致。
+   Element Plus 默认给 checkbox 固定高度与右外边距，这里改成整行块级才能把头像排开 */
+.blacklist__pick-item {
+  display: flex;
+  width: 100%;
+  height: auto;
+  margin-right: 0;
+  padding: 6px 4px;
+  overflow: hidden;
+}
+
+.blacklist__pick-item:hover {
+  background: #f5f7fa;
+}
+
+.blacklist__pick-item :deep(.el-checkbox__label) {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.blacklist__pick-name {
+  min-width: 0;
+  flex: none;
+  max-width: 45%;
+}
+
+.blacklist__pick-sub {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+/* footer 默认右对齐，用 flex + margin-right:auto 把「已选 N 人」顶到最左 */
+.blacklist__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.blacklist__pick-count {
+  margin-right: auto;
   font-size: 12px;
   color: var(--im-text-secondary, #909399);
 }

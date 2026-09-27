@@ -151,6 +151,7 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import ChatWindow from './ChatWindow.vue'
 import { useConversationStore } from '@/stores/conversation'
+import { useFriendStore } from '@/stores/friend'
 import { useSettingsStore } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { clearConversationMessages, searchMessages } from '@/api/message'
@@ -169,6 +170,7 @@ defineOptions({ name: 'ChatHome' })
 const route = useRoute()
 const router = useRouter()
 const conversation = useConversationStore()
+const friend = useFriendStore()
 const settings = useSettingsStore()
 const chat = useChatStore()
 
@@ -383,14 +385,31 @@ const menuItems = computed(() => {
   if (!target) {
     return []
   }
+  const relation = blockableOf(target)
   return [
     { key: 'top', label: target.top ? '取消置顶' : '置顶会话' },
     { key: 'mute', label: target.muted ? '取消免打扰' : '消息免打扰' },
     // 没有未读时置灰而不是隐藏：菜单项数量突变会让人以为点错了行
     { key: 'read', label: '标记已读', disabled: !target.unreadCount },
+    // 拉黑要求好友关系存在（后端 block 走 requireRelation），群聊也没有「拉黑一个群」的说法，
+    // 所以只在单聊且对方还在好友列表时给这一项
+    {
+      key: 'block',
+      label: relation && relation.status === 2 ? '移出黑名单' : '加入黑名单',
+      danger: !(relation && relation.status === 2),
+      show: !!relation
+    },
     { key: 'remove', label: '删除会话', danger: true }
   ]
 })
+
+/** 能拉黑的对象：单聊 + 对方是我的好友；拿不到关系行就不提供入口 */
+function blockableOf(target) {
+  if (!target || Number(target.type) !== 1) {
+    return null
+  }
+  return friend.friendOf(target.targetId)
+}
 
 async function onMenuSelect(key) {
   const target = menu.target
@@ -410,6 +429,9 @@ async function onMenuSelect(key) {
         // 不传位点：后端在 lastAckSeq 为空时按会话当前最大 seq 全量已读
         await conversation.markRead(id)
         break
+      case 'block':
+        await toggleBlockFromConversation(target)
+        break
       case 'remove':
         await confirmRemove(target)
         break
@@ -419,6 +441,37 @@ async function onMenuSelect(key) {
   } catch {
     // request.js 已经弹过错误提示，这里只保证不让异常冒到全局
   }
+}
+
+/**
+ * 从会话右键菜单拉黑 / 取消拉黑。
+ *
+ * 拉黑是有后果的操作（对方的消息会被默默拦掉），必须事先确认；移出黑名单没风险，直接做。
+ * 拉黑不删会话也不解除好友关系，store 的 block/unblock 已经会把状态位改过来，会话列表无需重拉。
+ */
+async function toggleBlockFromConversation(target) {
+  const relation = blockableOf(target)
+  if (!relation) {
+    ElMessage.warning('对方已不在你的好友列表里，无法拉黑')
+    return
+  }
+  if (relation.status === 2) {
+    await friend.unblock(relation.friendId)
+    ElMessage.success(`已把「${target.name}」移出黑名单`)
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `拉黑后「${target.name}」发来的消息会被拦截，好友关系保留；你仍可主动发消息，发送后自动解除拉黑。`,
+      '加入黑名单',
+      { confirmButtonText: '拉黑', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    // 用户取消，不是错误
+    return
+  }
+  await friend.block(relation.friendId)
+  ElMessage.success('已加入黑名单')
 }
 
 /**

@@ -248,11 +248,11 @@ public class RemoteRelayService {
                     relayToAgent(binding.control, binding, json, env);
                 }
                 sessionServiceProvider.getObject().recordDirectEvent(sessionId,
-                        "direct-candidates", fromAgent ? "from=agent" : "from=control");
+                        "direct-candidates", fromAgent ? "from=agent" : "from=control", fromAgent);
             }
             case EVENT -> sessionServiceProvider.getObject().recordDirectEvent(sessionId,
                     env.getType(), String.valueOf(data.getOrDefault("reason",
-                            data.getOrDefault("path", ""))) + ", peer=" + data.get("peer"));
+                            data.getOrDefault("path", ""))) + ", peer=" + data.get("peer"), fromAgent);
             case STATS -> sessionServiceProvider.getObject().recordDirectStats(sessionId,
                     fromAgent ? "agent" : "control",
                     asLong(data.get("down")), asLong(data.get("up")), str(data.get("path")));

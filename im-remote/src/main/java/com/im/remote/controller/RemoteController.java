@@ -7,9 +7,9 @@ import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.remote.dto.req.RemoteCodeInviteRequest;
 import com.im.remote.dto.req.RemoteInviteRequest;
+import com.im.remote.dto.vo.RemoteSessionVO;
 import com.im.remote.entity.RemoteAuditLog;
 import com.im.remote.entity.RemoteDevice;
-import com.im.remote.entity.RemoteSession;
 import com.im.remote.manager.AgentRegistry;
 import com.im.remote.service.RemoteDeviceService;
 import com.im.remote.service.RemoteRelayService;
@@ -105,18 +105,23 @@ public class RemoteController {
         return Result.ok();
     }
 
-    @Operation(summary = "我的远程会话分页", description = "作为控制方或被控方的全部会话历史")
+    @Operation(summary = "我的远程会话分页",
+            description = "作为控制方或被控方的全部会话历史；返回已补齐设备名/对端昵称/时长/码率/审计条数的展示视图，可按 status 筛选")
     @GetMapping("/session/page")
-    public Result<Page<RemoteSession>> sessionPage(@RequestParam(defaultValue = "1") long current,
-                                                   @RequestParam(defaultValue = "20") long size) {
-        return Result.ok(sessionService.sessionPage(current, size));
+    public Result<Page<RemoteSessionVO>> sessionPage(@RequestParam(defaultValue = "1") long current,
+                                                     @RequestParam(defaultValue = "20") long size,
+                                                     @RequestParam(required = false) String status) {
+        return Result.ok(sessionService.sessionPage(current, Math.min(size, 100), status));
     }
 
-    @Operation(summary = "会话审计分页", description = "会话内的操作流水（文件删除/结束进程/cmd/电源/输入拦截等）")
+    @Operation(summary = "会话审计分页",
+            description = "会话内的操作流水（文件删除/结束进程/cmd/电源/输入拦截等），含触发方 actor；可按 action 模糊过滤")
     @GetMapping("/session/{id}/audit")
     public Result<Page<RemoteAuditLog>> auditPage(@PathVariable("id") Long id,
                                                   @RequestParam(defaultValue = "1") long current,
-                                                  @RequestParam(defaultValue = "50") long size) {
-        return Result.ok(sessionService.auditPage(id, current, Math.min(size, 100)));
+                                                  @RequestParam(defaultValue = "50") long size,
+                                                  @RequestParam(required = false) String action) {
+        // 上限放宽到 200 是给「导出 CSV」留的：前端循环翻页拉全量，页太小就要发太多次请求
+        return Result.ok(sessionService.auditPage(id, current, Math.min(size, 200), action));
     }
 }

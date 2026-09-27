@@ -88,6 +88,26 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
     clear: () => call('im:media-clear', null),
     stats: () => call('im:media-stats', null),
     trim: (maxBytes) => call('im:media-trim', { maxBytes })
+  },
+  /**
+   * 录屏审计桥：渲染进程用 MediaRecorder 录远控画面，分片经这里流式交给主进程写盘。
+   * 只有桌面端有——浏览器既写不了任意磁盘目录，也不该在用户不知情下落地录像文件，
+   * 前端 utils/recorder.js 拿不到这个对象就整体禁用该功能。
+   */
+  record: {
+    /** 默认保存目录（系统「视频」\IM远程录屏），设置页留空时用它 */
+    defaultDir: () => call('im:record-default-dir', null),
+    /** 弹系统目录选择框，resolve 出所选路径；用户取消时为 null */
+    pickDir: (current) => call('im:record-pick-dir', { current }),
+    /** params: {dir, ext, meta} → {filePath, baseName} */
+    start: (params) => call('im:record-start', params),
+    /** data 为 MediaRecorder 分片的 ArrayBuffer，resolve 出已累计字节数 */
+    chunk: (data) => call('im:record-chunk', { data }),
+    /** params: {meta, auditEvents, reason} → {filePath, size, durationMs, sidecar}；无进行中的录制时为 null */
+    stop: (params) => call('im:record-stop', params),
+    state: () => call('im:record-state', null),
+    /** 在资源管理器里定位录像文件；只给 dir 则打开目录本身 */
+    openDir: (filePath, dir) => call('im:record-open-dir', { filePath, dir })
   }
 })
 

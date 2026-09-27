@@ -60,6 +60,13 @@ const DEFAULTS = {
   mediaCacheEnabled: true,
   /** 媒体缓存占用上限（MB），超限按 LRU 淘汰最旧条目；0 表示不限制 */
   mediaCacheMaxMb: 200,
+  // ---------- 远程控制录屏审计（仅桌面端） ----------
+  /** 远控会话录屏：开启后每次控制对端设备时，把画面录成本地视频文件留档 */
+  remoteRecordEnabled: false,
+  /** 录像保存目录，留空表示用默认的「视频\IM远程录屏」 */
+  remoteRecordDir: '',
+  /** 随录像写一份同名 .json：会话信息 + 服务端操作审计事件，便于事后追溯 */
+  remoteRecordAudit: true,
   // ---------- 高级 ----------
   debugLog: false
 }

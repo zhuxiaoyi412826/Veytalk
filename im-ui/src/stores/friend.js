@@ -175,6 +175,26 @@ export const useFriendStore = defineStore('friend', {
       }
     },
 
+    /**
+     * 本地补上「自动解除拉黑」这个状态位。
+     *
+     * 单向阻断下 A 主动给 B 发消息是允许的，后端 validateSendRight 会顺带 unblockSilently
+     * 把 im_friend.status 改回 1，但这是静默的（没有推送帧）；本地不跟着改就会出现
+     * 「消息明明发出去了，右键菜单还写着移出黑名单」。只在确实是拉黑态时才改并返回 true，
+     * 供调用方决定要不要提示一声。对方被搜索关键字过滤掉时（friends 里根本没这一行）
+     * 打不上补丁，这里不强行重拉：清空搜索框会重新 fetchFriends，
+     * 黑名单弹窗也是每次打开都重拉，会自动对齐。
+     */
+    applySilentUnblock(friendId) {
+      const target = this.friendOf(friendId)
+      if (!target || Number(target.status) !== 2) {
+        return false
+      }
+      target.blocked = false
+      target.status = 1
+      return true
+    },
+
     /** 好友在线状态变更推送：data = { userId, online } */
     applyOnlineState(payload) {
       if (!payload) {

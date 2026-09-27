@@ -43,11 +43,17 @@ public final class FileConvert {
             Map.entry("gif", "image/gif"),
             Map.entry("webp", "image/webp"),
             Map.entry("bmp", "image/bmp"),
+            // jfif 的字节就是 JPEG，不给这一行会变成下载框而不是图片
+            Map.entry("jfif", "image/jpeg"),
+            // avif 不补这一行就会落到 octet-stream + attachment：白名单放行了也仍弹下载框，图片卡片渲染不出来
+            Map.entry("avif", "image/avif"),
             Map.entry("mp3", "audio/mpeg"),
             Map.entry("wav", "audio/wav"),
             Map.entry("aac", "audio/aac"),
             Map.entry("m4a", "audio/mp4"),
             Map.entry("ogg", "audio/ogg"),
+            // opus 装在 Ogg 容器里，MIME 与 ogg 同源；缺这一行会被归为 octet-stream，语音气泡只会下载不能播
+            Map.entry("opus", "audio/ogg"),
             Map.entry("amr", "audio/amr"),
             Map.entry("flac", "audio/flac"),
             Map.entry("mp4", "video/mp4"),

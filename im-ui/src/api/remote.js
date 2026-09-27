@@ -34,12 +34,22 @@ export function endRemoteSession(sessionId) {
   return http.post(`/remote/session/${sessionId}/end`)
 }
 
-/** 我的远程会话分页 */
+/**
+ * 我的远程会话分页。
+ *
+ * 返回的是后端补齐过的展示视图（RemoteSessionVO）：deviceName / role /
+ * peerName / durationSeconds / bitrateMbps / auditCount，列表无需再发请求补数据。
+ * @param {{ current?: number, size?: number, status?: string }} params status 留空为全部
+ */
 export function fetchRemoteSessionPage(params) {
   return http.get('/remote/session/page', { params })
 }
 
-/** 会话审计分页：文件删除/结束进程/cmd/电源/输入拦截等 */
+/**
+ * 会话审计分页：文件删除/结束进程/cmd/电源/输入拦截等，每条带 actor（谁触发的）。
+ * @param {string} sessionId
+ * @param {{ current?: number, size?: number, action?: string }} params size 上限 200（导出 CSV 时循环翻页用）
+ */
 export function fetchRemoteAudit(sessionId, params) {
   return http.get(`/remote/session/${sessionId}/audit`, { params })
 }

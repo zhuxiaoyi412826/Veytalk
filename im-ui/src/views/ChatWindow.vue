@@ -134,14 +134,14 @@
         <!-- 图标按钮 + 隐藏 input（JS 调起）。注：荣耀自带浏览器会对本站点拦截
              文件选择框（隔离测试页证实连原生可见 input 都不弹，微信内正常），
              属浏览器站点级风控，非代码问题 -->
-        <el-tooltip v-if="canUpload" content="发送图片" placement="top">
+        <el-tooltip v-if="canUpload" content="添加图片到输入框（可一次勾多个，也能把图片拖进窗口或 Ctrl+V 粘贴截图）" placement="top">
           <el-button text :icon="Picture" :disabled="uploading" @click="pickImage" />
         </el-tooltip>
-        <el-tooltip v-if="canUpload" content="发送文件（也可直接把文件拖进聊天窗口；音频会作为语音消息）" placement="top">
+        <el-tooltip v-if="canUpload" content="添加文件到输入框（可拖进窗口或 Ctrl+V 粘贴；音频会作为语音消息）" placement="top">
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
         </el-tooltip>
-        <input ref="imageInputRef" type="file" accept="image/*" class="chat-window__file-input" @change="onPicked" />
-        <input ref="fileInputRef" type="file" class="chat-window__file-input" @change="onPicked" />
+        <input ref="imageInputRef" type="file" accept="image/*" multiple class="chat-window__file-input" @change="onPicked" />
+        <input ref="fileInputRef" type="file" multiple class="chat-window__file-input" @change="onPicked" />
 
         <el-tooltip
           v-if="canUpload"
@@ -179,6 +179,42 @@
           <span class="chat-window__reply-content im-ellipsis">{{ replyPreview }}</span>
         </div>
         <el-button text :icon="Close" size="small" @click="cancelReply" />
+      </div>
+
+      <!-- 待发送附件托盘：选 / 拖 / 粘 三个入口都先落这里，点「发送」才真正上传发送。
+           卡片在左侧一个挨着一个横向排，「待发送 N / 9」与「清空」放在同一行的右侧 -->
+      <div v-if="tray.length" class="chat-window__tray">
+        <div class="chat-window__tray-list im-scroll">
+          <div v-for="item in tray" :key="item.id" class="chat-window__tray-item">
+            <!-- 图片看缩略图，点开能放大；发送前发现选错了直接叉掉 -->
+            <img
+              v-if="item.url"
+              :src="item.url"
+              :alt="item.name"
+              :title="item.name + '（点击放大）'"
+              class="chat-window__tray-thumb"
+              @click="onViewImage({ url: item.url })"
+            />
+            <div v-else class="chat-window__tray-card">
+              <el-icon :size="22"><component :is="trayIcon(item.kind)" /></el-icon>
+              <span class="chat-window__tray-name im-ellipsis" :title="item.name">{{ item.name }}</span>
+              <span class="chat-window__tray-size">{{ trayLabel(item) }}</span>
+            </div>
+            <!-- ✕ 默认藏着，鼠标移到这张卡片上才显形（位置与样式里的说明配套） -->
+            <el-button
+              class="chat-window__tray-del"
+              text
+              :icon="Close"
+              size="small"
+              :title="item.kind === 'image' ? '移除（点缩略图可放大）' : '移除'"
+              @click="removeTrayItem(item)"
+            />
+          </div>
+        </div>
+        <div class="chat-window__tray-side">
+          <span class="chat-window__tray-count">待发送 {{ tray.length }} / {{ MAX_PENDING_FILES }}</span>
+          <el-button text size="small" :disabled="uploading" @click="clearTray">清空</el-button>
+        </div>
       </div>
 
       <el-input
@@ -227,16 +263,18 @@
       </el-popover>
 
       <div class="chat-window__send-row">
-        <el-button type="primary" :loading="sending" :disabled="!draft.trim()" @click="sendText">发送</el-button>
+        <el-button type="primary" :loading="sending || uploading" :disabled="!canSend" @click="sendMessage">
+          发送<span v-if="tray.length">（{{ pendingCount }} 条）</span>
+        </el-button>
       </div>
 
     </footer>
 
-    <!-- 拖拽发送（PC 浏览器 / Electron 桌面端）：手机没有 HTML5 拖放，acceptsDrop 里已排除 -->
+    <!-- 拖拽进托盘（PC 浏览器 / Electron 桌面端）：手机没有 HTML5 拖放，acceptsDrop 里已排除 -->
     <div v-if="dropActive" class="chat-window__drop">
       <el-icon :size="30"><FolderOpened /></el-icon>
-      <span>松开即可发送到「{{ title }}」</span>
-      <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_DROP_FILES }} 个</span>
+      <span>松开即可添加到「{{ title }}」的待发送</span>
+      <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_PENDING_FILES }} 个（也可以 Ctrl+V 粘贴）</span>
     </div>
 
     <ContextMenu
@@ -289,7 +327,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, Delete, FolderOpened, Picture, Refresh, Search, Select, Setting, Sunny, User } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Microphone, Picture, Refresh, Search, Select, Setting, Sunny, User, VideoCamera } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
@@ -328,8 +366,8 @@ const MAX_TEXT_LENGTH = 5000
  *  要传更大的文件，需同时调大后端 im.file.upload.max-size 与 max-chunks。 */
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
-/** 一次拖拽最多发几个文件：再多就该打包成压缩包，逐个排队上传太慢，进度条也看不清 */
-const MAX_DROP_FILES = 9
+/** 待发送附件托盘的容量：再多就该打包成压缩包，逐个排队上传太慢，缩略图也摆不下 */
+const MAX_PENDING_FILES = 9
 
 /** 消息类型与文件业务类型，与后端 MsgType / im-file 的约定对齐 */
 const TYPE_IMAGE = 2
@@ -674,6 +712,144 @@ watch(draft, (value) => {
   }
 })
 
+/* --------------------------- 待发送附件托盘 --------------------------- */
+
+/**
+ * 选 / 拖 / 粘 三个入口都先把文件放进这里，点「发送」才真正上传发送。
+ *
+ * 刻意不做成「选中即发」：一次挑七八张时中途发现选错了要能撤，手滑选中也不该把
+ * 图直接发出去。校验（体积 / 空文件 / 风险格式）放在入托盘这一刻，
+ * 发送时不再弹任何确认框，一批文件不会被弹窗打断。
+ *
+ * 与草稿同一套「按会话暂存」机制（ChatHome 用 :key 让切会话时本组件重挂载），
+ * 切到别的会话再回来，挑了一半的附件还在。
+ */
+const trays = new Map()
+let traySeq = 0
+const tray = ref(trays.get(key.value) || [])
+
+/** 把当前会话的托盘写回模块级 Map（数组每次重新赋值，不需要 deep watch） */
+function syncTray() {
+  if (tray.value.length) {
+    trays.set(key.value, tray.value)
+  } else {
+    trays.delete(key.value)
+  }
+}
+
+/** 缩略图的 objectURL 是唯一要手动放的东西：不 revoke 会一直占着那份文件字节 */
+function releaseTrayUrls(items) {
+  items.forEach((one) => one.url && URL.revokeObjectURL(one.url))
+}
+
+/**
+ * 一个待发文件放进托盘（图标选、拖进来、粘贴进来都走这里）。
+ *
+ * 校验只写一份：三入口如果各判各的，就会出现「同一个文件点着进能过、拖着进绕过风险确认」。
+ */
+async function stageFile(file) {
+  if (!file) {
+    return
+  }
+  if (!canUpload.value) {
+    ElMessage.warning('当前账号没有上传文件的权限')
+    return
+  }
+  if (isMuted.value) {
+    ElMessage.warning('本会话已禁言，无法发送文件')
+    return
+  }
+  // 文件夹与 0 字节文件后端一律拒（无扩展名 / FILE_EMPTY），挑出来比让红条弹一排友好
+  if (!file.size) {
+    ElMessage.warning('文件夹或空文件无法发送')
+    return
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    ElMessage.error(`文件不能超过 ${formatFileSize(MAX_UPLOAD_BYTES)}，当前 ${formatFileSize(file.size)}`)
+    return
+  }
+  if (tray.value.length >= MAX_PENDING_FILES) {
+    ElMessage.warning(`待发送附件最多 ${MAX_PENDING_FILES} 个，请先发送或移除一些`)
+    return
+  }
+  // 高风险格式（安装包 / 证书私钥 / 凭据库）：后端已放行，但得让人知情后才继续（需求 2）。
+  // 取消则静默返回：不进托盘，也不会像以前那样在发送一批文件时反复弹确认
+  const risk = riskCategoryOf(file.name)
+  if (risk) {
+    try {
+      await ElMessageBox.confirm(riskConfirmText(file.name), '高风险文件提醒', {
+        confirmButtonText: '仍要添加',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+  }
+  const kind = kindOf(file)
+  const item = {
+    id: ++traySeq,
+    file,
+    kind,
+    name: file.name || '未命名文件',
+    size: file.size,
+    // 图片才做缩略图；视频/语音/文件用类型图标 + 名字，不必为预览多解一遍元数据
+    url: kind === 'image' ? URL.createObjectURL(file) : ''
+  }
+  tray.value = [...tray.value, item]
+  syncTray()
+}
+
+/** 多文件入口（拖拽 / 粘贴）共用的批量入托盘：数量裁剪与提示口径只写一份 */
+async function stageFiles(files) {
+  const room = MAX_PENDING_FILES - tray.value.length
+  if (!files.length || room <= 0) {
+    if (files.length) {
+      ElMessage.warning(`待发送附件最多 ${MAX_PENDING_FILES} 个，请先发送或移除一些`)
+    }
+    return
+  }
+  let list = files
+  if (list.length > room) {
+    ElMessage.warning(`还能放 ${room} 个，已取前 ${room} 个`)
+    list = list.slice(0, room)
+  }
+  for (const file of list) {
+    await stageFile(file)
+  }
+}
+
+function removeTrayItem(item) {
+  if (item.url) {
+    URL.revokeObjectURL(item.url)
+  }
+  tray.value = tray.value.filter((one) => one.id !== item.id)
+  syncTray()
+}
+
+function clearTray() {
+  releaseTrayUrls(tray.value)
+  tray.value = []
+  syncTray()
+}
+
+/** 托盘里非图片项的类型图标（图片直接看缩略图，不需要图标） */
+function trayIcon(kind) {
+  return kind === 'voice' ? Microphone : kind === 'video' ? VideoCamera : Document
+}
+
+/** 托盘卡片的副标题：类型 + 体积，让语音/视频/文件一眼能分辨 */
+function trayLabel(item) {
+  const kindText = item.kind === 'voice' ? '语音' : item.kind === 'video' ? '视频' : '文件'
+  return `${kindText} · ${formatFileSize(item.size)}`
+}
+
+/** 本次要发的条数（文字一条 + 附件若干条），只给按钮当文案用 */
+const pendingCount = computed(() => (draft.value.trim() ? 1 : 0) + tray.value.length)
+
+/** 有文字或有待发附件就能点：只挑了图没打字时也得发得出去 */
+const canSend = computed(() => !!draft.value.trim() || tray.value.length > 0)
+
 /**
  * Enter 发送。
  *
@@ -688,7 +864,7 @@ function onEnter(event) {
   if (settings.sendKey === 'ctrlEnter') {
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault()
-      sendText()
+      sendMessage()
     }
     return
   }
@@ -697,7 +873,7 @@ function onEnter(event) {
     return
   }
   event.preventDefault()
-  sendText()
+  sendMessage()
 }
 
 async function sendText() {
@@ -727,11 +903,39 @@ async function sendText() {
     // 网络类失败：气泡红叹号 + 离线队列自动重发，断网时不弹 toast；
     // 业务类拒绝（敏感词/限流）：重试一万次也不会成，必须把原因弹出来
     if (isBusinessError(error)) {
-      ElMessage.error(error.message || '发送失败')
+      ElMessage.error(sendErrorText(error))
     }
   } finally {
     sending.value = false
   }
+}
+
+/**
+ * 发送 = 文字 + 托盘里的附件一批走。
+ *
+ * 顺序是先文字后附件：文字是主句、图是补充，气泡的时间戳顺序也与输入顺序一致。
+ * 附件严格串行：uploadAndSend 自带占位气泡与单槽进度条，并行会互相搅乱。
+ * 先把托盘腾空再发：发送过程中新粘进来的文件属于下一批，不会跟着这次莫名其妙地发出去。
+ * 失败不回摆托盘：uploadAndSend 已经把 File 存进 store，消息上的红叹号「重发」会直接复用。
+ */
+async function sendMessage() {
+  const items = tray.value
+  if (sending.value || uploading.value || (!draft.value.trim() && !items.length)) {
+    return
+  }
+  if (!items.length) {
+    await sendText()
+    return
+  }
+  if (draft.value.trim()) {
+    await sendText()
+  }
+  tray.value = []
+  syncTray()
+  for (const item of items) {
+    await uploadAndSend(item.file)
+  }
+  releaseTrayUrls(items)
 }
 
 function onEmoji(emoji) {
@@ -973,50 +1177,19 @@ function pickFile() {
 }
 
 /**
- * 两个隐藏 input（图片 / 文件）选完都回到这里。
+ * 两个隐藏 input（图片 / 文件）选完都回到这里，一次能勾多个。
  *
  * input 的 value 必须清空：连续两次选同一个文件时，
  * 值没变则 change 事件不触发，表现为「第二次点没反应」。
  */
 async function onPicked(event) {
   const input = event.target
-  const file = input.files && input.files[0]
+  const files = Array.from(input.files || [])
   input.value = ''
-  await sendPickedFile(file)
+  await stageFiles(files)
 }
 
-/**
- * 拿到一个待发文件后的统一入口（点图标选、拖拽进来都走这里）。
- *
- * 体积、风险确认、上传发送只写一份：拖拽如果另起一套校验，
- * 就会出现「同一个文件点着发能过、拖着发能绕过风险提示」这类不一致。
- */
-async function sendPickedFile(file) {
-  if (!file) {
-    return
-  }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    ElMessage.error(`文件不能超过 ${formatFileSize(MAX_UPLOAD_BYTES)}，当前 ${formatFileSize(file.size)}`)
-    return
-  }
-  // 高风险格式（安装包 / 证书私钥 / 凭据库）：后端已放行，但得让人知情后才继续（需求 2）。
-  // 取消则静默返回：input.value 已置空，没上挂占位气泡，界面不会残留任何东西
-  const risk = riskCategoryOf(file.name)
-  if (risk) {
-    try {
-      await ElMessageBox.confirm(riskConfirmText(file.name), '高风险文件提醒', {
-        confirmButtonText: '仍要发送',
-        cancelButtonText: '取消',
-        type: 'warning'
-      })
-    } catch {
-      return
-    }
-  }
-  await uploadAndSend(file)
-}
-
-/* ---------------- 拖拽发送（PC 浏览器 / Electron 桌面端） ---------------- */
+/* ---------------- 拖拽进托盘（PC 浏览器 / Electron 桌面端） ---------------- */
 
 /**
  * dragenter / dragleave 的配对计数。
@@ -1069,32 +1242,105 @@ async function onDrop(event) {
   if (isMobile.value || !hasFilePayload(event)) {
     return
   }
-  if (!canUpload.value) {
-    ElMessage.warning('当前账号没有上传文件的权限')
+  // 权限 / 禁言 / 空文件 / 体积这些全交给 stageFile 判，入口只负责把文件捞出来
+  await stageFiles(Array.from((event.dataTransfer && event.dataTransfer.files) || []))
+}
+
+/* ------------------ 粘贴进托盘（截图 / 复制的图片与文件） ------------------ */
+
+/** 剪贴板内容的 MIME → 补名用的扩展名；表里没有的图片一律按 png 兜（截图几乎都是 png） */
+const PASTE_MIME_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+  'image/avif': 'avif',
+  'audio/ogg': 'ogg',
+  'audio/opus': 'opus',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/flac': 'flac',
+  'application/pdf': 'pdf'
+}
+
+/**
+ * 文档级粘贴：剪贴板里带文件（截屏、复制的图片）就放进托盘，纯文字粘贴一切照旧。
+ *
+ * 为什么绑在 document 而不是输入框的 @paste：后者只在焦点就在本输入框时才会触发，
+ * 而截完图最常见的动作是「回到聊天窗口直接按 Ctrl+V」，那时焦点多半在消息列表或页面上，
+ * 绑在输入框上就表现为「粘贴没反应」。
+ *
+ * 焦点在别的可编辑区域（会话内搜索框、改昵称输入框这类）时一律让开，不抢它的粘贴。
+ */
+function onDocumentPaste(event) {
+  const source = event.target
+  const tag = String((source && source.tagName) || '').toLowerCase()
+  const editable = tag === 'textarea' || tag === 'input' || !!(source && source.isContentEditable)
+  const composer = inputRef.value && (inputRef.value.textarea || inputRef.value.input)
+  if (editable && source !== composer) {
     return
   }
-  if (isMuted.value) {
-    ElMessage.warning('本会话已禁言，无法发送文件')
+  handlePaste(event)
+}
+
+/**
+ * 粘贴内容的取法，三个得小心的点：
+ * 1. 富文本粘贴（Word / 网页复制）会同时给 text/plain 与图片，只有没文字时才 preventDefault，
+ *    否则会把用户以为要粘进输入框的字吃掉；有文字就是「文字留在框里、图片进托盘」，与微信一致；
+ * 2. 资源管理器里复制的文件，浏览器多数只给文件名不给字节，读不到 file 项时什么都不做
+ *    （退化成普通文字粘贴），不弹「粘贴失败」这种无能为力的提示；
+ * 3. 手机长按粘贴与桌面 Ctrl+V 都走同一个 paste 事件，所以不像拖拽那样排除移动端。
+ */
+function handlePaste(event) {
+  const data = event.clipboardData
+  const items = data && data.items
+  if (!items || !items.length) {
     return
   }
-  let files = Array.from((event.dataTransfer && event.dataTransfer.files) || [])
-  // 文件夹与 0 字节文件后端一律拒（无扩展名 / FILE_EMPTY），先挑出来比让红条弹一排友好
-  const skipped = files.filter((f) => !f.size)
-  files = files.filter((f) => f.size > 0)
-  if (skipped.length) {
-    ElMessage.warning(`文件夹或空文件无法发送，已跳过 ${skipped.length} 项`)
+  const pasted = []
+  for (const item of Array.from(items)) {
+    if (item.kind === 'file') {
+      const one = item.getAsFile()
+      if (one) {
+        pasted.push(one)
+      }
+    }
   }
-  if (!files.length) {
+  if (!pasted.length) {
     return
   }
-  if (files.length > MAX_DROP_FILES) {
-    ElMessage.warning(`一次最多拖 ${MAX_DROP_FILES} 个文件，已取前 ${MAX_DROP_FILES} 个`)
-    files = files.slice(0, MAX_DROP_FILES)
+  // 剪贴板里没文字时，默认行为本来也不会往输入框里放东西，preventDefault 只是把意图写明确；
+  // 图文混贴时不拦，文字照常进输入框（焦点不在输入框时不会被贴到任何地方）
+  if (!data.getData('text/plain')) {
+    event.preventDefault()
   }
-  // 串行发：uploadAndSend 会等上传 + 发送全部完成，并行会把进度条与占位气泡搅乱
-  for (const file of files) {
-    await sendPickedFile(file)
+  stageFiles(pasted.map(ensureFileNameExtension))
+}
+
+/**
+ * 给没扩展名的剪贴板文件补一个名字。
+ *
+ * 后端放行哪种类型、能不能发，看的都是文件名后缀（白名单按类型放行，
+ * 判不出类型就判不出风险，无扩展名直接拒），而部分系统的截图只给字节与 MIME、
+ * 名字里没后缀，不补一下必被拒。补完仍旧走 stageFile，风险格式确认那套照常生效。
+ */
+function ensureFileNameExtension(file) {
+  if (/\.[A-Za-z0-9]{1,8}$/.test(file.name || '')) {
+    return file
   }
+  const mime = (file.type || '').toLowerCase()
+  const isImage = mime.startsWith('image/')
+  const ext = PASTE_MIME_EXT[mime] || (isImage ? 'png' : 'bin')
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return new File([file], `${isImage ? '粘贴图片' : '粘贴文件'}_${stamp}.${ext}`, {
+    type: file.type || (isImage ? 'image/png' : 'application/octet-stream'),
+    lastModified: now.getTime()
+  })
 }
 
 /**
@@ -1219,7 +1465,7 @@ async function uploadAndSend(file, retryClientMsgId = null) {
     // 网络类只标失败（红叹号 + 恢复后自动重发），不弹「网络有问题」toast
     chat.markFailed(props.conversationId, clientMsgId)
     if (isBusinessError(error)) {
-      ElMessage.error(error.message || '发送失败')
+      ElMessage.error(sendErrorText(error))
     }
   } finally {
     uploading.value = false
@@ -1249,10 +1495,10 @@ function kindOf(file) {
   }
   if (!type) {
     const name = (file.name || '').toLowerCase()
-    if (/\.(png|jpe?g|gif|webp|bmp)$/.test(name)) {
+    if (/\.(png|jpe?g|gif|webp|bmp|avif|jfif)$/.test(name)) {
       return 'image'
     }
-    if (/\.(mp3|wav|m4a|aac|ogg|flac|amr)$/.test(name)) {
+    if (/\.(mp3|wav|m4a|aac|ogg|opus|flac|amr)$/.test(name)) {
       return 'voice'
     }
     if (isVideoFile(file)) {
@@ -1505,6 +1751,22 @@ function isBusinessError(error) {
   return code > 0 && code !== 1002 && code !== 2010
 }
 
+/** 后端 ResultCode.FRIEND_BLOCKED（3006）：对方把我拉黑了，我发的消息会被单向拦下 */
+const CODE_BLOCKED_BY_OTHER = 3006
+
+/**
+ * 发送失败的提示文案。
+ *
+ * 被拉黑这一条后端只能给通用文案「对方已将你加入黑名单」，而这里就是单聊窗口，
+ * 会话名正是那个「对方」，换成带名字的提示才不会让人以为是自己网断了。
+ */
+function sendErrorText(error) {
+  if (Number(error && error.code) === CODE_BLOCKED_BY_OTHER && !isGroup.value && conv.value?.name) {
+    return `你已被「${conv.value.name}」拉入黑名单，消息未送达`
+  }
+  return (error && error.message) || '发送失败'
+}
+
 /** 网络恢复：上传阶段失败的附件自动重走上传+发送（文本类由 WS 重连的 pending 队列接管） */
 async function onOnline() {
   const waiting = chat.pendingRetryFiles(props.conversationId)
@@ -1535,7 +1797,7 @@ async function onResend(message) {
     await chat.resend(props.conversationId, message)
   } catch (error) {
     if (isBusinessError(error)) {
-      ElMessage.error(error.message || '发送失败')
+      ElMessage.error(sendErrorText(error))
     }
   }
 }
@@ -1549,6 +1811,7 @@ function onDiscard(message) {
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('paste', onDocumentPaste)
   window.addEventListener('online', onOnline)
   // 内容高度变化（图片加载完成、气泡重排）且当前贴着底时，跟随钉回底部：
   // 首次进会话时列表渲染是分批完成的，只在 nextTick 滚一次会落在中途，
@@ -1571,6 +1834,7 @@ onBeforeUnmount(() => {
     contentObserver = null
   }
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  document.removeEventListener('paste', onDocumentPaste)
   window.removeEventListener('online', onOnline)
   // 离开会话时把已经看到的消息标成已读，避免回到列表还挂着红点
   if (document.visibilityState === 'visible') {
@@ -1583,6 +1847,8 @@ onBeforeUnmount(() => {
 watch(key, async () => {
   detail.value = null
   draft.value = drafts.get(key.value) || ''
+  // 托盘按会话各自一份：切走时不清掉刚挑的图，切回来还在（与草稿同一套机制）
+  tray.value = trays.get(key.value) || []
   replyTarget.value = null
   nearBottom = true
   showJump.value = false
@@ -1922,6 +2188,124 @@ watch(key, async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ------------------------------ 待发送附件托盘 ------------------------------ */
+/* 一行两栏：左侧卡片一个挨着一个（放不下就横向滚），右侧竖排放「待发送 N / 9」与「清空」 */
+.chat-window__tray {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 6px 8px;
+  background: var(--im-bg, #f5f5f5);
+  border-radius: 6px;
+}
+
+/* 卡片区占满剩下的宽度；min-width: 0 才能被挤窄（否则 flex 子项最小宽度等于内容宽度，滚不起来） */
+.chat-window__tray-list {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.chat-window__tray-item {
+  position: relative;
+  flex: none;
+}
+
+/* 图片缩略图：正方形裁切，点开走那个自绘的图片放大弹窗 */
+.chat-window__tray-thumb {
+  display: block;
+  width: 68px;
+  height: 68px;
+  object-fit: cover;
+  border: 1px solid var(--im-border);
+  border-radius: 4px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+/* 语音 / 视频 / 文件：类型图标 + 名字 + 体积，比缩略图宽一点才放得下名字 */
+.chat-window__tray-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  width: 132px;
+  height: 68px;
+  /* 右上角留给 ✕（34px）：不给这点内边距，名字末尾会被按钮压住 */
+  padding: 4px 20px 4px 10px;
+  border: 1px solid var(--im-border);
+  border-radius: 4px;
+  background: var(--im-panel);
+  color: var(--im-text-secondary);
+}
+
+/* 右侧这一列宽度由内容撑起且不参与压缩（flex: none），所以卡片区不会被名字长短拽得左右跳 */
+.chat-window__tray-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.chat-window__tray-name {
+  font-size: 12px;
+  color: var(--im-text);
+}
+
+.chat-window__tray-size {
+  font-size: 11px;
+  color: var(--im-text-secondary);
+}
+
+/* 移除按钮放在卡片内的右上角（必须是卡片内部的正值偏移：列表横向滚动会让溢出的部分被裁掉，
+   压到卡片外就成了「叉看得见却少一半」）。默认藏着，鼠标移到这张卡片上才显形。
+   两条要一起看：① 隐藏时要同时关掉 pointer-events，否则看不见也能被点到，
+   变成「没看到叉却把文件删了」；② 名字列右内边距留出按钮的位置，长名会被 ✕ 挡住 */
+.chat-window__tray-item .chat-window__tray-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 1;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  transition: opacity 0.15s;
+}
+
+.chat-window__tray-item:hover .chat-window__tray-del,
+.chat-window__tray-item .chat-window__tray-del:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-window__tray-item .chat-window__tray-del:hover {
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+}
+
+/* 触屏没得 hover，一直藏着就是删不掉：这类设备上常显 */
+@media (hover: none) {
+  .chat-window__tray-item .chat-window__tray-del {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* ------------------------------ 跳转高亮 ------------------------------ */

@@ -9,8 +9,8 @@
  * 屏幕渲染统一走「离屏底图 + rAF 原子贴屏」：整帧刷底图、脏块按坐标并进底图，
  * 与 Agent 端 64x64 网格协议对应；两种帧可以混着来（自适应模式正是这么发的）。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { ElButton, ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import {
   endRemoteSession,
   fetchRemoteAudit,
@@ -25,9 +25,96 @@ import { DirectChannel } from '@/utils/directChannel'
 import { AvcDecoder } from '@/utils/avc'
 import { getToken } from '@/utils/token'
 import { openFilePicker } from '@/utils/picker'
+import { createSessionRecorder, openRecordDir, recordSupported } from '@/utils/recorder'
+import { useSettingsStore } from '@/stores/settings'
+import { useAuthStore } from '@/stores/auth'
 
 const STATUS_TEXT = { 0: '离线', 1: '空闲', 2: '使用中', 3: '拒绝接入' }
 const STATUS_TAG = { 0: 'info', 1: 'success', 2: 'warning', 3: 'danger' }
+
+/* ---------- 会话历史 / 审计的文案映射 ----------
+ * 后端存的是英文枚举（endReason / action / actor），直接摆到表格里等于让用户自己去猜。
+ * 映射表集中放在这里而不是散在各处 template 里：词表一变只改一处。
+ */
+
+// 会话状态。名字刻意带上 SESSION_ 前缀：上面的 STATUS_TEXT 是「设备」的数字状态，两者语义完全不同
+const SESSION_STATUS_TEXT = { inviting: '等待授权', active: '进行中', rejected: '已拒绝', ended: '已结束' }
+const SESSION_STATUS_TAG = { inviting: 'warning', active: 'success', rejected: 'info', ended: 'info' }
+
+// 结束原因：谁按的结束、还是系统收尾的
+const END_REASON_TEXT = {
+  'inviter-end': '控制方主动结束',
+  'invitee-end': '被控方主动结束',
+  rejected: '对方拒绝授权',
+  superseded: '被新邀请顶替',
+  'agent-offline': '被控端掉线',
+  'control-offline': '控制端掉线',
+  'idle-timeout': '长时间无操作自动结束',
+  'invite-timeout': '授权超时未响应'
+}
+
+const ROLE_TEXT = { inviter: '我控对方', invitee: '对方控我' }
+const ROLE_TAG = { inviter: 'primary', invitee: 'warning' }
+
+// 触发方：加 actor 列之前的历史记录为 null，宁可显示「—」也不猜一个值
+const ACTOR_TEXT = { inviter: '控制端', invitee: '被控端', system: '服务端' }
+
+/**
+ * 审计动作的中文名与配色，三档刻意拉开：
+ * danger 红（不可逆或等于交出系统控制权）、warning 橙（碰了数据或越过了权限边界）、
+ * info 灰（流程事件，翻审计时基本可以跳过）。表里出现大片红色就说明这次会话动了真东西。
+ *
+ * 未收录的动作原样显示英文——宁可直接把生词摆出来，也不要映射成「未知动作」把线索抹掉。
+ */
+const ACTION_META = {
+  invite: { text: '发起邀请', type: 'info' },
+  accept: { text: '同意授权', type: 'success' },
+  reject: { text: '拒绝授权', type: 'info' },
+  'agent-ready': { text: 'Agent 就绪', type: 'info' },
+  'control-bound': { text: '控制端接入', type: 'info' },
+  'session-end': { text: '会话结束', type: 'info' },
+  'direct-candidates': { text: '直连地址交换', type: 'info' },
+  'direct-up': { text: '直连已建立', type: 'success' },
+  'direct-failed': { text: '直连失败', type: 'info' },
+  'direct-rejected': { text: '直连被拒', type: 'info' },
+  'direct-stats': { text: '直连流量统计', type: 'info' },
+  'clip-sync': { text: '剪贴板同步', type: 'warning' },
+  'file-get': { text: '下载文件', type: 'warning' },
+  'file-put': { text: '上传文件', type: 'warning' },
+  'file-mkdir': { text: '新建目录', type: 'warning' },
+  'input-blocked': { text: '输入被拦截', type: 'warning' },
+  'danger-denied': { text: '高危操作被拒', type: 'warning' },
+  'file-rename': { text: '重命名文件', type: 'danger' },
+  'file-rm': { text: '删除文件', type: 'danger' },
+  'ps-kill': { text: '结束进程', type: 'danger' },
+  'ps-run': { text: '启动程序', type: 'danger' },
+  exec: { text: '执行命令', type: 'danger' },
+  power: { text: '电源操作', type: 'danger' }
+}
+
+// detail 里的键名翻译；没收录的键原样显示
+const DETAIL_LABEL = {
+  permission: '权限',
+  grantedPermission: '授予权限',
+  reason: '原因',
+  bytes: '流量',
+  role: '上报方',
+  path: '路径',
+  down: '下行',
+  up: '上行',
+  type: '类型',
+  from: '来源',
+  peer: '对端地址',
+  pid: '进程号',
+  ok: '结果',
+  size: '大小',
+  len: '长度',
+  cmd: '命令',
+  dir: '是目录',
+  entries: '条目数',
+  to: '目标',
+  action: '操作'
+}
 
 /* ==================== 设备与发起 ==================== */
 
@@ -224,6 +311,8 @@ async function openSession(detail, deviceName) {
     await sock.connect()
     pushLog(`已连接中继，权限：${detail.permission === 'operate' ? '可操作' : '只读'}`)
     loadDevices()
+    // 录屏按设置排定，但真正开录要等第一帧把画布撑到远端分辨率（见 scheduleBlit）
+    recordArmed.value = recordAvailable && settings.remoteRecordEnabled
   } catch (e) {
     const reason = e.message || '数据通道建立失败'
     // 浏览器（尤其手机）对不受信任的自签证书：页面能点「继续访问」绕过，wss 不能，
@@ -406,6 +495,15 @@ function formatMbps(bytesPerSecond) {
   return m >= 1 ? `${m.toFixed(1)} Mbps` : `${(m * 1000).toFixed(0)} kbps`
 }
 
+/**
+ * HTML 转义。凡是要拼进 dangerouslyUseHTMLString 的外部字符串（设备名、结束原因、
+ * 链路名等）都得过一道：这些都是对端可填的内容，不能直接当标记用。
+ * 录屏通知走的是 VNode（要带可点按钮），文本节点天然不会当标记解析，不需转义。
+ */
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+}
+
 /** 工具栏一屏内看得完的简讯：下行/上行/合计 + 时长 + 平均下行码率 */
 const trafficLine = computed(() => {
   const t = traffic.value
@@ -427,21 +525,19 @@ function reportTraffic(summary, deviceName, reason) {
     return
   }
   const total = summary.rx + summary.tx
-  const esc = (s) =>
-    String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
   const perHour = summary.seconds > 30 ? formatBytes((total * 3600) / summary.seconds) : ''
   // 链路取收尾前抓的快照：那时 linkPath 已被 teardown 复位成中继，不存下来就永远报「中继」
   const path = summary.path || linkPath.value
   const codec = summary.codec || codecActual.value
   ElNotification({
-    title: `会话结束 · ${esc(deviceName || '设备')}`,
+    title: `会话结束 · ${escapeHtml(deviceName || '设备')}`,
     dangerouslyUseHTMLString: true,
     message:
-      `时长 ${formatDuration(summary.seconds)}（${esc(reason || '已关闭')}）<br>` +
+      `时长 ${formatDuration(summary.seconds)}（${escapeHtml(reason || '已关闭')}）<br>` +
       `接收 ${formatBytes(summary.rx)}　发送 ${formatBytes(summary.tx)}　合计 ${formatBytes(total)}<br>` +
       `平均下行 ${summary.seconds ? formatMbps(summary.rx / summary.seconds) : '—'}` +
       (perHour ? `<br>按此速率 1 小时约 ${perHour}` : '') +
-      `<br>链路 ${esc(LINK_TEXT[path] || '中继')}　编码 ${esc(codec || '—')}` +
+      `<br>链路 ${escapeHtml(LINK_TEXT[path] || '中继')}　编码 ${escapeHtml(codec || '—')}` +
       (path !== 'relay'
         ? '<br>本会话为直连，服务器看到的字节仅中继部分，实测带宽以本通知为准'
         : ''),
@@ -508,6 +604,8 @@ async function teardownSession(reason) {
   const deviceName = session.value?.deviceName
   const path = linkPath.value
   const codec = codecActual.value
+  // 录屏收尾赶在状态复位之前：meta 要带本轮的会话信息、链路与编码，晚了就全被重置了
+  await stopRecording(reason)
   stopTraffic()
   stopDirect()
   // 全屏层是盖在整页上的：会话一结束不退出，回到设备列表时会被一层黑屏顶掉（只能刷新页面）
@@ -544,6 +642,236 @@ async function endSession() {
     // 后端可能已因断线收尾，忽略
   }
   await teardownSession()
+}
+
+/* ==================== 录屏审计（仅桌面端） ====================
+ * 录的是 canvas 上的远端画面，也就是操作者本人看到的内容；分片经主进程流式落盘，
+ * 内存里只留一个分片大小，长会话也不会涨。浏览器端 recordSupported() 为 false，
+ * 下面整块逻辑不会被触发（工具栏按钮也不渲染）。
+ *
+ * 录制是旁路能力：任何失败只写会话日志 + 轻提示，绝不往外抛、不影响远控本身。
+ */
+const settings = useSettingsStore()
+const auth = useAuthStore()
+const recordAvailable = recordSupported()
+const recording = ref(false)
+/** 已排定「本轮要录」，但还在等第一帧把画布撑到真实分辨率 */
+const recordArmed = ref(false)
+const recordClock = ref('')
+/** 本轮会话已落盘的录像路径，供工具栏「打开录像」定位；下次开录时清空 */
+const lastRecordPath = ref('')
+let recorder = null
+let recordTimer = null
+
+/** 审计拉取上限：收尾不能让界面卡住，超时就只留视频 */
+const AUDIT_COLLECT_TIMEOUT = 5000
+
+/** 录像旁 .json 的会话元数据：事后要能对上是谁控了谁、走哪条链路、为何结束 */
+function recordMeta(reason) {
+  const current = session.value
+  return {
+    sessionId: current ? String(current.sessionId) : '',
+    deviceName: current ? current.deviceName : '',
+    permission: current ? current.permission : '',
+    linkPath: linkPath.value,
+    codec: codecActual.value || codecWanted.value,
+    endReason: reason || '',
+    operator: { userId: auth.userId, username: auth.username, nickname: auth.nickname }
+  }
+}
+
+function startRecordClock() {
+  stopRecordClock()
+  const startedAt = Date.now()
+  recordTimer = setInterval(() => {
+    const sec = Math.floor((Date.now() - startedAt) / 1000)
+    const p = (n) => String(n).padStart(2, '0')
+    recordClock.value =
+      sec >= 3600
+        ? `${p(Math.floor(sec / 3600))}:${p(Math.floor((sec % 3600) / 60))}:${p(sec % 60)}`
+        : `${p(Math.floor(sec / 60))}:${p(sec % 60)}`
+  }, 1000)
+}
+
+function stopRecordClock() {
+  if (recordTimer) {
+    clearInterval(recordTimer)
+    recordTimer = null
+  }
+  recordClock.value = ''
+}
+
+/**
+ * 拉本次会话的全部操作审计事件，随录像写进同名 .json。
+ * 循环翻页沿用导出 CSV 的做法；接口拉不到或超时就只留视频，不影响录像本身。
+ */
+async function collectAuditEvents(sessionId) {
+  if (!settings.remoteRecordAudit || !sessionId) {
+    return []
+  }
+  const all = []
+  let timer = null
+  const collect = async () => {
+    let current = 1
+    for (;;) {
+      const page = await fetchRemoteAudit(sessionId, { current, size: EXPORT_PAGE_SIZE })
+      const records = page.records || []
+      all.push(
+        ...records.map((item) => ({
+          time: formatTime(item.createTime),
+          action: item.action || '',
+          actionText: actionText(item.action),
+          actor: item.actor || '',
+          detail: item.detail == null ? '' : String(item.detail)
+        }))
+      )
+      const total = Number(page.total) || 0
+      if (records.length === 0 || all.length >= total || current >= EXPORT_MAX_PAGES) break
+      current += 1
+    }
+  }
+  try {
+    await Promise.race([
+      collect(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, AUDIT_COLLECT_TIMEOUT)
+      })
+    ])
+  } catch {
+    // 审计不可用时录像仍要完整保存
+  } finally {
+    clearTimeout(timer)
+  }
+  // 超时胜出时后台的 collect() 还会往 all 里 push，取一份快照免得后续被改写
+  return all.slice()
+}
+
+/**
+ * 开始录制。manual 为 true 表示用户点的工具栏按钮（要给反馈），
+ * 否则是会话建立后按设置自动开录（失败只写日志，不弹窗打扰）。
+ */
+async function startRecording(manual = false) {
+  if (!recordAvailable || recorder) {
+    return false
+  }
+  // 画面未开时画布还是默认的 300x150：这时开录会录下一段无意义的小尺寸画面，
+  // 而且分辨率中途变化要编码器重配。改成挂起等第一帧，兼容性与观感都更好。
+  if (!screenOn.value) {
+    recordArmed.value = true
+    pushLog('录制已排定，画面开启后自动开始')
+    if (manual) {
+      ElMessage.success('将在画面开启后自动开始录制')
+    }
+    return true
+  }
+  const canvas = canvasRef.value
+  if (!canvas) {
+    return false
+  }
+  const instance = createSessionRecorder({
+    onError: (message) => {
+      recording.value = false
+      stopRecordClock()
+      pushLog(`录屏中止：${message}`)
+    }
+  })
+  const started = await instance.start(canvas, { dir: settings.remoteRecordDir, meta: recordMeta() })
+  if (!started) {
+    if (manual) {
+      ElMessage.warning('本次未能开始录制，原因见会话日志')
+    }
+    return false
+  }
+  recorder = instance
+  recording.value = true
+  recordArmed.value = false
+  lastRecordPath.value = ''
+  startRecordClock()
+  pushLog(`录屏已开始 → ${instance.path}`)
+  return true
+}
+
+/** 停录并落盘。必须在会话状态复位之前调：meta 要带上本轮的链路、编码与结束原因 */
+async function stopRecording(reason) {
+  recordArmed.value = false
+  const instance = recorder
+  if (!instance) {
+    return null
+  }
+  recorder = null
+  recording.value = false
+  stopRecordClock()
+  const meta = recordMeta(reason)
+  // 断线收尾时服务端可能还没写完最后一条会话结束事件，拉到的审计会少一两条；
+  // 服务端仍是事实源，完整审计以「会话历史 → 审计」抽屉为准
+  const auditEvents = await collectAuditEvents(meta.sessionId)
+  let result = null
+  try {
+    result = await instance.stop({ meta, auditEvents, reason: reason || '' })
+  } catch (e) {
+    pushLog(`录屏收尾失败：${e.message || e}`)
+  }
+  if (result && result.filePath) {
+    lastRecordPath.value = result.filePath
+    pushLog(`录屏已保存：${result.filePath}（${formatBytes(result.size)}）`)
+    const summary =
+      `${formatBytes(result.size)} · ${formatDuration(Math.round((result.durationMs || 0) / 1000))}` +
+      (auditEvents.length ? ` · 审计 ${auditEvents.length} 条` : '')
+    // 入口挂在通知上而不是只靠工具栏：会话一结束工作区就卸载了，工具栏那个按钮跟着消失，
+    // 而「录完马上去看」恰恰是最常见的动作。用 VNode 而非 HTML 字符串才能带真可点的按钮
+    ElNotification({
+      title: '录屏已保存',
+      duration: 8000,
+      message: h('div', null, [
+        h('div', { style: 'word-break: break-all' }, result.filePath),
+        h('div', { style: 'margin-top: 4px; color: var(--el-text-color-secondary)' }, summary),
+        h(
+          ElButton,
+          {
+            size: 'small',
+            type: 'primary',
+            plain: true,
+            style: 'margin-top: 8px',
+            onClick: () => openRecordPath(result.filePath)
+          },
+          () => '打开录像'
+        )
+      ])
+    })
+  }
+  return result
+}
+
+/** 工具栏开关：录制中→停；已排定→取消排定；都没→开录 */
+async function toggleRecording() {
+  if (recording.value) {
+    await stopRecording('手动停止')
+    return
+  }
+  if (recordArmed.value) {
+    recordArmed.value = false
+    pushLog('已取消排定的录制')
+    ElMessage.info('已取消本次会话的录制')
+    return
+  }
+  await startRecording(true)
+}
+
+/**
+ * 在资源管理器里定位录像。工具栏按钮不传参，用本轮存下的路径；通知里的按钮直接带上当时的路径
+ * （会话已重置，lastRecordPath 可能已被下一轮开录清掉）。
+ * 文件被用户移走或删了时主进程会退而开目录，所以这里不预检查存在性。
+ */
+async function openRecordPath(filePath) {
+  const target = filePath || lastRecordPath.value
+  if (!target) {
+    return
+  }
+  try {
+    await openRecordDir(target)
+  } catch (e) {
+    ElMessage.error(e.message || '打开录像目录失败')
+  }
 }
 
 /* ==================== 屏幕渲染 ==================== */
@@ -583,6 +911,14 @@ function scheduleBlit() {
       canvas.height = backCanvas.height
     }
     canvas.getContext('2d').drawImage(backCanvas, 0, 0)
+    // 第一帧已把画布撑到远端真实分辨率，此时开录最稳：录制器的初始尺寸即最终尺寸。
+    // 必须先同步撤掉 armed 标记——startRecording 是异步的，而 rAF 会连着进来好几轮
+    if (recordArmed.value) {
+      recordArmed.value = false
+      startRecording().catch(() => {
+        /* 失败已经由 onError 写进会话日志，这里不能让它变成未处理的 promise 异常 */
+      })
+    }
   })
 }
 
@@ -1312,41 +1648,228 @@ async function pushClipboard() {
 
 /* ==================== 会话历史 / 审计 ==================== */
 
-const history = reactive({ rows: [], total: 0, current: 1, size: 10 })
-const audit = reactive({ visible: false, rows: [], total: 0, current: 1, sessionId: '' })
+const history = reactive({
+  rows: [], total: 0, current: 1, size: 10, status: '', loading: false
+})
+const audit = reactive({
+  visible: false, rows: [], total: 0, current: 1, size: 20,
+  sessionId: '', action: '', loading: false, exporting: false,
+  // 抽屉顶部的会话概要直接复用列表行（RemoteSessionVO 已把关联信息补齐），不额外发请求
+  summary: null
+})
 
 async function loadSessions() {
-  const page = await fetchRemoteSessionPage({ current: history.current, size: history.size })
-  history.rows = page.records || []
-  history.total = Number(page.total) || 0
+  history.loading = true
+  try {
+    const page = await fetchRemoteSessionPage({
+      current: history.current,
+      size: history.size,
+      status: history.status || undefined
+    })
+    history.rows = page.records || []
+    history.total = Number(page.total) || 0
+  } catch (e) {
+    ElMessage.error(e.message || '加载会话历史失败')
+  } finally {
+    history.loading = false
+  }
+}
+
+/** 换筛选条件或每页条数时回到第一页：停在第 5 页去看一个只剩 2 条的结果集，只会看到空白 */
+function reloadSessions() {
+  history.current = 1
+  return loadSessions()
 }
 
 async function openAudit(row) {
   audit.sessionId = String(row.id)
+  audit.summary = row
   audit.current = 1
+  audit.action = ''
   audit.visible = true
   await loadAudit()
 }
 
 async function loadAudit() {
-  const page = await fetchRemoteAudit(audit.sessionId, { current: audit.current, size: 20 })
-  audit.rows = page.records || []
-  audit.total = Number(page.total) || 0
+  if (!audit.sessionId) return
+  audit.loading = true
+  try {
+    const page = await fetchRemoteAudit(audit.sessionId, {
+      current: audit.current,
+      size: audit.size,
+      action: audit.action || undefined
+    })
+    audit.rows = page.records || []
+    audit.total = Number(page.total) || 0
+  } catch (e) {
+    ElMessage.error(e.message || '加载审计记录失败')
+  } finally {
+    audit.loading = false
+  }
+}
+
+function reloadAudit() {
+  audit.current = 1
+  return loadAudit()
 }
 
 function statusText(status) {
-  return { inviting: '等待授权', active: '进行中', rejected: '被拒绝', ended: '已结束' }[status] || status
+  return SESSION_STATUS_TEXT[status] || status || '-'
+}
+
+function endReasonText(reason) {
+  return END_REASON_TEXT[reason] || reason || '-'
+}
+
+function actionText(action) {
+  const meta = ACTION_META[action]
+  return meta ? meta.text : action
+}
+
+function actionTagType(action) {
+  const meta = ACTION_META[action]
+  return meta ? meta.type : 'info'
+}
+
+function actorText(actor) {
+  return ACTOR_TEXT[actor] || '—'
+}
+
+function roleText(role) {
+  return ROLE_TEXT[role] || role || '-'
+}
+
+/** 对端显示：识别码接入的被控端没账号，peerUserId 为 0 且昵称为空 */
+function peerText(row) {
+  if (row.peerName) return row.peerName
+  return Number(row.peerUserId) > 0 ? `用户 ${row.peerUserId}` : '匿名设备（识别码接入）'
 }
 
 function formatSize(bytesValue) {
   const v = Number(bytesValue) || 0
   if (v < 1024) return `${v} B`
   if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`
-  return `${(v / 1024 / 1024).toFixed(2)} MB`
+  if (v < 1024 * 1024 * 1024) return `${(v / 1024 / 1024).toFixed(2)} MB`
+  return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+/**
+ * 历史列表的时长。
+ *
+ * 刻意不复用上面的 formatDuration：那个是工具栏的实时计时器，00:00:00 是它的正常初值；
+ * 而历史里时长为 0 意味着「这次邀请根本没建立过连接」，显示一排 00:00:00 等于把信息噪声当数据。
+ */
+function formatElapsed(seconds) {
+  const v = Number(seconds) || 0
+  if (v <= 0) return '-'
+  if (v < 60) return `${v} 秒`
+  const m = Math.floor(v / 60)
+  if (m < 60) return `${m} 分 ${v % 60} 秒`
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+}
+
+function formatBitrate(value) {
+  return value == null ? '-' : `${value} Mbps`
 }
 
 function formatTime(value) {
   return value ? String(value).replace('T', ' ').slice(0, 19) : '-'
+}
+
+/**
+ * 把 detail 拆成键值对。
+ *
+ * detail 有两种形态：结构化串（key=value, key=value）与裸文本
+ * （exec / ps-run 的 detail 就是命令行本身，power 的 detail 是动作名）。
+ * 只有「每个逗号后面都跟着 key=」才按键值对渲染，否则整串原样显示：
+ * 把 `ipconfig /all, x` 这种命令行按逗号切碎，反而毁掉了它唯一的可读性。
+ */
+function parseDetail(detail) {
+  const raw = detail == null ? '' : String(detail)
+  if (!raw) return { pairs: [], text: '' }
+  const parts = raw.split(/,\s*(?=[A-Za-z][\w.-]*=)/)
+  const pairs = []
+  for (const part of parts) {
+    const matched = /^([A-Za-z][\w.-]*)=([\s\S]*)$/.exec(part.trim())
+    if (!matched) return { pairs: [], text: raw }
+    pairs.push({ key: DETAIL_LABEL[matched[1]] || matched[1], value: matched[2] })
+  }
+  return { pairs, text: '' }
+}
+
+// 先在 computed 里解析一次，而不是在模板里反复调 parseDetail：
+// 同一行的「详情列 + 展开行」共用一份结果，翻页时才不致于把正则跑上四百次
+const auditRows = computed(() => audit.rows.map((row) => ({ ...row, parsed: parseDetail(row.detail) })))
+
+/** 导出单页上限与页数上限：后者是安全阀，避免一个异常 total 把浏览器拖进死循环 */
+const EXPORT_PAGE_SIZE = 200
+const EXPORT_MAX_PAGES = 200
+
+/**
+ * 导出当前会话的审计为 CSV。
+ *
+ * 全部在前端做：循环翻页拉全量再拼 Blob，不新增导出接口——导出只是把已经能查到的
+ * 数据换个格式，多一个后端接口就多一处要做权限与限流的地方。
+ * 开头写 BOM，否则 Excel 打开中文全是乱码。
+ */
+async function exportAuditCsv() {
+  if (!audit.sessionId) return
+  audit.exporting = true
+  try {
+    const all = []
+    let current = 1
+    for (;;) {
+      const page = await fetchRemoteAudit(audit.sessionId, {
+        current, size: EXPORT_PAGE_SIZE, action: audit.action || undefined
+      })
+      const records = page.records || []
+      all.push(...records)
+      const total = Number(page.total) || 0
+      if (records.length === 0 || all.length >= total || current >= EXPORT_MAX_PAGES) break
+      current += 1
+    }
+    if (!all.length) {
+      ElMessage.info('没有可导出的记录')
+      return
+    }
+    const rows = [['时间', '动作', '动作标识', '触发方', '详情']]
+    for (const item of all) {
+      rows.push([
+        formatTime(item.createTime),
+        actionText(item.action),
+        item.action || '',
+        actorText(item.actor),
+        item.detail == null ? '' : String(item.detail)
+      ])
+    }
+    const csv = rows.map((cols) => cols.map(escapeCsv).join(',')).join('\r\n')
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `远程审计_${safeFileName(audit.summary && audit.summary.deviceName)}_${audit.sessionId}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success(`已导出 ${all.length} 条审计记录`)
+  } catch (e) {
+    ElMessage.error(e.message || '导出失败')
+  } finally {
+    audit.exporting = false
+  }
+}
+
+/** CSV 转义：含逗号/引号/换行的字段整体加引号，内部引号翻倍 */
+function escapeCsv(value) {
+  const text = value == null ? '' : String(value)
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+/** 设备名是用户自定义的，直接当文件名会碰上 Windows 的非法字符 */
+function safeFileName(name) {
+  const text = name ? String(name) : 'session'
+  return text.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40)
 }
 
 /* ==================== 生命周期 ==================== */
@@ -1382,6 +1905,10 @@ onBeforeUnmount(() => {
   decodeQueue.length = 0
   latestFullFrame = null
   stopTraffic()
+  // 路由切走时也得把录制收口，否则主进程的文件句柄一直挂着；
+  // 真关窗时渲染进程已没，由主进程 window-all-closed 里的 closeRecording 兜底
+  stopRecording('页面卸载').catch(() => {})
+  recordArmed.value = false
   // 全屏是盖在整页上的固定层：会话结束不退出，设备列表就会被一层永久黑屏顶掉（只能刷新页面）
   exitPortrait()
   // 先补报一次直连字节再拆链：服务端落库的总量靠这一帧，路由切走不报就成了直连白跑
@@ -1483,36 +2010,87 @@ const inSession = computed(() => !!session.value)
       </el-card>
 
       <el-card shadow="never" class="remote-entry__card">
-        <template #header><span>远程会话历史</span></template>
-        <el-table :data="history.rows" empty-text="暂无会话记录">
-          <el-table-column prop="deviceName" label="设备" width="140">
-            <template #default="{ row }">{{ row.deviceId }}</template>
+        <template #header>
+          <div class="card-header">
+            <span>远程会话历史</span>
+            <div class="card-toolbar">
+              <el-select
+                v-model="history.status"
+                size="small"
+                style="width: 118px"
+                @change="reloadSessions"
+              >
+                <el-option label="全部状态" value="" />
+                <el-option label="等待授权" value="inviting" />
+                <el-option label="进行中" value="active" />
+                <el-option label="已拒绝" value="rejected" />
+                <el-option label="已结束" value="ended" />
+              </el-select>
+              <el-button size="small" :loading="history.loading" @click="loadSessions">刷新</el-button>
+            </div>
+          </div>
+        </template>
+        <el-table v-loading="history.loading" :data="history.rows" empty-text="暂无会话记录">
+          <el-table-column label="设备" min-width="150">
+            <template #default="{ row }">
+              <div class="cell-main">{{ row.deviceName || row.deviceId }}</div>
+              <div class="cell-sub">{{ row.deviceId }}</div>
+            </template>
           </el-table-column>
-          <el-table-column label="权限" width="90">
+          <el-table-column label="角色" width="96">
+            <template #default="{ row }">
+              <el-tag size="small" :type="ROLE_TAG[row.role] || 'info'" effect="plain">
+                {{ roleText(row.role) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="对端" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">{{ peerText(row) }}</template>
+          </el-table-column>
+          <el-table-column label="权限" width="76">
             <template #default="{ row }">{{ row.permission === 'operate' ? '可操作' : '只读' }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">{{ statusText(row.status) }}</template>
+          <el-table-column label="状态" width="92">
+            <template #default="{ row }">
+              <el-tag size="small" :type="SESSION_STATUS_TAG[row.status] || 'info'">
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
           </el-table-column>
-          <el-table-column label="流量" width="100">
-            <template #default="{ row }">{{ formatSize(row.bytes) }}</template>
-          </el-table-column>
-          <el-table-column prop="endReason" label="结束原因" width="130" show-overflow-tooltip />
-          <el-table-column label="开始时间" width="160">
+          <el-table-column label="开始时间" width="158">
             <template #default="{ row }">{{ formatTime(row.startTime || row.createTime) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100" fixed="right">
+          <el-table-column label="结束时间" width="158">
+            <template #default="{ row }">{{ formatTime(row.endTime) }}</template>
+          </el-table-column>
+          <el-table-column label="时长" width="100">
+            <template #default="{ row }">{{ formatElapsed(row.durationSeconds) }}</template>
+          </el-table-column>
+          <el-table-column label="流量" width="96">
+            <template #default="{ row }">{{ formatSize(row.bytes) }}</template>
+          </el-table-column>
+          <el-table-column label="平均码率" width="104">
+            <template #default="{ row }">{{ formatBitrate(row.bitrateMbps) }}</template>
+          </el-table-column>
+          <el-table-column label="结束原因" min-width="150" show-overflow-tooltip>
+            <template #default="{ row }">{{ endReasonText(row.endReason) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="96" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" link type="primary" @click="openAudit(row)">审计</el-button>
+              <el-button size="small" link type="primary" @click="openAudit(row)">
+                审计{{ row.auditCount ? `(${row.auditCount})` : '' }}
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
         <el-pagination
           v-model:current-page="history.current"
-          :page-size="history.size"
+          v-model:page-size="history.size"
+          :page-sizes="[10, 20, 50]"
           :total="history.total"
-          layout="prev, pager, next"
+          layout="total, sizes, prev, pager, next"
           style="margin-top: 8px; justify-content: flex-end"
+          @size-change="reloadSessions"
           @current-change="loadSessions"
         />
       </el-card>
@@ -1525,6 +2103,32 @@ const inSession = computed(() => !!session.value)
         <el-tag size="small" :type="session.permission === 'operate' ? 'success' : 'warning'">
           {{ session.permission === 'operate' ? '可操作' : '只读' }}
         </el-tag>
+        <el-tag v-if="recording" size="small" type="danger" effect="dark" class="toolbar-rec">
+          ● REC{{ recordClock ? ` ${recordClock}` : '' }}
+        </el-tag>
+        <el-tag v-else-if="recordArmed" size="small" type="warning" effect="plain">待录制</el-tag>
+        <!-- 录屏只有桌面端有：浏览器端连按钮都不渲染，免得点了没反应 -->
+        <el-tooltip
+          v-if="recordAvailable"
+          effect="dark"
+          placement="bottom"
+          :content="recordArmed
+            ? '已排定，画面开启后自动开始录制'
+            : '把远端画面录成本地视频留档，保存目录在「设置 → 远程控制录屏审计」里改'"
+        >
+          <el-button size="small" :type="recording ? 'danger' : 'info'" plain @click="toggleRecording">
+            {{ recording ? '停止录制' : recordArmed ? '取消录制' : '开始录制' }}
+          </el-button>
+        </el-tooltip>
+        <!-- 手动停录后会话还在，这里能直接回看；会话自然结束时工作区已卸载，入口在那条通知上 -->
+        <el-tooltip
+          v-if="recordAvailable && lastRecordPath"
+          effect="dark"
+          placement="bottom"
+          content="在资源管理器里选中刚保存的录像"
+        >
+          <el-button size="small" type="primary" plain @click="openRecordPath()">打开录像</el-button>
+        </el-tooltip>
         <el-divider direction="vertical" />
         <el-button size="small" @click="screenOn ? stopScreen() : startScreen()">
           {{ screenOn ? '停止画面' : '开始画面' }}
@@ -1685,21 +2289,108 @@ const inSession = computed(() => !!session.value)
       </div>
     </div>
 
-    <!-- 审计抽屉 -->
-    <el-drawer v-model="audit.visible" title="会话审计记录" size="520px">
-      <el-table :data="audit.rows" size="small" empty-text="暂无记录">
-        <el-table-column prop="action" label="动作" width="130" />
-        <el-table-column prop="detail" label="详情" min-width="180" show-overflow-tooltip />
+    <!-- 审计抽屉：顶部概要头交代「这是哪一次会话」，下面才是逐条流水 -->
+    <el-drawer v-model="audit.visible" title="会话审计记录" size="720px">
+      <el-descriptions v-if="audit.summary" class="audit-summary" :column="2" size="small" border>
+        <el-descriptions-item label="设备">
+          {{ audit.summary.deviceName || audit.summary.deviceId }}
+        </el-descriptions-item>
+        <el-descriptions-item label="我的角色">
+          <el-tag size="small" :type="ROLE_TAG[audit.summary.role] || 'info'" effect="plain">
+            {{ roleText(audit.summary.role) }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="对端">{{ peerText(audit.summary) }}</el-descriptions-item>
+        <el-descriptions-item label="权限">
+          {{ audit.summary.permission === 'operate' ? '可操作' : '只读' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="开始">
+          {{ formatTime(audit.summary.startTime || audit.summary.createTime) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="结束">{{ formatTime(audit.summary.endTime) }}</el-descriptions-item>
+        <el-descriptions-item label="时长">
+          {{ formatElapsed(audit.summary.durationSeconds) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="流量 / 码率">
+          {{ formatSize(audit.summary.bytes) }} · {{ formatBitrate(audit.summary.bitrateMbps) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag size="small" :type="SESSION_STATUS_TAG[audit.summary.status] || 'info'">
+            {{ statusText(audit.summary.status) }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="结束原因">
+          {{ endReasonText(audit.summary.endReason) }}
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <div class="card-toolbar audit-toolbar">
+        <el-input
+          v-model="audit.action"
+          size="small"
+          clearable
+          placeholder="按动作过滤，如 exec、file-rm"
+          style="width: 200px"
+          @keyup.enter="reloadAudit"
+          @clear="reloadAudit"
+        />
+        <el-button size="small" type="primary" plain :loading="audit.loading" @click="reloadAudit">查询</el-button>
+        <el-button size="small" :loading="audit.exporting" @click="exportAuditCsv">导出 CSV</el-button>
+        <span class="audit-toolbar__hint">
+          共 {{ audit.total }} 条<span v-if="audit.action">（已过滤）</span>
+        </span>
+      </div>
+
+      <!-- row-key 是给展开行用的：auditRows 是 computed，每次重算都产生新对象，没有 key 就无法把展开状态对应回同一条记录 -->
+      <el-table v-loading="audit.loading" :data="auditRows" row-key="id" size="small" empty-text="暂无记录">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="audit-detail">
+              <template v-if="row.parsed.pairs.length">
+                <div v-for="(pair, i) in row.parsed.pairs" :key="i" class="audit-detail__row">
+                  <span class="audit-detail__key">{{ pair.key }}</span>
+                  <span class="audit-detail__value">{{ pair.value }}</span>
+                </div>
+              </template>
+              <pre v-else class="audit-detail__raw">{{ row.parsed.text || '（无详情）' }}</pre>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="时间" width="150">
           <template #default="{ row }">{{ formatTime(row.createTime) }}</template>
+        </el-table-column>
+        <el-table-column label="动作" width="124">
+          <template #default="{ row }">
+            <el-tag
+              size="small"
+              :type="actionTagType(row.action)"
+              :effect="actionTagType(row.action) === 'danger' ? 'dark' : 'light'"
+              :title="row.action"
+            >{{ actionText(row.action) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源" width="76">
+          <template #default="{ row }">{{ actorText(row.actor) }}</template>
+        </el-table-column>
+        <el-table-column label="详情" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            <template v-if="row.parsed.pairs.length">
+              <span v-for="(pair, i) in row.parsed.pairs" :key="i" class="audit-inline">
+                <b>{{ pair.key }}</b>{{ pair.value }}
+              </span>
+            </template>
+            <span v-else>{{ row.parsed.text || '-' }}</span>
+          </template>
         </el-table-column>
       </el-table>
       <el-pagination
         v-model:current-page="audit.current"
-        :page-size="20"
+        v-model:page-size="audit.size"
+        :page-sizes="[20, 50, 100]"
         :total="audit.total"
-        layout="prev, pager, next"
+        layout="total, sizes, prev, pager, next"
         style="margin-top: 8px; justify-content: flex-end"
+        @size-change="reloadAudit"
         @current-change="loadAudit"
       />
     </el-drawer>
@@ -1738,6 +2429,73 @@ const inSession = computed(() => !!session.value)
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.card-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 设备列分两行：主行是设备名，副行是机器指纹（认不出名字时的唯一线索） */
+.cell-main {
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-sub {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-summary {
+  margin-bottom: 12px;
+}
+.audit-toolbar {
+  margin-bottom: 8px;
+}
+.audit-toolbar__hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.audit-detail {
+  padding: 4px 12px 8px 48px;
+}
+.audit-detail__row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+.audit-detail__key {
+  flex: 0 0 88px;
+  color: var(--el-text-color-secondary);
+}
+.audit-detail__value {
+  flex: 1;
+  color: var(--el-text-color-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+/* 裸文本按原样等宽展示：exec 的 detail 就是命令行，换了字体就等于换了语义 */
+.audit-detail__raw {
+  margin: 0;
+  font-family: var(--el-font-family-mono, monospace);
+  font-size: 12px;
+  color: var(--el-text-color-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.audit-inline {
+  margin-right: 10px;
+}
+.audit-inline b {
+  margin-right: 3px;
+  font-weight: 500;
+  color: var(--el-text-color-secondary);
 }
 .local-code {
   display: flex;
@@ -1827,6 +2585,11 @@ const inSession = computed(() => !!session.value)
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+/* 录制计时：等宽数字，否则秒数每跳一下整个工具栏就抽一下 */
+.toolbar-rec {
+  font-family: Consolas, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 /* 实时流量：等宽字防数字跳动把布局挤得抽跳，色调走次要信息不抢画面 */
 .toolbar-traffic {

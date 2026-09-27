@@ -396,6 +396,7 @@ CREATE TABLE `im_remote_audit_log`
     `session_id`  BIGINT   NOT NULL COMMENT '所属远程会话 ID',
     `action`      VARCHAR(32) NOT NULL COMMENT '动作标识：session-start / session-end / file-rm / ps-kill / exec / power / input-blocked ...',
     `detail`      VARCHAR(1000)   DEFAULT NULL COMMENT '动作详情（路径、命令、拦截原因等），写入前截断到 1000 字符',
+    `actor`       VARCHAR(16)     DEFAULT NULL COMMENT '触发方：inviter 控制端 / invitee 被控端 Agent / system 服务端流程事件；加列前的历史记录为 NULL',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (`id`),

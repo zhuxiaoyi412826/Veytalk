@@ -5,6 +5,7 @@ const fs = require('fs')
 const { spawn, execFile } = require('child_process')
 const { setupLocalDb } = require('./localdb')
 const { setupDirectBridge, closeDirectLink } = require('./direct')
+const { setupRecorder, closeRecording } = require('./recorder')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -305,6 +306,7 @@ app.whenReady().then(() => {
   setupVideoCompress()
   setupLocalDb()
   setupDirect()
+  setupRecorder()
   setupAgentAutostart()
   createWindow()
 
@@ -318,6 +320,8 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // 直连 socket 先礼貌收掉，免得被控端干等一轮 ARQ 超时才判死
   closeDirectLink()
+  // 录制文件同步收口：关窗时渲染进程已经没了，没人再调 record-stop，fd 不收就丢尾巴
+  closeRecording('window-closed')
   if (process.platform !== 'darwin') {
     app.quit()
   }

@@ -21,7 +21,7 @@
               <div class="user-profile__nickname">
                 <span class="user-profile__nickname-text">{{ displayName }}</span>
                 <el-tag v-if="card.remark" size="small" effect="plain">已备注</el-tag>
-                <el-tag v-if="blocked" size="small" type="danger" effect="plain">我已拉黑</el-tag>
+                <el-tag v-if="blocked" size="small" type="danger" effect="plain">已在黑名单</el-tag>
                 <el-tag v-if="blockedByOther" size="small" type="warning" effect="plain">对方已拉黑我</el-tag>
               </div>
               <div class="user-profile__account">@{{ card.username }}</div>
@@ -95,7 +95,7 @@
                 :loading="acting === 'block'"
                 @click="toggleBlock"
               >
-                {{ blocked ? '取消拉黑' : '拉黑' }}
+                {{ blocked ? '移出黑名单' : '加入黑名单' }}
               </el-button>
               <el-button
                 type="danger"
@@ -374,11 +374,11 @@ async function toggleBlock() {
   const next = !blocked.value
   const tip = next
     ? '拉黑后对方发来的消息会被拦截；你仍可向对方发消息，发送后自动解除拉黑。确定拉黑？'
-    : '取消拉黑后双方可以正常收发消息。'
+    : '移出黑名单后双方可以正常收发消息。'
   try {
-    await ElMessageBox.confirm(tip, next ? '拉黑好友' : '取消拉黑', {
+    await ElMessageBox.confirm(tip, next ? '加入黑名单' : '移出黑名单', {
       type: 'warning',
-      confirmButtonText: next ? '拉黑' : '取消拉黑',
+      confirmButtonText: next ? '拉黑' : '移出',
       cancelButtonText: '取消'
     })
   } catch {
@@ -394,7 +394,7 @@ async function toggleBlock() {
     if (card.value) {
       card.value.blocked = next
     }
-    ElMessage.success(next ? '已拉黑' : '已取消拉黑')
+    ElMessage.success(next ? '已加入黑名单' : '已移出黑名单')
   } catch {
     // 提示已弹出
   } finally {

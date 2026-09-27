@@ -17,6 +17,9 @@ import {
 } from '@/utils/localdb'
 import { useAuthStore } from './auth'
 import { useSettingsStore } from './settings'
+import { useConversationStore } from './conversation'
+import { useFriendStore } from './friend'
+import { ElMessage } from 'element-plus'
 
 /**
  * 聊天消息：当前会话的消息列表、发送中的本地消息、历史分页游标与本地缓存。
@@ -120,6 +123,27 @@ function isNetworkError(error) {
 /** 把变化过的消息写进本地库（fire-and-forget：门面内部已兜住异常，不阻塞渲染） */
 function cacheMessages(conversationId, list) {
   dbUpsertMessages(conversationId, list)
+}
+
+/**
+ * 单聊发送成功后，把本地「我把对方拉黑了」的状态位跟着撤掉。
+ *
+ * 后端 validateSendRight 里的 unblockSilently 是静默生效的（不推帧），
+ * 本地不跟着改就会出现「消息都发出去了，右键菜单还写着移出黑名单」。
+ * 四个提交入口（send / resend / flushPending / forward）都要走这一句，
+ * 抽成函数而不是四处各写一遍，是为了避免以后只改了其中一个。
+ *
+ * 会话不在列表里（比如刚被删）时取不到 targetId，跳过即可，刷新后会自己对齐。
+ */
+function syncSilentUnblock(conversationId) {
+  const item = useConversationStore().find(conversationId)
+  if (!item || Number(item.type) !== 1 || !item.targetId) {
+    return
+  }
+  // 只在确实拉黑着的时候才提示，否则每条消息都会多一条无关的 toast
+  if (useFriendStore().applySilentUnblock(item.targetId)) {
+    ElMessage.info(`发送成功，已自动解除对「${item.name}」的拉黑`)
+  }
 }
 
 export const useChatStore = defineStore('chat', {
@@ -282,6 +306,7 @@ export const useChatStore = defineStore('chat', {
           quoteMsgId: quoteMsgId || undefined
         })
         this.appendMessage(conversationId, vo, true)
+        syncSilentUnblock(conversationId)
         return vo
       } catch (error) {
         this.markFailed(conversationId, id)
@@ -369,6 +394,7 @@ export const useChatStore = defineStore('chat', {
           try {
             const vo = await messageApi.sendMessage(payload)
             this.appendMessage(payload.conversationId, vo, true)
+            syncSilentUnblock(payload.conversationId)
             await dbRemovePending(payload.clientMsgId)
           } catch (error) {
             if (isNetworkError(error)) {
@@ -403,6 +429,7 @@ export const useChatStore = defineStore('chat', {
           quoteMsgId: message.quoteMsgId || undefined
         })
         this.appendMessage(conversationId, vo, true)
+        syncSilentUnblock(conversationId)
         // 手动重发成功就把离线队列里的同一条清掉（不在队列时删除也是空操作）
         dbRemovePending(message.clientMsgId)
         return vo
@@ -427,6 +454,8 @@ export const useChatStore = defineStore('chat', {
     async forward(conversationId, messageId) {
       const vo = await messageApi.forwardMessage({ conversationId, messageId })
       this.appendMessage(conversationId, vo, true)
+      // 转发同样过后端的发送校验，拉黑态会被顺带解除
+      syncSilentUnblock(conversationId)
       return vo
     },
 

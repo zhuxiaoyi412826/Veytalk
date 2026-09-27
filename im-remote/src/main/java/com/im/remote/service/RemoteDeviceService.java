@@ -6,6 +6,7 @@ import com.im.remote.mapper.RemoteDeviceMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -58,6 +59,21 @@ public class RemoteDeviceService {
         return deviceMapper.selectList(new LambdaQueryWrapper<RemoteDevice>()
                 .eq(RemoteDevice::getUserId, userId)
                 .orderByDesc(RemoteDevice::getLastOnlineTime));
+    }
+
+    /**
+     * 批量按设备标识取设备行，供会话历史列表补设备名。
+     *
+     * <p>只按 deviceId 过滤、不拼 userId 条件：会话里的设备归属被控方，而列表是
+     * 「我作为控制方或被控方」的混合视角，调用方拿到全量行后自己按 (userId, deviceId) 配对。
+     * 同一台机器换账号登录会留下多行，配对时以归属人为准。
+     */
+    public List<RemoteDevice> listByDeviceIds(Collection<String> deviceIds) {
+        if (deviceIds == null || deviceIds.isEmpty()) {
+            return List.of();
+        }
+        return deviceMapper.selectList(new LambdaQueryWrapper<RemoteDevice>()
+                .in(RemoteDevice::getDeviceId, deviceIds));
     }
 
     public void updateStatus(Long deviceId, int status) {

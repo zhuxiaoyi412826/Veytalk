@@ -128,21 +128,26 @@ public class FileOps {
         requireDanger("mkdir " + rawPath);
         Path path = checkPath(rawPath);
         Files.createDirectories(path);
+        client.sendAudit("file-mkdir", "path=" + path);
         return Map.of("path", path.toString());
     }
 
     public Map<String, Object> rename(String from, String to) throws IOException {
         requireDanger("rename " + from + " -> " + to);
         Files.move(checkPath(from), checkPath(to));
+        client.sendAudit("file-rename", "from=" + from + ", to=" + to);
         return Map.of("from", from, "to", to);
     }
 
     public Map<String, Object> remove(String rawPath) throws IOException {
         requireDanger("rm " + rawPath);
         Path path = checkPath(rawPath);
-        if (Files.isDirectory(path)) {
+        boolean dir = Files.isDirectory(path);
+        long entries = 1;
+        if (dir) {
             try (var stream = Files.walk(path)) {
                 List<Path> all = stream.sorted(Comparator.reverseOrder()).toList();
+                entries = all.size();
                 for (Path p : all) {
                     Files.deleteIfExists(p);
                 }
@@ -150,6 +155,8 @@ public class FileOps {
         } else {
             Files.delete(path);
         }
+        // 递归删除不可逆，条目数一并上报：审计里要能看出「删了一个文件」还是「抹掉了一整棵目录树」
+        client.sendAudit("file-rm", "path=" + path + ", dir=" + dir + ", entries=" + entries);
         return Map.of("path", path.toString());
     }
 

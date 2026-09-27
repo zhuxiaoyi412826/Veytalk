@@ -211,7 +211,62 @@
         </div>
       </section>
 
-      <!-- ==================== 四、本地缓存 ==================== -->
+      <!-- ==================== 四、远程控制录屏审计 ==================== -->
+      <section class="settings__card">
+        <div class="settings__card-title">远程控制录屏审计</div>
+        <div class="settings__notice">
+          仅桌面端提供：录屏要把视频写进本机指定目录，浏览器既没有这个权限，也不应在用户不知情下落地录像文件，
+          因此 Web 端整体关闭该功能。录制范围只有远控画面本身，不含本端的工具栏与聊天窗口；
+          录制前请确认已取得被控方同意。
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>
+              会话录屏
+              <el-tag v-if="!recordAvailable" size="small" type="info" effect="plain">需桌面版</el-tag>
+            </span>
+            <span class="settings__desc">开启后每次发起远程控制都会录像留档，会话结束自动落盘（约 15 MB/分钟）</span>
+          </div>
+          <el-switch v-model="remoteRecordEnabled" :disabled="!recordAvailable" />
+        </div>
+
+        <div class="settings__row settings__row--stack">
+          <div class="settings__label">
+            <span>存储位置</span>
+            <span class="settings__desc">{{ recordDirText }}</span>
+          </div>
+          <div class="settings__bg">
+            <el-input
+              class="settings__dir"
+              :model-value="remoteRecordDir"
+              :placeholder="recordDirPlaceholder"
+              readonly
+              :disabled="!recordAvailable"
+            />
+            <el-button :icon="FolderOpened" :disabled="!recordAvailable" @click="onPickRecordDir">选择目录</el-button>
+            <el-button :disabled="!recordAvailable" @click="onOpenRecordDir">打开目录</el-button>
+            <el-button
+              link
+              type="primary"
+              :disabled="!recordAvailable || !remoteRecordDir"
+              @click="onResetRecordDir"
+            >
+              恢复默认
+            </el-button>
+          </div>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>附带操作审计</span>
+            <span class="settings__desc">在录像旁写一份同名 .json，记录会话双方、时长与本次会话的全部操作审计事件</span>
+          </div>
+          <el-switch v-model="remoteRecordAudit" :disabled="!recordAvailable" />
+        </div>
+      </section>
+
+      <!-- ==================== 五、本地缓存 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">本地缓存</div>
         <div class="settings__notice">
@@ -267,7 +322,7 @@
         </div>
       </section>
 
-      <!-- ==================== 五、高级设置 ==================== -->
+      <!-- ==================== 六、高级设置 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">高级设置</div>
 
@@ -335,7 +390,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Picture, Refresh, RefreshLeft, User } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Picture, Refresh, RefreshLeft, User } from '@element-plus/icons-vue'
 import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
@@ -343,6 +398,7 @@ import { dbStats, dbClearAllMessages, dbExportAll, localDbEnabled } from '@/util
 import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
 import { clearMediaCache } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
+import { fetchDefaultRecordDir, openRecordDir, pickRecordDir, recordSupported } from '@/utils/recorder'
 import { fetchSensitiveFilter, setSensitiveFilter } from '@/api/message'
 
 defineOptions({ name: 'Settings' })
@@ -388,7 +444,66 @@ const previewNoDownload = setting('previewNoDownload')
 const shareMultiDevice = setting('shareMultiDevice')
 const mediaCacheEnabled = setting('mediaCacheEnabled')
 const mediaCacheMaxMb = setting('mediaCacheMaxMb')
+const remoteRecordEnabled = setting('remoteRecordEnabled')
+const remoteRecordDir = setting('remoteRecordDir')
+const remoteRecordAudit = setting('remoteRecordAudit')
 const debugLog = setting('debugLog')
+
+/* ------------------------------ 远程控制录屏审计（仅桌面端） ------------------------------ */
+
+// 运行环境不会中途变，算一次就够了；浏览器端拿不到主进程录制桥，
+// 控件全部置灰并标「需桌面版」，而不是直接隐藏——用户能看到能力存在与为何用不了
+const recordAvailable = recordSupported()
+const recordDefaultDir = ref('')
+
+const recordDirPlaceholder = computed(() =>
+  recordDefaultDir.value ? `默认：${recordDefaultDir.value}` : '默认：系统「视频」\\IM远程录屏'
+)
+
+const recordDirText = computed(() => {
+  if (!recordAvailable) {
+    return '浏览器端不提供录屏，此项不可用'
+  }
+  return remoteRecordDir.value
+    ? '录像与审计 JSON 都写到这里；正在进行的会话不受影响，下次会话生效'
+    : '未自定义，使用默认目录（首次录制时自动创建）'
+})
+
+onMounted(async () => {
+  if (!recordAvailable) {
+    return
+  }
+  try {
+    recordDefaultDir.value = await fetchDefaultRecordDir()
+  } catch {
+    // 拿不到默认目录只影响占位提示，不值得为此报错
+  }
+})
+
+async function onPickRecordDir() {
+  try {
+    const picked = await pickRecordDir(remoteRecordDir.value || recordDefaultDir.value)
+    if (picked) {
+      settings.update({ remoteRecordDir: picked })
+      ElMessage.success('录制目录已更新，下次会话生效')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '选择目录失败')
+  }
+}
+
+/** 清空自定义值即回到默认目录：存一个空串比存一份重复的默认路径更好维护 */
+function onResetRecordDir() {
+  settings.update({ remoteRecordDir: '' })
+}
+
+async function onOpenRecordDir() {
+  try {
+    await openRecordDir('', remoteRecordDir.value || recordDefaultDir.value)
+  } catch (e) {
+    ElMessage.error(e.message || '打开目录失败')
+  }
+}
 
 /* ------------------------------ 敏感词过滤开关（服务端全局） ------------------------------ */
 
@@ -773,6 +888,12 @@ async function onReset() {
   flex: none;
 }
 
+/* 录像目录：路径往往很长，占满一行剩余宽度才看得全 */
+.settings__dir {
+  flex: 1;
+  min-width: 220px;
+}
+
 .settings__footer {
   display: flex;
   justify-content: center;
@@ -789,6 +910,10 @@ async function onReset() {
   .settings__slider,
   .settings__disabled {
     width: 100%;
+  }
+
+  .settings__dir {
+    min-width: 0;
   }
 }
 </style>

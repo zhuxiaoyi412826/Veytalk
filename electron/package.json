@@ -22,6 +22,8 @@
       "main.js",
       "preload.js",
       "localdb.js",
+      "direct.js",
+      "recorder.js",
       "dist/**/*"
     ],
     "extraResources": [
