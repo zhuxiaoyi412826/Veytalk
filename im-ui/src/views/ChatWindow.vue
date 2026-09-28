@@ -74,7 +74,14 @@
 
     <!-- ==================== 消息区 ==================== -->
     <div class="chat-window__main">
-    <div ref="scrollRef" class="chat-window__body im-scroll" @scroll.passive="onScroll">
+    <div
+      ref="scrollRef"
+      class="chat-window__body im-scroll"
+      @scroll.passive="onScroll"
+      @wheel.passive="onUserScrollIntent"
+      @touchmove.passive="onUserScrollIntent"
+      @mousedown="onUserScrollIntent"
+    >
       <!-- 内容层：给 ResizeObserver 监听高度变化，图片加载/气泡重排后才能补钉到底部 -->
       <div ref="contentRef" class="chat-window__content">
         <div v-if="hasMore" class="chat-window__more">
@@ -481,6 +488,14 @@ function isNearBottom() {
 
 /** 平滑滚动动画期间的豁免窗口：不让锚底观察器用瞬时滚动打断动画 */
 let animatingUntil = 0
+/**
+ * 本次钉底的豁免窗口：窗口内的 scroll 事件不重算 nearBottom。
+ *
+ * 没有这个窗口时，自己发起的钉底会被自己的中间位置拆台：平滑滚动途中的 scroll
+ * 事件位置一定不贴底，onScroll 一重算就把 nearBottom 判成 false，后面的补钉与观察器
+ * 全部失效——表现就是「向上滚了一点，最后一条仍然被输入框挡住半截」。
+ */
+let pinOverrideUntil = 0
 /** 前插历史消息期间的豁免窗口：补偿 scrollTop 后不应被钉回底部 */
 let pinSuspendUntil = 0
 let contentObserver = null
@@ -500,17 +515,26 @@ function scrollToBottom(smooth = false) {
     }
     nearBottom = true
     showJump.value = false
+    pinOverrideUntil = Date.now() + (smooth ? 700 : 300)
     if (smooth) {
       animatingUntil = Date.now() + 400
+      // 动画的目标是发起那一刻的 scrollHeight；途中图片加载完、输入区塌陷都会让真正的
+      // 底部继续往下移，所以动画结束后按最新高度再钉一次
+      setTimeout(() => {
+        if (nearBottom) {
+          applyScrollToBottom('auto')
+        }
+      }, 430)
+    } else {
+      // nextTick 时拿到的 scrollHeight 还是「半成品高度」：气泡与图片在其后才完成布局，
+      // 双 rAF 后按最新高度再补一次。自己发的消息走这一档而不是平滑滚动：
+      // 用户刚按下发送，一定要完整看到它，不能等 400ms 动画，也不能差一截
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (nearBottom) {
+          applyScrollToBottom('auto')
+        }
+      }))
     }
-    applyScrollToBottom(smooth ? 'smooth' : 'auto')
-    // nextTick 时拿到的 scrollHeight 还是「半成品高度」：气泡/图片在其后才完成布局，
-    // 短消息不滚动、平滑滚动差一截够不到底都是这个原因；双 rAF 后按最新高度再补一次
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (nearBottom) {
-        applyScrollToBottom('auto')
-      }
-    }))
   })
 }
 
@@ -518,8 +542,15 @@ function jumpToBottom() {
   scrollToBottom(true)
 }
 
+/** 用户自己的滚动动作：立刻取消钉底豁免，不让自动滚动跟他抢位置 */
+function onUserScrollIntent() {
+  pinOverrideUntil = 0
+}
+
 function onScroll() {
-  nearBottom = isNearBottom()
+  // 豁免窗口内不重算：那些位置是自己滚出来的，不代表用户意图；窗口最多几百毫秒，
+  // 期间用户真动了滚轮 / 拖了滚动条会走 onUserScrollIntent 把窗口清掉
+  nearBottom = Date.now() < pinOverrideUntil ? true : isNearBottom()
   if (nearBottom) {
     showJump.value = false
   }
@@ -570,9 +601,9 @@ watch(
       return
     }
     const last = messages.value[length - 1]
-    // 自己发的消息无条件滚到底：用户刚按下发送，一定要看到它出去了
+    // 自己发的消息无条件、瞬时滚到底：用户刚按下发送，一定要完整看到它出去了
     if (last && last.self) {
-      scrollToBottom(true)
+      scrollToBottom()
       return
     }
     if (nearBottom) {
@@ -1816,14 +1847,19 @@ onMounted(async () => {
   // 内容高度变化（图片加载完成、气泡重排）且当前贴着底时，跟随钉回底部：
   // 首次进会话时列表渲染是分批完成的，只在 nextTick 滚一次会落在中途，
   // 表现为「重进同一会话却从头显示」
-  if (contentRef.value && typeof ResizeObserver !== 'undefined') {
+  if (contentRef.value && scrollRef.value && typeof ResizeObserver !== 'undefined') {
     contentObserver = new ResizeObserver(() => {
       if (!nearBottom || Date.now() < animatingUntil || Date.now() < pinSuspendUntil) {
         return
       }
       applyScrollToBottom('auto')
     })
+    // 两个都观察：contentRef 长高是「内容变了」，scrollRef 变高是「视口变了」。
+    // 后者专属于发送这一步：回复横幅与附件托盘就在 footer 里、发送时同时被清空，
+    // footer 缩下去、消息区被撑高，内容高度一点没变——只观察 contentRef 就漏掉这种，
+    // 滚到底的判定仍是「旧视口下的底部」，最后一条就被输入框挡掉一截
     contentObserver.observe(contentRef.value)
+    contentObserver.observe(scrollRef.value)
   }
   await loadInitial()
 })

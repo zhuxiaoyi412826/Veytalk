@@ -43,14 +43,12 @@ public class WebLogAspect {
     private static final int MAX_RESULT_LENGTH = 1000;
 
     /**
-     * 敏感字段名关键词：字段名转小写后包含任一关键词，值就遮成 {@link #MASKED_VALUE}。
+     * 敏感字段名关键词，值遮成 {@link #MASKED_VALUE}。
      *
-     * <p>用子串匹配而不是精确匹配，是为了覆盖 oldPassword / newPassword / accessToken
-     * 这类变体，新增字段时也不用记得来改这里。
+     * <p>定义在 {@link ImConstants#SENSITIVE_KEY_WORDS}：慢 SQL 拦截器也要遮同一批凭证，
+     * 两处各留一份迟早会漂移。
      */
-    private static final List<String> SENSITIVE_KEY_WORDS = List.of(
-            "password", "passwd", "token", "secret", "captcha", "smscode",
-            "verifycode", "credential", "ticket", "debugcode");
+    private static final List<String> SENSITIVE_KEY_WORDS = ImConstants.SENSITIVE_KEY_WORDS;
 
     private static final String MASKED_VALUE = "***";
 

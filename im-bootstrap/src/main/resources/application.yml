@@ -437,6 +437,25 @@ im:
     max-message-chars: 4000
     # 目录重扫最小间隔（秒）
     rescan-interval-seconds: 30
+    # 监考：面试页的切屏/粘贴检测与处置（im-ai 模块 InterviewAuditService）。
+    # 前端只上报「发生了什么」，算不算违规、是否强制结束全在这里定。
+    proctor:
+      enabled: true
+      # 违规累计达此数就强制结束面试；0 或负数 = 只留痕不中断（练习模式）
+      violation-limit: 8
+      # 关掉后只记录不拦截，用来先观察阈值定得合不合适
+      enforce-limit: true
+      # 以下开关决定「哪类动作计入违规」，也决定前端要不要监听它
+      count-blur: true
+      count-visibility-hidden: true
+      count-paste: true
+      count-fullscreen-exit: true
+      # 复制/剪切/右键大多是无害操作（拖动文字、调输入法），默认只留痕不计违规
+      count-copy: false
+      count-cut: false
+      count-contextmenu: false
+      max-events-per-batch: 100
+      max-detail-chars: 500
     # 全网检索：消息搜索框（搜索全部会话/网络）里「网络」分组的数据源。
     # 实现是抓取结果页 HTML 再解析，入口改版会拿不到结果；所有失败都只让
     # 网络分组空白，不影响本地消息检索，所以这里不需要开关以外的降级手段。
@@ -550,13 +569,35 @@ im:
       # 直连握手尝试预算（毫秒）：超时即判该档不可用，落回下一档，不反复重试
       handshake-timeout-ms: 3000
 
+  # --------------------------------------------------------------------------
+  # 日志落地：目录、保留天数、体积护栏与慢 SQL 阈值
+  # 格式与滚动策略在 im-common 的 logback-spring.xml，它按属性名直接读这几个 key
+  # （logback 初始化早于 Spring 容器，拿不到 ImProperties 实例），默认值与该类和
+  # logback 里的 defaultValue 三处必须一致。
+  # --------------------------------------------------------------------------
+  log:
+    # 日志根目录，Windows 与 Linux 都认这种正斜杠写法。目录不存在时 logback 会自建，
+    # 但父目录不可写时它只打一条 status 错误、不会让启动失败——日志静默丢失比启动失败
+    # 更难发现，部署后记得去这个目录确认文件确实生成了。
+    home: ${IM_LOG_HOME:D:/rizi1/IM}
+    # 单条语句执行超过这个耗时（毫秒）就进 <home>/SQL/ 目录；0 或负数表示关掉
+    slow-sql-millis: 100
+    # 单个文件到这个体积就滚下一个序号，防止单日日志把磁盘写满
+    max-file-size: 50MB
+    # 普通档保留天数
+    max-history: 30
+    # 单个 appender 的归档体积上限，天数未到期但体积超了也会删最旧的
+    total-size-cap: 5GB
+    # 错误档留更久：量最小、复盘时最想翻
+    error-max-history: 60
+
 # ==============================================================================
-# 日志
-# 具体格式与滚动策略在 im-common 的 logback-spring.xml 里，
-# 这里只提供它通过 <springProperty> 读取的两个值。
+# 日志级别
+# 落盘位置与滚动策略在上面 im.log 以及 im-common 的 logback-spring.xml 里，
+# 这里只管级别。logging.file.path 已经不再参与：自定义配置里没有读它。
 # ==============================================================================
 logging:
-  file:
-    path: ${LOG_PATH:logs}
   level:
+    # root 钉在 INFO：抬到 DEBUG 会把 Tomcat / Netty / Spring 的内部调试日志一并放进来，
+    # 刷屏到看不出自己的日志。本项目的 DEBUG 由 dev profile 单独打开（com.im: debug）。
     root: info

@@ -24,6 +24,7 @@ public class ImProperties {
     private Captcha captcha = new Captcha();
     private RateLimiting rateLimit = new RateLimiting();
     private Cache cache = new Cache();
+    private Log log = new Log();
 
     @Data
     public static class Jwt {
@@ -261,5 +262,35 @@ public class ImProperties {
         private long l2TtlSeconds = 1800;
         /** 空值哨兵在 L2 的过期秒数：防缓存穿透，又不至于让新建数据长期隐身 */
         private long nullTtlSeconds = 60;
+    }
+
+    /**
+     * 日志落地配置。
+     *
+     * <p>注意读取路径不经过这个类：logback 初始化早于 Spring 容器，它只能按属性名
+     * 用 {@code <springProperty>} 从 Environment 里取（见 im-common 的 logback-spring.xml）。
+     * 这里定义一份是把 key 和默认值写进类型系统，同时给 {@code SlowSqlInterceptor}
+     * 提供阈值；两边默认值必须一致，改一处就得改两处。
+     *
+     * <p>体积类字段用 {@code String} 而不是像 {@link DataSize} 那样转成类型：这些字符串要直接交给
+     * logback 解析（它认 {@code 50MB} / {@code 5GB} 这种写法），中间转一道单位对象只会多出一种表达形式。
+     */
+    @Data
+    public static class Log {
+        /**
+         * 日志根目录。子目录结构（DEBUG.log / info-yyyy-MM-dd.N.log / SQL/）由 logback 定，
+         * 这里只能改根。写相对路径也行，但生产机器上的工作目录不可控，绝对路径更保险。
+         */
+        private String home = "D:/rizi1/IM";
+        /** 单条语句超过这个耗时才记为慢 SQL（毫秒）；<=0 表示关掉拦截器 */
+        private long slowSqlMillis = 100;
+        /** 单个日志文件的体积上限，到了就滚下一个序号，防单日日志过大占满磁盘 */
+        private String maxFileSize = "50MB";
+        /** 普通档保留天数 */
+        private int maxHistory = 30;
+        /** 单个 appender 的归档总体积上限，天数没到期但体积超了也会删最旧的 */
+        private String totalSizeCap = "5GB";
+        /** 错误档单独留更久：出事时最想翻的就是历史错误，而它的量级最小 */
+        private int errorMaxHistory = 60;
     }
 }

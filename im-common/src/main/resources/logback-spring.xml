@@ -5,6 +5,26 @@
   放在 im-common 的 classpath 根下，任何依赖 common 的模块（最终由 im-bootstrap 打包）都会自动生效。
   pattern 中的 %X{traceId} 由 TraceIdFilter 写入，%X{userId} 由 WebLogAspect / SecurityUtil 写入，
   两者缺失时输出 '-'，避免出现空白列影响肉眼对齐。
+
+  ===================== 落地布局（全部在 ${LOG_HOME} 下，默认 D:/rizi1/IM）=====================
+
+  DEBUG.log                    与控制台内容完全一致的一份镜像；启动时被清空（只装本次运行）
+  info.log                     只有 INFO
+  warn.log                     只有 WARN
+  error.log                    只有 ERROR
+  SQL/slow-sql.log             只有慢 SQL（执行耗时 > im.log.slow-sql-millis，默认 100ms）
+
+  当天写入的文件名不带日期（上面这五个就是你在目录里直接看到的那几个），跨天后旧内容
+  才滚成带日期的归档：info-yyyy-MM-dd.N.log / warn-… / error-… / SQL/slow-sql-…，
+  活动文件同时被重新创建为空。
+
+  级别隔离用 LevelFilter 且 onMismatch=DENY，不是 ThresholdFilter：后者是「及以上」，
+  那样 error 会同时出现在 warn 和 error 三个文件里，就失去分档的意义了。所以每条日志
+  最多落两个文件——DEBUG.log（镜像，便于按时间线通读）+ 它那一级自己的文件，级别之间不交叉。
+
+  日期文件名带 .N 序号是 maxFileSize 的硬性要求：SizeAndTimeBasedRollingPolicy 的
+  fileNamePattern 必须含 %i，否则单日体积没有护栏，一次异常刷屏就能把磁盘写满。
+  代价是归档名多了个序号，这是「防止单日日志过大」这条要求换来的，值得。
 -->
 <!--
   scan 刻意关闭：交付物是单个可执行 jar，本文件位于 BOOT-INF/lib/im-common-1.0.0.jar 内部，
@@ -25,15 +45,30 @@
     -->
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
-    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="im-server"/>
-    <springProperty scope="context" name="LOG_PATH" source="logging.file.path" defaultValue="logs"/>
+    <!--
+      目录与滚动参数从 Environment 取。logback 的初始化早于 Spring 容器，拿不到 ImProperties
+      实例，只能按属性名约定读——im.log.* 这几个 key 的真正定义处是 ImProperties.Log。
+    -->
+    <springProperty scope="context" name="LOG_HOME" source="im.log.home" defaultValue="D:/rizi1/IM"/>
+    <springProperty scope="context" name="MAX_FILE_SIZE" source="im.log.max-file-size" defaultValue="50MB"/>
+    <springProperty scope="context" name="MAX_HISTORY" source="im.log.max-history" defaultValue="30"/>
+    <springProperty scope="context" name="TOTAL_SIZE_CAP" source="im.log.total-size-cap" defaultValue="5GB"/>
+    <!-- error 档单独留更久：出事时最想翻的就是历史错误，而它的量级最小 -->
+    <springProperty scope="context" name="ERROR_MAX_HISTORY" source="im.log.error-max-history" defaultValue="60"/>
 
     <property name="CONSOLE_PATTERN"
               value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%15.15thread]){magenta} %clr([%X{traceId:--}]){cyan} %clr([uid:%X{userId:--}]){blue} %clr(%-40.40logger{39}){faint} %clr(:){faint} %msg%n"/>
     <property name="FILE_PATTERN"
               value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%15.15thread] [%X{traceId:--}] [uid:%X{userId:--}] %-40.40logger{39} : %msg%n"/>
 
-    <!-- 控制台 -->
+    <!-- ==================== 控制台 ==================== -->
+    <!--
+      「控制台输出 DEBUG」这件事不是靠 appender 的 filter 实现的：logback 先按 logger 级别决定是否
+      生成事件，appender 的 filter 只在已生成的事件上做减法。root 保持 INFO、由 dev profile 把
+      com.im 抬到 DEBUG，效果就是「本项目的 DEBUG（含 MyBatis 打出的完整 SQL）全进控制台，
+      三方库仍然安静」。把 root 直接调成 DEBUG 会把 Tomcat/Netty/Spring 的 DEBUG 一并放进来，
+      刷屏到看不出自己的日志，反而更难排障。
+    -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>${CONSOLE_PATTERN}</pattern>
@@ -41,14 +76,27 @@
         </encoder>
     </appender>
 
-    <!-- 全量文件，按天 + 单文件 50MB 滚动，保留 30 天 -->
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${LOG_PATH}/${APP_NAME}.log</file>
+    <!-- ==================== DEBUG.log：控制台镜像，重启清空 ==================== -->
+    <!--
+      class 用的不是 logback 自带的 RollingFileAppender，而是本项目补的一个子类：
+      原生实现会无条件把 append 改回 true（启动时那条
+      "Append mode is mandatory for RollingFileAppender. Defaulting to append=true."
+      就是它打的，与有没有写 <file> 无关），<append>false</append> 单独写完全不起作用。
+      换非滚动的 FileAppender 确实认 append=false，但这份镜像恰恰是体积最大的一份，
+      不能没有 maxFileSize / maxHistory / totalSizeCap 三道磁盘护栏。两边都要只能补代码，
+      见 com.im.common.log.TruncatingRollingFileAppender。
+    -->
+    <appender name="DEBUG_FILE" class="com.im.common.log.TruncatingRollingFileAppender">
+        <!-- append=false 在这里的语义是「本文件只装本次运行的内容」：子类启动时先删旧文件 -->
+        <file>${LOG_HOME}/DEBUG.log</file>
+        <append>false</append>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_PATH}/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>50MB</maxFileSize>
-            <maxHistory>30</maxHistory>
-            <totalSizeCap>5GB</totalSizeCap>
+            <fileNamePattern>${LOG_HOME}/DEBUG-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <!-- 只在滚动时删过期文件；开启动就清一次，避免「低频重启的机器永远攒着不滚」-->
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
         </rollingPolicy>
         <encoder>
             <pattern>${FILE_PATTERN}</pattern>
@@ -56,16 +104,26 @@
         </encoder>
     </appender>
 
-    <!-- WARN 及以上单独归档，便于快速定位问题 -->
-    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${LOG_PATH}/${APP_NAME}-error.log</file>
-        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
-            <level>WARN</level>
+    <!-- ==================== info / warn / error：按级严格隔离，按天滚动 ==================== -->
+    <!--
+      活动文件要写 <file>：当天落盘的文件名就是固定的 info.log / warn.log / error.log，
+      不随日期变；跨天（或单日超 maxFileSize）时旧内容才滚成 info-yyyy-MM-dd.N.log。
+      好处是看日志不用先查今天叫什么名字，tail -f 的路径永远是固定的那一个。
+      这三个不压 .gz：分档之后单档体积可控，归档留着纯文本方便直接翻。
+    -->
+    <appender name="INFO_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/info.log</file>
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>INFO</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
         </filter>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_PATH}/${APP_NAME}-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>50MB</maxFileSize>
-            <maxHistory>60</maxHistory>
+            <fileNamePattern>${LOG_HOME}/info-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
         </rollingPolicy>
         <encoder>
             <pattern>${FILE_PATTERN}</pattern>
@@ -73,22 +131,126 @@
         </encoder>
     </appender>
 
-    <!-- 异步包装，避免磁盘 IO 阻塞业务线程 -->
-    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
-        <queueSize>1024</queueSize>
-        <discardingThreshold>0</discardingThreshold>
-        <neverBlock>true</neverBlock>
-        <appender-ref ref="FILE"/>
+    <appender name="WARN_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/warn.log</file>
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>WARN</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/warn-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
     </appender>
 
-    <appender name="ASYNC_ERROR_FILE" class="ch.qos.logback.classic.AsyncAppender">
-        <queueSize>512</queueSize>
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/error.log</file>
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>ERROR</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/error-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <!-- 错误档留更久，但同样有 totalSizeCap 兜底，不会因为「留 60 天」就把盘占满 -->
+            <maxHistory>${ERROR_MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== SQL/slow-sql-*.log：慢 SQL 单独一档 ==================== -->
+    <!--
+      这份只由 com.im.slowsql 这一个 logger 写入（见下方 additivity="false"），
+      所以不加 LevelFilter：它本来就是独占通道，加过滤反而挡住以后改级别。
+      内容是 SQL 文本与真实参数值，可能含手机号等个人信息——目录权限要按敏感数据对待。
+
+      与 info/warn/error 同规则：写 <file>，当天固定叫 SQL/slow-sql.log，跨天才滚成
+      slow-sql-yyyy-MM-dd.N.log。不压 .gz 是为了跟其他三档一致，也因为慢 SQL 体量本来就小
+      （一次启动几千字节），不值得为省磁盘上一份未验证的配置。
+      DEBUG.log 仍压 .gz：它是体积最大的一份，只有归档需要压缩。
+    -->
+    <appender name="SQL_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/SQL/slow-sql.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/SQL/slow-sql-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 异步包装 ==================== -->
+    <!--
+      discardingThreshold=0 关掉 AsyncAppender「队列剩 20% 时先丢 INFO/DEBUG/WARN」的默认行为，
+      否则最容易丢的恰恰是想看的那些。
+      neverBlock 分两类取舍：
+        · DEBUG/INFO/控制台（量大、可容忍缺失）→ true，队列满就直接丢，绝不让业务线程陪着等磁盘；
+        · WARN/ERROR/慢SQL（量少、事后追责要用）→ false，满了宁可阻塞一下，也不能把故障现场丢掉。
+      includeCallerData 保持默认 false：开它等于每次入队都抓一次栈，而 pattern 里并没有
+      %class/%line/%method，纯属白付开销。
+    -->
+    <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>4096</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="CONSOLE"/>
+    </appender>
+
+    <appender name="ASYNC_DEBUG" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>2048</queueSize>
         <discardingThreshold>0</discardingThreshold>
         <neverBlock>true</neverBlock>
+        <appender-ref ref="DEBUG_FILE"/>
+    </appender>
+
+    <appender name="ASYNC_INFO" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>2048</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="INFO_FILE"/>
+    </appender>
+
+    <appender name="ASYNC_WARN" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="WARN_FILE"/>
+    </appender>
+
+    <appender name="ASYNC_ERROR" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
         <appender-ref ref="ERROR_FILE"/>
     </appender>
 
-    <!-- 三方组件降噪 -->
+    <appender name="ASYNC_SQL" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="SQL_FILE"/>
+    </appender>
+
+    <!-- 三方组件降噪：把 root 抬到 DEBUG 时这些仍然钉在 INFO -->
     <logger name="org.springframework" level="INFO"/>
     <logger name="org.apache.ibatis" level="INFO"/>
     <logger name="com.baomidou.mybatisplus" level="INFO"/>
@@ -98,7 +260,32 @@
     <logger name="okhttp3" level="INFO"/>
     <logger name="org.springdoc" level="INFO"/>
 
-    <!-- 开发环境打开本项目 DEBUG，WebLogAspect 会输出出入参明细与 SQL -->
+    <!--
+      慢 SQL 专用通道。additivity=false 是关键：不设的话事件会沿 logger 树继续向 root 传播，
+      同一条慢 SQL 就会既进 SQL 文件、又进 DEBUG.log / warn 文件，等于重复打印三遍。
+      级别钉在 WARN——拦截器只用 warn 打，低于这个值就直接短路掉格式化开销。
+      两条分支都只挂 ASYNC_SQL，区别是 dev 额外进控制台：本地联调时不想为了看一条慢 SQL 去开文件；
+      生产不进控制台，是因为控制台往往被 systemd/docker 收走再打一份，等于多一个副本落地。
+    -->
+    <springProfile name="dev">
+        <logger name="com.im.slowsql" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_SQL"/>
+            <appender-ref ref="ASYNC_CONSOLE"/>
+        </logger>
+    </springProfile>
+    <springProfile name="!dev">
+        <logger name="com.im.slowsql" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_SQL"/>
+        </logger>
+    </springProfile>
+
+    <!--
+      本项目级别：dev 打开 DEBUG（WebLogAspect 的出入参明细与 MyBatis 的完整 SQL 都在这一级），
+      非 dev 收在 INFO。注意生产收着不只是降噪：WebLogAspect 在 DEBUG 下会把请求体与响应体
+      整体落日志，聊天消息正文、手机号都在里面，那是隐私数据。
+      另外 application-*.yml 里的 logging.level.com.im 会在容器启动后覆盖这里的设置，
+      两处要一起改，改这里不生效时先去看 yml。
+    -->
     <springProfile name="dev">
         <logger name="com.im" level="DEBUG"/>
     </springProfile>
@@ -107,9 +294,11 @@
     </springProfile>
 
     <root level="INFO">
-        <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="ASYNC_FILE"/>
-        <appender-ref ref="ASYNC_ERROR_FILE"/>
+        <appender-ref ref="ASYNC_CONSOLE"/>
+        <appender-ref ref="ASYNC_DEBUG"/>
+        <appender-ref ref="ASYNC_INFO"/>
+        <appender-ref ref="ASYNC_WARN"/>
+        <appender-ref ref="ASYNC_ERROR"/>
     </root>
 
 </configuration>

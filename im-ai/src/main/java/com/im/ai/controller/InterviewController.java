@@ -2,6 +2,7 @@ package com.im.ai.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.im.ai.dto.req.InterviewChatRequest;
+import com.im.ai.service.InterviewAuditService;
 import com.im.ai.service.InterviewService;
 import com.im.common.api.Result;
 import com.im.common.security.ratelimit.RateLimit;
@@ -38,6 +39,7 @@ import java.util.Map;
 public class InterviewController {
 
     private final InterviewService interviewService;
+    private final InterviewAuditService auditService;
 
     @Operation(summary = "面试对话（SSE 流式）",
             description = "请求体携带完整对话历史（空数组=开始新面试）；响应为 text/event-stream，"
@@ -52,9 +54,14 @@ public class InterviewController {
     }
 
     @Operation(summary = "面试官状态",
-            description = "返回知识库目录、文件数、片段数与模型配置概况，前端状态条展示用")
+            description = "返回知识库目录、文件数、片段数与模型配置概况，前端状态条展示用；"
+                    + "另外附带 proctor 监考策略，面试页据此决定挂哪些监听、阈值多少")
     @GetMapping("/status")
     public Result<Map<String, Object>> status() {
-        return Result.ok(interviewService.status());
+        Map<String, Object> status = interviewService.status();
+        // 监考策略合进状态接口而不是新开一个：前端本来就要在 onMounted 拉一次状态，
+        // 分两个请求就会多一种「状态拿到了、策略还没到」的中间态
+        status.put("proctor", auditService.proctorView());
+        return Result.ok(status);
     }
 }

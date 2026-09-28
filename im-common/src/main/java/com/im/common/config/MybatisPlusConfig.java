@@ -7,6 +7,8 @@ import com.baomidou.mybatisplus.extension.plugins.inner.BlockAttackInnerIntercep
 import com.baomidou.mybatisplus.extension.plugins.inner.OptimisticLockerInnerInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
 import com.baomidou.mybatisplus.extension.handlers.Jackson3TypeHandler;
+import com.im.common.mybatis.SlowSqlInterceptor;
+import org.apache.ibatis.plugin.Interceptor;
 import org.apache.ibatis.reflection.MetaObject;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.context.annotation.Bean;
@@ -40,6 +42,18 @@ public class MybatisPlusConfig {
         interceptor.addInnerInterceptor(new OptimisticLockerInnerInterceptor());
         interceptor.addInnerInterceptor(new BlockAttackInnerInterceptor());
         return interceptor;
+    }
+
+    /**
+     * 慢 SQL 拦截器。
+     *
+     * <p>只要声明成 bean 就会被接上：MyBatis-Plus 的自动配置会把容器里所有
+     * {@code org.apache.ibatis.plugin.Interceptor} 依次 addInterceptor。
+     * 它与 {@link #mybatisPlusInterceptor()} 是两个独立插件，各管各的，不存在谁覆盖谁。
+     */
+    @Bean
+    public Interceptor slowSqlInterceptor(ImProperties imProperties) {
+        return new SlowSqlInterceptor(imProperties.getLog().getSlowSqlMillis());
     }
 
     /**

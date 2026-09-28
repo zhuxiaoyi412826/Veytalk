@@ -51,5 +51,6 @@ logging:
     # 生产不打 DEBUG：WebLogAspect 在 DEBUG 下会输出完整出入参，
     # 消息正文与手机号都会落进日志文件，那是隐私数据。
     com.im: info
-  file:
-    path: ${LOG_PATH:logs}
+# 落盘目录、保留天数与体积护栏统一看 application.yml 的 im.log（可用 IM_LOG_HOME 覆盖）。
+# D:/rizi1/IM 是开发机的默认值，Linux 部署时记得指到 /var/log/im 这类真实路径；
+# 目录不可写时 logback 只打一条 status 错误不会拦住启动，日志会静默丢失。

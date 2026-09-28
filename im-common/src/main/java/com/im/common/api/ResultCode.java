@@ -99,7 +99,14 @@ public enum ResultCode {
     REMOTE_SESSION_FORBIDDEN(9006, "无权访问该远程会话"),
     REMOTE_TICKET_INVALID(9007, "远程连接票据无效、已使用或已过期"),
     REMOTE_READONLY(9008, "当前会话为只读模式，禁止输入操作"),
-    REMOTE_FRAME_TOO_LARGE(9009, "中继帧超过大小限制");
+    REMOTE_FRAME_TOO_LARGE(9009, "中继帧超过大小限制"),
+
+    /* ==================== 10xxx AI 面试监考 ==================== */
+    /* 独立于 9xxx：远程控制与面试监考是两个不相干的域，混在一个千位段里，
+       排查时看到 9xxx 还得先猜是哪块业务 */
+    AI_INTERVIEW_NOT_FOUND(10001, "面试会话不存在或已过期"),
+    AI_INTERVIEW_FORBIDDEN(10002, "无权访问该面试会话"),
+    AI_INTERVIEW_ENDED(10003, "面试已结束，不能再上报该会话的数据");
 
     private final int code;
     private final String message;

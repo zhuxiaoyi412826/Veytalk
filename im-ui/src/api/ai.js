@@ -3,7 +3,7 @@ import { getToken, getTokenName } from '@/utils/token'
 import { apiBaseURL } from '@/utils/env'
 
 /**
- * AI 相关接口：面试官对话 + 全网检索（消息搜索框的「网络」分组）。
+ * AI 相关接口：面试官对话 + 全网检索（消息搜索框的「网络」分组）+ 面试监考上报。
  *
  * /chat 是 SSE 流式接口，不能走 axios（它要等整个响应体收完才回调），
  * 也不能走 EventSource（只支持 GET、不能带自定义请求头），
@@ -107,4 +107,79 @@ export async function streamInterviewChat(messages, { onDelta, signal } = {}) {
       }
     }
   }
+}
+
+/* ==================== 面试监考与审计 ==================== */
+
+/**
+ * 开始面试：建一条审计会话。
+ *
+ * 拿到 sessionId 后，本轮面试的所有事件上报与问答落库都要带上它。
+ * screen 是客户端分辨率，用于事后判断「切屏误报」（分屏/双显场景误报率明显高）。
+ */
+export function startInterviewSession({ title, screen } = {}) {
+  return http.post('/ai/interview/session/start', null, { params: { title, screen }, silent: true })
+}
+
+/**
+ * 批量上报监考事件。返回最新计数与 reachedLimit / ended。
+ *
+ * 失败时不弹全局 toast：监考上报是后台行为，网络抖动不该打断候选人答题，
+ * 丢的那一批由前端回放进队列下次重试。
+ */
+export function reportInterviewEvents(sessionId, events) {
+  return http.post('/ai/interview/events', { sessionId, events }, { silent: true })
+}
+
+/**
+ * 落一轮问答（上一答 + 本新题）。
+ *
+ * payload.turnNo 是幂等键的一部分：服务端拿「第几题」而不是自算的 seq 去撞唯一键，
+ * 网络重试才不会把一轮问答存成两轮。作答行归题号减一（候选人答的是上一题）。
+ */
+export function saveInterviewTurn(payload) {
+  return http.post('/ai/interview/turn', payload, { silent: true })
+}
+
+/** 结束面试 */
+export function endInterviewSession(sessionId, reason) {
+  return http.post('/ai/interview/session/end', { sessionId, reason }, { silent: true })
+}
+
+/**
+ * 页面正在被卸载（刷新 / 关标签页）时的收尾上报。
+ *
+ * 这时候 axios 的请求会被浏览器直接掐掉，所以必须用 fetch 的 keepalive：
+ * 浏览器会在文档卸载后继续把这几个小请求发完。sendBeacon 更稳但带不了
+ * 鉴权头，本项目 token 在 header 里，因此选 keepalive。
+ *
+ * endReason 传 null 表示只带走事件、不下结论：刷新后要不要记「未完成」
+ * 由新页面根据 sessionStorage 的残留标记判断，关页则交给服务端在下次
+ * 开始时补记。不包错误处理：页面都要走了，报错也没人看。
+ */
+export function interviewLeaveBeacon(sessionId, events = [], endReason = null) {
+  if (!sessionId) {
+    return
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    [getTokenName()]: getToken() || ''
+  }
+  const base = events.length
+    ? fetch(`${apiBaseURL()}/ai/interview/events`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ sessionId, events }),
+      keepalive: true
+    }).catch(() => {})
+    : Promise.resolve()
+  if (!endReason) {
+    return
+  }
+  base.then(() => fetch(`${apiBaseURL()}/ai/interview/session/end`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sessionId, reason: endReason }),
+    keepalive: true
+  })).catch(() => {})
 }

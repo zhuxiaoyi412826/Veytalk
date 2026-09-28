@@ -40,6 +40,9 @@ logging:
     # 能直接和同一次请求的业务日志对齐——这也是不用
     # mybatis-plus.configuration.log-impl=StdOutImpl 的原因：
     # StdOutImpl 直接写 System.out，绕过 logback，日志里既没有时间戳也没有 traceId。
+    # 这一级的内容除了控制台，还会整份镜像到 ${im.log.home}/DEBUG.log（重启即清空，
+    # 所以它永远只包含本次运行）。完整 SQL 里带的是真实参数值，password 一类字段
+    # 只能靠按字段名打码拦下，因此开发期的日志目录同样要当敏感数据对待。
     com.im: debug
     # 连接池与 Redis 的问题在开发期同样值得看见
     com.zaxxer.hikari: debug

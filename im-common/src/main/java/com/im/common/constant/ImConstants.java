@@ -1,5 +1,7 @@
 package com.im.common.constant;
 
+import java.util.List;
+
 /**
  * 全局通用常量。
  */
@@ -70,4 +72,18 @@ public final class ImConstants {
      */
     public static final String CACHE_USER_BRIEF_PREFIX = "user:brief:";
     public static final String CACHE_GROUP_BRIEF_PREFIX = "group:brief:";
+
+    /**
+     * 敏感字段名关键词：字段名转小写后包含任一关键词，其值就不允许明文进日志。
+     *
+     * <p>用子串匹配而不是精确匹配，是为了覆盖 oldPassword / newPassword / accessToken
+     * 这类变体，新增字段时也不用记得来改这里。
+     *
+     * <p>放在这里而不是留在某个切面里：目前有两处要打码——{@code WebLogAspect} 打的是
+     * 请求/响应体的字段名，{@code SlowSqlInterceptor} 打的是 SQL 的占位符属性名，
+     * 两边都得认得同一批凭证。各留一份迟早会漂移，而漂移的后果是密码明文落进日志文件。
+     */
+    public static final List<String> SENSITIVE_KEY_WORDS = List.of(
+            "password", "passwd", "token", "secret", "captcha", "smscode",
+            "verifycode", "credential", "ticket", "debugcode");
 }

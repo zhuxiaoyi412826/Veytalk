@@ -145,7 +145,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `MINIO_ACCESS_KEY` | `minioadmin` | |
 | `MINIO_SECRET_KEY` | `minioadmin` | |
 | `MINIO_BUCKET` | `im-files` | 启动时自动创建，无需手动建桶（桶名须≥3字符符合 S3 规范） |
-| `LOG_PATH` | `logs` | 日志目录（相对启动路径） |
+| `IM_LOG_HOME` | `D:/rizi1/IM` | 日志目录，见「六、启动后端 → 日志输出与目录」；Linux 下必须覆盖成对应路径（如 `/data/logs/im`） |
 | `ALI_BABA_API_KEY` | 空 | AI 面试官的百炼（DashScope）API Key；未设置时仅面试功能不可用，其余功能照常 |
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
@@ -177,11 +177,16 @@ export MYSQL_PASSWORD=your-password
 
 ```powershell
 # 1. 建表（含索引、虚拟生成列、外键约束）——仅限全新库
-mysql -u $env:MYSQL_USER -p im_db < sql/im_schema.sql
+mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_schema.sql"
 
-# 2. 灌入演示数据（3 个用户、角色权限、一对好友、1 个会话、若干历史消息）
-mysql -u $env:MYSQL_USER -p im_db < sql/im_data.sql
+# 2. 灌入演示数据（3 个用户、角色权限、一对好友、1 个会话、若干历史消息、4 场面试演示会话）
+mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
+
+> ⚠️ **Windows PowerShell 下不要用 `<` 重定向导入 SQL**：PowerShell 5.1 不识别 `<`（报
+> *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
+> 又会被管道的 ASCII 编码把中文一律转成 `?`，数据“导入成功”但满屏乱码。`-e "source 文件"` 让
+> mysql 客户端自己去读文件，不经过 shell 管道，是唯一不会损字符的写法（Git Bash / cmd 下用 `<` 没问题）。
 
 如果 `im_db` 库还不存在，先建：
 
@@ -214,9 +219,13 @@ mvn clean package -DskipTests
 java -jar im-bootstrap/target/im-server.jar
 
 # 这样启动每次修改都要返回上层目录进去编译打包 ，只在im-bootstrap目录下即可
-mvn -f ..\pom.xml clean install -DskipTests
-mvn springboot:run    
-
+# 注意：spring-boot:run 只跑 im-bootstrap 一个模块，跨模块依赖（im-common 等）是从本地
+# 仓库 ~/.m2 解析的，不是从源码目录。所以改过 im-common 里的任何文件（包括
+# logback-spring.xml）都必须先重新 install，否则跑的还是旧 jar——而且不会报错，
+# 只看得到旧行为（典型现象：改了日志配置但 D:/rizi1/IM 下不生成文件）。
+mvn -f ..\pom.xml install -DskipTests
+mvn spring-boot:run
+# 应用还在跑时不要加 clean：im-server.jar 被占用会让删失败
 ```
 
 启动成功的标志是控制台打出这段横幅（由 `ImApplication#logStartupSummary` 打印，
@@ -241,6 +250,41 @@ mvn springboot:run
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
 | http://localhost:8080/api/ | 全部 REST 接口 |
+
+### 日志输出与目录
+
+配置在 `im-common/src/main/resources/logback-spring.xml`（**不在 im-bootstrap**：放在
+common 的 classpath 根下，打单 jar 后位于 `BOOT-INF/lib/im-common-*.jar` 内）。
+目录由 `im.log.home` 决定（可用环境变量 `IM_LOG_HOME` 覆盖），落地布局：
+
+| 文件 | 内容 | 滚动与保护 |
+|---|---|---|
+| `DEBUG.log` | 控制台输出的一份完整镜像（dev 下含本项目的 DEBUG：SQL、出入参） | **每次启动清空**，只装本次运行；溢出部分滚到 `DEBUG-yyyy-MM-dd.N.log.gz` |
+| `info.log` | **只有 INFO**（不含 warn/error） | 当天写满 50MB 或跨天后，旧内容滚到 `info-yyyy-MM-dd.N.log`；保留 30 天、总量 5GB |
+| `warn.log` | **只有 WARN** | 同上 |
+| `error.log` | **只有 ERROR** | 同上，但归档保留 60 天（出错现场留得更久） |
+| `SQL/slow-sql.log` | 执行耗时 > `im.log.slow-sql-millis`（默认 100ms）的语句，参数已内联可读 | 跨天滚到 `SQL/slow-sql-yyyy-MM-dd.N.log`，同 30 天 |
+
+当天在目录里看到的就是上面这五个固定名字，日期只出现在跨天后的归档名里。
+
+几个刻意的设计，改之前先看注释：
+
+- **三档互不交叉**靠 `LevelFilter + onMismatch=DENY`，不是 `ThresholdFilter`——后者是「及以上」，
+  会让 error 同时出现在 info 和 warn 里。
+- **异步落盘**（`AsyncAppender`，`discardingThreshold=0`）：`discardingThreshold` 默认值会「队列
+  只剩 20% 时先丢 INFO/DEBUG」，与上面「info 档必须有 INFO」直接冲突，必须显式关。
+  取舍按档分：DEBUG/INFO/控制台 `neverBlock=true`（宁可丢日志也不拖慢业务），
+  WARN/ERROR/慢 SQL `neverBlock=false`（这几条不能丢）。
+- **`append=false` 在 `RollingFileAppender` 上是无效的**——logback 无条件强制改回 true 并打一条
+  `Append mode is mandatory...`。所以「重启清空」由本项目的
+  `com.im.common.log.TruncatingRollingFileAppender` 实现（启动时先删活动文件）；同机多实例共用
+  目录时删除会失败并警告，此时保住别人的现场而不是静默截断。
+- **慢 SQL 由 `com.im.common.mybatis.SlowSqlInterceptor` 拦截**（MyBatis `Executor` 的 query/update），
+  写独立 logger `com.im.slowsql` 且 `additivity=false`，因此它不会重复出现在 warn / DEBUG.log 里；
+  password / token / ticket 一类参数按字段名打码（清单与请求日志切面共用 `ImConstants.SENSITIVE_KEY_WORDS`）。
+- **`root` 固定在 INFO**，本项目的 DEBUG 由 dev profile 的 `com.im: debug` 单独打开。抬 root 会把
+  Tomcat / Netty / Spring 的内部 DEBUG 一并放进来，刷屏到看不出自己的日志。
+- prod 与 dev 的差别只有两处：日志分级（prod 无 `com.im: debug`）与慢 SQL 是否同时进控制台。
 
 ---
 
@@ -863,7 +907,7 @@ spring-boot-duomokuia/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
 │   └── im_data.sql          演示数据（用户/角色/权限/好友/会话/消息）
 ├── md/                      专项文档（架构与请求链路图、Electron 打包指南、远程控制 Agent 使用说明、手机真机调试 HTTPS 配置、MinIO 部署指南等）
-├── im-common/               公共层 + SPI 契约
+├── im-common/               公共层 + SPI 契约（含 logback-spring.xml 与慢 SQL 拦截器）
 ├── im-user/                 用户中心
 ├── im-friend/               好友关系
 ├── im-conversation/         会话管理
@@ -878,7 +922,6 @@ spring-boot-duomokuia/
 │   ├── src/main/resources/application.yml       主配置（16 KB，逐项带注释）
 │   ├── src/main/resources/application-dev.yml   开发环境：回显验证码、打开 SQL 日志
 │   ├── src/main/resources/application-prod.yml  生产环境：关闭全部回显与 DEBUG 日志
-│   ├── src/main/resources/logback-spring.xml    控制台 + 按天滚动文件（pattern 含 traceId/userId）
 │   └── target/im-server.jar                     打包产物（单 jar）
 ├── im-remote-agent/         被控端 Agent（独立 fat jar，纯 JDK 零依赖，Swing UI + 回环识别码接口）
 ├── im-ui/                   Vue 3 前端（独立工程，浏览器 / Electron 两用）
@@ -919,7 +962,7 @@ spring-boot-duomokuia/
    （见「已知坑」第 3 条）
 3. **建库** — 执行 `sql/im_schema.sql` 与 `sql/im_data.sql`，无报错
 4. **启动** — `java -jar im-bootstrap/target/im-server.jar` → 8080 端口起来了，
-   控制台打出上述横幅，`logs/im-server.log` 里没有 `ERROR`
+   控制台打出上述横幅，`D:/rizi1/IM/error.log` 里没有内容
 5. **文档** — 浏览器打开 http://localhost:8080/doc.html，左侧 9 个分组齐全
    （也可以直接请 `GET /v3/api-docs/swagger-config`，返回的 `urls` 数组应当是 9 项）
 6. **接口串测** — 注册 → 登录取 token → `/api/user/profile` → 搜索用户 →
@@ -938,7 +981,7 @@ spring-boot-duomokuia/
     不设 Key 时返回明确的「API Key 未配置」，其余功能不受影响
 11. **全网检索** — 首页搜索框输入关键字（不选会话）→ 本地消息先出，短暂延迟后分隔横线下方出「网络」条目；
     F12 应看到 `/api/message/search` 与 `/api/ai/search/web` **两个** 请求（只看到一个 = 前端未热更新或后端未重启）；
-    同一关键字再搜一次应秒回（走 Redis 缓存），`im-bootstrap/logs/im-server.log` 里不再打外网请求；
+    同一关键字再搜一次应秒回（走 Redis 缓存），`D:/rizi1/IM/info.log` 里不再打外网请求；
     外网不可达时该栏整体隐藏且本地结果照常可用（失败收敛为空结果），结果为空时给「在浏览器中打开搜索」入口
 
 已实测通过的项：1、2、3、4、5（9 个分组已核实）、6/7 中的

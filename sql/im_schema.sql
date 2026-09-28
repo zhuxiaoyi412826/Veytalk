@@ -3,8 +3,9 @@
 --  适用：MySQL 8.0+（InnoDB / utf8mb4）
 --
 --  执行方式（凭据从环境变量读取，脚本内不含任何明文密码）：
---    mysql -u "$env:MYSQL_USER" -p < sql/im_schema.sql
---    或在客户端中直接 source 本文件
+--    mysql -u "$env:MYSQL_USER" -p --default-character-set=utf8mb4 -e "source sql/im_schema.sql"
+--    或在客户端中直接 source 本文件；Windows PowerShell 下不要用 `<` 重定向，
+--    管道会把中文刷成 ?（表注释、列注释跟着坏掉）。
 --
 --  约定：
 --    1. 所有主键为 BIGINT，由 MyBatis-Plus 雪花算法生成，不使用自增，便于将来分库分表
@@ -21,6 +22,9 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_interview_event`;
+DROP TABLE IF EXISTS `im_interview_message`;
+DROP TABLE IF EXISTS `im_interview_session`;
 DROP TABLE IF EXISTS `im_remote_audit_log`;
 DROP TABLE IF EXISTS `im_remote_session`;
 DROP TABLE IF EXISTS `im_remote_device`;
@@ -403,3 +407,95 @@ CREATE TABLE `im_remote_audit_log`
     KEY `idx_session_time` (`session_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='远程会话审计日志（只增不改不删）';
+
+-- =====================================================================================
+--  八、RAG 智能面试官（im-ai）
+--
+--  面试原本是全无状态的：对话历史由前端 Interview.vue 持有，刷新即丢，事后无法复盘，
+--  也没地方记「候选人中途切了几次屏」。这三张表把它变成可审计的业务：
+--    会话元信息 + 逐轮问答 + 操作与违规事件流水。
+--
+--  问答单独成表而不是往会话表塞一个 JSON 大字段：审计要能回答「他是在答第几题时
+--  切屏的」，整段 JSON 既撑爆行又只能全量读回。
+--  会话表上的几个计数是事件表的冗余汇总：列表页要一次把「切屏 3 次」显示出来，
+--  不能为 20 行列表跑 20 次 GROUP BY。冗余可能与流水不平（上报丢失、并发累加），
+--  所以审计定性一律以事件表为准，计数只用于展示与阈值判断。
+--
+--  问答表与事件表继承 AuditEntity（无 deleted）：流水只增不删；会话表是主数据，
+--  用 BaseEntity 逻辑删除，便于清理演示数据时不连带抹掉审计历史。
+--
+--  幂等键为什么是 (session_id, turn_no, role) 而不是 (session_id, seq)：
+--  seq 由服务端 maxSeq+1 现算，重传一次就会得到一个新 seq，拿它当幂等键等于没加；
+--  而且并发上报时两个请求可能算出同一个 seq，若给 seq 建唯一键，撞键的那一行会被
+--  当成「已存在」静默丢弃——顺序略微受影响远比丢一条问答好。turn_no 是前端报的
+--  「这是第几题」，同一题的提问行与作答行各自唯一，重试才真能被拦住。
+-- =====================================================================================
+
+CREATE TABLE `im_interview_session`
+(
+    `id`                 BIGINT      NOT NULL COMMENT '面试会话 ID（雪花）',
+    `user_id`            BIGINT      NOT NULL COMMENT '候选人用户 ID',
+    `title`              VARCHAR(64) NOT NULL DEFAULT '后端 Java 全栈面试' COMMENT '面试题目/岗位名称',
+    `status`             TINYINT     NOT NULL DEFAULT 0 COMMENT '状态：0 进行中 1 正常结束 2 违规达阈值强制结束 3 未完成（刷新/关闭页面/中途离开）',
+    `start_time`         DATETIME             DEFAULT NULL COMMENT '开始时间（服务端收到开始请求的时刻）',
+    `end_time`           DATETIME             DEFAULT NULL COMMENT '结束时间',
+    `duration_seconds`   INT         NOT NULL DEFAULT 0 COMMENT '面试时长（秒）：服务端拿 end-start 算，不信客户端自报的计时',
+    `turn_count`         INT         NOT NULL DEFAULT 0 COMMENT '问答轮数（面试官提问数，等同于候选人作答数）',
+    `violation_count`    INT         NOT NULL DEFAULT 0 COMMENT '违规总次数（下行四类合计 + 未单独列类的违规事件）',
+    `blur_count`         INT         NOT NULL DEFAULT 0 COMMENT '切屏次数：标签页/窗口被最小化或切到其它应用（window.blur 与 visibilitychange 只计一次）',
+    `copy_count`         INT         NOT NULL DEFAULT 0 COMMENT '复制次数：面试中复制题目去搜答案',
+    `paste_count`        INT         NOT NULL DEFAULT 0 COMMENT '粘贴次数：最典型的作弊信号——答案不是当场敲的',
+    `fullscreen_exit_count` INT      NOT NULL DEFAULT 0 COMMENT '退出全屏次数（仅当面试处于全屏监考模式时才会产生）',
+    `end_reason`         VARCHAR(32)          DEFAULT NULL COMMENT '结束原因：user-end 自行结束 / violation-limit 违规达上限 / reload / close / timeout',
+    `screen`             VARCHAR(32)          DEFAULT NULL COMMENT '客户端屏幕分辨率（宽x高）；排「切屏误报」时用，分屏/双显会拉高误报率',
+    `client_info`        VARCHAR(255)         DEFAULT NULL COMMENT '浏览器 UA 摘要（只留引擎与版本，不落完整 UA）',
+    `create_time`        DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`        DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`            TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    -- 「我的面试记录」倒序分页：WHERE user_id=? ORDER BY create_time DESC
+    KEY `idx_user_time` (`user_id`, `create_time`),
+    -- 进行中的会话需要被巡检收尾（刷新/断电会留下永久 status=0 的行）
+    KEY `idx_status` (`status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试会话表';
+
+CREATE TABLE `im_interview_message`
+(
+    `id`          BIGINT      NOT NULL COMMENT '主键（雪花）',
+    `session_id`  BIGINT      NOT NULL COMMENT '所属面试会话 ID',
+    `seq`         INT         NOT NULL COMMENT '会话内序号，从 1 递增；排序以此列为准，不用 create_time（同毫秒会并列）',
+    `turn_no`     INT         NOT NULL DEFAULT 0 COMMENT '属于第几轮（面试官出到第几题为第几轮）；与 role 共同构成幂等键',
+    `role`        VARCHAR(16) NOT NULL COMMENT '角色：assistant 面试官提问 / user 候选人作答',
+    `content`     TEXT        NOT NULL COMMENT '正文，写入前按 im.ai.max-message-chars 截断',
+    `char_count`  INT         NOT NULL DEFAULT 0 COMMENT '正文字符数：审计时看作答长度分布，不必把正文读回来',
+    `elapsed_ms`  BIGINT      NOT NULL DEFAULT 0 COMMENT '候选人从收到本题到提交的耗时（毫秒）；role=assistant 固定为 0',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 幂等：同一会话里「某一轮 + 某一角色」只能有一行，前端重试（网络抖动后再发一次）不会多出一条问答
+    UNIQUE KEY `uk_session_turn` (`session_id`, `turn_no`, `role`),
+    KEY `idx_session` (`session_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试问答记录表（逐轮留存，事后复盘用）';
+
+CREATE TABLE `im_interview_event`
+(
+    `id`          BIGINT      NOT NULL COMMENT '主键（雪花）',
+    `session_id`  BIGINT      NOT NULL COMMENT '所属面试会话 ID',
+    `user_id`     BIGINT      NOT NULL COMMENT '候选人 ID（冗余一份：审计常按人查，不必先 join 会话表）',
+    `event_type`  VARCHAR(32) NOT NULL COMMENT '事件类型：visibility-hidden 切标签页/最小化 / blur 窗口失焦 / copy / paste / cut / contextmenu / fullscreen-exit / session-start / turn-submit / session-end',
+    `violation`   TINYINT     NOT NULL DEFAULT 0 COMMENT '是否计入违规：1 计入会话表计数并参与阈值判断，0 仅记录现象（如 session-start）',
+    `turn_no`     INT         NOT NULL DEFAULT 0 COMMENT '当时进行到第几轮，0 表示尚未开始问答；回答「他在答哪题时切屏」',
+    `detail`      VARCHAR(500) DEFAULT NULL COMMENT '补充信息（离开多久、粘贴多少字符、从哪个元素粘的等），写入前截断到 500 字符',
+    `event_time`  DATETIME(3) NOT NULL COMMENT '事件发生时刻（客户端上报的本地时间，带毫秒）',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '服务端落库时间：与 event_time 的差就是上报延迟或客户端时钟偏差',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 审计详情页的主查询：一个会话的全部事件按时间排开
+    KEY `idx_session_time` (`session_id`, `event_time`),
+    KEY `idx_user_time` (`user_id`, `create_time`),
+    -- 只看违规：把非违规的流程事件（start/submit/end）排除在索引之外
+    KEY `idx_session_violation` (`session_id`, `violation`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试操作与违规事件流水（只增不改不删）';

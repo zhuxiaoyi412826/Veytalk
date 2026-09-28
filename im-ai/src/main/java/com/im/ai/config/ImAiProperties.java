@@ -43,6 +43,65 @@ public class ImAiProperties {
     /** 全网检索：消息搜索框「网络」分组的数据源，与面试功能互不影响 */
     private WebSearch webSearch = new WebSearch();
 
+    /** 监考：切屏/粘贴的检测与处置策略 */
+    private Proctor proctor = new Proctor();
+
+    /**
+     * 监考配置。
+     *
+     * <p>「哪些动作算违规」是业务判断，不能由前端定：前端只负责报告「发生了什么」，
+     * violation 标志与是否入计数全部在服务端按这里的开关算——否则改一下 js 就能把
+     * 粘贴刷成不算违规。下面的开关因此都只影响服务端的判定，前端拿到的只是结果。
+     *
+     * <p>{@code violationLimit} 是唯一的「拦截」配置：达到后服务端直接把会话置为强制结束，
+     * 之后该 sessionId 的所有上报都报错。只警告不结束是没有用的——候选人会忽略提示继续。
+     */
+    @Data
+    public static class Proctor {
+
+        /** 总开关。关闭后不建会话、不收事件，面试回到无状态行为 */
+        private boolean enabled = true;
+
+        /**
+         * 违规次数上限：累计达到这个数就强制结束面试。
+         * 0 或负数表示不封顶（只留痕不中断），给「纯练习模式」留的口子。
+         */
+        private int violationLimit = 8;
+
+        /**
+         * 达到上限是否真的强制结束。关掉后只做记录并在响应里回传已达阈值，
+         * 用于「先观察阈值定得合不合适」的阶段，不必为此改代码。
+         */
+        private boolean enforceLimit = true;
+
+        /** 窗口失焦（blur）是否计违规 */
+        private boolean countBlur = true;
+
+        /** 标签页/最小化（visibility-hidden）是否计违规 */
+        private boolean countVisibilityHidden = true;
+
+        /** 复制是否计违规（只复制自己写的答不算作弊，故默认不计） */
+        private boolean countCopy = false;
+
+        /** 剪切同复制 */
+        private boolean countCut = false;
+
+        /** 粘贴是否计违规 */
+        private boolean countPaste = true;
+
+        /** 右键菜单是否计违规 */
+        private boolean countContextmenu = false;
+
+        /** 退出全屏是否计违规 */
+        private boolean countFullscreenExit = true;
+
+        /** 单次批量上报的事件条数上限，防前端/脚本滥用 */
+        private int maxEventsPerBatch = 100;
+
+        /** 事件 detail 字段落库前的截断长度，与表列宽一致 */
+        private int maxDetailChars = 500;
+    }
+
     /**
      * 全网检索配置。
      *
