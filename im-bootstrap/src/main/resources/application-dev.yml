@@ -14,9 +14,19 @@ im:
     # 图形验证码不再回显：短信登录与邮箱登录都用它作为发信前的闸门，
     # 页面上直接看图输入即可，不需要把答案显式回显。
     expose-image-code: false
-    # 邮箱验证码走真实 QQ 邮箱 SMTP，邮件会真的发到收件箱，
-    # 因此不再回显到响应体，避免验证码在页面上暴露。
-    expose-email-code: false
+    # 邮箱验证码回显到响应体与日志。邮箱登录与邮箱找回密码都靠它联调：
+    # 真实 SMTP 需要 QQ 授权码，换一台开发机就可能没有，收不到邮件时整条链路直接卡死。
+    # 配了 SMTP 就照常发信、回显只是多一个答案来源；没配时靠下面的降级开关兜住。
+    expose-email-code: true
+    # SMTP 未配置（缺 MAIL_USERNAME / MAIL_PASSWORD）时不报 MAIL_NOT_CONFIGURED，
+    # 而是只写日志 + 按 expose-email-code 回显。验证码照常写进 Redis 并参与校验，
+    # 因此这条链路的代码路径与生产完全一致，只是最后一步没真发信。
+    mock-mail-when-unconfigured: true
+
+  sms:
+    # mock = 只写日志，不发真实短信。换成 aliyun / tencent 时新增一个 SmsSender 实现即可，
+    # 验证码的生成、频率限制、Redis 存取与校验都在 CaptchaServiceImpl 里，不用改。
+    provider: mock
 
   remote:
     # 远程控制的 AES-256-GCM 端到端加密在 dev 下关闭。

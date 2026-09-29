@@ -37,6 +37,11 @@ public enum ResultCode {
     EMAIL_SEND_TOO_FREQUENT(2014, "邮件发送过于频繁，请稍后再试"),
     MAIL_NOT_CONFIGURED(2015, "邮件服务未配置，无法发送验证码"),
     MAIL_SEND_FAILED(2016, "验证码邮件发送失败，请稍后再试"),
+    /* 找回密码专用：与 USER_NOT_FOUND 区分开，前端能直接提示「先去注册」而不是「用户不存在」 */
+    USER_PHONE_NOT_BOUND(2017, "该手机号未绑定任何账号，请先注册或用其他方式登录"),
+    USER_EMAIL_NOT_BOUND(2018, "该邮箱未绑定任何账号，请先注册或用其他方式登录"),
+    PASSWORD_RESET_NEW_SAME(2019, "新密码不能与当前密码相同"),
+    SMS_SEND_FAILED(2020, "短信发送失败，请稍后再试"),
 
     /* ==================== 3xxx 好友 ==================== */
     FRIEND_NOT_FOUND(3001, "好友关系不存在"),

@@ -10,6 +10,9 @@ import java.io.Serializable;
 
 /**
  * 发送短信验证码入参。
+ *
+ * <p>场景常量的唯一来源：邮箱侧的 {@code SendEmailRequest} 也引用这里的定义，
+ * 避免两边各写一份字符串、日后改一个忘另一个。
  */
 @Data
 @Schema(description = "发送短信验证码请求")
@@ -24,6 +27,13 @@ public class SendSmsRequest implements Serializable {
     public static final String SCENE_REGISTER = "register";
     /** 场景：绑定手机号 */
     public static final String SCENE_BIND = "bind";
+    /**
+     * 场景：找回密码。
+     *
+     * <p>单独一个场景而不是复用 login：验证码按场景分键存储（见 {@code RedisKeys.captchaSms}），
+     * 登录码因此无法被拿去做密码重置——改密码的权限必须比登录更高一档。
+     */
+    public static final String SCENE_RESET = "reset";
 
     @Schema(description = "手机号", example = "13800000001", requiredMode = Schema.RequiredMode.REQUIRED)
     @NotBlank(message = "手机号不能为空")

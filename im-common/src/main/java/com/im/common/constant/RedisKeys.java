@@ -14,16 +14,21 @@ public final class RedisKeys {
     /** 图形验证码：im:captcha:image:{captchaKey} -> 验证码答案 */
     public static final String CAPTCHA_IMAGE = PREFIX + "captcha:image:";
 
-    /** 短信验证码：im:captcha:sms:{phone} -> 6 位验证码 */
+    /** 短信验证码：im:captcha:sms:{scene}:{phone} -> 6 位验证码 */
     public static final String CAPTCHA_SMS = PREFIX + "captcha:sms:";
 
-    /** 短信发送频率限制：im:captcha:sms:limit:{phone} */
+    /**
+     * 短信发送频率限制：im:captcha:sms:limit:{phone}
+     *
+     * <p>刻意不按场景分键：否则攻击者轮流用 login / reset 两个场景发码，
+     * 就等于把「同一手机号 60 秒一次」的限制翻了一倍，短信费用与骚扰风险同步放大。
+     */
     public static final String CAPTCHA_SMS_LIMIT = PREFIX + "captcha:sms:limit:";
 
-    /** 邮箱验证码：im:captcha:email:{email} -> 6 位验证码 */
+    /** 邮箱验证码：im:captcha:email:{scene}:{email} -> 6 位验证码 */
     public static final String CAPTCHA_EMAIL = PREFIX + "captcha:email:";
 
-    /** 邮箱验证码发送频率限制：im:captcha:email:limit:{email} */
+    /** 邮箱验证码发送频率限制：im:captcha:email:limit:{email}，同样不按场景分键 */
     public static final String CAPTCHA_EMAIL_LIMIT = PREFIX + "captcha:email:limit:";
 
     /** 在线状态：im:online:{userId} -> Hash(deviceId -> 最近心跳时间戳) */
@@ -60,16 +65,24 @@ public final class RedisKeys {
         return CAPTCHA_IMAGE + captchaKey;
     }
 
-    public static String captchaSms(String phone) {
-        return CAPTCHA_SMS + phone;
+    /**
+     * 短信验证码键，按场景隔离。
+     *
+     * <p>场景进键名是安全边界而不是整洁度问题：登录、绑定、找回密码三个场景
+     * 的信任级别不同，找回密码能直接改写密码。若共用一个键，用户为登录申请的
+     * 验证码就能被拿去重置密码（反之亦然），等于把改密码这道门的强度降到了登录码的水平。
+     */
+    public static String captchaSms(String scene, String phone) {
+        return CAPTCHA_SMS + scene + ":" + phone;
     }
 
     public static String captchaSmsLimit(String phone) {
         return CAPTCHA_SMS_LIMIT + phone;
     }
 
-    public static String captchaEmail(String email) {
-        return CAPTCHA_EMAIL + email;
+    /** 邮箱验证码键，按场景隔离，理由同 {@link #captchaSms(String, String)} */
+    public static String captchaEmail(String scene, String email) {
+        return CAPTCHA_EMAIL + scene + ":" + email;
     }
 
     public static String captchaEmailLimit(String email) {

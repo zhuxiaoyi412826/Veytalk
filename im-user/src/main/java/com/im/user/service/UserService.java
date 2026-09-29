@@ -67,6 +67,15 @@ public interface UserService {
     void changePassword(Long userId, ChangePasswordRequest request);
 
     /**
+     * 凭验证码重置密码（找回密码），不校验原密码。
+     *
+     * <p>身份已经由上游的短信/邮箱验证码校验保证，因此这里只负责落库；
+     * 调用方必须在重置成功后踢掉该用户的全部登录态，否则偷到验证码的人
+     * 改完密码，原主人的会话却还活着。
+     */
+    void resetPassword(Long userId, String newPassword);
+
+    /**
      * 绑定/换绑手机号：凭短信验证码校验通过后写入，手机号被他人占用时报错。
      */
     void bindPhone(Long userId, BindPhoneRequest request);

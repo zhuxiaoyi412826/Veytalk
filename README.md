@@ -5,7 +5,7 @@
 被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上，不打进后端；
 前端是独立工程，通过 Vite 代理与后端通信，不参与 Maven 构建。
 
-功能覆盖：注册登录（图形/短信验证码）、JWT 鉴权与 RBAC 权限、好友申请与管理（含黑名单：多处拉黑入口 + 集中管理）、
+功能覆盖：注册登录（图形/短信验证码）、密码找回（手机短信 / 邮箱双通道）、JWT 鉴权与 RBAC 权限、好友申请与管理（含黑名单：多处拉黑入口 + 集中管理）、
 单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
 文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB；聊天附件可选 / 可拖 / 可粘，
 三者都先进「待发送托盘」再手动发送）、
@@ -140,6 +140,9 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `IM_JWT_SECRET` | 内置开发用长串 | Sa-Token 的 JWT 签名密钥，**生产必须替换** |
 | `IM_TICKET_SECRET` | 内置开发用长串 | WS 连接票据 / 文件访问票据的签名密钥，**生产必须替换** |
 | `IM_FILE_STORAGE` | `local` | `local` 或 `minio` |
+| `IM_SMS_PROVIDER` | `mock` | 短信下发通道。`mock` 只写日志不发真短信；接真实服务商时改成对应实现名（如 `aliyun`），**生产必须替换** |
+| `MAIL_USERNAME` | 空 | 完整邮箱地址（如 `123456@qq.com`），邮箱验证码的发件人 |
+| `MAIL_PASSWORD` | 空 | QQ 邮箱的 **SMTP 授权码**，不是 QQ 登录密码（用登录密码会 535 认证失败）。两者都不配时邮箱登录与邮箱找回密码不可用 |
 | `IM_FILE_DIR` | `${user.home}/im-files` | 仅 `local` 模式生效 |
 | `MINIO_ENDPOINT` | `http://127.0.0.1:9000` | 仅 `minio` 模式生效 |
 | `MINIO_ACCESS_KEY` | `minioadmin` | |
@@ -176,17 +179,25 @@ export MYSQL_PASSWORD=your-password
 > 已经有数据的库不要重跑这个脚本，改用下面的增量升级方式。
 
 ```powershell
-# 1. 建表（含索引、虚拟生成列、外键约束）——仅限全新库
+# 1. 建表（含索引、虚拟生成列）——仅限全新库
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_schema.sql"
 
 # 2. 灌入演示数据（3 个用户、角色权限、一对好友、1 个会话、若干历史消息、4 场面试演示会话）
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
 
-> ⚠️ **Windows PowerShell 下不要用 `<` 重定向导入 SQL**：PowerShell 5.1 不识别 `<`（报
+> ⚠️ **PowerShell 5.1 不要用 `<` 重定向导入 SQL**：它不识别 `<`（报
 > *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
 > 又会被管道的 ASCII 编码把中文一律转成 `?`，数据“导入成功”但满屏乱码。`-e "source 文件"` 让
 > mysql 客户端自己去读文件，不经过 shell 管道，是唯一不会损字符的写法（Git Bash / cmd 下用 `<` 没问题）。
+
+> ⚠️ **`im_data.sql` 可以安全地跑在有真实数据的库上**：它的清理段只删自己的种子 ID 段
+> （`id < 10000` 与面试三表的 2300~9399），运行期写入的雪花 ID（19 位）不受影响。早期版本
+> 是 `DELETE FROM im_user` 这种整表清空，跑一次就把已注册账号、会话、聊天记录全清了。
+> 真误删了不要慌：本机 MySQL 开着 ROW 格式 binlog，用
+> `mysqlbinlog -vv --base64-output=DECODE-ROWS --start-datetime=... --stop-datetime=...`
+> 能把被删行的前像反解出来，转成 INSERT 回灌（注意生成列不能出现在列表里，
+> 且 PowerShell 的 `>` 重定向会把中文转成 UTF-16，要直接用二进制落盘或用 Python 读取）。
 
 如果 `im_db` 库还不存在，先建：
 
@@ -393,11 +404,48 @@ cd ..\electron; npm install; npm run build
 | `alice` | 1001 | 爱丽丝 | `user` | 与 bob 互为好友，已有 1 个会话和若干历史消息 |
 | `bob` | 1002 | Bob | `user` | alice 给他的备注是「Alice」，分组「同事」 |
 
-登录页在 `dev` profile 下会**直接把图形验证码明文回显在表单下方**，不用眯着眼认图，短信验证码同理。
-这两个开关（`im.captcha.expose-image-code` / `expose-sms-code`）**只在 `application-dev.yml` 里为 `true`**，
+登录页在 `dev` profile 下会**把短信与邮箱验证码明文回显在表单下方**，不用去翻收件箱或等短信。
+这两个开关（`im.captcha.expose-sms-code` / `expose-email-code`）**只在 `application-dev.yml` 里为 `true`**，
 主配置 `application.yml` 与 `application-prod.yml` 一律 `false`——
 这样即使哪天忘了切 profile，也不会把生产环境的验证码校验废掉。
+图形验证码（`expose-image-code`）三个环境都是 `false`：它是发信前的闸门，页面上直接看图输入即可，
+回显答案等于把这道闸门拆掉。
 前端不需要判环境：`debugCode` 字段为空时那段提示自然就不渲染。
+
+开发机没有 QQ 邮箱 SMTP 授权码时，`dev` 还开了 `im.captcha.mock-mail-when-unconfigured: true`：
+邮件验证码不真发信，只写日志 + 按 `expose-email-code` 回显，但**验证码照常写进 Redis 并参与校验**，
+所以邮箱登录与邮箱找回密码的代码路径和生产完全一致，只是最后一步没出网。
+生产该开关为 `false`，SMTP 没配就老老实实报 `MAIL_NOT_CONFIGURED`。
+
+### 找回密码
+
+登录页底部「忘记密码」→ 弹窗内两条通道二选一（手机短信 / 邮箱），流程都是
+**图形验证码 → 6 位验证码 → 新密码**。对应三个匿名端点：
+
+| 端点 | 说明 |
+|---|---|
+| `POST /api/auth/password/sms-code` | 给已绑定手机号发 `reset` 场景短信码 |
+| `POST /api/auth/password/email-code` | 给已绑定邮箱发 `reset` 场景邮件码 |
+| `POST /api/auth/password/reset` | 校验验证码并写入新密码 |
+
+几个刻意的设计：
+
+- **场景隔离**：Redis 键是 `im:captcha:sms:{scene}:{phone}`，`scene` 由服务端钉死为 `reset`（客户端传什么都不认）。
+  登录用的码拿到找回密码这里一律无效——改密码这道门的强度必须高于登录。
+  `scene` 会进键名，所以有白名单校验，否则传个带 `:` 的场景就能跨命名空间写键。
+- **频率限制键不分场景**：否则轮流用 `login` / `reset` 发码，等于把「60 秒一次」的限制翻了一倍。
+- **重置成功后踢掉全部登录态**：不踢的话，盗号者改完密码，原主人的会话依旧活着。
+- **被禁用的账号不能靠找回密码绕过封禁**，重置前会校验账号状态。
+- **新旧密码相同直接拒**（`2019`），否则找回密码能变成一次空操作。
+- 手机号/邮箱未绑定任何账号时返回 `2017` / `2018`。这会泄露「该号码在不在系统里」，
+  与 QQ、微信的行为一致；靠图形验证码闸门 + `@RateLimit` + 60 秒间隔三道门控住。
+  真要避免枚举就得照常发码，代价是白耗短信费用。
+
+短信下发是**可插拔**的：`SmsSender` 接口 + `MockSmsSender`（只写日志），由 `im.sms.provider` 选择，
+默认 `mock`。接阿里云/腾讯云时新增一个实现并标
+`@ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")`，
+再把 `IM_SMS_PROVIDER` 改成 `aliyun` 即可——验证码的生成、频率限制、Redis 存取与校验全在
+`CaptchaServiceImpl` 里，一行都不用动。这个模式与 `im-file` 的 `FileStorage`（local / minio）一致。
 
 > ⚠️ **同一个账号开两个浏览器标签页会互相顶下线。**
 > 这是设计行为：`AuthServiceImpl#kickSameDevice` 按「用户 + 设备类型」顶号，

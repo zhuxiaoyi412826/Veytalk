@@ -421,6 +421,19 @@ im:
     expose-image-code: false
     expose-email-code: false
     image-required: true
+    # SMTP 未配置（缺 MAIL_USERNAME / MAIL_PASSWORD）时，邮件验证码是否降级为
+    # 「只写日志 + 按 expose-email-code 回显」而不直接报 MAIL_NOT_CONFIGURED。
+    # 主配置 false：邮箱登录与邮箱找回密码都要求真实发信才算数；dev profile 打开它，
+    # 没有 QQ 授权码的机器也能把这两条链路跑通。生产打开等于任何人都能靠回显拿到验证码。
+    mock-mail-when-unconfigured: false
+
+  # 短信下发通道：mock = 只写日志、不发真实短信（默认，本地开发够用）。
+  # 接阿里云/腾讯云时新增一个 SmsSender 实现，标
+  # @ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")，
+  # 再把这里（或 IM_SMS_PROVIDER 环境变量）改成 aliyun 即可：
+  # 验证码的生成、频率限制、Redis 存储与校验都在 CaptchaServiceImpl 里，一行都不用动。
+  sms:
+    provider: ${IM_SMS_PROVIDER:mock}
 
   # AI 面试官与全网检索（im-ai 模块 ImAiProperties）：模型接入参数在上面的 spring.ai.openai，
   # 这里只管知识库、对话策略与网络检索入口。

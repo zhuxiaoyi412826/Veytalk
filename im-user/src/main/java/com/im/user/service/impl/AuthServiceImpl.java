@@ -16,8 +16,13 @@ import com.im.common.util.TextUtil;
 import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
+import com.im.user.dto.req.ResetPasswordRequest;
+import com.im.user.dto.req.SendEmailRequest;
+import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.req.SmsLoginRequest;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.LoginVO;
+import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.dto.vo.UserVO;
 import com.im.user.entity.User;
 import com.im.user.service.AuthService;
@@ -72,7 +77,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO loginBySms(SmsLoginRequest request) {
-        captchaService.verifySms(request.getPhone(), request.getSmsCode());
+        captchaService.verifySms(SendSmsRequest.SCENE_LOGIN, request.getPhone(), request.getSmsCode());
 
         User user = userService.findByPhone(request.getPhone());
         if (user == null) {
@@ -85,7 +90,7 @@ public class AuthServiceImpl implements AuthService {
     @Override
     public LoginVO loginByEmail(EmailLoginRequest request) {
         String email = request.getEmail() == null ? null : request.getEmail().trim();
-        captchaService.verifyEmail(email, request.getEmailCode());
+        captchaService.verifyEmail(SendEmailRequest.SCENE_LOGIN, email, request.getEmailCode());
 
         User user = userService.findByEmail(email);
         if (user == null) {
@@ -100,6 +105,45 @@ public class AuthServiceImpl implements AuthService {
         User user = userService.createUser(request.getUsername(), request.getPassword(),
                 request.getNickname(), request.getPhone(), request.getEmail());
         return doLogin(user, null);
+    }
+
+    @Override
+    public SmsSendVO sendResetSmsCode(SendSmsRequest request) {
+        // 先确认账号存在再发码：未绑定的手机号直接拒，不白耗一条短信
+        requireBoundPhone(request.getPhone());
+        // 场景由服务端钉死：客户端就算传 login，拿到的也是只能用于登录的码，改不了密码
+        request.setScene(SendSmsRequest.SCENE_RESET);
+        return captchaService.sendSms(request);
+    }
+
+    @Override
+    public EmailSendVO sendResetEmailCode(SendEmailRequest request) {
+        requireBoundEmail(request.getEmail());
+        request.setScene(SendEmailRequest.SCENE_RESET);
+        return captchaService.sendEmail(request);
+    }
+
+    @Override
+    public void resetPassword(ResetPasswordRequest request) {
+        boolean byEmail = request.byEmail();
+        User user = byEmail
+                ? requireBoundEmail(request.getEmail())
+                : requireBoundPhone(request.getPhone());
+        // 被禁用的账号不允许靠找回密码绕过封禁：否则封号就只剩「不能登录」这一个效果
+        checkUsable(user);
+
+        String target = byEmail ? request.getEmail().trim() : request.getPhone().trim();
+        if (byEmail) {
+            captchaService.verifyEmail(SendEmailRequest.SCENE_RESET, target, request.getCode());
+        } else {
+            captchaService.verifySms(SendSmsRequest.SCENE_RESET, target, request.getCode());
+        }
+
+        userService.resetPassword(user.getId(), request.getNewPassword());
+        // 改完密码必须踢掉全部设备：这是找回密码的标准动作。
+        // 不踢的话，盗号者拿到验证码改完密码，原主人的会话依旧活着，两边同时在线
+        logoutEverywhere(user.getId());
+        log.info("用户 {} 通过{}找回密码重置成功，已注销全部登录态", user.getId(), byEmail ? "邮箱" : "手机号");
     }
 
     @Override
@@ -152,6 +196,46 @@ public class AuthServiceImpl implements AuthService {
     @Override
     public UserVO currentUser() {
         return userService.getProfile(SecurityUtil.getUserId());
+    }
+
+    /**
+     * 找回密码专用：手机号必须已绑定账号，否则报「未绑定」而不是「用户不存在」。
+     *
+     * <p>这里确实会泄露「该手机号在不在系统里」，是产品上的取舍：国内主流应用
+     * （QQ、微信）都是先确认账号存在再发码，否则用户会把验证码发到一堆根本没注册的号码上，
+     * 体验更差。滥用风险由三道门控住：图形验证码闸门 + 按 IP 的 {@code @RateLimit}
+     * + 同一手机号 60 秒一次。真要避免枚举，得把提示改成「若该手机号已注册，验证码已发送」
+     * 并照常发码（对未注册号也发），代价是白耗短信费用。
+     */
+    private User requireBoundPhone(String phone) {
+        String value = phone == null ? null : phone.trim();
+        if (TextUtil.isBlank(value)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "手机号不能为空");
+        }
+        User user = userService.findByPhone(value);
+        if (user == null) {
+            log.warn("找回密码被拒，手机号未绑定账号: phone={}, ip={}",
+                    TextUtil.maskPhone(value), SecurityUtil.getClientIp());
+            throw new BusinessException(ResultCode.USER_PHONE_NOT_BOUND);
+        }
+        return user;
+    }
+
+    /**
+     * 找回密码专用：邮箱必须已绑定账号，枚举风险与应对同 {@link #requireBoundPhone}。
+     */
+    private User requireBoundEmail(String email) {
+        String value = email == null ? null : email.trim();
+        if (TextUtil.isBlank(value)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "邮箱不能为空");
+        }
+        User user = userService.findByEmail(value);
+        if (user == null) {
+            log.warn("找回密码被拒，邮箱未绑定账号: email={}, ip={}",
+                    TextUtil.maskEmail(value), SecurityUtil.getClientIp());
+            throw new BusinessException(ResultCode.USER_EMAIL_NOT_BOUND);
+        }
+        return user;
     }
 
     /**

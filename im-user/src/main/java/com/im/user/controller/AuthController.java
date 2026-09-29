@@ -6,8 +6,13 @@ import com.im.common.security.ratelimit.RateLimit;
 import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
+import com.im.user.dto.req.ResetPasswordRequest;
+import com.im.user.dto.req.SendEmailRequest;
+import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.req.SmsLoginRequest;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.LoginVO;
+import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.dto.vo.UserVO;
 import com.im.user.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -23,12 +28,12 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 认证接口。
  *
- * <p>{@code register} / {@code login} / {@code login/sms} 三个匿名接口已在
+ * <p>{@code register} / {@code login} / {@code login/sms} / {@code password/**} 这些匿名接口已在
  * {@code SaTokenConfigure} 的路由白名单中放行；{@code logout} / {@code refresh} / {@code me}
  * 同属 {@code /api/auth}，但通过 {@link SaCheckLogin} 注解要求登录态——
  * 这也是「白名单只放在 SaRouter 层、不放在 Spring MVC 拦截器排除列表」的原因。
  *
- * <p>四个匿名入口全部标了按 IP 的 {@code @RateLimit}：此时还没有可信的用户身份，
+ * <p>所有匿名入口全部标了按 IP 的 {@code @RateLimit}：此时还没有可信的用户身份，
  * 只能按来源地址限。登录另有图形验证码闸门，限流拦的是「绕过页面直接刷接口」的脚本。
  */
 @Tag(name = "01-认证", description = "注册、登录、注销与续签")
@@ -65,6 +70,31 @@ public class AuthController {
     @PostMapping("/login/email")
     public Result<LoginVO> loginByEmail(@RequestBody @Valid EmailLoginRequest request) {
         return Result.ok(authService.loginByEmail(request), "登录成功");
+    }
+
+    @Operation(summary = "发送找回密码短信验证码",
+            description = "手机号必须已绑定账号；需先过图形验证码闸门；scene 由服务端强制为 reset，客户端传什么都无效")
+    @RateLimit(count = 5, key = "auth.password.sms")
+    @PostMapping("/password/sms-code")
+    public Result<SmsSendVO> passwordSmsCode(@RequestBody @Valid SendSmsRequest request) {
+        return Result.ok(authService.sendResetSmsCode(request), "验证码已发送");
+    }
+
+    @Operation(summary = "发送找回密码邮箱验证码",
+            description = "邮箱必须已绑定账号；需先过图形验证码闸门；SMTP 未配置时开发环境降级为日志 + 回显")
+    @RateLimit(count = 5, key = "auth.password.email")
+    @PostMapping("/password/email-code")
+    public Result<EmailSendVO> passwordEmailCode(@RequestBody @Valid SendEmailRequest request) {
+        return Result.ok(authService.sendResetEmailCode(request), "验证码已发送");
+    }
+
+    @Operation(summary = "凭验证码重置密码",
+            description = "resetType 取 phone / email；验证码一次性消费，错一次就作废；成功后该账号在所有设备上都需要重新登录")
+    @RateLimit(count = 5, seconds = 300, key = "auth.password.reset")
+    @PostMapping("/password/reset")
+    public Result<Void> resetPassword(@RequestBody @Valid ResetPasswordRequest request) {
+        authService.resetPassword(request);
+        return Result.ok(null, "密码已重置，请用新密码重新登录");
     }
 
     @Operation(summary = "注销当前设备")

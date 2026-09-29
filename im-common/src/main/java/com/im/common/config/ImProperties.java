@@ -216,6 +216,15 @@ public class ImProperties {
         private boolean imageRequired = true;
         /** 是否在响应中回显图形验证码答案，仅开发环境联调使用 */
         private boolean exposeImageCode = false;
+        /**
+         * SMTP 未配置（缺 {@code MAIL_USERNAME} / {@code MAIL_PASSWORD}）时，
+         * 邮件验证码是否降级为「只写日志 + 按 expose-email-code 回显」而不报 MAIL_NOT_CONFIGURED。
+         *
+         * <p>存在的意义：邮箱登录与邮箱找回密码都依赖真实 SMTP，开发机上没有 QQ 授权码时
+         * 这两条链路根本无法联调。打开后验证码仍然正常写入 Redis 并参与校验，只是不真发信。
+         * 生产环境必须为 false：否则任何人都能靠回显拿到验证码，邮箱这道身份校验直接失效。
+         */
+        private boolean mockMailWhenUnconfigured = false;
     }
 
     /**

@@ -34,12 +34,17 @@ public class SaTokenConfigure implements WebMvcConfigurer {
      * 浏览器渲染 {@code <img src>} 时根本不会带上 {@code satoken} 请求头，
      * 因此该端点改用 URL 上的短时票据认证，鉴权全部在 {@code FileController} 内部完成
      * （票据无效且无登录态时一样返回 401）。把它排除在拦截器外只是为了让票据有机会被读到。
+     *
+     * <p>{@code /api/auth/password/**} 是找回密码，用户正是因为登录不进来才走这条路，
+     * 天然匿名可达。它的安全性不靠登录态，而靠三道门叠起来：图形验证码闸门
+     * （一次性消费）+ 6 位场景验证码 + 按 IP 的 {@code @RateLimit}，缺一不可。
      */
     private static final List<String> EXCLUDE_PATTERNS = List.of(
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/login/sms",
             "/api/auth/login/email",
+            "/api/auth/password/**",
             "/api/captcha/**",
             "/api/file/download/**"
     );

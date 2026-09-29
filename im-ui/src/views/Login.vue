@@ -130,6 +130,9 @@
                 </el-button>
               </div>
             </el-form-item>
+            <p v-if="emailDebugCode" class="login__debug">
+              开发环境回显邮箱验证码：<b>{{ emailDebugCode }}</b>
+            </p>
             <el-button type="primary" class="login__submit" :loading="submitting" @click="submitEmail">
               登录
             </el-button>
@@ -137,10 +140,12 @@
         </el-tab-pane>
       </el-tabs>
 
-      <!-- 注册入口移到底部 -->
+      <!-- 注册入口与找回密码都放在底部 -->
       <p class="login__tip">
         未登录请
         <el-link type="primary" :underline="false" @click="openRegister">注册</el-link>
+        <span class="login__tip-sep">|</span>
+        <el-link type="primary" :underline="false" @click="openReset">忘记密码</el-link>
       </p>
     </div>
 
@@ -178,6 +183,89 @@
         <el-button type="primary" :loading="submitting" @click="submitRegister">注册并登录</el-button>
       </template>
     </el-dialog>
+
+    <!-- ==================== 找回密码弹窗 ====================
+         两条通道共用一个弹窗：发码接口不同，但校验链路完全一样
+         （图形验证码 → 6 位码 → 新密码）。图形验证码与登录 Tab 共用一份，
+         因为它本来就是一次性的，分开存反而会出现“两张图都只能用一个答案”。 -->
+    <el-dialog v-model="resetVisible" title="找回密码" width="min(420px, calc(100vw - 32px))" append-to-body>
+      <el-form
+        ref="resetFormRef"
+        :model="resetForm"
+        :rules="resetRules"
+        label-position="top"
+        size="large"
+        @submit.prevent="submitReset"
+      >
+        <el-form-item label="找回方式">
+          <el-radio-group v-model="resetForm.resetType" @change="onResetTypeChange">
+            <el-radio-button value="phone">手机验证码</el-radio-button>
+            <el-radio-button value="email">邮箱验证码</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item v-if="resetForm.resetType === 'phone'" label="手机号" prop="phone">
+          <el-input
+            v-model.trim="resetForm.phone"
+            placeholder="注册时绑定的手机号"
+            maxlength="11"
+            clearable
+            :prefix-icon="Iphone"
+          />
+        </el-form-item>
+        <el-form-item v-else label="邮箱" prop="email">
+          <el-input
+            v-model.trim="resetForm.email"
+            placeholder="注册时绑定的邮箱"
+            clearable
+            :prefix-icon="Message"
+          />
+        </el-form-item>
+
+        <el-form-item label="图形验证码" prop="captchaCode">
+          <div class="login__captcha-row">
+            <el-input v-model.trim="resetForm.captchaCode" placeholder="先完成图形验证" maxlength="8" :prefix-icon="Key" />
+            <CaptchaImage :src="captcha.image" :loading="captchaLoading" @refresh="loadCaptcha" />
+          </div>
+        </el-form-item>
+
+        <el-form-item label="验证码" prop="code">
+          <div class="login__captcha-row">
+            <el-input
+              v-model.trim="resetForm.code"
+              placeholder="6 位数字"
+              maxlength="6"
+              :prefix-icon="Key"
+              @keyup.enter="submitReset"
+            />
+            <el-button :disabled="resetCountdown > 0" :loading="resetSending" @click="sendResetCode">
+              {{ resetCountdown > 0 ? `${resetCountdown} 秒后重发` : '获取验证码' }}
+            </el-button>
+          </div>
+        </el-form-item>
+        <p v-if="resetDebugCode" class="login__debug">
+          开发环境回显验证码：<b>{{ resetDebugCode }}</b>
+        </p>
+
+        <el-form-item label="新密码" prop="newPassword">
+          <el-input v-model="resetForm.newPassword" type="password" placeholder="6-32 位" show-password :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input
+            v-model="resetForm.confirmPassword"
+            type="password"
+            placeholder="再输入一次"
+            show-password
+            :prefix-icon="Lock"
+            @keyup.enter="submitReset"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="resetVisible = false">取消</el-button>
+        <el-button type="primary" :loading="resetting" @click="submitReset">重置密码</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -190,7 +278,10 @@ import CaptchaImage from '@/components/CaptchaImage.vue'
 import {
   fetchCaptchaImage,
   sendSmsCode as sendSmsCodeApi,
-  sendEmailCode as sendEmailCodeApi
+  sendEmailCode as sendEmailCodeApi,
+  sendResetSmsCode as sendResetSmsCodeApi,
+  sendResetEmailCode as sendResetEmailCodeApi,
+  resetPassword as resetPasswordApi
 } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 
@@ -294,6 +385,7 @@ async function sendSmsCode() {
 /* ------------------------------ 邮箱验证码 ------------------------------ */
 
 const emailSending = ref(false)
+const emailDebugCode = ref('')
 const email = useCountdown()
 const emailCountdown = email.seconds
 
@@ -316,8 +408,11 @@ async function sendEmailCode() {
       captchaKey: captcha.key,
       captchaCode: emailForm.captchaCode
     })
+    // 开发环境（im.captcha.expose-email-code=true）才带 debugCode；
+    // 没配 SMTP 的开发机靠 mock-mail-when-unconfigured 降级，同样从这儿拿码。
+    emailDebugCode.value = vo?.debugCode || ''
     email.start(vo?.retryAfter || vo?.expiresIn || 60)
-    ElMessage.success('邮箱验证码已发送，请注意查收')
+    ElMessage.success(emailDebugCode.value ? '邮箱验证码已发送' : '邮箱验证码已发送，请注意查收')
   } finally {
     emailSending.value = false
     loadCaptcha()
@@ -500,6 +595,194 @@ async function submitRegister() {
   }
 }
 
+/* ------------------------------ 找回密码 ------------------------------ */
+
+const resetVisible = ref(false)
+const resetSending = ref(false)
+const resetting = ref(false)
+const resetDebugCode = ref('')
+const resetFormRef = ref(null)
+const resetCd = useCountdown()
+const resetCountdown = resetCd.seconds
+
+const resetForm = reactive({
+  resetType: 'phone',
+  phone: '',
+  email: '',
+  captchaCode: '',
+  code: '',
+  newPassword: '',
+  confirmPassword: ''
+})
+
+/**
+ * 手机号与邮箱二选一必填，且只对当前选中的通道生效。
+ *
+ * 用 validator 而不是 required：隐藏起来的那一项不应该参与校验，
+ * 否则切到邮箱通道后，空的手机号会一直报错挡住提交。
+ * 同样的约束后端放在服务层做（Bean Validation 表达不了“二选一必填”）。
+ */
+const resetRules = {
+  phone: [
+    {
+      validator: (rule, value, callback) => {
+        if (resetForm.resetType !== 'phone') {
+          callback()
+          return
+        }
+        if (!value) {
+          callback(new Error('请输入手机号'))
+          return
+        }
+        if (!/^1[3-9]\d{9}$/.test(value)) {
+          callback(new Error('手机号格式不正确'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
+  ],
+  email: [
+    {
+      validator: (rule, value, callback) => {
+        if (resetForm.resetType !== 'email') {
+          callback()
+          return
+        }
+        if (!value) {
+          callback(new Error('请输入邮箱'))
+          return
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+          callback(new Error('邮箱格式不正确'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
+  ],
+  captchaCode: [{ required: true, message: '请输入图形验证码', trigger: 'blur' }],
+  code: [
+    { required: true, message: '请输入验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
+  ],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, max: 32, message: '密码长度 6-32 位', trigger: 'blur' }
+  ],
+  confirmPassword: [
+    { required: true, message: '请再输入一次新密码', trigger: 'blur' },
+    {
+      validator: (rule, value, callback) => {
+        if (value !== resetForm.newPassword) {
+          callback(new Error('两次输入的密码不一致'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
+  ]
+}
+
+function onResetTypeChange() {
+  // 切通道时清掉已填的码：两个通道的验证码在后端是分场景分目标存的，
+  // 手机通道的码填进邮箱通道一律校验不过，留在框里只会误导用户。
+  resetForm.captchaCode = ''
+  resetForm.code = ''
+  resetDebugCode.value = ''
+  resetFormRef.value?.clearValidate()
+}
+
+function openReset() {
+  // 把当前 Tab 里已经填好的手机号 / 邮箱带过去，省一次重复输入
+  if (tab.value === 'sms' && smsForm.phone) {
+    resetForm.resetType = 'phone'
+    resetForm.phone = smsForm.phone
+  } else if (tab.value === 'email' && emailForm.email) {
+    resetForm.resetType = 'email'
+    resetForm.email = emailForm.email
+  }
+  resetVisible.value = true
+  if (!captcha.image) {
+    loadCaptcha()
+  }
+}
+
+/**
+ * 发找回验证码。
+ *
+ * 不传 scene：场景由后端 AuthServiceImpl 钉死为 reset。
+ * 客户端能自己选场景的话，登录场景的码就能拿去改密码。
+ */
+async function sendResetCode() {
+  const byEmail = resetForm.resetType === 'email'
+  try {
+    await resetFormRef.value.validateField(byEmail ? ['email', 'captchaCode'] : ['phone', 'captchaCode'])
+  } catch {
+    return
+  }
+  resetSending.value = true
+  try {
+    const payload = byEmail
+      ? { email: resetForm.email, captchaKey: captcha.key, captchaCode: resetForm.captchaCode }
+      : { phone: resetForm.phone, captchaKey: captcha.key, captchaCode: resetForm.captchaCode }
+    const vo = await (byEmail ? sendResetEmailCodeApi(payload) : sendResetSmsCodeApi(payload))
+    resetDebugCode.value = vo?.debugCode || ''
+    resetCd.start(vo?.retryAfter || vo?.expiresIn || 60)
+    ElMessage.success(resetDebugCode.value ? '验证码已发送' : '验证码已发送，请注意查收')
+  } finally {
+    resetSending.value = false
+    // 图形验证码是一次性的，无论成功还是被拒都要换新图
+    loadCaptcha()
+    resetForm.captchaCode = ''
+  }
+}
+
+async function submitReset() {
+  const byEmail = resetForm.resetType === 'email'
+  const fields = byEmail
+    ? ['email', 'code', 'newPassword', 'confirmPassword']
+    : ['phone', 'code', 'newPassword', 'confirmPassword']
+  try {
+    await resetFormRef.value.validateField(fields)
+  } catch {
+    return
+  }
+  resetting.value = true
+  try {
+    const payload = {
+      resetType: resetForm.resetType,
+      code: resetForm.code,
+      newPassword: resetForm.newPassword
+    }
+    // 只传当前通道的目标：另一项传空字符串反而会撞上 DTO 上的格式校验
+    if (byEmail) {
+      payload.email = resetForm.email
+    } else {
+      payload.phone = resetForm.phone
+    }
+    await resetPasswordApi(payload)
+    resetVisible.value = false
+    ElMessage.success('密码已重置，该账号在所有设备上的登录态已失效，请用新密码重新登录')
+    // 手机本身就是账号登录的入参，直接填回去；邮箱登录不用密码，只切 Tab
+    tab.value = 'account'
+    if (!byEmail) {
+      accountForm.account = resetForm.phone
+    }
+    accountForm.password = ''
+    resetForm.code = ''
+    resetForm.newPassword = ''
+    resetForm.confirmPassword = ''
+    resetDebugCode.value = ''
+    resetCd.stop()
+  } finally {
+    resetting.value = false
+  }
+}
+
 /* ------------------------------- 生命周期 ------------------------------- */
 
 onMounted(loadCaptcha)
@@ -507,6 +790,7 @@ onMounted(loadCaptcha)
 onBeforeUnmount(() => {
   sms.stop()
   email.stop()
+  resetCd.stop()
 })
 
 /**
@@ -598,5 +882,10 @@ watch(tab, (value) => {
   font-size: 13px;
   color: var(--im-text-secondary);
   text-align: center;
+}
+
+.login__tip-sep {
+  margin: 0 8px;
+  color: var(--im-border);
 }
 </style>

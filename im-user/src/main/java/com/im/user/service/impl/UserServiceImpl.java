@@ -16,6 +16,7 @@ import com.im.common.util.TextUtil;
 import com.im.user.convert.UserConvert;
 import com.im.user.dto.req.BindPhoneRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
+import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.req.UpdateProfileRequest;
 import com.im.user.dto.req.UserSearchQuery;
 import com.im.user.dto.vo.UserCardVO;
@@ -264,12 +265,30 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
+    public void resetPassword(Long userId, String newPassword) {
+        User user = requireById(userId);
+        // 不校验原密码：用户正是因为忘了密码才走这条路，身份由验证码保证。
+        // 但仍拒绝「新旧密码相同」：否则找回密码能变成一次空操作，
+        // 用户以为改成功了，实际密码没变，下次依旧登不进去。
+        if (!User.NO_PASSWORD.equals(user.getPassword())
+                && passwordEncryptor.matches(newPassword, user.getPassword())) {
+            throw new BusinessException(ResultCode.PASSWORD_RESET_NEW_SAME);
+        }
+        User patch = new User();
+        patch.setId(userId);
+        patch.setPassword(passwordEncryptor.encode(newPassword));
+        userMapper.updateById(patch);
+        log.info("用户 {} 凭验证码重置密码成功", userId);
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public void bindPhone(Long userId, BindPhoneRequest request) {
         User user = requireById(userId);
         String phone = request.getPhone().trim();
-        // 先校验短信验证码（一次性消费），再判断占用，避免验证码被无效请求白白消耗
-        captchaService.verifySms(phone, request.getSmsCode());
+        // 先校验短信验证码（一次性消费），再判断占用，避免验证码被无效请求白白消耗；
+        // 场景必须是 bind，与发码时一致，否则在分场景的 Redis 键里根本找不到这个码
+        captchaService.verifySms(SendSmsRequest.SCENE_BIND, phone, request.getSmsCode());
         User occupied = findByPhone(phone);
         if (occupied != null && !occupied.getId().equals(userId)) {
             throw new BusinessException(ResultCode.USER_PHONE_EXISTS);

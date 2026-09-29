@@ -15,6 +15,9 @@
 --    1 正常结束（无违规）/ 2 违规达阈值强制结束 / 3 未完成（关页面后被补记）/ 0 进行中
 --  详见第 7~9 节。计数与流水是照着服务端判定规则造的，两边能对账。
 --
+--  本脚本只规整自己的种子 ID 段（1~9999 与 2300~9399 区间），不会碰运行期写入的
+--  雪花 ID 数据，因此对已有真实数据的库也能安全执行（见第 0 节）。
+--
 --  密码密文由 org.springframework.security.crypto.argon2.Argon2PasswordEncoder
 --  （Spring Security v5.8 默认参数：m=16384,t=2,p=1）离线生成，
 --  校验时参数从密文自身解析，因此与 im.security.password-encoder 的运行期取值无关。
@@ -22,24 +25,36 @@
 
 USE `im_db`;
 
--- 所有 INSERT 前先清理，保证脚本可重复执行
-DELETE FROM `im_message_read`;
-DELETE FROM `im_message`;
-DELETE FROM `im_conversation_member`;
-DELETE FROM `im_conversation`;
-DELETE FROM `im_friend_request`;
-DELETE FROM `im_friend`;
-DELETE FROM `im_role_permission`;
-DELETE FROM `im_user_role`;
-DELETE FROM `im_permission`;
-DELETE FROM `im_role`;
-DELETE FROM `im_user`;
+-- -------------------------------------------------------------------------------------
+-- 0. 清理旧数据（先删子表再删主表，避免外键/逻辑不一致）
+--
+--    ⚠ 只删本文件的种子 ID 段，禁止整表 DELETE。种子 ID 全部落在 1~9999，
+--    而运行期写入的是 MyBatis-Plus 雪花 ID（19 位，量级 10^18），两个区间不会重叠。
+--    早期版本写的是 `DELETE FROM im_user` 这样的整表清空，跑一次就把库里已注册的
+--    真实账号、会话、聊天记录和好友关系全删了。要把库重置成纯演示数据时，
+--    自己手动执行下面这段（确认无需保留真实数据后再用）：
+--      TRUNCATE `im_message_read`;  TRUNCATE `im_message`;
+--      TRUNCATE `im_conversation_member`;  TRUNCATE `im_conversation`;
+--      TRUNCATE `im_friend_request`;  TRUNCATE `im_friend`;
+--      TRUNCATE `im_role_permission`;  TRUNCATE `im_user_role`;
+--      TRUNCATE `im_permission`;  TRUNCATE `im_role`;  TRUNCATE `im_user`;
+-- -------------------------------------------------------------------------------------
+DELETE FROM `im_message_read`        WHERE `id` < 10000;
+DELETE FROM `im_message`             WHERE `id` < 10000;
+DELETE FROM `im_conversation_member` WHERE `id` < 10000;
+DELETE FROM `im_conversation`        WHERE `id` < 10000;
+DELETE FROM `im_friend_request`      WHERE `id` < 10000;
+DELETE FROM `im_friend`              WHERE `id` < 10000;
+DELETE FROM `im_role_permission`     WHERE `id` < 10000;
+DELETE FROM `im_user_role`           WHERE `id` < 10000;
+DELETE FROM `im_permission`          WHERE `id` < 10000;
+DELETE FROM `im_role`                WHERE `id` < 10000;
+DELETE FROM `im_user`                WHERE `id` < 10000;
 
--- 面试三张表可能已经存了候选人真实面试的审计数据，因此不按表清空，只精确删掉种子 ID 段
--- （雪花 ID 是 19 位，2300~2399 / 3300~3399 / 9300~9399 这几个小区间不可能撞上）。
-DELETE FROM `im_interview_event` WHERE `id` BETWEEN 9300 AND 9399;
-DELETE FROM `im_interview_message` WHERE `id` BETWEEN 3300 AND 3399;
-DELETE FROM `im_interview_session` WHERE `id` BETWEEN 2300 AND 2399;
+-- 面试三张表的种子 ID 段（2300~2399 / 3300~3399 / 9300~9399）。
+DELETE FROM `im_interview_event`     WHERE `id` BETWEEN 9300 AND 9399;
+DELETE FROM `im_interview_message`   WHERE `id` BETWEEN 3300 AND 3399;
+DELETE FROM `im_interview_session`   WHERE `id` BETWEEN 2300 AND 2399;
 
 -- -------------------------------------------------------------------------------------
 -- 1. 角色

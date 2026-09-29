@@ -3,8 +3,13 @@ package com.im.user.service;
 import com.im.user.dto.req.EmailLoginRequest;
 import com.im.user.dto.req.LoginRequest;
 import com.im.user.dto.req.RegisterRequest;
+import com.im.user.dto.req.ResetPasswordRequest;
+import com.im.user.dto.req.SendEmailRequest;
+import com.im.user.dto.req.SendSmsRequest;
 import com.im.user.dto.req.SmsLoginRequest;
+import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.LoginVO;
+import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.dto.vo.UserVO;
 
 /**
@@ -31,6 +36,25 @@ public interface AuthService {
      * 注册并直接返回登录态，省去前端的二次登录。
      */
     LoginVO register(RegisterRequest request);
+
+    /**
+     * 发送找回密码用的短信验证码。
+     *
+     * <p>与登录发码的两个区别：场景强制为 {@code reset}（客户端传什么都无效），
+     * 且手机号必须已绑定账号——找回密码不能像验证码登录那样顺手建号，
+     * 否则任意手机号都能被用来探测系统里有没有这个人。
+     */
+    SmsSendVO sendResetSmsCode(SendSmsRequest request);
+
+    /**
+     * 发送找回密码用的邮箱验证码，约束同 {@link #sendResetSmsCode}。
+     */
+    EmailSendVO sendResetEmailCode(SendEmailRequest request);
+
+    /**
+     * 凭验证码重置密码，成功后注销该用户全部设备的登录态。
+     */
+    void resetPassword(ResetPasswordRequest request);
 
     /**
      * 注销当前设备。

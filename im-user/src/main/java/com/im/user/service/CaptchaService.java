@@ -24,25 +24,36 @@ public interface CaptchaService {
     void verifyImage(String captchaKey, String captchaCode);
 
     /**
-     * 发送短信验证码（Mock 实现：写 Redis + 日志），带 60 秒频率限制。
+     * 发送短信验证码，带 60 秒频率限制；具体下发通道由 {@code SmsSender} 实现决定
+     * （默认 Mock：只写日志，不接真实服务商）。
      *
      * <p>当 {@code im.captcha.image-required=true} 时，发送前先校验图形验证码，
-     * 作为防短信轰炸的闸门；图形验证码一次性消费。
+     * 作为防短信轰炸的闸门；图形验证码一次性消费。绑定手机号场景例外（已登录的本人操作）。
      */
     SmsSendVO sendSms(SendSmsRequest request);
 
     /**
-     * 校验短信验证码，成功后立即作废。
+     * 校验指定场景的短信验证码，成功后立即作废。
+     *
+     * <p>场景必传且参与 Redis 键名：为登录发的码不能用来重置密码，反之亦然。
+     * 验证码本身一次性消费（取出即删），因此 6 位码无法被暴力猜测。
+     *
+     * @param scene {@code SendSmsRequest.SCENE_*} 之一
      */
-    void verifySms(String phone, String smsCode);
+    void verifySms(String scene, String phone, String smsCode);
 
     /**
      * 发送邮箱验证码（通过 QQ 邮箱 SMTP），带频率限制。
+     *
+     * <p>SMTP 未配置且 {@code im.captcha.mock-mail-when-unconfigured=true} 时降级为只写日志，
+     * 供开发环境联调邮箱登录与邮箱找回密码；生产环境该开关必须为 false。
      */
     EmailSendVO sendEmail(SendEmailRequest request);
 
     /**
-     * 校验邮箱验证码，成功后立即作废。
+     * 校验指定场景的邮箱验证码，成功后立即作废。场景隔离理由同 {@link #verifySms}。
+     *
+     * @param scene {@code SendEmailRequest.SCENE_*} 之一
      */
-    void verifyEmail(String email, String emailCode);
+    void verifyEmail(String scene, String email, String emailCode);
 }

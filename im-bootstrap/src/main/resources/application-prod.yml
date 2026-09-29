@@ -24,6 +24,16 @@ im:
     # 成为一条显式声明，而不是依赖某个人没有去改主配置。
     expose-sms-code: false
     expose-image-code: false
+    expose-email-code: false
+    # 生产必须真实发信：SMTP 未配置时直接报 MAIL_NOT_CONFIGURED，
+    # 而不是降级成「只写日志」。降级开着的话，忘配环境变量会变成「找回密码静默失效」，
+    # 而且日志里带明文验证码——生产日志的可见范围远大于开发机。
+    mock-mail-when-unconfigured: false
+  sms:
+    # 这里显式从环境变量读：不设 IM_SMS_PROVIDER 就退回 mock，
+    # 后果是短信只写日志、用户永远收不到码（失败方向是「发不出去」而不是「绕过校验」，
+    # 不会造成安全口子，但上线前必须把它换成真实服务商）。
+    provider: ${IM_SMS_PROVIDER:mock}
   websocket:
     # 生产环境客户端基数大，空闲扫描放宽到 60s，减少无谓的遍历开销；
     # 断连判定仍然由 heartbeat-timeout-seconds 决定，这里只改检查频率。

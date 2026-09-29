@@ -48,3 +48,26 @@ export function sendSmsCode(data) {
 export function sendEmailCode(data) {
   return http.post('/captcha/email', data)
 }
+
+/**
+ * 找回密码：发送手机验证码。{ phone, captchaKey, captchaCode }
+ * 场景由后端钉死为 reset，前端不用（也不能）传 scene——
+ * 登录用的验证码在分场景的 Redis 键里与找回密码的码完全隔离。
+ * 手机号未绑定任何账号时返回 2017。
+ */
+export function sendResetSmsCode(data) {
+  return http.post('/auth/password/sms-code', data)
+}
+
+/** 找回密码：发送邮箱验证码。{ email, captchaKey, captchaCode }，邮箱未绑定时返回 2018 */
+export function sendResetEmailCode(data) {
+  return http.post('/auth/password/email-code', data)
+}
+
+/**
+ * 提交新密码：{ resetType: 'phone' | 'email', phone | email, code, newPassword }
+ * 成功后该账号在所有设备上的登录态都会失效，需要用新密码重新登录。
+ */
+export function resetPassword(data) {
+  return http.post('/auth/password/reset', data)
+}
