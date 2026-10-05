@@ -582,6 +582,45 @@ im:
       # 直连握手尝试预算（毫秒）：超时即判该档不可用，落回下一档，不反复重试
       handshake-timeout-ms: 3000
 
+  # ---------------------------------------------------------------------------
+  # 直播（im-live 控制面模块）
+  #
+  # 拓扑：推流端（Electron + 已捆绑 ffmpeg）硬编切 HLS 分片 → PUT 到 Nginx 推流口；
+  #       观众从 Nginx 播放口拉 m3u8；Java 只管房间状态、播放地址签名与弹幕通道，
+  #       一个媒体字节都不碰。键名对应 com.im.live.config.LiveProperties。
+  #
+  # ★ play-base-url / push-base-url 必须由部署方显式配置：它们取决于 Nginx 挂在哪个
+  #   域名/端口、location 前缀是什么，服务端猜不出来。留空时开播接口直接报
+  #   LIVE_NOT_CONFIGURED（11002），而不是下发一个拼不出来、要等播放器 404 才暴露的相对地址。
+  # ★ sign-secret 必须与 Nginx secure_link_md5 用的密钥逐字一致，生产环境经环境变量注入。
+  # ---------------------------------------------------------------------------
+  live:
+    # 总开关：关闭后开播/观看接口与 /ws/live 弹幕端点全部拒绝服务
+    enabled: ${IM_LIVE_ENABLED:true}
+    # 播放基址：观众实际请求 m3u8 的 URL 前缀，含 Nginx 的 location 前缀。
+    # 最终地址 = {play-base-url}/{roomId}/{streamKey}/index.m3u8?expire=&sign=
+    play-base-url: ${IM_LIVE_PLAY_BASE_URL:}
+    # 推流基址：ffmpeg -method PUT 的目标前缀，只在服务端与主播之间用，通常不对外发布
+    push-base-url: ${IM_LIVE_PUSH_BASE_URL:}
+    # 播放地址签名密钥，必须与 Nginx secure_link_md5 "$uri$arg_expire$secret" 的 secret 一致
+    sign-secret: ${IM_LIVE_SIGN_SECRET:im-live-dev-secret-change-me}
+    # 播放地址有效期（秒），默认 6 小时：覆盖一场直播，泄露的地址也不会长期可用
+    sign-ttl-seconds: 21600
+    # 推流端心跳间隔建议值（秒），随开播响应下发；服务端按 heartbeat-timeout-factor 倍判超时
+    heartbeat-seconds: 15
+    # 心跳超时倍数：超过 heartbeat-seconds × 该倍数没心跳即判定断播并自动关播
+    heartbeat-timeout-factor: 4
+    # 单条弹幕最大字符数，超出直接拒绝（不截断）
+    danmaku-max-length: 100
+    # 单个连接每秒最多发几条弹幕，防脚本刷爆房间
+    danmaku-per-second: 3
+    # 房间标题最大长度
+    title-max-length: 60
+    # 单个用户同时能开几个直播中的房间
+    max-living-rooms-per-user: 1
+    # 在线人数计数键的 TTL（秒）：正常路径成对增减，TTL 只是进程被 kill / 连接泄漏时的兜底
+    online-key-ttl-seconds: 7200
+
   # --------------------------------------------------------------------------
   # 日志落地：目录、保留天数、体积护栏与慢 SQL 阈值
   # 格式与滚动策略在 im-common 的 logback-spring.xml，它按属性名直接读这几个 key

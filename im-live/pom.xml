@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-live</artifactId>
+    <name>im-live</name>
+    <description>直播：本地软件推流（ffmpeg 切 HLS）、房间管理与签名播放地址、弹幕通道</description>
+
+    <dependencies>
+        <!-- 业务模块只依赖 im-common，跨模块协作全部走 com.im.common.spi 契约 -->
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-common</artifactId>
+        </dependency>
+        <!-- 弹幕通道用原生 WebSocket（TextWebSocketHandler），与聊天/远控通道相互独立；
+             im-common 只带 spring-boot-starter-web，不含 websocket，需显式引入 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+    </dependencies>
+</project>

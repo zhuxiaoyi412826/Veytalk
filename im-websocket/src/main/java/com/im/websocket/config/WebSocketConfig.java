@@ -5,8 +5,10 @@ import com.im.common.constant.ImConstants;
 import com.im.websocket.handler.ImWebSocketHandler;
 import com.im.websocket.handler.WsHandshakeInterceptor;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
@@ -30,6 +32,9 @@ import org.springframework.web.socket.server.standard.ServletServerContainerFact
  * 反过来，若这里改成白名单，生产环境把前后端部署到同一个新域名时，
  * 握手会因为 Origin 不在 {@code im.cors.allowed-origins} 里而全部失败——
  * 那是一个只在上线当天才暴露、且报错信息（HTTP 403）完全指不到根因的坑。
+ *
+ * <p>注意 {@code "*"} 并不放行字面量 {@code null} / {@code file://}（Electron 桌面端的
+ * 握手 Origin），那道坎在框架层且静默 403，由 {@link WsOriginNormalizeFilter} 前置归一化解决。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSocket
@@ -71,5 +76,21 @@ public class WebSocketConfig implements WebSocketConfigurer {
         container.setMaxBinaryMessageBufferSize(8 * 1024);
         container.setMaxSessionIdleTimeout(config.getHeartbeatTimeoutSeconds() * 2000L);
         return container;
+    }
+
+    /**
+     * 桌面端握手 Origin 归一化前置过滤器，见 {@link WsOriginNormalizeFilter}。
+     *
+     * <p>顺序必须最高：它要在 Spring 握手处理链读到 Origin 之前完成改写，
+     * 而框架的 Origin 校验发生在 DispatcherServlet 内部，任何晚于它的 Filter 都来不及。
+     */
+    @Bean
+    public FilterRegistrationBean<WsOriginNormalizeFilter> wsOriginNormalizeFilter() {
+        FilterRegistrationBean<WsOriginNormalizeFilter> registration =
+                new FilterRegistrationBean<>(new WsOriginNormalizeFilter());
+        registration.addUrlPatterns(ImConstants.WS_ENDPOINT, ImConstants.WS_ENDPOINT + "/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        registration.setName("wsOriginNormalizeFilter");
+        return registration;
     }
 }

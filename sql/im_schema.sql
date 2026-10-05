@@ -499,3 +499,35 @@ CREATE TABLE `im_interview_event`
     KEY `idx_session_violation` (`session_id`, `violation`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试操作与违规事件流水（只增不改不删）';
+
+-- =====================================================================================
+--  十、直播（im-live）
+-- =====================================================================================
+
+CREATE TABLE `im_live_room`
+(
+    `id`            BIGINT       NOT NULL COMMENT '房间 ID（一行 = 一场直播，非「频道」）',
+    `anchor_id`     BIGINT       NOT NULL COMMENT '主播用户 ID',
+    `title`         VARCHAR(60)  NOT NULL COMMENT '房间标题',
+    `cover`         VARCHAR(512)          DEFAULT NULL COMMENT '封面图访问地址，可空（前端退化成占位图）',
+    `notice`        VARCHAR(512)          DEFAULT NULL COMMENT '房间公告，进房时随弹幕通道下发一次',
+    `source_type`   VARCHAR(16)           DEFAULT 'screen' COMMENT '推流源：screen 屏幕分享 / camera 摄像头，仅前端展示图标用',
+    `resolution`    VARCHAR(16)           DEFAULT NULL COMMENT '分辨率档位标签（如 720p/1080p），推流端声明，服务端只存不校验',
+    `bitrate_kbps`  INT                   DEFAULT NULL COMMENT '视频码率（kbps），推流端声明，用于列表展示与带宽估算',
+    `stream_key`    VARCHAR(64)           DEFAULT NULL COMMENT '本场推流密钥：既是 Nginx 目录名也是能力凭证，随机不可猜，关播后置空作废本场地址',
+    `status`        TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 直播中 2 已结束 3 已封禁',
+    `peak_online`   INT          NOT NULL DEFAULT 0 COMMENT '峰值在线人数，关播时定格（直播途中的实时值在 Redis）',
+    `viewer_total`  INT          NOT NULL DEFAULT 0 COMMENT '累计观看人次（连接建立次数，同一人反复进出重复计），关播时定格',
+    `start_time`    DATETIME              DEFAULT NULL COMMENT '开播时间',
+    `end_time`      DATETIME              DEFAULT NULL COMMENT '关播时间，直播中为空',
+    `end_reason`    VARCHAR(16)           DEFAULT NULL COMMENT '关播原因：stop 主播主动 / timeout 心跳超时 / ban 管理封禁，为空表示仍在直播',
+    `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`       TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    -- 「我的直播」面板与「该主播是否已有进行中房间」都按 anchor_id + status 查
+    KEY `idx_anchor_status` (`anchor_id`, `status`),
+    -- 房间列表主查询：直播中恒排最前（status 升序），其次按开播时间倒序
+    KEY `idx_status_start` (`status`, `start_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='直播房间表（一行一场直播）';

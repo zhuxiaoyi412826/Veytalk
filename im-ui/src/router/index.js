@@ -70,6 +70,18 @@ const routes = [
         meta: { title: '远程控制' }
       },
       {
+        path: 'live',
+        name: 'live',
+        component: () => import('@/views/Live.vue'),
+        meta: { title: '直播' }
+      },
+      {
+        path: 'live/:roomId',
+        name: 'live-room',
+        component: () => import('@/views/Live.vue'),
+        meta: { title: '直播间' }
+      },
+      {
         path: 'user/:id',
         name: 'user-profile',
         component: () => import('@/views/UserProfile.vue'),

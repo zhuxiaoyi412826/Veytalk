@@ -98,6 +98,11 @@ public class Knife4jConfig {
         return build("09-远程控制", "/api/remote/**");
     }
 
+    @Bean
+    public GroupedOpenApi liveApi() {
+        return build("10-直播", "/api/live/**");
+    }
+
     /**
      * 按路径前缀分组，而不是按包名。
      *

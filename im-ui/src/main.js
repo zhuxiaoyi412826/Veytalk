@@ -31,4 +31,30 @@ Object.entries(elementIcons).forEach(([name, component]) => {
   app.component(name, component)
 })
 
+/*
+ * 手机软键盘收起后把可视视口的残留平移抹平。
+ *
+ * 本页是 html/body/#app 全 100% + body overflow:hidden 的固定壳，页面自己永不滚动。
+ * 浏览器为了露出被键盘挡住的输入框会把可视视口往上顶；键盘收起时若没复位（移动端
+ * 浏览器的老毛病），偏移就留在那里，而命中测试是跟着可视视口走的——于是「看到的」
+ * 和「点得到的」错开一段，点输入框弹不出键盘、点别的也落错地方，
+ * 只有回桌面或重登这种整页重布局才能救。index.html 的 interactive-widget 是预防，
+ * 这里是兜底：不支持那个参数的浏览器上，键盘一收起（可视视口高度回到布局高度）
+ * 就主动把平移归零。键盘还开着时不动，免得跟浏览器抢着滚动把输入框推出视野。 */
+const visualViewport = window.visualViewport
+if (visualViewport) {
+  const settleViewport = () => {
+    if (visualViewport.height < window.innerHeight - 2) {
+      return
+    }
+    if (Math.abs(visualViewport.offsetTop) < 2 && Math.abs(visualViewport.offsetLeft) < 2) {
+      return
+    }
+    window.scrollTo(0, 0)
+    visualViewport.scrollTo?.(0, 0)
+  }
+  visualViewport.addEventListener('resize', settleViewport)
+  visualViewport.addEventListener('scroll', settleViewport)
+}
+
 app.mount('#app')

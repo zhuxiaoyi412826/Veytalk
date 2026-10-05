@@ -137,3 +137,25 @@ contextBridge.exposeInMainWorld('__IM_DIRECT__', {
     ipcRenderer.on('im:direct-state', (event, state) => callback(state))
   }
 })
+
+/**
+ * 直播推流桥：只有桌面端有。
+ *
+ * 实际推流靠主进程 spawn 本机原生 ffmpeg 采集屏幕/摄像头、切 HLS(fMP4) 再 PUT 到 Nginx，
+ * 渲染进程起不了子进程，故全部下沉到主进程（见 electron/live.js）。
+ * 浏览器/手机端没有 preload，window.__IM_LIVE__ 不存在，前端据此禁用「开播」只保留观看。
+ *
+ * 契约：startPush/stopPush 走 invoke（主进程统一返回 {ok, data|error}，call 拆包）；
+ * startPush 在 ffmpeg 成功 spawn 后即 resolve，推流中途的状态变化经 onState 事件持续推送
+ * （state: starting | pushing | stopped | error，附带 encoder / error / warn 等字段）。
+ */
+contextBridge.exposeInMainWorld('__IM_LIVE__', {
+  isDesktop: true,
+  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?} → {started, encoder} */
+  startPush: (params) => call('im:live-start-push', params),
+  stopPush: () => call('im:live-stop-push', null),
+  queryState: () => call('im:live-query-state', null),
+  onState: (callback) => {
+    ipcRenderer.on('im:live-state', (event, state) => callback(state))
+  }
+})

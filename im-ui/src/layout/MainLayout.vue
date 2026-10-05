@@ -36,9 +36,16 @@
             ></span>
           </div>
         </el-tooltip>
-        <div class="main-layout__item" title="退出登录" @click="onLogout">
-          <el-icon :size="22"><SwitchButton /></el-icon>
-          <span class="main-layout__label">退出</span>
+        <!-- 直播入口：跳转到直播大厅（房间列表 + 开播面板）；
+             退出登录挪到「设置」页的「账号」卡片，窄屏底栏格子宝贵，不再为它留位 -->
+        <div
+          class="main-layout__item"
+          :class="{ 'main-layout__item--active': isActive({ match: 'live' }) }"
+          title="直播"
+          @click="router.push({ name: 'live' })"
+        >
+          <el-icon :size="22"><VideoCamera /></el-icon>
+          <span class="main-layout__label">直播</span>
         </div>
       </div>
     </nav>
@@ -61,15 +68,13 @@
 <script setup>
 import { computed, onBeforeMount, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { ChatDotRound, Microphone, Monitor, Setting, SwitchButton, User } from '@element-plus/icons-vue'
+import { ChatDotRound, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useChatStore } from '@/stores/chat'
 import { installWsDispatch, uninstallWsDispatch } from '@/ws/dispatch'
-import { signOut } from '@/stores'
 import { socketState } from '@/ws/socket'
 
 defineOptions({ name: 'MainLayout' })
@@ -177,22 +182,6 @@ function blockRawFileDrop(event) {
   if (types && Array.from(types).includes('Files')) {
     event.preventDefault()
   }
-}
-
-async function onLogout() {
-  try {
-    await ElMessageBox.confirm('退出后需要重新登录才能收发消息，确定退出？', '退出登录', {
-      confirmButtonText: '退出',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
-  } catch {
-    return
-  }
-  // 清理步骤集中在 stores/index.js 的 signOut，与「我的」页面那个退出入口共用一份
-  await signOut()
-  ElMessage.success('已退出登录')
-  router.replace({ name: 'login' })
 }
 </script>
 

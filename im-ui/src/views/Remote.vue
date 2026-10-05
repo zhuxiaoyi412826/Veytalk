@@ -1279,6 +1279,28 @@ const portraitVp = ref(false) // 当前视口是竖的（innerHeight > innerWidt
 function syncPortraitViewport() {
   portraitVp.value = window.innerHeight > window.innerWidth
 }
+/* 进/退全屏后视口尺寸要好几拍才稳定（全屏过渡、地址栏收起都在这期间改 innerHeight），
+   单点采样会读到过渡中的旧值：读到「横」就漏转一次，表现是全屏后画面竖着一条带黑边，
+   而回桌面再进来触发 resize 重采又好了。连采几拍、让值自己稳定下来才算数。 */
+let vpSyncTimer = 0
+function scheduleViewportSync() {
+  clearTimeout(vpSyncTimer)
+  let left = 6
+  const tick = () => {
+    syncPortraitViewport()
+    if (--left > 0) {
+      vpSyncTimer = setTimeout(tick, 120)
+    }
+  }
+  tick()
+}
+/* 切后台再回前台时地址栏/视口会重新结算：这正是「回桌面再进来就正常」的那次补救，
+   直接监听 visibilitychange 把它变成自动的，不用用户手动绕一圈。 */
+function onVisibilityChange() {
+  if (!document.hidden) {
+    scheduleViewportSync()
+  }
+}
 const rotateFs = computed(() => isFs.value && portraitVp.value)
 // 旋转样式：宽高对调 + rotate(90deg) 顺时针铺满；dvh 排在 vh 之后，老内核认不了就自动退回 vh
 const stageStyle = computed(() =>
@@ -1314,8 +1336,8 @@ async function enterLandscapeFullscreen() {
   }
   // 内置浏览器不一定补发 fullscreenchange，这里直接按实测结果同步，否则按钮与旋转状态会卡在旧值
   isFullscreen.value = native
-  // 全屏切换后视口尺寸要稍后才稳定：延一拍再判方向，否则会多转或漏转一次
-  setTimeout(syncPortraitViewport, 320)
+  // 全屏切换后视口尺寸要稍后才稳定：连采几拍再判方向，否则会多转或漏转一次
+  scheduleViewportSync()
 }
 
 async function exitPortrait() {
@@ -1333,7 +1355,7 @@ async function exitPortrait() {
       // 已不在全屏则忽略
     }
   }
-  setTimeout(syncPortraitViewport, 120)
+  scheduleViewportSync()
 }
 
 function onFullscreenChange() {
@@ -1890,12 +1912,18 @@ onMounted(() => {
   syncPortraitViewport()
   window.addEventListener('resize', syncPortraitViewport)
   window.addEventListener('orientationchange', syncPortraitViewport)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  // 部分手机浏览器的地址栏收放只通知 visualViewport，不冒到 window.resize
+  window.visualViewport?.addEventListener('resize', syncPortraitViewport)
 })
 
 onBeforeUnmount(() => {
   stopPolling()
   window.removeEventListener('resize', syncPortraitViewport)
   window.removeEventListener('orientationchange', syncPortraitViewport)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.visualViewport?.removeEventListener('resize', syncPortraitViewport)
+  clearTimeout(vpSyncTimer)
   if (keydownHandler) {
     document.removeEventListener('keydown', keydownHandler)
     document.removeEventListener('keyup', keyupHandler)

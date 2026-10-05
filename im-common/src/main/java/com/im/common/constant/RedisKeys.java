@@ -124,4 +124,27 @@ public final class RedisKeys {
     public static String webSearch(String keywordMd5) {
         return WEB_SEARCH + keywordMd5;
     }
+
+    /**
+     * 直播间在线人数：im:live:online:{roomId} -> 计数。
+     *
+     * <p>不进库是因为它会每秒变好几次（百人房间进出频繁），而库值只在关播时定格一次。
+     */
+    public static final String LIVE_ONLINE = PREFIX + "live:online:";
+
+    /**
+     * 直播推流心跳：im:live:hb:{roomId} -> 时间戳，TTL 即超时判定。
+     *
+     * <p>用 TTL 而不是存时间戳再比差值：巡检任务只需 {@code EXISTS}，
+     * 不必把全部直播中的房间扫一遍再逐个算超时。
+     */
+    public static final String LIVE_HEARTBEAT = PREFIX + "live:hb:";
+
+    public static String liveOnline(Long roomId) {
+        return LIVE_ONLINE + roomId;
+    }
+
+    public static String liveHeartbeat(Long roomId) {
+        return LIVE_HEARTBEAT + roomId;
+    }
 }

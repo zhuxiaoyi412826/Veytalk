@@ -6,6 +6,7 @@ const { spawn, execFile } = require('child_process')
 const { setupLocalDb } = require('./localdb')
 const { setupDirectBridge, closeDirectLink } = require('./direct')
 const { setupRecorder, closeRecording } = require('./recorder')
+const { setupLiveBridge, closeLivePush } = require('./live')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -288,6 +289,20 @@ function setupDirect() {
   setupDirectBridge(ipcMain, send)
 }
 
+/**
+ * 直播推流桥：spawn ffmpeg 切 HLS + PUT 到 Nginx 全在主进程做（见 live.js），
+ * 渲染进程只收「已启动 / 推流中 / 停止 / 错误」状态事件。send 用第一个窗口的 webContents。
+ */
+function setupLive() {
+  const send = (channel, payload) => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, payload)
+    }
+  }
+  setupLiveBridge(ipcMain, send)
+}
+
 // 单实例：防止双击两次图标起两个主进程、在回环探测窗口期内竞相拉起 Agent
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -307,6 +322,7 @@ app.whenReady().then(() => {
   setupLocalDb()
   setupDirect()
   setupRecorder()
+  setupLive()
   setupAgentAutostart()
   createWindow()
 
@@ -322,6 +338,8 @@ app.on('window-all-closed', () => {
   closeDirectLink()
   // 录制文件同步收口：关窗时渲染进程已经没了，没人再调 record-stop，fd 不收就丢尾巴
   closeRecording('window-closed')
+  // 直播推流同理收口：关窗即停 ffmpeg 并清理临时分片目录，不留一个没人管的推流进程
+  closeLivePush('window-closed')
   if (process.platform !== 'darwin') {
     app.quit()
   }

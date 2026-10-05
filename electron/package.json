@@ -24,6 +24,7 @@
       "localdb.js",
       "direct.js",
       "recorder.js",
+      "live.js",
       "dist/**/*"
     ],
     "extraResources": [

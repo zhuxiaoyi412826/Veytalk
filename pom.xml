@@ -29,6 +29,7 @@
         <module>im-websocket</module>
         <module>im-ai</module>
         <module>im-remote</module>
+        <module>im-live</module>
         <module>im-bootstrap</module>
         <!-- 被控端 Agent：独立 fat jar，不被 bootstrap 依赖 -->
         <module>im-remote-agent</module>
@@ -127,6 +128,11 @@
             <dependency>
                 <groupId>com.im</groupId>
                 <artifactId>im-remote</artifactId>
+                <version>${im.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.im</groupId>
+                <artifactId>im-live</artifactId>
                 <version>${im.version}</version>
             </dependency>
 

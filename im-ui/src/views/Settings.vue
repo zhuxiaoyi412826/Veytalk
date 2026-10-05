@@ -379,6 +379,18 @@
         </div>
       </section>
 
+      <!-- ==================== 七、账号 ==================== -->
+      <section class="settings__card">
+        <div class="settings__card-title">账号</div>
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>退出登录</span>
+            <span class="settings__desc">侧边栏的退出入口已让位给直播，退出统一收在这里与「个人信息」页</span>
+          </div>
+          <el-button type="danger" plain :icon="SwitchButton" @click="onLogout">退出登录</el-button>
+        </div>
+      </section>
+
       <div class="settings__footer">
         <el-button :icon="RefreshLeft" @click="onReset">恢复默认设置</el-button>
       </div>
@@ -390,7 +402,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, FolderOpened, Picture, Refresh, RefreshLeft, User } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, User } from '@element-plus/icons-vue'
+import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
@@ -713,6 +726,24 @@ async function onReset() {
   }
   settings.reset()
   ElMessage.success('已恢复默认设置')
+}
+
+/* ------------------------------ 退出登录 ------------------------------ */
+
+// 与「个人信息」页的退出入口同一套流程：确认 → signOut 清本地态 → 回登录页
+async function onLogout() {
+  try {
+    await ElMessageBox.confirm('退出后需要重新登录才能收发消息，确定退出？', '退出登录', {
+      confirmButtonText: '退出',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  await signOut()
+  ElMessage.success('已退出登录')
+  router.replace({ name: 'login' })
 }
 </script>
 

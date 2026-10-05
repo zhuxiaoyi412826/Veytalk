@@ -111,7 +111,15 @@ public enum ResultCode {
        排查时看到 9xxx 还得先猜是哪块业务 */
     AI_INTERVIEW_NOT_FOUND(10001, "面试会话不存在或已过期"),
     AI_INTERVIEW_FORBIDDEN(10002, "无权访问该面试会话"),
-    AI_INTERVIEW_ENDED(10003, "面试已结束，不能再上报该会话的数据");
+    AI_INTERVIEW_ENDED(10003, "面试已结束，不能再上报该会话的数据"),
+
+    /* ==================== 11xxx 直播 ==================== */
+    LIVE_DISABLED(11001, "直播功能未开启"),
+    LIVE_NOT_CONFIGURED(11002, "直播推流/播放地址未配置，无法开播"),
+    LIVE_ROOM_NOT_FOUND(11003, "直播间不存在"),
+    LIVE_NOT_LIVING(11004, "该直播已结束"),
+    LIVE_FORBIDDEN(11005, "无权操作该直播间"),
+    LIVE_ALREADY_LIVING(11006, "你已有正在进行的直播，请先关播");
 
     private final int code;
     private final String message;

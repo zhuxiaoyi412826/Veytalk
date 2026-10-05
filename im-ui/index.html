@@ -2,7 +2,11 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- interactive-widget=resizes-content：键盘弹起时收缩布局视口而不是让浏览器去平移可视视口。
+         本页是 body overflow:hidden 的固定壳，一旦浏览器平移可视视口又没复位，
+         命中测试会跟着偏（点输入框弹不出键盘），收缩布局从根上不让它平移。
+         仅 Chrome/Edge 108+ 认识，其余浏览器忽略此参数、行为不变。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <title>IM 即时通讯</title>
   </head>
   <body>

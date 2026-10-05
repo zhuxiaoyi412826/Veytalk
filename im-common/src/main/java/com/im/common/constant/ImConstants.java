@@ -20,6 +20,16 @@ public final class ImConstants {
     public static final String WS_REMOTE_AGENT_ENDPOINT = "/ws/remote/agent";
     public static final String WS_REMOTE_CONTROL_ENDPOINT = "/ws/remote/control";
 
+    /**
+     * 直播弹幕端点：观众与主播都连这一条，握手参数为 roomId + satoken。
+     *
+     * <p>刻意不复用聊天通道 {@link #WS_ENDPOINT}：弹幕是高频、可丢弃、不落库的
+     * 临时消息，而聊天通道每条消息都要落库、发号、推离线；两者混在一个端点上，
+     * 百人房间的弹幕会把聊天推送的处理线程占满。同理也不走群消息：
+     * 走群消息就意味着每个观众都要成为群成员、直播间会出现在所有人的会话列表里。
+     */
+    public static final String WS_LIVE_ENDPOINT = "/ws/live";
+
     /** Sa-Token 登录体系标识 */
     public static final String LOGIN_TYPE = "login";
 
