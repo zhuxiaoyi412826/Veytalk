@@ -11,7 +11,8 @@
 三者都先进「待发送托盘」再手动发送）、
 WebSocket 实时推送（心跳/重连/多端踢下线）、
 **远程桌面控制**（服务端中继 + AES-GCM 端到端加密 + 识别码跨账号，见「十二」）、
-**AI 面试官**（本地知识库 BM25 RAG + SSE 流式）与**全网检索**（消息搜索框的「网络」分组，见「十三」）；
+**AI 面试官**（本地知识库 BM25 RAG + SSE 流式）与**全网检索**（消息搜索框的「网络」分组，见「十三」）、
+**直播**（桌面端 ffmpeg 屏幕分享 → HLS 分片 → 浏览器/手机 hls.js 观看 + WS 弹幕，见「十四」）；
 前端另可用 **Electron 打包为 Windows 桌面客户端**（安装包内置被控端 Agent 与裁剪 JRE）。
 
 > 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
@@ -60,6 +61,8 @@ im-parent (pom)
 ├── im-ai            AI 能力：面试官（知识库 BM25 检索 RAG、DashScope SSE 客户端、会话与限流）+ 全网检索
 │                    （抓取搜索引擎结果页、Redis 结果缓存）
 ├── im-remote        远程控制服务端：会话状态机、Agent/控制端双 WS 中继、审计与限流
+├── im-live          直播：房间生命周期（开播/关播/心跳超时结算）、播放地址签名、HLS 弹幕 WS 中继；
+│                    房间列表默认隐藏关播超过 1 小时的已结束场次（`im.live.ended-room-visible-minutes`）
 ├── im-bootstrap     启动模块：唯一的 main 类 + application.yml，repackage 成单 jar
 ├── im-remote-agent  被控端 Agent：独立 fat jar（纯 JDK 零依赖），不进上面那个单 jar，单独部署在被控机
 └── im-ui            Vue 3 前端（独立工程，不在 Maven modules 里）
@@ -76,7 +79,8 @@ im-parent (pom)
          im-file ┤                 │
     im-websocket ┤                 │
            im-ai ┤                 │
-       im-remote ┘                 │
+       im-remote ┤                 │
+        im-live  ┘                 │
                                    │
               im-bootstrap ────────┴──► 依赖全部 11 个模块，负责装配启动
 ```
@@ -152,6 +156,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `ALI_BABA_API_KEY` | 空 | AI 面试官的百炼（DashScope）API Key；未设置时仅面试功能不可用，其余功能照常 |
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
+| `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束直播间在大厅列表的可见时长（分钟）；关播超过它就不再显示，配 `0` 或负数=不过滤 |
 
 PowerShell 设置示例：
 
@@ -943,13 +948,60 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 
 ---
 
-## 十四、已知坑（踩过的，别再踩）
+## 十四、直播（桌面端屏幕分享 → HLS → 浏览器/手机观看）
 
-## 十五、目录结构
+主播用 **Electron 桌面端**开播（屏幕分享 / 摄像头），ffmpeg 采集编码切成 **HLS(fMP4)** 分片推流；观众用**浏览器 / 手机**进房，hls.js 拉流播放，弹幕走 WebSocket。前端是 `Live.vue`（大厅列表 + 直播间两形态）。
+
+**控制面与媒体面彻底分离**（与远程控制同一套哲学）：
+
+- **控制面（`im-live` Java 模块）**：只管房间生命周期、播放地址签名、弹幕 WS 中继，**一个媒体字节都不碰**；
+- **媒体面（独立 HTTP 文件服务器）**：真正收发 HLS 分片。生产用 **Nginx**（`secure_link_md5` 校验签名 + HTTPS，见 `md/直播.md §10`）；本机自测用零依赖脚本 **`electron/live-media-server.js`**（8088：PUT 落盘 / GET 静态返回，不校验签名，靠不可猜的 streamKey 兜底，见 `md/直播.md §11`）。
+
+```
+桌面端 ffmpeg ──PUT /hls/{roomId}/{streamKey}/…──►  媒体面（Nginx / live-media-server.js:8088）
+观众 浏览器/手机 ──hls.js GET（相对 /hls，前端同源代理）──►  同上
+观众 浏览器/手机 ──弹幕 WS /ws/live──►  im-live（控制面：签发播放地址、房间状态、心跳超时结算）
+```
+
+**接口**（`/api/live/**`，均需登录）：
+
+| 方法 & 路径 | 作用 |
+|---|---|
+| `POST /api/live/start` | 开播：建房 + 下发 roomId / streamKey（只此一次）/ pushUrl / playUrl / heartbeatSeconds / danmakuWs |
+| `POST /api/live/{roomId}/stop` | 关播（幂等） |
+| `POST /api/live/{roomId}/heartbeat` | 推流心跳续期；返回 false = 房间已结束，推流端必须停 ffmpeg |
+| `GET /api/live/{roomId}` | 房间详情（含签名播放地址，仅直播中），进房现取现用 |
+| `GET /api/live/page` | 房间分页：直播中恒排最前；**已结束且关播超阈值（默认 60 分钟）的房间不返回** |
+| `GET /api/live/mine` | 我的最近一场（直播中优先），供开播面板恢复现场 |
+| `WS /ws/live` | 弹幕 / 点赞 / 在线人数通道 |
+
+**播放地址签名**：`md5(path + expire + secret)`，与 Nginx `secure_link_md5 "$uri$arg_expire$secret"` 逐字对应；streamKey 是能力凭证（每场随机、关播作废），绝不出现在任何列表接口里。
+
+**IP 免配**（自测痛点根治）：`push-base-url=http://127.0.0.1:8088/hls`（本机推流，回环恒定）+ `play-base-url=/hls`（相对路径，前端 `livePlayBase()` 按访问源补全 + vite `proxy['/hls']→8088` 同源转发）——换网 / DHCP 换 IP 都不用改配置，且播放与页面同源、复用 dev server 证书，不触发 mixed content。
+
+**多屏选择**：`gdigrab -i desktop` 默认抓整个虚拟桌面（多屏会拼接错位）；桌面端开播前枚举显示器，选定后用 `-offset_x/-offset_y/-video_size` 只抓该屏。渲染端只传 `displayId`（纯量），主进程按 id 现查 bounds，避免响应式对象过 IPC 克隆失败。
+
+**主要配置**（`im.live.*`，环境变量可覆盖，逐项注释见 `application.yml`）：
+
+| 配置 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| `enabled` | `IM_LIVE_ENABLED` | `true` | 总开关，关掉则开播/观看/弹幕全部拒绝 |
+| `push-base-url` | `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg PUT 目标前缀（本机推流） |
+| `play-base-url` | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放地址前缀（相对路径，前端同源补全） |
+| `sign-secret` | `IM_LIVE_SIGN_SECRET` | 开发用串 | 播放地址签名密钥，**生产必须替换**且与 Nginx 一致 |
+| `ended-room-visible-minutes` | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束房间在列表的可见时长（分钟），0/负数=不过滤 |
+
+**自测启动**：① 建表 `im_live_room`（`sql/im_schema.sql`）；② `node electron/live-media-server.js`（8088）；③ 后端加载 `im.live` 配置；④ `npm run dev`（vite proxy 已含 `/hls`），手机与本机同 WiFi 打开控制台 `Network` 地址（自签证书手机不信任时改用 `npm run dev:lan` 走 http）。完整部署、生产 Nginx 迁移与排障见 [`md/直播.md`](md/直播.md)。
+
+---
+
+## 十五、已知坑（踩过的，别再踩）
+
+## 十六、目录结构
 
 ```
 spring-boot-duomokuia/
-├── pom.xml                  父 POM：版本统一管理、12 个 module、编译插件配置
+├── pom.xml                  父 POM：版本统一管理、13 个 module、编译插件配置
 ├── README.md                本文件
 ├── sql/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
@@ -965,6 +1017,7 @@ spring-boot-duomokuia/
 ├── im-websocket/            实时推送
 ├── im-ai/                   AI 面试官（BM25 知识库检索 + DashScope SSE 客户端）+ 全网检索（WebSearchService）
 ├── im-remote/               远程控制服务端（会话状态机 + 双 WS 中继）
+├── im-live/                 直播（房间生命周期 + 播放地址签名 + HLS 弹幕 WS 中继）
 ├── im-bootstrap/            启动模块
 │   ├── src/main/java/.../ImApplication.java     唯一的 main 类 + 启动横幅
 │   ├── src/main/resources/application.yml       主配置（16 KB，逐项带注释）
@@ -993,17 +1046,17 @@ spring-boot-duomokuia/
     ├── package.json         electron-builder 配置（electronDist 指向本地 electron；extraResources 内置 agent/jre/bat）
     ├── launch/              启动被控端.bat（双击用内置 JRE 拉起 Agent）
     ├── jre/                 jlink 裁剪 JRE（随安装包分发，被控机免装 Java）
-    ├── dist/                从 im-ui/dist 复制来的前端产物
+    ├── dist/                前端产物（vite --mode electron 直接产出到此，electron-builder 打包它）
     └── release/             打包产物（IM通讯 Setup 1.0.0.exe）
 ```
 
 ---
 
-## 十六、验证清单
+## 十七、验证清单
 
 按顺序执行，每步都有明确的通过标志：
 
-1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，12 个模块全部通过，
+1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，13 个模块全部通过，
    生成 `im-bootstrap/target/im-server.jar` 与 `im-remote-agent/target/*-jar-with-dependencies.jar`
 2. **依赖抽查** — `mvn dependency:tree` → 确认 30 个 `org.springframework.boot:*` 构件全部是 4.0.8、
    Spring Framework 一致为 7.0.9，无 Boot 3 残留；Jackson 2 只允许从 knife4j 与 minio 两条链进来
@@ -1031,6 +1084,9 @@ spring-boot-duomokuia/
     F12 应看到 `/api/message/search` 与 `/api/ai/search/web` **两个** 请求（只看到一个 = 前端未热更新或后端未重启）；
     同一关键字再搜一次应秒回（走 Redis 缓存），`D:/rizi1/IM/info.log` 里不再打外网请求；
     外网不可达时该栏整体隐藏且本地结果照常可用（失败收敛为空结果），结果为空时给「在浏览器中打开搜索」入口
+12. **直播** — `node electron/live-media-server.js`（8088）+ 后端加载 `im.live` 配置 + `npm run dev` →
+    桌面端开播（多屏先选屏）→ 几秒内 `electron/live-data/hls/{roomId}/{streamKey}/` 出现 `init.mp4`/`segN.m4s`/`index.m3u8` →
+    浏览器/手机（同 WiFi，`http://<本机IP>:5173`）进房出画面、弹幕连通；关播超 60 分钟后该场次从大厅列表消失
 
 已实测通过的项：1、2、3、4、5（9 个分组已核实）、6/7 中的
 「登录 → WS 握手 → 双向收发 → 未读数 → 已读回执 → 顶下线」主链路，
@@ -1042,7 +1098,7 @@ spring-boot-duomokuia/
 > 群聊后端功能完整实现，前端聊天页以单聊交互为主，**群聊 UI 不在交付范围内**。
 > 单元测试不纳入本次交付，验证以真实启动 + 接口/WebSocket 串测为准。
 >
-> **桌面端（可选）**：`cd im-ui; npm run build:electron` → 复制 dist 到 `electron/` →
-> `npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
+> **桌面端（可选）**：`cd im-ui; npm run build:electron`（直接产出到 `electron/dist`，无需手动复制）→
+> `cd ..\electron; npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
 > 应能登录、收发、上传、下载大文件（前提：`main.js` 的 `SERVER_BASE` 指向的后端已启动）；
 > 启动后还会自动后台拉起内置的被控端 Agent（回环接口 `127.0.0.1:18923/local-info` 可验证）。

@@ -44,7 +44,8 @@ public interface LiveRoomService {
     /**
      * 房间分页。
      *
-     * @param status 为空表示全部；直播中的房间恒排在最前
+     * @param status 为空表示全部；直播中的房间恒排在最前。
+     *               另：已结束且关播超过 {@code endedRoomVisibleMinutes}（默认 60 分钟）的房间不在列表中返回
      */
     Page<LiveRoomVO> page(long current, long size, Integer status);
 

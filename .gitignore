@@ -34,6 +34,8 @@ electron/node_modules/
 electron/dist/
 electron/release/
 electron/bin/ffmpeg.exe
+# 本机直播自测：live-media-server.js 的 HLS 落盘目录（媒体分片，不进版本库）
+electron/live-data/
 
 # ==============================================================================
 # 运行时产生的文件

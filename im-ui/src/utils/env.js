@@ -53,3 +53,14 @@ export function wsBaseURL() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${protocol}//${window.location.host}`
 }
+
+/**
+ * 直播播放地址的 host 前缀。后端下发的 playUrl 是相对路径（/hls/{roomId}/{streamKey}/index.m3u8?...）：
+ * - Web：返回空串，浏览器按当前页面 origin 解析（开发期 vite proxy /hls→本机 8088，生产 Nginx 同域反代），
+ *   播放地址于是永远跟随前端访问地址，DHCP 换 IP 无需改任何配置；
+ * - Electron：页面从 file:// 加载，相对路径会解析成 file:///hls/... 必然失败，补本机流媒体绝对地址。
+ * 生产若把 play-base-url 配成绝对域名，后端下发的 playUrl 就是 http(s) 开头，调用方直接用、不经过这里。
+ */
+export function livePlayBase() {
+  return isElectron() ? 'http://127.0.0.1:8088' : ''
+}

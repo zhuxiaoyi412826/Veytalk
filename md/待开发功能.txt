@@ -38,5 +38,7 @@
   （当前设计接受）；要支持重启不丢或多实例部署，需迁到 Redis + TTL。
 
 
-   application.yml 三个 live 值（192.168.41.62:8088/live）
-这个值不是固定的每次 手机链接都会随机分配的 也增加一个
+   [已解决] application.yml 的 live 地址不再写死局域网 IP（DHCP 换 IP 免配）：
+   - push-base-url=http://127.0.0.1:8088/hls（本机推流，回环地址恒定，与手机分到哪个 IP 无关）；
+   - play-base-url=/hls（相对路径）：前端 livePlayBase() 按访问源补全 + vite proxy /hls→本机 8088，
+     手机用什么 IP 打开前端、播放就自动走那个 IP，换网/换 WiFi 零改动。详见 md/直播.md §11。

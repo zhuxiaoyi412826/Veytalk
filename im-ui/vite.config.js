@@ -140,11 +140,23 @@ export default defineConfig(({ mode, command }) => {
         target: 'ws://localhost:8080',
         ws: true,
         changeOrigin: true
+      },
+      // 直播 HLS 流媒体：观众播放地址走同源 /hls（后端 play-base-url=/hls），dev server 代理到
+      // 本机 8088 的 live-media-server.js。播放地址因此永远跟随前端访问地址（https://IP:5173），
+      // DHCP 换 IP 无需改任何配置，且与页面同源、复用 dev server 的 https 证书，不触发 mixed content。
+      // 前缀用 /hls 而非 /live——/live 是前端路由（直播页），代理它会劫持页面导航。
+      '/hls': {
+        target: 'http://localhost:8088',
+        changeOrigin: true
       }
     }
   },
   build: {
-    outDir: 'dist',
+    // Electron 模式直接产出到 electron/dist（electron-builder 打包的目录、main.js 加载的目录），
+    // 省掉「im-ui/dist → electron/dist」的手动拷贝——之前正是漏了这步，导致新前端 UI 从没进包。
+    // emptyOutDir 显式置 true：outDir 在项目根之外时 vite 默认不清空，会残留旧文件。
+    outDir: mode === 'electron' ? '../electron/dist' : 'dist',
+    emptyOutDir: true,
     sourcemap: false,
     // element-plus 全量引入后单包偏大，抬高告警阈值避免每次构建都刷一屏无意义的提示
     chunkSizeWarningLimit: 1500

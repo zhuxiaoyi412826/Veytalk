@@ -67,7 +67,7 @@ public class LiveController {
         return Result.ok(roomService.detail(roomId));
     }
 
-    @Operation(summary = "房间分页", description = "直播中的房间恒排最前，其次按开播时间倒序；status 留空为全部（1 直播中 2 已结束 3 已封禁）")
+    @Operation(summary = "房间分页", description = "直播中的房间恒排最前，其次按开播时间倒序；status 留空为全部（1 直播中 2 已结束 3 已封禁）；已结束且关播超过阈值（默认 60 分钟）的房间不再返回")
     @GetMapping("/page")
     public Result<Page<LiveRoomVO>> page(@RequestParam(defaultValue = "1") long current,
                                          @RequestParam(defaultValue = "20") long size,

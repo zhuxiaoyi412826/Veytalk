@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const { spawn, execFile } = require('child_process')
+const { screen } = require('electron')
 
 /**
  * 桌面端直播推流桥（主进程）。
@@ -109,7 +110,7 @@ function detectCameraDevice(ffmpegPath) {
 }
 
 /** 采集输入参数：屏幕用 gdigrab 抓整个桌面，摄像头用 dshow（设备名来自 payload 或自动探测） */
-async function buildInputArgs(ffmpegPath, sourceType, fps, deviceName) {
+async function buildInputArgs(ffmpegPath, sourceType, fps, deviceName, display) {
   if (sourceType === 'camera') {
     const name = deviceName || (await detectCameraDevice(ffmpegPath))
     if (!name) {
@@ -117,8 +118,15 @@ async function buildInputArgs(ffmpegPath, sourceType, fps, deviceName) {
     }
     return ['-f', 'dshow', '-framerate', String(fps), '-i', `video=${name}`]
   }
-  // 默认屏幕分享
-  return ['-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop']
+  // 默认屏幕分享：gdigrab 抓整个虚拟桌面；多屏且用户选了某屏时，用 offset/size 限定该屏区域，
+  // 否则多显示器会抓到所有屏拼接的画面（含黑边/错位）。bounds 为 DIP 坐标，100% 缩放下与物理像素一致。
+  const args = ['-f', 'gdigrab', '-framerate', String(fps)]
+  if (display && display.bounds) {
+    const b = display.bounds
+    args.push('-offset_x', String(b.x), '-offset_y', String(b.y), '-video_size', `${b.width}x${b.height}`)
+  }
+  args.push('-i', 'desktop')
+  return args
 }
 
 /**
@@ -174,23 +182,35 @@ function startUploader(dir, baseDir, onFirstUpload, onUploadError) {
   let pumping = false
   let closed = false
   let firstDone = false
+  let initSent = false
 
   async function pump() {
     if (pumping || closed) return
     pumping = true
     try {
-      while (pending.size && !closed) {
-        // 优先传分片，最后传 m3u8
+      while (!closed) {
+        // init.mp4 是 fMP4 的初始化段（m3u8 用 #EXT-X-MAP 引用），缺了它观众端解不了码、一直转圈。
+        // 它由 ffmpeg 一次性写出，Windows 的 fs.watch 偶发漏掉这种小文件的 create 事件，
+        // 故每轮 pump 都主动探测本地 init.mp4，存在且未传就补进队列，不依赖 watch。
+        if (!initSent && fs.existsSync(path.join(dir, 'init.mp4'))) pending.add('init.mp4')
+        if (!pending.size) break
+        // 优先 init.mp4，其次分片，最后 m3u8（m3u8 引用的内容要先就位）
         let name = null
-        for (const n of pending) {
-          if (n !== 'index.m3u8') { name = n; break }
+        if (pending.has('init.mp4')) name = 'init.mp4'
+        else {
+          for (const n of pending) {
+            if (n !== 'index.m3u8') { name = n; break }
+          }
         }
         if (!name) name = [...pending][0]
         pending.delete(name)
         const ok = await putFile(`${baseDir}/${name}`, path.join(dir, name), contentTypeOf(name))
-        if (ok && !firstDone) {
-          firstDone = true
-          if (onFirstUpload) onFirstUpload()
+        if (ok) {
+          if (name === 'init.mp4') initSent = true
+          if (!firstDone) {
+            firstDone = true
+            if (onFirstUpload) onFirstUpload()
+          }
         }
         if (!ok && onUploadError) onUploadError(name)
       }
@@ -207,6 +227,9 @@ function startUploader(dir, baseDir, onFirstUpload, onUploadError) {
     pending.add(name)
     pump()
   })
+
+  // 启动即探测一次：若 ffmpeg 在 watch 建立前已写出 init.mp4，这里补传
+  pump()
 
   return {
     close() {
@@ -253,10 +276,26 @@ function setupLiveBridge(ipcMain, send) {
     }
   }
 
+  // 枚举显示器供多屏选择：屏幕分享默认抓整个虚拟桌面，多显示器时会拼屏，
+  // 前端据此在开播面板让用户选某一块屏，主进程用其 bounds 限定 gdigrab 抓取区域。
+  ipcMain.handle('im:live-list-displays', wrap(async () => {
+    const primary = screen.getPrimaryDisplay()
+    return screen.getAllDisplays().map((d, i) => ({
+      id: d.id,
+      label: `显示器 ${i + 1}（${d.bounds.width}x${d.bounds.height}${d.id === primary.id ? '，主屏' : ''}）`,
+      bounds: d.bounds,
+      primary: d.id === primary.id
+    }))
+  }))
+
   ipcMain.handle('im:live-start-push', wrap(async (payload) => {
-    const { pushUrl, sourceType = 'screen', resolution = '720p', bitrateKbps = 2500, deviceName = '' } = payload || {}
+    const { pushUrl, sourceType = 'screen', resolution = '720p', bitrateKbps = 2500, deviceName = '', displayId = null } = payload || {}
     if (!pushUrl) throw new Error('缺少推流地址')
     if (active) throw new Error('已有推流在进行中')
+
+    // 渲染端只传 displayId（数字）——display 对象在主进程按 id 现查，避免把 Vue 响应式 Proxy
+    // 传过 IPC 触发「An object could not be cloned」。查不到（id 失效/单屏未选）则回落整个虚拟桌面。
+    const display = displayId == null ? null : (screen.getAllDisplays().find((d) => d.id === displayId) || null)
 
     const ffmpegPath = resolveFfmpegPath()
     const height = heightOf(resolution)
@@ -264,7 +303,7 @@ function setupLiveBridge(ipcMain, send) {
     const fps = sourceType === 'camera' ? 30 : 15
     const gop = fps * 2
     const enc = await detectLiveEncoder(ffmpegPath, bitrateKbps)
-    const inputArgs = await buildInputArgs(ffmpegPath, sourceType, fps, deviceName)
+    const inputArgs = await buildInputArgs(ffmpegPath, sourceType, fps, deviceName, display)
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-live-'))
     const baseDir = dirBaseOf(pushUrl)
@@ -289,7 +328,11 @@ function setupLiveBridge(ipcMain, send) {
 
     let proc
     try {
-      proc = spawn(ffmpegPath, args, { windowsHide: true })
+      // cwd 必须设为临时目录：-hls_fmp4_init_filename 给的是相对名 init.mp4，ffmpeg 会把它
+      // 写到进程 cwd；不设 cwd 时 init.mp4 落到 Electron 工作目录而非 dir，上传泵在 dir 里
+      // 永远找不到它，观众端缺 fMP4 初始化段解不了码（黑屏/转圈）。设 cwd=dir 后 init.mp4
+      // 正确落进 dir，且 m3u8 里 EXT-X-MAP 仍是相对引用 init.mp4（已实验验证）。
+      proc = spawn(ffmpegPath, args, { windowsHide: true, cwd: dir })
     } catch (e) {
       fs.rmSync(dir, { recursive: true, force: true })
       throw new Error(`无法启动 ffmpeg：${(e && e.message) || e}`)

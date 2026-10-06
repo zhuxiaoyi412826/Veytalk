@@ -28,7 +28,7 @@ import {
   stopLive
 } from '@/api/live'
 import { getToken } from '@/utils/token'
-import { wsBaseURL, isElectron } from '@/utils/env'
+import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
 import { useAuthStore } from '@/stores/auth'
 import UserAvatar from '@/components/UserAvatar.vue'
 
@@ -84,8 +84,11 @@ const startForm = reactive({
   notice: '',
   sourceType: 'screen',
   resolution: '720p',
-  bitrateKbps: 2500
+  bitrateKbps: 2500,
+  displayId: null
 })
+/** 本机显示器列表（多屏选择用）；单屏或浏览器端为空，不显示选择项 */
+const displays = ref([])
 
 /** 桌面端原生推流桥（preload 注入）；浏览器下为空，开播按钮据此禁用 */
 const liveBridge = computed(() => (isElectron() ? window.__IM_LIVE__ : null))
@@ -107,13 +110,22 @@ async function loadMyLive() {
   }
 }
 
-function openStartDialog() {
+async function openStartDialog() {
   if (!canBroadcast.value) {
     ElMessage.warning('开播需使用桌面客户端（浏览器/手机端仅供观看）')
     return
   }
   startForm.title = ''
   startForm.notice = ''
+  startForm.displayId = null
+  // 多屏时让用户选抓哪块屏；拉取失败/单屏都不影响开播（display 缺省=整个虚拟桌面）
+  displays.value = []
+  try {
+    const list = (await liveBridge.value.listDisplays()) || []
+    displays.value = list
+    const primary = list.find((d) => d.primary) || list[0]
+    if (primary) startForm.displayId = primary.id
+  } catch { /* 无桥或失败：保持空，按整桌面抓 */ }
   startDialog.value = true
 }
 
@@ -145,7 +157,10 @@ async function submitStart() {
       pushUrl: pushInfo.pushUrl,
       sourceType: startForm.sourceType,
       resolution: startForm.resolution,
-      bitrateKbps: Number(startForm.bitrateKbps) || 2500
+      bitrateKbps: Number(startForm.bitrateKbps) || 2500,
+      // 只传 displayId（纯数字）；displays.value.find(...) 得到的是 Vue 响应式 Proxy，
+      // 直接过 IPC 会触发「An object could not be cloned」。主进程按 id 用 screen.getAllDisplays() 查 bounds。
+      displayId: startForm.displayId ?? null
     })
 
     myLiving.value = { id: pushInfo.roomId, title: startForm.title.trim(), status: 1 }
@@ -282,15 +297,18 @@ function setupPlayer(playUrl) {
   if (!video || !playUrl) {
     return
   }
+  // playUrl 后端下发：自测是相对路径（/hls/...，走前端同源代理），生产可能是绝对 CDN 地址。
+  // 相对路径按环境补 host：Web 用同源（空串），Electron 用本机流媒体绝对地址（见 env.js livePlayBase）
+  const src = /^https?:\/\//i.test(playUrl) ? playUrl : livePlayBase() + playUrl
   // iOS/Safari 原生支持 HLS，直接喂 src；其余走 hls.js（MSE）
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = playUrl
+    video.src = src
     video.play().catch(() => {})
     return
   }
   if (Hls.isSupported()) {
     hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 3 })
-    hls.loadSource(playUrl)
+    hls.loadSource(src)
     hls.attachMedia(video)
     hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}))
     hls.on(Hls.Events.ERROR, (_evt, data) => {
@@ -668,6 +686,11 @@ watch(() => route.params.roomId, () => syncRoute())
             <el-radio-button value="screen">屏幕分享</el-radio-button>
             <el-radio-button value="camera">摄像头</el-radio-button>
           </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="startForm.sourceType === 'screen' && displays.length > 1" label="选择屏幕">
+          <el-select v-model="startForm.displayId" style="width: 240px">
+            <el-option v-for="d in displays" :key="d.id" :label="d.label" :value="d.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="分辨率">
           <el-select v-model="startForm.resolution" style="width: 140px">

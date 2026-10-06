@@ -597,11 +597,13 @@ im:
   live:
     # 总开关：关闭后开播/观看接口与 /ws/live 弹幕端点全部拒绝服务
     enabled: ${IM_LIVE_ENABLED:true}
-    # 播放基址：观众实际请求 m3u8 的 URL 前缀，含 Nginx 的 location 前缀。
+    # 播放基址：观众请求 m3u8 的 URL 前缀。默认 /hls 是相对路径——前端按访问源自动补全
+    # （开发期 vite proxy /hls→本机 8088，生产 Nginx 同域反代），DHCP 换 IP 无需改这里。
     # 最终地址 = {play-base-url}/{roomId}/{streamKey}/index.m3u8?expire=&sign=
-    play-base-url: ${IM_LIVE_PLAY_BASE_URL:}
-    # 推流基址：ffmpeg -method PUT 的目标前缀，只在服务端与主播之间用，通常不对外发布
-    push-base-url: ${IM_LIVE_PUSH_BASE_URL:}
+    play-base-url: ${IM_LIVE_PLAY_BASE_URL:/hls}
+    # 推流基址：ffmpeg -method PUT 的目标前缀。推流端与流媒体服务器同在本机，用 127.0.0.1
+    # 恒不受局域网 IP 变化影响；只在服务端与主播之间用，不对外发布
+    push-base-url: ${IM_LIVE_PUSH_BASE_URL:http://127.0.0.1:8088/hls}
     # 播放地址签名密钥，必须与 Nginx secure_link_md5 "$uri$arg_expire$secret" 的 secret 一致
     sign-secret: ${IM_LIVE_SIGN_SECRET:im-live-dev-secret-change-me}
     # 播放地址有效期（秒），默认 6 小时：覆盖一场直播，泄露的地址也不会长期可用
@@ -620,6 +622,9 @@ im:
     max-living-rooms-per-user: 1
     # 在线人数计数键的 TTL（秒）：正常路径成对增减，TTL 只是进程被 kill / 连接泄漏时的兜底
     online-key-ttl-seconds: 7200
+    # 已结束房间在大厅列表的可见时长（分钟）：关播超过它就不再显示，免得列表堆满历史场次。
+    # 只影响列表展示；直播中 / 已封禁的房间、以及房间详情与「我的直播」面板都不受此限。配 0 或负数=不过滤。
+    ended-room-visible-minutes: ${IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES:60}
 
   # --------------------------------------------------------------------------
   # 日志落地：目录、保留天数、体积护栏与慢 SQL 阈值

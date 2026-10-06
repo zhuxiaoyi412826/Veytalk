@@ -80,4 +80,13 @@ public class LiveProperties {
      * 计数不会永久停在错误值上，最多一个 TTL 后自动归零重来。
      */
     private long onlineKeyTtlSeconds = 2 * 3600L;
+
+    /**
+     * 已结束房间在大厅列表的可见时长（分钟）。关播超过这个时长的房间不再出现在房间列表里，
+     * 免得观众翻到一堆早就散场的历史场次。默认 60 分钟；直播中 / 已封禁的房间不受此限，
+     * 配成 0 或负数则关闭过滤（历史场次全部保留）。
+     *
+     * <p>只影响列表展示：房间详情接口与「我的直播」面板仍可按 id 取到，不做隐藏。
+     */
+    private int endedRoomVisibleMinutes = 60;
 }

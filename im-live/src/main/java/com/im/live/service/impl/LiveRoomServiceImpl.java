@@ -179,6 +179,17 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         if (status != null) {
             wrapper.eq(LiveRoom::getStatus, status);
         }
+        // 已结束且关播超过 endedRoomVisibleMinutes 的房间不再展示：观众不该翻到一堆早就散场的历史场次。
+        // 条件写成「非已结束 OR 无 endTime OR endTime 在阈值内」——直播中(1)、已封禁(3)天然满足第一条不受影响，
+        // endTime 为空的脏数据也不会被误藏；与上面的 status 过滤是 AND，选「已结束」时只剩阈值内刚结束的场次。
+        // 配成 0 或负数则关闭该过滤（历史场次全部保留），方便需要回看全部已结束房间的运营场景。
+        int endedVisibleMinutes = properties.getEndedRoomVisibleMinutes();
+        if (endedVisibleMinutes > 0) {
+            LocalDateTime endedCutoff = LocalDateTime.now().minusMinutes(endedVisibleMinutes);
+            wrapper.and(w -> w.ne(LiveRoom::getStatus, LiveRoom.STATUS_ENDED)
+                    .or().isNull(LiveRoom::getEndTime)
+                    .or().ge(LiveRoom::getEndTime, endedCutoff));
+        }
         // 直播中恒排最前，其次按开播时间倒序：列表页要的是「现在能看的」在最上面
         wrapper.orderByAsc(LiveRoom::getStatus)
                 .orderByDesc(LiveRoom::getStartTime);

@@ -151,7 +151,9 @@ contextBridge.exposeInMainWorld('__IM_DIRECT__', {
  */
 contextBridge.exposeInMainWorld('__IM_LIVE__', {
   isDesktop: true,
-  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?} → {started, encoder} */
+  /** 枚举本机显示器（多屏选择用）→ [{id, label, bounds, primary}] */
+  listDisplays: () => call('im:live-list-displays', null),
+  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?, displayId?} → {started, encoder} */
   startPush: (params) => call('im:live-start-push', params),
   stopPush: () => call('im:live-stop-push', null),
   queryState: () => call('im:live-query-state', null),

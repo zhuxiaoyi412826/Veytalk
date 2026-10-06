@@ -17,6 +17,12 @@ chcp 65001
 $env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"
 mvn spring-boot:run
 
+live-media-server.js 直播流媒体服务器——一句话概括：它是生产环境 Nginx 的「局域网替身」，负责真正收发 HLS 流媒体字节
+node electron\live-media-server.js   访问时需要使用http 而不是https
+
+$env:PORT=8088; node live-media-server.js
+
+
 
 
 打包为EXE命令

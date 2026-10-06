@@ -40,6 +40,7 @@ export function fetchLiveRoom(roomId) {
 
 /**
  * 房间分页：直播中的房间恒排最前，其次按开播时间倒序。
+ * 后端会过滤掉已结束且关播超过阈值（默认 60 分钟）的房间，前端无需再筛。
  * @param {{ current?: number, size?: number, status?: number }} params status 留空为全部（1 直播中 2 已结束 3 已封禁）
  */
 export function fetchLivePage(params) {
