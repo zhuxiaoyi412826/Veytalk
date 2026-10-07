@@ -54,6 +54,15 @@ public class LiveController {
         return Result.ok();
     }
 
+    @Operation(summary = "撤销未推流的直播",
+            description = "建房成功但推流起不来时调用：从未收到过推流端心跳的房间直接删除，不留空场 ENDED 房；"
+                    + "已推过流的降级为普通关播。房间不存在时幂等返回成功")
+    @PostMapping("/{roomId}/abort")
+    public Result<Void> abort(@PathVariable("roomId") Long roomId) {
+        roomService.abort(roomId);
+        return Result.ok();
+    }
+
     @Operation(summary = "推流心跳",
             description = "推流端按 heartbeatSeconds 周期调用续期；返回 false 表示房间已不存在或已结束，推流端必须停止 ffmpeg")
     @PostMapping("/{roomId}/heartbeat")

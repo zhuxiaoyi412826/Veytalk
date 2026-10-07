@@ -26,6 +26,15 @@ export function stopLive(roomId) {
 }
 
 /**
+ * 撤销未推流的直播：建房成功但 startPush 失败时调用。
+ * 后端对从未收到推流心跳的房间直接删除，不留一个空场的「已结束」房；
+ * 已推过流的降级为普通关播。房间不存在时幂等返回成功。
+ */
+export function abortLive(roomId) {
+  return http.post(`/live/${roomId}/abort`)
+}
+
+/**
  * 推流心跳：推流端按 heartbeatSeconds 周期调用续期。
  * 返回 false 表示房间已不存在或已结束，推流端必须立即停止 ffmpeg。
  */

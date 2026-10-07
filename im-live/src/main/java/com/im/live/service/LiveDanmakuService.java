@@ -58,6 +58,8 @@ public class LiveDanmakuService {
     public static final String TYPE_SYSTEM = "system";
     /** 服务端 → 客户端：房间公告，进房时下发一次 */
     public static final String TYPE_NOTICE = "notice";
+    /** 服务端 → 客户端：直播已结束（画面作废，聊天室保留至聊天模式超时） */
+    public static final String TYPE_ENDED = "ended";
     /** 服务端 → 客户端：保活回应 */
     public static final String TYPE_PONG = "pong";
     /** 服务端 → 客户端：错误提示（限流、内容过长），不关连接 */
@@ -154,6 +156,20 @@ public class LiveDanmakuService {
             }
         }
         redisUtil.delete(RedisKeys.liveOnline(roomId));
+    }
+
+    /**
+     * 关播 → 聊天模式：广播一帧 {@code ended}（前端据此黑屏并提示「主播已结束直播」），
+     * 但<b>不断开任何连接</b>——聊天室保留到 {@code im.live.ended-chat-minutes} 超时，
+     * 由巡检任务调 {@link #closeRoom} 收尾。
+     */
+    public void enterChatMode(Long roomId, String reason) {
+        broadcast(roomId, frame(TYPE_ENDED, "content", reason));
+    }
+
+    /** 本机仍有活跃连接的房间 id 集合（快照）；巡检任务据此清理聊天模式到期的房间，不扫全库 */
+    public Set<Long> openRoomIds() {
+        return Set.copyOf(rooms.keySet());
     }
 
     /* ==================== 广播 ==================== */

@@ -25,7 +25,8 @@ import {
   fetchMyLive,
   liveHeartbeat,
   startLive,
-  stopLive
+  stopLive,
+  abortLive
 } from '@/api/live'
 import { getToken } from '@/utils/token'
 import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
@@ -171,10 +172,12 @@ async function submitStart() {
   } catch (e) {
     pushState.value = 'error'
     pushError.value = e?.message || '开播失败'
-    // 房已建但推流没起来：把关播补上，避免留一个必然超时僵尸房
+    // 房已建但推流没起来：调 abort 直接删房（后端按「从未收到推流心跳」护栏判定），
+    // 不留一个空场的 ENDED 房在大厅挂一小时；失败再退回 stop 关播兑底
     if (pushInfo.roomId) {
-      stopLive(pushInfo.roomId).catch(() => {})
+      const rid = pushInfo.roomId
       pushInfo.roomId = ''
+      abortLive(rid).catch(() => stopLive(rid).catch(() => {}))
     }
     ElMessage.error(pushError.value)
   } finally {
@@ -263,6 +266,8 @@ const danmakuText = ref('')
 const onlineCount = ref(0)
 const likeCount = ref(0)
 const wsStatus = ref('idle') // idle | connecting | open | closed
+/** 直播已结束但聊天室保留（ENDED 聊天模式）：画面黑屏、弹幕仍可发 */
+const streamEnded = ref(false)
 let hls = null
 let danmakuWs = null
 let pingTimer = null
@@ -274,18 +279,26 @@ async function openRoom(id) {
   try {
     const vo = await fetchLiveRoom(id)
     room.value = vo
-    if (!vo || vo.status !== 1) {
+    // 已结束且聊天模式也超时（后端不再下发 danmakuWs）：只提示并黑屏
+    if (!vo || (vo.status !== 1 && !vo.danmakuWs)) {
       ElMessage.info('该直播已结束')
       teardownRoom()
       return
     }
     likeCount.value = 0
     danmakuList.value = []
+    // 已结束但处于聊天模式（status=2 且带 danmakuWs）：不起播放器（黑屏），只接聊天室
+    streamEnded.value = vo.status !== 1
     await nextTick()
-    setupPlayer(vo.playUrl)
+    if (vo.status === 1) {
+      setupPlayer(vo.playUrl)
+    } else {
+      destroyPlayer()
+    }
     connectDanmaku(vo.danmakuWs)
   } catch {
     room.value = null
+    streamEnded.value = false
   } finally {
     roomLoading.value = false
   }
@@ -307,21 +320,39 @@ function setupPlayer(playUrl) {
     return
   }
   if (Hls.isSupported()) {
-    hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 3 })
-    hls.loadSource(src)
-    hls.attachMedia(video)
-    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}))
+    // liveSyncDurationCount 3→2：播放位距直播边缘少回退一个切片，延迟降约 1~2s（推流端切 1s 片后再降）。
+    // 若卡顿明显可回调 3；网络稳定也可压到 1
+    hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
+    const inst = hls
+    let netRetries = 0
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      netRetries = 0
+      video.play().catch(() => {})
+    })
     hls.on(Hls.Events.ERROR, (_evt, data) => {
-      // 直播流偶发分片缺失可自愈，只有 fatal 且无法恢复时才重建
       if (!data?.fatal) {
         return
       }
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        hls.startLoad()
+        // 开播头几秒 init.mp4/m3u8 还没 PUT 上来，首次加载必然 404。旧实现只 startLoad 一次，
+        // 失败后无人接管——表现为「点开播看不到画面，必须回大厅再进」。改为每秒重试一次、最多 30 次，
+        // 覆盖 ffmpeg 启动+首片上传窗口；manifest 成功解析后计数清零
+        if (netRetries++ < 30) {
+          setTimeout(() => {
+            // inst 可能已被 destroyPlayer（退房/关播）销毁，守卫防止操作死实例
+            if (hls === inst) {
+              inst.loadSource(src)
+            }
+          }, 1000)
+        } else {
+          ElMessage.error('直播流加载失败，请稍后重试')
+        }
       } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
         hls.recoverMediaError()
       }
     })
+    hls.loadSource(src)
+    hls.attachMedia(video)
   } else {
     ElMessage.error('当前浏览器不支持 HLS 播放')
   }
@@ -412,6 +443,18 @@ function onWsFrame(raw) {
     case 'system':
       appendSystem(frame.content)
       break
+    case 'ended': {
+      // 主播关播：画面黑屏并提示，但聊天室保留（服务端 ended-chat-minutes 到期后才断开）
+      const text = frame.content || '主播已结束直播'
+      streamEnded.value = true
+      if (room.value) {
+        room.value.status = 2
+      }
+      destroyPlayer()
+      appendSystem(text)
+      ElMessage.info(text)
+      break
+    }
     case 'error':
       ElMessage.warning(frame.content || '发送失败')
       break
@@ -486,6 +529,7 @@ function teardownRoom() {
   room.value = null
   danmakuList.value = []
   onlineCount.value = 0
+  streamEnded.value = false
 }
 
 /* ==================== 生命周期 / 路由联动 ==================== */
@@ -547,7 +591,9 @@ watch(() => route.params.roomId, () => syncRoute())
           <div class="live-player">
             <video ref="videoEl" class="live-player__video" controls playsinline></video>
             <div v-if="roomLoading" class="live-player__mask">加载中…</div>
-            <div v-else-if="!room || room.status !== 1" class="live-player__mask">直播已结束</div>
+            <div v-else-if="!room || room.status !== 1 || streamEnded" class="live-player__mask">
+              {{ streamEnded || (room && room.status === 2) ? '主播已结束直播，可继续聊天' : '直播已结束' }}
+            </div>
           </div>
           <div v-if="room" class="live-room__title">
             <h3 class="im-ellipsis">{{ room.title }}</h3>
@@ -636,8 +682,8 @@ watch(() => route.params.roomId, () => syncRoute())
           v-for="item in rooms"
           :key="item.id"
           class="live-card"
-          :class="{ 'live-card--ended': item.status !== 1 }"
-          @click="item.status === 1 && enterRoom(item.id)"
+          :class="{ 'live-card--ended': item.status === 3 }"
+          @click="(item.status === 1 || item.status === 2) && enterRoom(item.id)"
         >
           <div class="live-card__cover">
             <img v-if="item.cover" :src="item.cover" alt="" />

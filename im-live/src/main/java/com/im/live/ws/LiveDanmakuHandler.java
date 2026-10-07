@@ -52,9 +52,9 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
             closeQuietly(session);
             return;
         }
-        LiveRoom room = roomService.findLiving(roomId);
+        LiveRoom room = roomService.findJoinable(roomId);
         if (room == null) {
-            // 握手到这里之间可能刚好关播：给一帧明确的系统提示再断，好过前端对着一个静默关闭的连接猜
+            // 握手到这里之间可能刚好关播且聊天模式已超时：给一帧明确的系统提示再断，好过前端对着一个静默关闭的连接猜
             danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_SYSTEM, "content", "直播已结束"));
             closeQuietly(session);
             return;
@@ -71,7 +71,12 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
         }
         // join 已广播过在线人数，这里补一帧只发给本人的欢迎，省一次前端往返
         danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_ONLINE, "count", online));
-        log.debug("弹幕进房: roomId={}, userId={}, anchor={}, online={}", roomId, userId, anchor, online);
+        if (!room.isLiving()) {
+            // 聊天模式进房（房间已关播但聊天室保留）：补一帧 ended，前端据此黑屏并提示，聊天仍可用
+            danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_ENDED, "content",
+                    roomService.endReasonText(room.getEndReason())));
+        }
+        log.debug("弹幕进房: roomId={}, userId={}, anchor={}, online={}, ended={}", roomId, userId, anchor, online, !room.isLiving());
     }
 
     @Override

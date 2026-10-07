@@ -301,7 +301,9 @@ function setupLiveBridge(ipcMain, send) {
     const height = heightOf(resolution)
     // 屏幕分享 15fps 足够且省带宽/CPU，摄像头 30fps 更顺滑
     const fps = sourceType === 'camera' ? 30 : 15
-    const gop = fps * 2
+    // GOP = 1 秒：与 -hls_time 1 对齐，每秒一片。关键帧比 2s 片密一倍，码率开销略涨（~10%），
+    // 换取端到端延迟降约 3~5s（生产头/轮询周期/播放器回退同步减半）
+    const gop = fps
     const enc = await detectLiveEncoder(ffmpegPath, bitrateKbps)
     const inputArgs = await buildInputArgs(ffmpegPath, sourceType, fps, deviceName, display)
 
@@ -317,12 +319,13 @@ function setupLiveBridge(ipcMain, send) {
       '-pix_fmt', 'yuv420p', '-g', String(gop), '-keyint_min', String(fps), '-sc_threshold', '0',
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
       '-f', 'hls',
-      '-hls_time', '2',
+      '-hls_time', '1',
       '-hls_segment_type', 'fmp4',
       '-hls_fmp4_init_filename', 'init.mp4',
       '-hls_segment_filename', path.join(dir, 'seg%d.m4s'),
       '-hls_flags', 'independent_segments+delete_segments+omit_endlist+temp_file',
-      '-hls_list_size', '6',
+      // 12 片 × 1s = 12s 滑窗，与原 6 × 2s 窗口长度一致
+      '-hls_list_size', '12',
       playlist
     ]
 
@@ -388,16 +391,18 @@ function setupLiveBridge(ipcMain, send) {
           ...softEnc,
           '-pix_fmt', 'yuv420p', '-g', String(gop), '-keyint_min', String(fps), '-sc_threshold', '0',
           '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
-          '-f', 'hls', '-hls_time', '2', '-hls_segment_type', 'fmp4',
+          '-f', 'hls', '-hls_time', '1', '-hls_segment_type', 'fmp4',
           '-hls_fmp4_init_filename', 'init.mp4',
           '-hls_segment_filename', path.join(dir, 'seg%d.m4s'),
           '-hls_flags', 'independent_segments+delete_segments+omit_endlist+temp_file',
-          '-hls_list_size', '6',
+          '-hls_list_size', '12',
           playlist
         ]
         let retryProc
         try {
-          retryProc = spawn(ffmpegPath, rebuilt, { windowsHide: true })
+          // 与首次 spawn 一样必须带 cwd=dir：软编重开时 init.mp4 可能重写，
+          // 不带 cwd 会落到 Electron 工作目录，上传泵找不到（已知坑）
+          retryProc = spawn(ffmpegPath, rebuilt, { windowsHide: true, cwd: dir })
         } catch {
           closeLivePush('soft-retry-spawn-error')
           return

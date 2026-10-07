@@ -1,6 +1,9 @@
 Write-Host "Vite局域网地址：http://$((Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notmatch '^(127\.|169\.254\.)'} | Select-Object -First 1 -ExpandProperty IPAddress)):5173"
 一键组合脚本（直接打印 Vite 访问地址）
-
+：换 IP 重签 = 只换服务器证书，手机 CA 不用更新；只有看到"根 CA：重新签发"那行输出时才需要重装 ca.pem
+npm run dev:lan 访问的是 http://localhost:5173/
+npm run dev 访问的是 https://localhost:5173/
+ npm run gen:cert 重签证书后必须重启 dev server
 
 .\minio.exe server D:\minio-data --console-address :9001 
 单机minIo启动  API 9000 浏览器9001

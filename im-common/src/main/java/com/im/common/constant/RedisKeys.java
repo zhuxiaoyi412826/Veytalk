@@ -140,11 +140,23 @@ public final class RedisKeys {
      */
     public static final String LIVE_HEARTBEAT = PREFIX + "live:hb:";
 
+    /**
+     * 直播「推流端已跑起来」标记：im:live:pushed:{roomId} -> 首次心跳时间戳。
+     *
+     * <p>心跳键在开播建房时就播种了，区分不了「推流端真跑过」与「建完房 ffmpeg 就没起来」；
+     * 这个键只在推流端首次调心跳接口时种，供 abort（撤销未推流房间）做安全护栏。
+     */
+    public static final String LIVE_PUSHED = PREFIX + "live:pushed:";
+
     public static String liveOnline(Long roomId) {
         return LIVE_ONLINE + roomId;
     }
 
     public static String liveHeartbeat(Long roomId) {
         return LIVE_HEARTBEAT + roomId;
+    }
+
+    public static String livePushed(Long roomId) {
+        return LIVE_PUSHED + roomId;
     }
 }

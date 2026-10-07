@@ -31,6 +31,16 @@ public interface LiveRoomService {
     void stop(Long roomId, String reason);
 
     /**
+     * 撤销一场从未推流成功的直播：建房成功但 ffmpeg 起不来时前端调这里<b>直接删房</b>，
+     * 而不是走 stop 留一个必然空场的 ENDED 房（聊天模式下还会在大厅挂 1 小时）。
+     *
+     * <p>安全护栏：仅当房间仍 living 且<b>从未收到过心跳</b>（心跳键不存在 = 推流端根本没跑起来）
+     * 才允许删除；已推过流的房间降级为普通 stop，防止主播拿 abort 当「删直播记录」用。
+     * 房间不存在时幂等返回。
+     */
+    void abort(Long roomId);
+
+    /**
      * 推流端心跳。
      *
      * @return {@code true} 房间仍在直播；{@code false} 房间已不存在或已结束——
@@ -52,9 +62,15 @@ public interface LiveRoomService {
     /** 我最近的一场直播（直播中优先），用于「我的直播」面板恢复现场；一场都没开过返回 {@code null} */
     LiveRoomVO mine();
 
-    /** 巡检：把心跳超时的房间关播，并冲刷点赞合并计数 */
+    /** 巡检：把心跳超时的房间关播、清理聊天模式到期的聊天室，并冲刷点赞合并计数 */
     void expireTimeouts();
 
-    /** 取一个直播中的房间，不存在或已结束返回 {@code null}（弹幕握手用） */
-    LiveRoom findLiving(Long roomId);
+    /**
+     * 取一个可进房（弹幕握手用）的房间：直播中，或已结束但聊天模式未超时
+     * （见 {@code im.live.ended-chat-minutes}）。已封禁 / 聊天超时 / 不存在返回 {@code null}。
+     */
+    LiveRoom findJoinable(Long roomId);
+
+    /** 结束原因码（stop/timeout/ban）→ 观众可读文案；关播广播与聊天模式进房提示都走这个映射 */
+    String endReasonText(String reason);
 }

@@ -146,6 +146,35 @@ public class LiveRoomServiceImpl implements LiveRoomService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void abort(Long roomId) {
+        LiveRoom room = roomMapper.selectById(roomId);
+        if (room == null || !room.isLiving()) {
+            // 幂等：房已不在（或已关播）时前端重试/重复调用直接成功返回
+            return;
+        }
+        Long userId = SecurityUtil.getUserIdOrNull();
+        if (userId == null || !room.managedBy(userId)) {
+            throw new BusinessException(ResultCode.LIVE_FORBIDDEN);
+        }
+        if (redisUtil.hasKey(RedisKeys.livePushed(roomId))) {
+            // 推流端已经跑起来过（首次心跳时种了 pushed 标记；心跳键建房就有，区分不了）：
+            // 不算「从未推流」，降级为普通关播。否则主播可以开播成功后立刻 abort，
+            // 把一场真实直播的记录删掉。（前端只在 startPush 抛错时调 abort，正常到不了这个分支，纯防御）
+            closeRoom(room, LiveRoom.STATUS_ENDED, "stop");
+            return;
+        }
+        // 真·从未推流：删房 + 清残留键。弹幕连接理论上还没人建（主播进房在 startPush 成功之后），
+        // 但 catch 分支与 enterRoom 存在竞态可能，兼容性地关一次：顺带清 online 键与内存注册表，
+        // 也防止巡检在删库后扫到孤儿房间反复报「房间不存在」
+        danmakuService.drainStats(roomId);
+        danmakuService.closeRoom(roomId, "直播启动失败，房间已撤销");
+        redisUtil.delete(RedisKeys.liveOnline(roomId));
+        roomMapper.deleteById(roomId);
+        log.info("撤销未推流房间: roomId={}, anchorId={}", roomId, room.getAnchorId());
+    }
+
+    @Override
     public boolean heartbeat(Long roomId) {
         LiveRoom room = roomMapper.selectById(roomId);
         if (room == null || !room.isLiving()) {
@@ -157,6 +186,10 @@ public class LiveRoomServiceImpl implements LiveRoomService {
             throw new BusinessException(ResultCode.LIVE_FORBIDDEN);
         }
         seedHeartbeat(roomId);
+        // 首次心跳时种「推流端已跑起来」标记：与心跳键不同，它只在推流端真调过心跳接口后才存在，
+        // abort 据此区分「建房后 ffmpeg 就没起来（可删）」与「真实直播过（只能关）」。TTL 24h 兑底。
+        redisUtil.setIfAbsent(RedisKeys.livePushed(roomId), String.valueOf(System.currentTimeMillis()),
+                Duration.ofHours(24));
         return true;
     }
 
@@ -239,6 +272,8 @@ public class LiveRoomServiceImpl implements LiveRoomService {
     public void expireTimeouts() {
         // 点赞合并计数每拍冲刷一次：与超时巡检共用节拍，省一个独立的调度项
         danmakuService.flushLikes();
+        // 聊天模式到期的房间也在同一节拍里收尾，不另起调度项
+        closeExpiredChatRooms();
 
         List<LiveRoom> living = roomMapper.selectList(new LambdaQueryWrapper<LiveRoom>()
                 .eq(LiveRoom::getStatus, LiveRoom.STATUS_LIVING));
@@ -251,19 +286,63 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         }
     }
 
+    /**
+     * 聊天模式收尾：已结束但本机仍有活跃连接的房间，已封禁或超过 {@code endedChatMinutes}
+     * 截止时间的断开全部连接。只扫连接注册表里的房间（通常个位数），不扫全库。
+     */
+    private void closeExpiredChatRooms() {
+        for (Long rid : danmakuService.openRoomIds()) {
+            LiveRoom room = roomMapper.selectById(rid);
+            if (room == null) {
+                danmakuService.drainStats(rid);
+                danmakuService.closeRoom(rid, "房间不存在");
+                continue;
+            }
+            if (room.isLiving()) {
+                continue;
+            }
+            if (!chatOpenUntil(room).isAfter(LocalDateTime.now())) {
+                // 先 drainStats 再关房：聊天模式期间可能有观众进房，统计表条目要一并清掉
+                danmakuService.drainStats(rid);
+                danmakuService.closeRoom(rid, "聊天时间结束，房间已关闭");
+                log.info("聊天模式到期关房: roomId={}, endReason={}", rid, room.getEndReason());
+            }
+        }
+    }
+
     @Override
-    public LiveRoom findLiving(Long roomId) {
+    public LiveRoom findJoinable(Long roomId) {
         if (roomId == null) {
             return null;
         }
         LiveRoom room = roomMapper.selectById(roomId);
-        return room != null && room.isLiving() ? room : null;
+        if (room == null) {
+            return null;
+        }
+        if (room.isLiving()) {
+            return room;
+        }
+        // 已结束但聊天模式未超时：允许进房继续聊天（封禁房的截止时间恒为已过期，一律拒绝）
+        return chatOpenUntil(room).isAfter(LocalDateTime.now()) ? room : null;
+    }
+
+    /**
+     * 已结束房间的聊天模式截止时间 = endTime + endedChatMinutes。
+     * 封禁 / 无 endTime / 功能关闭时一律返回 {@link LocalDateTime#MIN}（视为已过期）。
+     */
+    private LocalDateTime chatOpenUntil(LiveRoom room) {
+        if (!room.isEnded() || room.getEndTime() == null || properties.getEndedChatMinutes() <= 0) {
+            return LocalDateTime.MIN;
+        }
+        return room.getEndTime().plusMinutes(properties.getEndedChatMinutes());
     }
 
     /* ==================== 内部 ==================== */
 
     /**
-     * 关播收尾：定格统计、作废 streamKey、断开房间内全部连接、清心跳键。
+     * 关播收尾：定格统计、作废 streamKey、清心跳键，并按配置决定弹幕去向——
+     * 封禁（或 {@code endedChatMinutes<=0}）立即断开全部连接；否则进「聊天模式」：
+     * 只广播 ended 帧（观众端黑屏+提示），连接保留到聊天超时由巡检收尾。
      *
      * <p>streamKey 置空是有意的：它是本场地址的能力凭证，关播后即便分片目录还在
      * Nginx 上（供回放），旧的签名地址也无法再定位——回放走另一套不带 key 的持久地址。
@@ -277,15 +356,24 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         room.setViewerTotal(stats[1]);
         room.setStreamKey(null);
         roomMapper.updateById(room);
-
-        danmakuService.closeRoom(room.getId(), reasonText(reason));
         redisUtil.delete(RedisKeys.liveHeartbeat(room.getId()));
-        redisUtil.delete(RedisKeys.liveOnline(room.getId()));
-        log.info("关播: roomId={}, reason={}, peakOnline={}, viewerTotal={}",
-                room.getId(), reason, stats[0], stats[1]);
+        // pushed 标记一并清掉：它的使命到关播为止，留着只会白占 24h TTL
+        redisUtil.delete(RedisKeys.livePushed(room.getId()));
+
+        if (status == LiveRoom.STATUS_BANNED || properties.getEndedChatMinutes() <= 0) {
+            danmakuService.closeRoom(room.getId(), endReasonText(reason));
+            redisUtil.delete(RedisKeys.liveOnline(room.getId()));
+        } else {
+            // 在线计数键保留：聊天模式期间观众仍在房间，计数要继续正确增减
+            danmakuService.enterChatMode(room.getId(), endReasonText(reason));
+        }
+        log.info("关播: roomId={}, reason={}, chatMode={}, peakOnline={}, viewerTotal={}",
+                room.getId(), reason, status != LiveRoom.STATUS_BANNED
+                        && properties.getEndedChatMinutes() > 0, stats[0], stats[1]);
     }
 
-    private String reasonText(String reason) {
+    @Override
+    public String endReasonText(String reason) {
         if ("timeout".equals(reason)) {
             return "主播已断开，直播结束";
         }
@@ -328,6 +416,11 @@ public class LiveRoomServiceImpl implements LiveRoomService {
             if (!isBlank(room.getStreamKey())) {
                 vo.setPlayUrl(signedPlayUrl(room.getId(), room.getStreamKey()));
             }
+            vo.setDanmakuWs(danmakuWsPath(room.getId()));
+        } else if (chatOpenUntil(room).isAfter(LocalDateTime.now())) {
+            // 已结束但聊天模式未超时：不给播放地址（前端黑屏），但仍下发弹幕端点，
+            // 便于观众刷新 / 从大厅重进时能重新接上聊天室
+            vo.setOnlineCount(danmakuService.onlineOf(room.getId()));
             vo.setDanmakuWs(danmakuWsPath(room.getId()));
         } else {
             vo.setOnlineCount(0);

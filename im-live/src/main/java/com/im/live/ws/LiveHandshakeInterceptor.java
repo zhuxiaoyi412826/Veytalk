@@ -25,7 +25,7 @@ import java.util.Map;
  *
  * <p>「房间是否还在直播」刻意留到 {@code afterConnectionEstablished} 再判：
  * 握手阶段查一次库、连接建立后再查一次是重复开销，而关播是低频事件，
- * 让 handler 用一次 {@code findLiving} 兜住即可，握手只做「你是谁」不做「房间在不在」。
+ * 让 handler 用一次 {@code findJoinable} 兜住即可（直播中与已结束聊天模式都算可进），握手只做「你是谁」不做「房间在不在」。
  */
 @Slf4j
 @Component

@@ -75,7 +75,7 @@ public class LiveRoomVO implements Serializable {
     @Schema(description = "已签名的播放地址（m3u8），仅直播中返回")
     private String playUrl;
 
-    @Schema(description = "弹幕 WebSocket 地址，仅直播中返回")
+    @Schema(description = "弹幕 WebSocket 地址：直播中、或已结束聊天模式未超时时返回")
     private String danmakuWs;
 
     @Schema(description = "当前用户是否为该房间主播")
