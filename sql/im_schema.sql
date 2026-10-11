@@ -22,6 +22,7 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_live_room`;
 DROP TABLE IF EXISTS `im_interview_event`;
 DROP TABLE IF EXISTS `im_interview_message`;
 DROP TABLE IF EXISTS `im_interview_session`;

@@ -1,30 +1,274 @@
 # IM 即时通讯系统
 
-基于 **Spring Boot 4 + JDK 21** 的多模块即时通讯后端，配套 **Vue 3** 前端。
-后端 11 个 Maven 模块最终打成**一个可执行 jar**（`im-bootstrap/target/im-server.jar`）；
-被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上，不打进后端；
-前端是独立工程，通过 Vite 代理与后端通信，不参与 Maven 构建。
 
-功能覆盖：注册登录（图形/短信验证码）、密码找回（手机短信 / 邮箱双通道）、JWT 鉴权与 RBAC 权限、好友申请与管理（含黑名单：多处拉黑入口 + 集中管理）、
-单聊/群聊会话、消息收发（幂等/撤回/已读回执/离线消息/历史分页）、群组权限与禁言、
-文件上传（MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB；聊天附件可选 / 可拖 / 可粘，
-三者都先进「待发送托盘」再手动发送）、
-WebSocket 实时推送（心跳/重连/多端踢下线）、
-**远程桌面控制**（服务端中继 + AES-GCM 端到端加密 + 识别码跨账号，见「十二」）、
-**AI 面试官**（本地知识库 BM25 RAG + SSE 流式）与**全网检索**（消息搜索框的「网络」分组，见「十三」）、
-**直播**（桌面端 ffmpeg 屏幕分享 → HLS 分片 → 浏览器/手机 hls.js 观看 + WS 弹幕，见「十四」）；
-前端另可用 **Electron 打包为 Windows 桌面客户端**（安装包内置被控端 Agent 与裁剪 JRE）。
 
-> 架构与请求链路的完整图集（三层架构、HTTP/WebSocket 链路、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
-> 多端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron 桌面）与各级缓存的全链路图集
-> （端侧 IndexedDB、本地 SQLite、服务端 L1 Caffeine + L2 Redis + L3 MySQL、从点击到数据接收）
-> 见 [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md)。
+> 一套开箱即用的**多模块企业级即时通讯系统**：用 Spring Boot 4 + JDK 21 + Vue 3 实现单聊群聊、社交关系、文件传输、远程控制、AI 面试官与抖音式 HLS 直播，后端最终打成**一个可执行 jar** 全搞定。
+
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.8-brightgreen) ![JDK](https://img.shields.io/badge/JDK-21-orange) ![Vue](https://img.shields.io/badge/Vue-3.5.42-4FC08D) ![MySQL](https://img.shields.io/badge/MySQL-8.x-4479A1) ![Redis](https://img.shields.io/badge/Redis-5%2B-DC382D) [![License](https://img.shields.io/badge/License-Apache%202.0-blue)](LICENSE)
+
+**工程形态**：后端 12 个 Maven 模块 repackage 成单 jar（`im-bootstrap/target/im-server.jar`）；被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上、不打进后端；前端是独立工程，通过 Vite 代理与后端通信、不参与 Maven 构建。
 
 ---
 
+## 特性
+
+**账号与鉴权（im-user）**
+
+- 注册登录（图形 / 短信 / 邮箱验证码）、密码找回（手机短信 / 邮箱双通道）
+- JWT 鉴权 + RBAC 权限、资料与头像、在线状态
+
+**会话与消息（im-conversation / im-message）**
+
+- 单聊 / 群聊会话，置顶、免打扰、未读角标、已读位点
+- 消息收发（HTTP 提交 + WS 下行）、**撤回、已读/送达回执**
+- **引用/回复、转发、@ 提醒**
+- 文本 / 图片 / 语音 / 文件消息，敏感词过滤
+- **离线消息补推**（`im_message` 本身当持久队列，重连/上线补拉）
+- **幂等三重设防**（Redis 标记 + 唯一键 + 回查）、断网本地待发送队列重提交
+- 消息历史分页、本地优先（端侧 SQLite/sql.js 缓存，本地凑得出整页就零请求）
+
+**社交关系（im-friend）**
+
+- 好友申请 / 同意 / 拒绝、好友管理（备注、分组）
+- **黑名单（单向阻断）**：多处拉黑入口 + 集中管理；我把你拉黑后，我主动发消息算和解自动解除
+
+**群组（im-group）**
+
+- 建群 / 改群、成员管理、群主转让、解散群
+- 群权限与禁言、@ 提醒
+
+**实时通信（im-websocket）**
+
+- WebSocket 长连接、心跳保活、断线重连
+- 在线状态（Redis `im:online`）、多端会话管理、封号/改密全端下线
+
+**文件（im-file）**
+
+- MinIO / 本地双实现，秒传 / 断点续传 / 大文件分片，单文件上限 2GB
+- 受控地址 + 一次性票据下载；聊天附件可选 / 可拖 / 可粘，三者都先进「待发送托盘」再手动发送
+
+**远程控制（im-remote / im-remote-agent）**
+
+- 手机/PC **远程控制电脑**：ToDesk 式识别码跨账号接入 + 名下设备邀请
+- 人工授权（Swing 弹窗）、权限降档、会话密钥端到端 AES-256-GCM
+- **三档直连阶梯**：中继 WS → 局域网 TCP → UDP 打洞（Go-Back-N）
+- 屏幕流（H.264 硬编 / JPEG 脏块回落）、鼠标键盘注入、文件传输、exec
+- **录屏审计**（桌面端本地 WebM + sidecar）、敏感操作审计台账
+
+**AI 能力（im-ai）**
+
+- **AI 面试官**：本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式对话
+- **全网检索**：消息搜索框的「网络」分组（见「十三」）
+- 对接阿里云百炼 DashScope（OpenAI 兼容协议），按轮检索、内存索引热更新
+
+**直播（im-live）**
+
+- **抖音式 HLS 直播**：Electron 桌面端 ffmpeg 采集（屏幕 gdigrab / 摄像头 dshow）→ H.264 硬编 → 切 HLS fMP4 1s 分片 → HTTP PUT 上传到媒体服务器 → 观众 hls.js 拉流（见「十四」）
+- 房间管理（开播/关播/撤销 abort）、播放地址签名防盗链、主播心跳超时结算
+- **弹幕/点赞 WS `/ws/live`**、在线人数
+- **ENDED 聊天模式**：关播后画面作废但聊天室保留 60 分钟
+
+**公共基础设施（im-common / im-bootstrap）**
+
+- **三级缓存**（Caffeine L1 → Redis L2 → MySQL L3，穿透防护 + 降级）
+- SPI 契约跨模块解耦、TraceId 全链路追踪、全局异常统一转 `Result`、限流
+- **im-bootstrap**：唯一启动模块（main 类 + `application.yml`），依赖全部业务模块并 repackage 成单 jar `im-server.jar`，启动打印生效 profile / 端口 / 存储实现的横幅
+
+---
+
+## 截图 / Demo
+
+> 🚧 **TODO：待补充界面截图与操作 GIF**——登录、会话列表、单聊 / 群聊、远程控制、AI 面试官、直播间。
+> 在线 Demo：暂无（自部署系统，需自备 MySQL / Redis 后本地运行）。
+
+---
+
+## 快速开始
+
+> 完整分步流程（环境准备 → 环境变量 → 建库灌数据 → 起后端 → 起前端 → 打包客户端）见 [`md/项目启动流程.md`](md/项目启动流程.md)，或本文「三 ~ 七」章；下面是最短跑通路径。
+
+**环境依赖**：JDK 21、Maven 3.9+、MySQL 8.x、Redis 5+、Node.js 18+（前端）。
+
+**1）起后端**（默认 `dev` profile，端口 `8080`）：
+
+```powershell
+mvn clean package -DskipTests
+java -jar im-bootstrap/target/im-server.jar
+```
+
+启动成功会打印横幅：接口文档 `http://localhost:8080/doc.html`、WebSocket `ws://localhost:8080/ws`。
+
+**2）起前端**（Vite dev server，端口 `5173`，已配 `/api`、`/ws`、`/hls` 代理，**必须先起后端**）：
+
+```powershell
+cd im-ui
+npm install
+npm run dev
+```
+
+浏览器打开 **http://localhost:5173**，演示账号见「八、演示账号」。
+
+**发布为桌面 / 移动客户端**：Windows 桌面端（Electron）见 [`md/打包/Electron打包指南.md`](md/打包/Electron打包指南.md)，Windows EXE 与安卓 APK 见 [`md/打包/打包为EXE和Android指南.md`](md/打包/打包为EXE和Android指南.md)（安装包内置被控端 Agent 与裁剪 JRE）。
+
+---
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`md/项目启动流程.md`](md/项目启动流程.md) | 从零跑起来的分步流程（对应本文「三 ~ 七」章） |
+| [`md/架构与请求链路图.md`](md/架构与请求链路图.md) | 三层架构、HTTP / WebSocket 链路、登录鉴权、文件上传下载、远程控制、AI、直播等专项时序图 |
+| [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md) | 四端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron）+ 端侧 IndexedDB·本地 SQLite·服务端 L1 Caffeine + L2 Redis + L3 MySQL 全链路 |
+| [`md/直播.md`](md/直播.md) | 直播选型对比与 HLS 推 / 拉流细节、Nginx 生产配置 |
+| [`md/手机真机调试HTTPS配置指南.md`](md/手机真机调试HTTPS配置指南.md) | 手机真机联调远程控制的自签证书配置 |
+| [`im-ui/README.md`](im-ui/README.md) | 前端工程详细说明 |
+| `http://localhost:8080/doc.html` | Knife4j 聚合接口文档（入参 / 出参、在线调试，9 个分组） |
+| [`md/CHANGELOG.md`](md/CHANGELOG.md) | 版本变更记录 |
+
+---
+
+## 许可证
+
+本项目基于 **Apache License 2.0** 开源，完整条款见仓库根目录的 [`LICENSE`](LICENSE) 文件。
+
+> 选 Apache-2.0 是因为它对 Java 生态友好：允许商用 / 修改 / 分发 / 私有使用，附带专利授权与免责条款，再分发时保留版权与许可证声明即可。
+
+---
+
+## 开发指南与贡献
+
+面向想改代码、提 PR 的人。仓库：<https://github.com/zhuxiaoyi412826/Veytalk>。
+
+### 源码构建
+
+- **后端**：整体打包 `mvn clean package -DskipTests`，产物 `im-bootstrap/target/im-server.jar`。改过跨模块代码（如 `im-common`）后若要用 `spring-boot:run` 跑，**必须先 `mvn install` 到本地仓库 `~/.m2`**，否则会**静默**跑旧 jar——`spring-boot:run` 只编译 `im-bootstrap` 一个模块、跨模块依赖从 `~/.m2` 解析（命令与原因见「六、启动后端」「十五、已知坑」）。
+- **前端**：`cd im-ui; npm install; npm run dev`（开发，5173）/ `npm run build`（生产，产物 `im-ui/dist`）/ `npm run build:electron`（桌面端）；`npm run dev:lan` 局域网模式，`npm run gen:cert` 生成手机真机联调用的自签证书。
+
+### 测试
+
+项目当前**不含自动化测试用例**（打包用 `-DskipTests` 跳过），验收靠「十七、验证清单」的手动串测；补测试的 PR 欢迎。
+
+### 代码规范
+
+**暂未配置** ESLint / Prettier / Checkstyle / Spotless 等自动化工具，靠以下人工约定（动手前先看周边文件的写法、保持一致）：
+
+- **后端**：严格分 `controller / service / mapper` 三层；跨模块只经 `im-common` 的 **SPI 契约**，不直接依赖别的业务模块实现；接口统一返回 `Result`（失败也 HTTP 200、靠 `code` 区分），错误码按段位分配（1xxx 通用 … 9xxx 远程控制）；`password / token / ticket` 一类敏感参数在日志与慢 SQL 里按字段名打码。
+- **前端**：组合式 API + `<script setup>`；网络请求收敛到 `src/api/`、全局状态收敛到 `src/stores/` 的 Pinia store，不在组件里散着调 axios。
+- **提交前**：后端至少 `mvn clean package -DskipTests` 过一遍编译；前端 `npm run build` 不报错。
+
+### 提 Issue
+
+到 [Issues](https://github.com/zhuxiaoyi412826/Veytalk/issues) 反馈请带上：**现象 + 复现步骤 + 环境**（生效 profile、JDK 版本、浏览器 / 客户端类型）+ **相关日志**（`D:/rizi1/IM/` 下的 `error.log` / `warn.log`，必要时附 `DEBUG.log` 片段）。
+
+### 提 PR
+
+1. 从 `main` 切特性分支，一个 PR 只做一件事、小步提交；
+2. 描述写清**动机、改动点、影响范围**；
+3. 涉及数据库变更的，附对应 `sql/` 脚本或 DDL 说明；
+4. **每次改动都在 [`md/CHANGELOG.md`](md/CHANGELOG.md) 补一条**（本项目硬性约定，Keep a Changelog 风格）；
+5. 合并前 rebase 到最新 `main` 并确保能编译。
+
+### 分支策略
+
+当前只有 `main` 一条主干（单人开发）。多人协作时建议：`main` 保持可发布，特性走 `feature/xxx` + PR 合并，紧急修复走 `hotfix/xxx`。
+
+---
+
+## 路线图 / Roadmap
+
+整理自 [`md/待开发功能.txt`](md/待开发功能.txt)（原始草稿），按状态分组：✅ 已落地、🚧 代码就绪待接外部依赖、📋 规划中。
+
+### ✅ 已完成
+
+- **账号认证**：账号密码 / 邮箱 / 手机验证码登录；密码找回（手机短信 + 邮箱双通道，reset 与登录场景的验证码在 Redis 里隔离、重置后踢掉全部登录态）。
+- **短信下发可插拔**：验证码下发走 `SmsSender` 抽象，默认 `MockSmsSender`（只写日志）。
+- **AI 面试官**：左侧「面试」入口 → Java 全栈面试，本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式、循序渐进按轮追问、面试会话审计（见「十三」）。
+- **好友备注**：改其他用户在自己这里的显示名，留空即清除、回退对方昵称（`PUT /api/friend/{friendId}/remark`）。
+
+### 🚧 代码就绪，待接真实服务商 / 依赖服务器
+
+- **真实短信服务商**：新增一个 `SmsSender` 实现、切换生效 provider 即可（当前 Mock 只写日志）。
+- **事务邮箱**：真实邮件发信通道（有了服务器再开发）。
+- **腾讯防水墙**：人机验证。
+- **腾讯 TRTC**：音视频实时通信底座（下面的语音 / 视频面试官与通话都依赖它）。
+
+### 📋 规划中
+
+- **第三方授权登录**：QQ / 微信 / GitHub OAuth。
+- **语音 / 视频面试官**：基于 TRTC，覆盖移动端与电脑端。
+- **语音 / 视频通话**：一对一实时通话，桌面端可保持通话或录屏。
+- **钱包**：零钱、转账等。
+- **图片敏感内容过滤**：现有为文本敏感词过滤，图片内容审核待补。
+- **闪照 + 马赛克**：阅后即焚图片、图片打码。
+- **直播右侧内容面板**：文章 / 视频 / 小说 / 音乐，点击切换展示。
+- **Tauri 2 打包**：安卓端 + 重新打包 exe（现有桌面端为 Electron 方案，见「七」）。
+- **日志系统完善**：在现有 logback 分档日志（见「六」）基础上进一步增强。
+
+**🔴 关键短板（企业级 / 合规 / 移动端最该补）**
+
+- **系统级离线推送**：App 被杀时经 APNs / FCM / 个推 / 小米华为通道唤醒（现「离线消息补推」仅重连后补拉）。
+- **管理后台（Admin Console）**：用户管理 / 封禁、举报处理、内容审核队列、数据看板、系统配置（现仅有 RBAC 权限码，无独立后台 UI）。
+- **举报 + 内容审核闭环**：举报违规消息 / 用户 → 审核队列 → 人工 / 机器复审 → 处置（现仅发送时敏感词过滤）。
+- **聊天端到端加密（E2EE）**：「私密会话」信令级 E2EE（需权衡与服务端检索 / 审核的冲突）。
+- **两步验证 2FA / TOTP**：登录二次校验。
+- **账号注销 / 数据删除**：合规（GDPR / 个保法）要求的销号与数据清除。
+- **监控告警**：Actuator + Prometheus / Grafana 指标暴露、健康检查、慢接口告警（现仅 TraceId + 慢 SQL 日志）。
+
+**🟡 沟通与群组体验**
+
+- **消息表情回应（Reaction）**：对某条消息贴表情 / 点赞。
+- **消息编辑**：现只能撤回（2 分钟内），不能改。
+- **更多消息类型**：位置、名片、合并转发（聊天记录打包）、投票 / 接龙。
+- **语音消息转文字 / 消息翻译**。
+- **群文件 / 群相册 / 精华消息**：群维度的内容沉淀。
+- **进群审批 / 邀请链接 / 群二维码**：自助入群入口（现邀请是直接 `POST members`）。
+- **群机器人 / Webhook**：群内自动化通知、外部系统接入。
+- **聊天记录导出 / 迁移 / 备份**（现远程审计能导 CSV，聊天记录不能）。
+- **草稿箱 / 常用语 / 快捷回复**。
+
+**🟢 前端体验 & AI / 直播延伸**
+
+- **国际化 i18n / 深色模式 / 无障碍 a11y**（现界面为中文硬编码）。
+- **AI 未读摘要 / 智能回复建议 / AI 客服机器人**（可复用现有 DashScope 接入）。
+- **直播连麦 / PK**（依赖 TRTC）、**礼物打赏**（依赖钱包）、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
+
+---
+
+## 社区 / 联系方式
+
+- **问题反馈 / 功能建议**：[GitHub Issues](https://github.com/zhuxiaoyi412826/Veytalk/issues)
+- **讨论**：[GitHub Discussions](https://github.com/zhuxiaoyi412826/Veytalk/discussions)（若仓库已开启）
+
+> 🚧 暂无 QQ 群 / 微信群 / Discord 等即时社区渠道；后续如建立会在此更新。
+
+---
+
+## 贡献者名单
+
+[![Contributors](https://contrib.rocks/image?repo=zhuxiaoyi412826/Veytalk)](https://github.com/zhuxiaoyi412826/Veytalk/graphs/contributors)
+
+- [@zhuxiaoyi412826](https://github.com/zhuxiaoyi412826)
+
+> 头像墙由 [contrib.rocks](https://contrib.rocks) 依据 GitHub 提交记录自动生成（需仓库公开可见）。
+
+---
+
+## 致谢
+
+本项目站在这些优秀开源项目肩上（完整版本见「一、技术栈与版本」）：
+
+- **后端**：[Spring Boot](https://spring.io/projects/spring-boot)、[MyBatis-Plus](https://baomidou.com)、[Sa-Token](https://sa-token.cc)、[Knife4j](https://github.com/xiaoymin/knife4j)、[MinIO](https://min.io)、[Hutool](https://hutool.cn)、[BouncyCastle](https://www.bouncycastle.org)、[OkHttp](https://square.github.io/okhttp/)、[Caffeine](https://github.com/ben-manes/caffeine)
+- **前端**：[Vue 3](https://vuejs.org)、[Vite](https://vite.dev)、[Element Plus](https://element-plus.org)、[Pinia](https://pinia.vuejs.org)、[Vue Router](https://router.vuejs.org)、[axios](https://axios-http.com)、[sql.js](https://github.com/sql-js/sql.js)、[hls.js](https://github.com/video-dev/hls.js)、[marked](https://marked.js.org)、[DOMPurify](https://github.com/cure53/DOMPurify)、[spark-md5](https://github.com/satazor/js-spark-md5)、[dayjs](https://day.js.org)
+- **桌面端 / 音视频**：[Electron](https://www.electronjs.org)、[electron-builder](https://www.electron.build)、[node-forge](https://github.com/digitalbazaar/forge)、[FFmpeg](https://ffmpeg.org)
+- **基础设施**：[MySQL](https://www.mysql.com)、[Redis](https://redis.io)
+
+> 各依赖的版权与许可证归其作者所有；本项目以 Apache-2.0 发布。
+
+# 详细开发内容
+
 ## 一、技术栈与版本
 
-版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处。
+后端版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处；前端依赖版本在 `im-ui/package.json`，桌面端在 `electron/package.json`。
 
 | 类别 | 组件 | 版本 | 说明 |
 |---|---|---|---|
@@ -40,35 +284,56 @@ WebSocket 实时推送（心跳/重连/多端踢下线）、
 | JWT 工具 | Hutool | 5.8.47 | WS 连接票据、文件访问票据 |
 | 密码加密 | spring-security-crypto | 7.0.7 | 只取加密算法，不引入整个 Spring Security |
 | 加密算法 | BouncyCastle | 1.86 | Argon2id 依赖 |
-| 前端 | Vue / Vite | 3.5.42 / 7.3.6 | |
-| 前端 | Element Plus / Pinia / Vue Router | 2.14.5 / 3.0.4 / 4.6.4 | |
+| 前端框架 | Vue | 3.5.42 | 组合式 API + `<script setup>` 单文件组件 |
+| 前端构建 | Vite | 7.3.6 | dev server 与代理（`/api`、`/ws`、`/hls`）；插件 `@vitejs/plugin-vue` 6.0.8 |
+| 前端 UI | Element Plus | 2.14.5 | 组件库；图标集 `@element-plus/icons-vue` 2.3.2 |
+| 前端状态 | Pinia | 3.0.4 | 全局状态管理，7 个 store |
+| 前端路由 | Vue Router | 4.6.4 | Web 走 history，Electron 走 hash |
+| 前端 HTTP | axios | 1.20.0 | 拦截器统一注入 token、按业务 `code` 判错（失败也是 HTTP 200） |
+| 前端本地存储 | sql.js | 1.13.0 | 端侧 SQLite（WASM），消息「本地优先」缓存 |
+| 前端媒体 | hls.js | 1.7.3 | 直播 HLS 拉流播放 |
+| 前端媒体 | @ffmpeg/ffmpeg + @ffmpeg/util | 0.12.15 / 0.12.2 | 浏览器内 WASM ffmpeg（前端音视频处理） |
+| 前端工具 | spark-md5 | 3.0.2 | 大文件分片算 MD5（秒传 / 断点续传） |
+| 前端工具 | marked + dompurify | 18.0.14 / 3.4.16 | Markdown 渲染 + HTML 净化（XSS 防护） |
+| 前端工具 | dayjs | 1.11.23 | 时间格式化 |
+| 桌面端 | Electron + electron-builder | 37.10.3 / 25.1.8 | `electron/` 前端壳连远程后端，打 Windows NSIS 安装包（内置被控端 Agent 与裁剪 JRE） |
+| 证书工具 | node-forge | 1.4.0 | devDep，`npm run gen:cert` 生成内网自签证书（手机真机联调用） |
 
 ---
 
 ## 二、模块结构与依赖关系
 
-```
-im-parent (pom)
-├── im-common        公共层：Result/异常/MP 配置/Sa-Token 拦截/Knife4j/日志 AOP/MDC
-│                    /加密工具/JWT 工具/常量/过滤器/SPI 契约
-├── im-user          用户中心：注册、登录、JWT 鉴权、资料、在线状态、角色权限
-├── im-friend        好友关系：申请、同意/拒绝、列表、备注、分组、删除、拉黑
-├── im-conversation  会话管理：会话列表、未读计数、置顶、免打扰、排序、单聊/群聊
-├── im-message       消息核心：收发、状态流转、撤回、删除、离线消息、幂等、历史分页
-├── im-group         群组管理：建群、改群、成员管理、群主/管理员权限、禁言、@提醒、解散
-├── im-file          文件存储：图片/文件/语音上传、访问鉴权、元数据保存（MinIO + 本地双实现）
-├── im-websocket     实时推送：连接管理、心跳、断线重连、消息路由分发、多端踢下线
-├── im-ai            AI 能力：面试官（知识库 BM25 检索 RAG、DashScope SSE 客户端、会话与限流）+ 全网检索
-│                    （抓取搜索引擎结果页、Redis 结果缓存）
-├── im-remote        远程控制服务端：会话状态机、Agent/控制端双 WS 中继、审计与限流
-├── im-live          直播：房间生命周期（开播/关播/心跳超时结算）、播放地址签名、HLS 弹幕 WS 中继；
-│                    房间列表默认隐藏关播超过 1 小时的已结束场次（`im.live.ended-room-visible-minutes`）
-├── im-bootstrap     启动模块：唯一的 main 类 + application.yml，repackage 成单 jar
-├── im-remote-agent  被控端 Agent：独立 fat jar（纯 JDK 零依赖），不进上面那个单 jar，单独部署在被控机
-└── im-ui            Vue 3 前端（独立工程，不在 Maven modules 里）
-```
+### 模块结构
 
-**依赖关系是星型而非网状**：
+一、业务模块（10 个，星型依赖 im-common，跨模块只走 SPI）
+
+| 模块            | 功能                                                         |
+| --------------- | ------------------------------------------------------------ |
+| im-user         | 用户注册 / 登录、资料、权限角色（PermissionProvider）、在线状态、验证码 |
+| im-friend       | 好友关系、好友申请、黑名单（单向阻断）                       |
+| im-conversation | 会话与成员、未读数、已读位点、会话摘要                       |
+| im-message      | 消息收发、撤回、已读 / 送达回执、离线补推、分页、幂等发号    |
+| im-group        | 群组、群成员、群权限、转让 / 解散                            |
+| im-file         | 文件上传（单请求 + 分片 + 秒传 + 断点续传）、票据下载、MinIO / 本地存储 |
+| im-websocket    | 长连接、心跳、在线状态、消息推送（WsSessionManager）         |
+| im-ai           | AI 面试官：BM25 知识库检索增强 + SSE 流式对话（DashScope）   |
+| im-remote       | 远程控制服务端：会话状态机、中继、UDP 打洞反射、审计         |
+| im-live         | 直播：房间管理、弹幕 WS /ws/live、HLS 播放地址签名、心跳结算、ENDED 聊天模式 |
+
+二、公共 / 装配模块（2 个）
+
+| 模块         | 功能                                                         |
+| ------------ | ------------------------------------------------------------ |
+| im-common    | 公共依赖：三级缓存、SPI 契约、RedisKeys、JWT 加解密、全局异常、Sa-Token 配置、Result |
+| im-bootstrap | 唯一启动模块，把上述业务 + 公共模块聚合成 im-server.jar      |
+
+三、独立程序（1 个，不进主 jar）
+
+| 模块            | 功能                                                         |
+| --------------- | ------------------------------------------------------------ |
+| im-remote-agent | 被控端桌面 Agent，独立 fat jar（Swing 授权弹窗 + Robot 抓屏 / 注入），不被 im-bootstrap 依赖 |
+
+### **依赖关系是星型而非网状**
 
 ```
         im-user ─┐
@@ -89,7 +354,9 @@ im-parent (pom)
 WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 
 业务模块之间**从不直接依赖**。跨模块调用一律走 `im-common` 里定义的 SPI 接口，
-由目标模块提供实现，调用方用 `ObjectProvider` 注入（拿不到就降级，不报启动失败）：
+由目标模块提供实现，调用方用 `ObjectProvider` 注入（拿不到就降级，不报启动失败）
+
+### SPI契约
 
 | SPI 契约（im-common） | 实现方 | 用途 |
 |---|---|---|
@@ -104,22 +371,37 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `PushSpi` | im-websocket | 向指定用户/设备推送 WS 报文、踢下线 |
 | `FileStorageSpi` | im-file | 文件元数据登记，供消息模块组装可访问 URL |
 
-每个业务模块内部统一分层：
-`controller` / `service`(+`impl`) / `mapper` / `entity` / `dto`(req+vo) / `convert` / `spi` / `config`。
+> 一句话总结：13 个模块 = 10 个业务模块 + im-common（公共）+ im-bootstrap（启动装配）+ im-remote-agent（独立被控端）。其中真正打进 im-server.jar 一起启动的是前 12 个；im-remote-agent 单独打包分发。
+
+> 每个业务模块内部统一分层：
+> `controller` / `service`(+`impl`) / `mapper` / `entity` / `dto`(req+vo) / `convert` / `spi` / `config`。
 
 ---
 
 ## 三、环境准备
 
-| 依赖 | 要求 | 检查命令 |
+只跑「后端 + Web 前端」时，装齐下面**必需**的 6 项即可；**可选**那几个只在做对象存储、直播 / 远程控制硬编、桌面端 / 安卓打包时才需要。分步启动见 [`md/项目启动流程.md`](md/项目启动流程.md)。
+
+### 必需
+
+| 依赖 | 要求 | 检查命令 | 用途 |
+|---|---|---|---|
+| JDK | 21 | `java -version` | 运行后端 `im-server.jar`（实测路径 `D:\software\jdk\jdk21`）；被控端 Agent 也需 JRE 21 |
+| Maven | 3.9+ | `mvn -v` | 后端多模块聚合构建（`mvn clean package`） |
+| MySQL | 8.x，已建库或允许建库 | `mysql --version` | 主数据库，库名默认 `im_db`（`im_schema.sql` 头部带 `CREATE DATABASE IF NOT EXISTS`） |
+| Redis | 5+，本地 6379 | `redis-cli ping` | Sa-Token 会话、验证码、在线状态、消息序号、直播在线数/心跳、全网检索缓存；**没起后端会启动失败** |
+| Node.js | ≥ 20（实测 v24.16.0） | `node -v` | 前端构建与 dev server（不参与 Maven 构建） |
+| npm | ≥ 10（实测 11.13.0） | `npm -v` | 前端依赖安装（`npm install`） |
+
+### 可选（按功能）
+
+| 依赖 | 何时需要 | 说明 |
 |---|---|---|
-| JDK | 21 | `java -version` |
-| Maven | 3.9+ | `mvn -v` |
-| MySQL | 8.x，已建库或允许建库 | `mysql --version` |
-| Redis | 5+，本地 6379 | `redis-cli ping` |
-| Node.js | ≥ 20（实测 v24.16.0） | `node -v` |
-| npm | ≥ 10（实测 11.13.0） | `npm -v` |
-| MinIO | 可选，不装也能跑 | — |
+| MinIO | 想用对象存储而非本地磁盘时 | 设 `IM_FILE_STORAGE=minio`；**不装默认走本地** `${user.home}/im-files`，上传下载照常跑通 |
+| ffmpeg | 直播推流 / 远程控制 H.264 硬件编码 | Electron 桌面客户端已内置（`electron/bin`）；被控端 Agent 与本机自测直播需本机可执行 `ffmpeg`（缺失时远控自动回落 JPEG，直播则无法推流） |
+| Android Studio + SDK | 打包安卓 APK 时 | Capacitor 方案，见 [`md/打包/打包为EXE和Android指南.md`](md/打包/打包为EXE和Android指南.md) |
+
+> 文档里的命令以 **Windows PowerShell** 为主（语句分隔用 `;` 而非 `&&`）；Linux / macOS 换对应写法，且 `IM_LOG_HOME` 等路径类环境变量必须覆盖成本机路径。
 
 ---
 
@@ -152,11 +434,20 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `MINIO_ACCESS_KEY` | `minioadmin` | |
 | `MINIO_SECRET_KEY` | `minioadmin` | |
 | `MINIO_BUCKET` | `im-files` | 启动时自动创建，无需手动建桶（桶名须≥3字符符合 S3 规范） |
+| `IM_UPLOAD_TMP_DIR` | `${user.home}/im-upload-tmp` | 分片上传的本地临时目录（断点续传 / 秒传）；**无论 storage 是 local 还是 minio，分片都先落这里**，所在磁盘必须可读写 |
 | `IM_LOG_HOME` | `D:/rizi1/IM` | 日志目录，见「六、启动后端 → 日志输出与目录」；Linux 下必须覆盖成对应路径（如 `/data/logs/im`） |
 | `ALI_BABA_API_KEY` | 空 | AI 面试官的百炼（DashScope）API Key；未设置时仅面试功能不可用，其余功能照常 |
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
+| `IM_LIVE_ENABLED` | `true` | 直播总开关；关掉则开播/观看接口与 `/ws/live` 弹幕端点全部拒绝服务 |
+| `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放基址（相对路径，前端按访问源补全）；生产换成 Nginx 播放口地址 |
+| `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg `-method PUT` 推流基址（本机推流，回环恒定） |
+| `IM_LIVE_SIGN_SECRET` | `im-live-dev-secret-change-me` | 播放地址签名密钥，须与 Nginx `secure_link_md5` 逐字一致，**生产必须替换** |
 | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束直播间在大厅列表的可见时长（分钟）；关播超过它就不再显示，配 `0` 或负数=不过滤 |
+| `IM_LIVE_ENDED_CHAT_MINUTES` | `60` | 关播后聊天室保留时长（分钟，ENDED 聊天模式）；配 `0` 或负数=关播立即全断 |
+| `IM_DIRECT_ENABLED` | `false` | 远程控制直连（P2P）服务端总开关；开启后被控机会常开 TCP 18924 / UDP 18925，需部署方显式决定并放行端口（见「十二」） |
+| `IM_DIRECT_PUNCH_HOST` | 空 | UDP 打洞反射服务的公网可达地址；留空=放弃打洞档，只剩局域网直连与中继 |
+| `IM_DIRECT_PUNCH_PORT` | `8947` | 反射服务监听的 UDP 端口，需单独放行 UDP 入站 |
 
 PowerShell 设置示例：
 
@@ -177,19 +468,54 @@ export MYSQL_PASSWORD=your-password
 
 ## 五、数据库初始化
 
-两个脚本按顺序执行即可。
+`sql/` 下两个脚本，**先 `im_schema.sql` 建表、后 `im_data.sql` 灌数据**，各跑一次即可：
+
+| 脚本 | 作用 | 规模 | 重跑安全性 |
+|---|---|---|---|
+| `im_schema.sql` | 建库 + 建表 + 索引 + 虚拟生成列 | `im_db` 库、**22 张表**（分属 9 个模块） | ⚠️ 头部 `DROP TABLE` 会清空数据，**仅限全新库** |
+| `im_data.sql` | 灌演示种子数据 | 写入 **14 张表**，其余 8 张建好即空 | ✅ 只删自己的种子 ID 段，**可安全重跑** |
 
 > ⚠️ **`im_schema.sql` 头部是 `DROP TABLE IF EXISTS` + 重建，重跑一次就会清空全库数据**。
 > 它的「幂等」指的是重复执行得到同一套表结构，不是「不会动你的数据」。
-> 已经有数据的库不要重跑这个脚本，改用下面的增量升级方式。
+> 已经有数据的库不要重跑这个脚本，改用本节末尾的「已有库的增量升级」方式。
+
+### 执行步骤
 
 ```powershell
+# 凭据见「四、环境变量」，PowerShell 下先设好再执行
+$env:MYSQL_USER = 'root'
+$env:MYSQL_PASSWORD = 'your-password'
+
 # 1. 建表（含索引、虚拟生成列）——仅限全新库
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_schema.sql"
 
-# 2. 灌入演示数据（3 个用户、角色权限、一对好友、1 个会话、若干历史消息、4 场面试演示会话）
+# 2. 灌入演示数据
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
+
+### 22 张表分属 9 个模块
+
+| 模块 | 表 |
+|---|---|
+| 用户权限（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` |
+| 好友（im-friend） | `im_friend` `im_friend_request` |
+| 会话（im-conversation） | `im_conversation` `im_conversation_member` |
+| 消息（im-message） | `im_message` `im_message_read` `im_message_delete` |
+| 群组（im-group） | `im_group` `im_group_member` |
+| 文件（im-file） | `im_file` |
+| 远程控制（im-remote） | `im_remote_device` `im_remote_session` `im_remote_audit_log` |
+| AI 面试（im-ai） | `im_interview_session` `im_interview_message` `im_interview_event` |
+| 直播（im-live） | `im_live_room` |
+
+### `im_data.sql` 灌了哪些演示数据
+
+- **3 个账号**（密码统一 `123456`）：`admin`（超管，持全部权限点）/ `alice`（userId 1001）/ `bob`（userId 1002）
+- **2 个角色 + 7 个权限点 + 12 条角色权限绑定**（admin 全量；user 除「撤回任意消息」「系统管理」外）
+- **alice ↔ bob 一对好友**（双向 2 行）+ 1 条已同意的历史申请
+- **1 个单聊会话**：3 条消息（seq 1~3）+ 送达/已读回执（bob 留 1 条未读，用于演示未读角标）
+- **4 场 AI 面试演示会话**（id 2301~2304）：覆盖 status 四种取值（进行中 / 正常结束 / 违规达阈值强制结束 / 未完成），含逐轮问答与违规事件流水，计数列与事件流水严格对账
+
+> 其余 **8 张表**（群组、文件、消息删除、远程三表、直播）**建好即空**，运行期由业务写入，脚本不预置任何数据。
 
 > ⚠️ **PowerShell 5.1 不要用 `<` 重定向导入 SQL**：它不识别 `<`（报
 > *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
@@ -233,13 +559,12 @@ ALTER TABLE `im_remote_audit_log`
 mvn clean package -DskipTests
 # 启动
 java -jar im-bootstrap/target/im-server.jar
-
 # 这样启动每次修改都要返回上层目录进去编译打包 ，只在im-bootstrap目录下即可
+mvn -f ..\pom.xml install -DskipTests
 # 注意：spring-boot:run 只跑 im-bootstrap 一个模块，跨模块依赖（im-common 等）是从本地
 # 仓库 ~/.m2 解析的，不是从源码目录。所以改过 im-common 里的任何文件（包括
 # logback-spring.xml）都必须先重新 install，否则跑的还是旧 jar——而且不会报错，
 # 只看得到旧行为（典型现象：改了日志配置但 D:/rizi1/IM 下不生成文件）。
-mvn -f ..\pom.xml install -DskipTests
 mvn spring-boot:run
 # 应用还在跑时不要加 clean：im-server.jar 被占用会让删失败
 ```
@@ -266,6 +591,20 @@ mvn spring-boot:run
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
 | http://localhost:8080/api/ | 全部 REST 接口 |
+
+### 直播媒体服务器（可选，仅用直播时启动）
+
+直播的**媒体面**不归 Java 后端管：后端（`im-live`）只处理房间状态、播放地址签名、弹幕 WS，**一个媒体字节都不碰**；真正收发 HLS 分片的是一个独立的 HTTP 文件服务器。**本机自测**没有 Nginx 时，用仓库里零依赖的 `electron/live-media-server.js` 顶上（生产换 Nginx，见 [`md/直播.md`](md/直播.md) §10）：
+
+```powershell
+node electron/live-media-server.js     # 在仓库根目录执行；监听 0.0.0.0:8088，可选 PORT=xxxx 覆盖端口
+```
+
+- 收 ffmpeg 的 `PUT /hls/{roomId}/{streamKey}/{file}` 落盘到 `electron/live-data/hls/…`（先写 `.part` 再原子 rename），观众端 `GET` 静态返回（带 CORS、Range，m3u8 不缓存）。
+- 与后端 `im.live` 默认配置对齐：`push-base-url=http://127.0.0.1:8088/hls`（本机推流）、`play-base-url=/hls`（观众经前端 vite 代理同源拉流），换网 / DHCP 换 IP 都不用改。
+- 局域网自测**不校验签名**，防盗链靠路径里不可猜的 `streamKey` 兜底；上生产必须换回 Nginx 的 `secure_link`。
+
+> 只在**要用直播**时才需要启动它；不启动不影响聊天、好友、文件、远程控制等其它功能。完整的开播→观看自测步骤见「十四、直播」与 [`md/直播.md`](md/直播.md) §11。
 
 ### 日志输出与目录
 
@@ -384,8 +723,7 @@ npm run preview    # 本地预览构建产物
 靠 `utils/env.js` 的 `isElectron()` 判断，互不影响。
 
 ```powershell
-cd im-ui; npm run build:electron          # 相对 base './' + hash 路由
-Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
+cd im-ui; npm run build:electron          # 相对 base './' + hash 路由；直接产出到 ../electron/dist（emptyOutDir 自动清空，无需手动拷贝）
 cd ..\electron; npm install; npm run build
 # 产物：electron\release\IM通讯 Setup 1.0.0.exe（约 160MB，含内置裁剪 JRE 与被控端 Agent）
 ```
@@ -393,9 +731,9 @@ cd ..\electron; npm install; npm run build
 > ⚠️ 分发前先改 `electron/main.js` 的 `SERVER_BASE` 为实际后端地址。
 > 安装包经 `extraResources` 内置 `im-remote-agent` 的 fat jar 与 jlink 裁剪 JRE，桌面端启动时
 > 自动后台拉起被控端 Agent（双击 `resources\启动被控端.bat` 亦可），被控机**无需安装任何 Java**；
-> 见 [`md/Electron打包指南.md`](md/Electron打包指南.md) 十二节。
+> 见 [`md/打包/Electron打包指南.md`](md/打包/Electron打包指南.md) 十二节。
 > 完整的环境准备、打包流程图、踩坑（SSL 证书拦截、`file://` 白屏、大文件下载）与注意事项，
-> 见 [`md/Electron打包指南.md`](md/Electron打包指南.md)。
+> 见 [`md/打包/Electron打包指南.md`](md/打包/Electron打包指南.md)。
 
 ---
 
@@ -422,36 +760,6 @@ cd ..\electron; npm install; npm run build
 所以邮箱登录与邮箱找回密码的代码路径和生产完全一致，只是最后一步没出网。
 生产该开关为 `false`，SMTP 没配就老老实实报 `MAIL_NOT_CONFIGURED`。
 
-### 找回密码
-
-登录页底部「忘记密码」→ 弹窗内两条通道二选一（手机短信 / 邮箱），流程都是
-**图形验证码 → 6 位验证码 → 新密码**。对应三个匿名端点：
-
-| 端点 | 说明 |
-|---|---|
-| `POST /api/auth/password/sms-code` | 给已绑定手机号发 `reset` 场景短信码 |
-| `POST /api/auth/password/email-code` | 给已绑定邮箱发 `reset` 场景邮件码 |
-| `POST /api/auth/password/reset` | 校验验证码并写入新密码 |
-
-几个刻意的设计：
-
-- **场景隔离**：Redis 键是 `im:captcha:sms:{scene}:{phone}`，`scene` 由服务端钉死为 `reset`（客户端传什么都不认）。
-  登录用的码拿到找回密码这里一律无效——改密码这道门的强度必须高于登录。
-  `scene` 会进键名，所以有白名单校验，否则传个带 `:` 的场景就能跨命名空间写键。
-- **频率限制键不分场景**：否则轮流用 `login` / `reset` 发码，等于把「60 秒一次」的限制翻了一倍。
-- **重置成功后踢掉全部登录态**：不踢的话，盗号者改完密码，原主人的会话依旧活着。
-- **被禁用的账号不能靠找回密码绕过封禁**，重置前会校验账号状态。
-- **新旧密码相同直接拒**（`2019`），否则找回密码能变成一次空操作。
-- 手机号/邮箱未绑定任何账号时返回 `2017` / `2018`。这会泄露「该号码在不在系统里」，
-  与 QQ、微信的行为一致；靠图形验证码闸门 + `@RateLimit` + 60 秒间隔三道门控住。
-  真要避免枚举就得照常发码，代价是白耗短信费用。
-
-短信下发是**可插拔**的：`SmsSender` 接口 + `MockSmsSender`（只写日志），由 `im.sms.provider` 选择，
-默认 `mock`。接阿里云/腾讯云时新增一个实现并标
-`@ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")`，
-再把 `IM_SMS_PROVIDER` 改成 `aliyun` 即可——验证码的生成、频率限制、Redis 存取与校验全在
-`CaptchaServiceImpl` 里，一行都不用动。这个模式与 `im-file` 的 `FileStorage`（local / minio）一致。
-
 > ⚠️ **同一个账号开两个浏览器标签页会互相顶下线。**
 > 这是设计行为：`AuthServiceImpl#kickSameDevice` 按「用户 + 设备类型」顶号，
 > 而两个标签页的 `deviceId` 都是 `web`，归一化后属于同一设备。
@@ -470,115 +778,212 @@ cd ..\electron; npm install; npm run build
 ```
 
 **所有失败也是 HTTP 200**，靠 `code` 区分（`GlobalExceptionHandler` 上没有 `@ResponseStatus`）。
-鉴权失败 `code=1002`，权限不足 `code=403`，业务错误码见 `ResultCode` 枚举
+鉴权失败 `code=1002`（`UNAUTHORIZED`），权限不足 `code=1003`（`FORBIDDEN`）——两者由 `GlobalExceptionHandler` 把 Sa-Token 的 `NotLoginException` / `NotPermissionException` 映射而来；业务错误码见 `ResultCode` 枚举
 （1xxx 通用 / 2xxx 用户 / 3xxx 好友 / 4xxx 会话 / 5xxx 消息 / 6xxx 群组 / 7xxx 文件 /
-8xxx WS 票据 / 9xxx 远程控制）。
-
-| 模块 | 前缀 | 放行 |
-|---|---|---|
-| 认证 | `/api/auth` | ✅ 免登录 |
-| 验证码 | `/api/captcha` | ✅ 免登录 |
-| 用户 | `/api/user` | |
-| 好友 | `/api/friend`、`/api/friend/request` | |
-| 会话 | `/api/conversation` | |
-| 消息 | `/api/message` | |
-| 群组 | `/api/group` | |
-| 文件 | `/api/file` | 下载走一次性票据 |
-| WS 票据 | `/api/ws` | |
-| AI 面试 / 全网检索 | `/api/ai` | 对话接口是 SSE 流，不走 Result JSON；`/api/ai/search/web` 是普通 Result JSON |
-| 远程控制 | `/api/remote` | 凭识别码邀请也要求登录（控制方必须有自己的账号） |
+8xxx 长连接 / 9xxx 远程控制；直播无独立段位，复用 1xxx 通用码）。
 
 token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie 与 body 读取都已关闭）。
 
-### 请求链路：从前端发出到拿到响应
+下面按模块列出**主要接口**（方法 + 路径 + 功能）。标 ✅ 的模块免登录，其余均需带 token；
+**完整清单（含入参 / 出参、在线调试）见 `http://localhost:8080/doc.html`（Knife4j 聚合的接口文档）。**
 
-关键约定：**后端所有失败都返回 HTTP 200 + `Result` 体**，业务错误码放在 `code` 里，
-所以前端的错误判定全在 axios 响应拦截器的「成功分支」，错误分支只处理网络问题。
+### 认证 `/api/auth` —— ✅ 免登录（`logout` / `refresh` / `me` 需登录）
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as 用户 / 组件
-    participant ST as Pinia Store
-    participant AX as axios（request.js）
-    participant PX as Vite Proxy
-    participant TF as TraceIdFilter
-    participant SA as Sa-Token 拦截器
-    participant CT as Controller
-    participant SV as Service
-    participant MP as Mapper
-    participant DB as MySQL
-    participant GEH as GlobalExceptionHandler
-
-    U->>ST: 触发操作（进入会话 / 发消息 / 刷新列表）
-    ST->>AX: 调用 api/*.js 方法
-    Note over AX: 请求拦截器：<br/>注入 token 头（tokenName）<br/>+ X-Trace-Id
-    AX->>PX: HTTP 请求 /api/xxx
-    PX->>TF: 转发到 localhost:8080
-    TF->>SA: 写入 MDC traceId 后放行
-    SA->>CT: 鉴权通过（@SaCheckLogin / @SaCheckPermission）
-    CT->>SV: 调业务方法（SecurityUtil.getUserId 取当前用户）
-    SV->>MP: 数据访问
-    MP->>DB: 执行 SQL
-    DB-->>MP: 结果集
-    MP-->>SV: Entity
-    SV-->>CT: VO / DTO（经 Convert 转换）
-    CT-->>PX: Result.ok(data)（HTTP 200）
-
-    alt 出现异常（BusinessException / 未登录 / 参数校验失败）
-        SV-->>GEH: 抛出异常
-        GEH-->>PX: Result.fail(code, message)（HTTP 仍 200）
-    end
-
-    PX-->>AX: HTTP 200 + Result JSON
-    Note over AX: 响应拦截器：<br/>code==200 → 只返回 data<br/>code==1002/2010 → 清 token 跳登录<br/>其余 → 弹错误并 reject(ApiError)
-    AX-->>ST: 业务数据 或 抛出 ApiError
-    ST-->>U: 更新视图 / 提示错误
-```
-
-> 更多链路图（三层架构、登录鉴权、文件上传下载）见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
-
-### 黑名单：一份名单、四处入口、单向拦截
-
-名单不建新表，就是 `im_friend.status = 2`（**只改我持有的那一行**，对方视角的关系仍在），
-所以多端看到的是同一份。后端三个接口早就到位：`PUT /api/friend/{id}/block`（拉黑）、
-`DELETE /api/friend/{id}/block`（移出）、`GET /api/friend/blacklist`（名单）。
-**拉黑要求好友关系存在**（`block` 走 `requireRelation`），所以所有入口的候选人都只能是好友。
-
-| 入口 | 位置 | 行为 |
+| 方法 | 路径 | 功能 |
 |---|---|---|
-| 加入 / 移出 | 好友列表右键菜单 | 单个切换，拉黑前弹确认 |
-| 加入 / 移出 | 他人资料页按钮（`UserProfile.vue`，仅好友可见） | 同上，成功后只改本地 `card.blocked` |
-| 加入 / 移出 | **会话列表右键菜单**（`ChatHome.vue`） | 只对单聊且 relation 存在的行出现（`blockableOf` 用 `friend.friendOf(target.targetId)` 判定），群聊没有「拉黑一个群」 |
-| **添加黑名单** | **黑名单对话框工具栏** | 开二级弹窗多选好友（已拉黑的不再列出）→ 一次确认 → 串行 `block` |
+| POST | `/register` | 注册（成功后直接返回登录态，无需再登录一次） |
+| POST | `/login` | 账号密码登录（`loginType=phone` 时 account 传手机号） |
+| POST | `/login/sms` | 短信验证码登录（手机号未注册时自动建号） |
+| POST | `/login/email` | 邮箱验证码登录（邮箱未注册时自动建号） |
+| POST | `/password/sms-code`·`/password/email-code` | 发送找回密码验证码（短信 / 邮箱） |
+| POST | `/password/reset` | 凭验证码重置密码 |
+| POST | `/logout` | 注销当前设备 |
+| POST | `/refresh` | 续签：换发新 token 并注销旧 token |
+| GET | `/me` | 当前登录用户资料 |
 
-黑名单对话框（`FriendList.vue` 的 `blacklist` / `blacklistAdd`）细节：
+### 验证码 `/api/captcha` —— ✅ 免登录
 
-- 工具栏左侧显「已拉黑 N 人」，右侧「添加黑名单」；每一行两个按钮：「资料」与「移除黑名单」；
-- 候选人列表**直接调 `fetchFriends()`**而不是取 `friend.friends`：store 里那份可能正被搜索关键字
-  过滤着，拿它当候选会少一批人，而为了拉全量去调 store 动作又会把用户当前的搜索结果洗掉；
-- 整行包成一个 `el-checkbox`（内容放在默认槽里）而不是 `<label>` 套 `el-checkbox`：
-  后者是嵌套 label（非法 HTML），点击有双触发风险；
-- 批量提交串行打接口，一个人失败不让整批停下，最后给「已加入 N 人，另有 M 人失败」的汇总；
-- **操作后必须按当前关键字重拉好友列表**：store 的 `block/unblock` 只能给已经在 `friends` 里的行
-  改状态位，对方被搜索过滤掉时就打不上补丁，表现为「拉黑了但好友行上没有「已拉黑」标签」；
-- 风险提示只在确认框里做一次：拉黑是单向阻断，对方发消息会被 `validateSendRight` 拦下，
-  而我主动发消息时后端会 `unblockSilently` 自动解除拉黑；
-- **自动解除是静默的，本地必须跟着改**：`unblockSilently` 只是一条条件 UPDATE（不是拉黑态就
-  不命中，所以每条单聊消息都打一次也不贵），改完不推任何帧。不跟着同步就会出现
-  「消息明明发出去了，右键菜单还写着移出黑名单」。处理方式：`stores/chat.js` 的
-  `syncSilentUnblock(conversationId)` 在四个提交入口（`send` / `resend` / `flushPending` / `forward`）
-  成功后各调一次：查会话拿 `targetId`（只处理 `type === 1` 的单聊）→ `friend.applySilentUnblock()`
-  把 `status` 从 2 改回 1，真的改到了才弹「发送成功，已自动解除对「X」的拉黑」。
-  抽成一个函数而不是四处各写一遍，是为了避免以后只改其中一个入口；
-- **被拉黑的一方（B → A）提示带名字**：`validateSendRight` 拒回去的是通用文案
-  「对方已将你加入黑名单」（3006），而 `ChatWindow.sendErrorText()` 在单聊里把它换成
-  「你已被「会话名」拉入黑名单，消息未送达」（`sendMessage` 走 `{ silent: true }`，
-  toast 由 ChatWindow 的 catch 统一补，所以改这一处就够，不必动后端文案）。
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/image` | 图形验证码（返回 Data URI PNG，点击可刷新） |
+| POST | `/sms` | 发送短信验证码（注册 / 登录 / 绑定 / 找回密码等场景） |
+| POST | `/email` | 发送邮箱验证码 |
+
+### 用户 `/api/user` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/profile` | 本人资料（含手机号、角色、权限码） |
+| PUT | `/profile` | 修改本人资料（只更新非 null 字段） |
+| PUT | `/password` | 修改密码（`logoutAll=true` 时全设备重新登录） |
+| PUT | `/phone` | 绑定 / 换绑手机号（凭短信验证码） |
+| GET | `/{id}/card` | 他人资料卡片（不含手机 / 邮箱，附好友 / 拉黑关系） |
+| GET | `/search` | 搜索用户（账号 / 昵称模糊，手机号 `exact=true` 全等，排除自己） |
+| GET | `/online` | 批量查询在线状态（单次 ≤ 200） |
+
+### 好友 `/api/friend` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/list` | 好友列表（含资料 / 在线 / 备注 / 分组，`keyword` 过滤） |
+| GET | `/groups` | 好友分组名列表（默认分组置顶） |
+| GET | `/blacklist` | 黑名单列表（存服务端，多端同步） |
+| GET | `/{friendId}/card` | 好友资料卡片（带备注与拉黑状态，非好友 3001） |
+| PUT | `/{friendId}/remark` | 修改好友备注（留空清除） |
+| PUT | `/{friendId}/group` | 移动好友分组 |
+| DELETE | `/{friendId}` | 删除好友（双向解除，会话与历史消息保留） |
+| PUT | `/{friendId}/block` | 拉黑（单向生效，对方列表不受影响） |
+| DELETE | `/{friendId}/block` | 取消拉黑 |
+
+### 好友申请 `/api/friend/request` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/apply` | 发起好友申请 |
+| GET | `/received` | 我收到的申请（分页，`status` 过滤） |
+| GET | `/sent` | 我发出的申请（分页） |
+| GET | `/pending-count` | 待处理申请数（入口红点） |
+| PUT | `/{id}/accept` | 同意申请 |
+| PUT | `/{id}/reject` | 拒绝申请 |
+
+### 会话 `/api/conversation` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/list` | 会话列表 |
+| GET | `/unread/total` | 未读消息总数（Redis 缓存，变动时失效） |
+| GET | `/{id}` | 会话详情（非成员 4002） |
+| POST | `/single` | 创建单聊会话 |
+| PUT | `/{id}/read` | 标记会话已读 |
+| PUT | `/{id}/top` | 置顶 / 取消置顶 |
+| PUT | `/{id}/mute` | 消息免打扰开关（不影响未读累计） |
+| PUT | `/{id}/hide` | 隐藏 / 恢复会话（对方再发消息自动解除隐藏） |
+| DELETE | `/{id}` | 删除会话（等价隐藏本端，记录与对方列表不受影响） |
+
+### 消息 `/api/message` —— 需登录（`/forward` 另需发消息权限）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/send` | 发送消息（文本 / 图片 / 语音 / 文件，`clientMsgId` 幂等） |
+| GET | `/history` | 历史消息分页 |
+| GET | `/search` | 消息内容检索 |
+| GET | `/offline` | 离线消息（`PUT /offline/clear` 清除离线标记） |
+| PUT | `/{id}/recall` | 撤回消息（默认 2 分钟内，本人 / 群主 / 管理员） |
+| DELETE | `/{id}` | 删除消息（仅当前用户不可见） |
+| DELETE | `/clear/{conversationId}` | 清空会话记录（仅当前用户） |
+| PUT | `/read` | 已读上报（写回执 + 清未读，单次 ≤ 500） |
+| POST | `/delivered` | 送达上报（点亮单勾，单次 ≤ 200） |
+| POST | `/forward` | 转发消息到目标会话（附件复用原文件） |
+| GET · PUT | `/sensitive-filter` | 敏感词过滤状态查询 / 开关 |
+
+### 群组 `/api/group` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/create` | 创建群组（创建者自动成群主） |
+| GET | `/my` | 我的群聊（入群时间倒序） |
+| GET | `/{id}` | 群详情（非成员也能看群名与公告） |
+| PUT | `/{id}` | 修改群资料（群主 / 管理员） |
+| DELETE | `/{id}` | 解散群聊（仅群主） |
+| POST | `/{id}/members` | 邀请成员（群主 / 管理员，已在群的跳过） |
+| GET | `/{id}/members` | 群成员列表（分页，群主 / 管理员靠前） |
+| DELETE | `/{id}/members/{userId}` | 移除成员 |
+| PUT | `/{id}/members/{userId}/role` | 设置成员角色（仅群主） |
+| PUT | `/{id}/members/{userId}/mute` | 单人禁言（`minutes` 空为无限期） |
+| PUT | `/{id}/mute-all` | 全员禁言开关 |
+| POST | `/{id}/quit` | 退出群聊（群主需先转让，否则 6005） |
+| PUT | `/{id}/transfer/{userId}` | 转让群主（仅群主，原群主降为普通成员） |
+| PUT | `/{id}/my-nickname` | 修改我的群昵称（留空回退账号昵称） |
+
+### 文件 `/api/file` —— 需登录（下载可用一次性票据）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/upload` | 上传文件（`bizType`：avatar / chat_image / chat_file / chat_voice） |
+| POST | `/avatar` | 上传头像（成功后同步写入本人资料） |
+| POST | `/upload/init`·`/upload/chunk`·`/upload/merge` | 大文件分片上传（MD5 秒传 + 断点续传 + 合并核对） |
+| GET | `/{id}` | 文件元数据（需对该文件有访问权） |
+| GET | `/{id}/url` | 临时访问地址（MinIO 预签名时为对象存储直链） |
+| GET | `/download/{id}` | 下载（`satoken` 头或 URL `ticket`；带 `If-None-Match` 命中返回 304） |
+
+### WS 票据 `/api/ws` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/ticket` | 获取 WebSocket 连接票据（默认 60 秒有效，握手时作 `ticket` 参数；重连需重新申请） |
+
+### AI 面试 `/api/ai/interview` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/chat` | 面试对话（SSE 流式，事件 `delta` / `done` / `error`；限流 20 次/分钟） |
+| GET | `/status` | 面试官状态（知识库概况 + 监考 `proctor` 策略） |
+| POST | `/session/start`·`/turn`·`/events`·`/session/end` | 面试会话：建会话 / 落一轮问答 / 批量上报监考事件 / 结束 |
+| GET | `/session/page` | 我的面试记录分页 |
+| GET | `/session/{id}` | 单场面试复盘 |
+
+### 全网检索 `/api/ai/search` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/web` | 全网关键字检索（返回标题 / 地址 / 来源 / 摘要；限流 20 次/分钟） |
+
+### 远程控制 `/api/remote` —— 需登录（凭识别码邀请也要求登录）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/devices` | 我的设备列表 |
+| POST | `/session/invite` | 发起远程邀请（自己名下设备） |
+| POST | `/session/invite-by-code` | 凭识别码发起邀请（跨账号，ToDesk 式） |
+| GET | `/session/{id}` | 会话详情（轮询授权进度、取凭证） |
+| POST | `/session/{id}/end` | 结束远程会话 |
+| GET | `/session/page` | 我的远程会话分页（补齐设备名 / 对端昵称 / 时长等） |
+| GET | `/session/{id}/audit` | 会话审计分页（可按 `action` 过滤，供导出 CSV） |
+
+### 直播 `/api/live` —— 需登录（类级 `@SaCheckLogin`）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/start` | 开播（建房下发 `streamKey` + 签名播放地址） |
+| POST | `/{roomId}/stop` | 关播（房间已结束则幂等成功） |
+| POST | `/{roomId}/abort` | 撤销未推流的直播（建房成功但 ffmpeg 没起来） |
+| POST | `/{roomId}/heartbeat` | 推流心跳（15 秒一次，续命 + 结算超时） |
+| GET | `/{roomId}` | 房间详情（签名播放地址 + 弹幕端点，进房现取现用） |
+| GET | `/page` | 房间分页（直播中恒排最前，其次开播时间倒序） |
+| GET | `/mine` | 我的直播（最近一场，用于恢复现场） |
+
+> 弹幕走独立 WS `/ws/live`（见「十、协议」）。
+
+> 一个请求从前端发出到拿到响应的完整链路（Vite 代理 → `TraceIdFilter` → Sa-Token 鉴权 → Controller / Service / Mapper → 异常统一转 `Result` → axios 响应拦截器解包），以及三层架构、登录鉴权、文件上传下载、远程控制、直播等专项链路图，见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
 
 ---
 
-## 十、WebSocket
+## 十、协议
+
+不同功能域对传输的诉求差别很大——聊天要**必达且落库**、弹幕要**高吞吐可丢**、直播要**大流量分发**、远程桌面要**低延迟直连**、AI 要**逐字流式**，所以本项目没有用一种协议包打天下，而是按场景各选各的。全项目实际用到的协议一览：
+
+| 协议 | 用在哪 | 承载 / 格式 | 传输层 | 详见 |
+|---|---|---|---|---|
+| **HTTP/HTTPS + JSON** | 全部 REST 接口（登录、好友、会话、消息、群组、文件…） | `Result` 统一返回体（失败也 HTTP 200，靠 `code` 区分） | TCP（TLS） | 「九」 |
+| **WebSocket（WS / WSS）** | 聊天实时收发、直播弹幕、远程控制信令与中继 | JSON 文本帧 + 定长头二进制帧 | TCP（TLS） | 本节 ↓ |
+| **SSE**（Server-Sent Events） | AI 面试官流式对话 `POST /api/ai/interview/chat` | `text/event-stream`，事件 `delta` / `done` / `error` | HTTP 单向长响应 | 「十三」 |
+| **HLS**（HTTP Live Streaming） | 直播**下行**拉流（观众端 hls.js / iOS 原生 `<video>`） | m3u8 清单 + fMP4 分片 | HTTP GET | 「十四」 |
+| **HTTP PUT**（WebDAV 语义） | 直播**上行**推流（ffmpeg 切片 → 媒体服务器 :8088） | init.mp4 / seg-N.m4s / index.m3u8 | HTTP PUT | 「十四」 |
+| **DXP**（自定义直连协议） | 远程桌面直连：画面 + 输入 + 文件三条流量 | `[12B 头][body]` + AES-256-GCM，UDP 档带 Go-Back-N 重传 | 局域网 TCP / UDP 打洞 / 中继 WS（三档阶梯） | 「十二」 |
+
+**两处刻意的「不用」**：
+
+- 直播**不用 RTMP / SRT**：切片落盘即 HTTP 上传，省掉流媒体服务器的协议栈与转码；代价是延迟略高，靠 `-hls_time 1` + 播放器 `liveSyncDurationCount` 压到几秒（选型对比见 [`md/直播.md`](md/直播.md)）。
+- 远程桌面**不用 WebRTC**：自研 DXP 三档直连——浏览器开不了原始 UDP，也顺带省掉 ICE / STUN / TURN 那套依赖（原理对比见 [`md/其他控制软件和远程会议实现原理.md`](md/其他控制软件和远程会议实现原理.md)）。
+
+**跨协议复用的安全与编码约定**：
+
+- **JWT**：登录态 `satoken`、文件下载票据、WS 握手票据都是短时 JWT，用 `purpose` 区分用途防止互相挪用。
+- **AES-256-GCM**：远程会话字节加密，密钥只存在于服务端内存与 `session-start` 帧，不落库、不进 Redis。
+- **HMAC-SHA256**：DXP 直连握手双向互证身份，proof 带 nonce 防重放。
+- **H.264 / AAC**：直播与远程画面的音视频编码，用 fMP4 封装。
+
+### WebSocket
 
 连接流程是**两段式**的，因为浏览器原生 `WebSocket` 不能自定义请求头：
 
@@ -587,8 +992,13 @@ sequenceDiagram
 
 票据 TTL 由 `im.jwt.ticket-ttl-seconds` 控制（默认 60 秒）。
 
-远程控制的两条数据面端点 `/ws/remote/agent` 与 `/ws/remote/control` 与这个通用端点**相互独立**：
-握手拦截器、票据体系、帧协议（文本信封 + 定长头二进制帧）都是另一套，见「十二、远程控制」。
+除了这个通用端点，系统还有三条**相互独立**的 WS 端点，各有独立的握手拦截器与帧协议，互不影响：
+
+| 端点 | 用途 | 握手凭证 | 详见 |
+|---|---|---|---|
+| `/ws/live` | 直播弹幕 / 点赞（高频、可丢弃、不落库，刻意不复用聊天通道） | — | 「十四、直播」 |
+| `/ws/remote/agent` | 远程控制被控端 Agent | sa-token 登录 token | 「十二、远程控制」 |
+| `/ws/remote/control` | 远程控制端（文本信封 + 定长头二进制帧） | 一次性 ticket | 「十二、远程控制」 |
 
 报文类型定义在 `im-common` 的 `WsMessageType` 枚举里，客户端发与服务端推是两套：
 
@@ -612,7 +1022,7 @@ sequenceDiagram
 
 断线后前端按指数退避重连，重连时会重新取票据（旧票据 60 秒就过期了，不可能复用）。
 
-### 消息链路：实时收发
+**消息链路：实时收发**
 
 连接建立走「先 HTTP 换票据、再握手」；发消息是上行 `chat` 帧，落库后由**写库的那一方**
 在事务提交后推送：接收方走 `message` 通道、发送方走 `ack` 通道（推给发送者的全部设备，实现多端同步）。
@@ -656,6 +1066,57 @@ sequenceDiagram
 
     Note over DP,SK: 任一步失败 → reject 回 error 帧<br/>异常绝不逃逸到容器，否则会误判为断连
 ```
+
+### SSE（AI 面试官流式对话）
+
+**服务器单向推流**：面试是一问一答，只需服务器持续往客户端吐字、不需要双向，所以用 SSE 而不是 WebSocket。
+
+- **端点**：`POST /api/ai/interview/chat`，`produces = text/event-stream`，`SseEmitter` 超时 300 秒，限流 20 次/分钟。
+- **前端不用 `EventSource`**：它只支持 GET、也带不了自定义请求头（`satoken`），改用 `fetch` + `ReadableStream`——`response.body.getReader()` 按空行切事件块，逐块 `JSON.parse`（见 `im-ui/src/api/ai.js`）。
+- **后端在虚拟线程上推流**：`SseEmitter` 立即返回、释放 Tomcat 线程；上游每来一段增量就 `sendDelta` 包成**单行 JSON** 再 `emitter.send`（裸文本里的换行会被前端误判成多个事件）。鉴权 / 限流 / 参数校验都必须在进虚拟线程**之前**做完，否则进了线程池就没有 Servlet 上下文了。
+- **中止即止损**：用户点「停止」→ `AbortController.abort()` → 连接断开 → `sendDelta` 抛 `ClientAbortException` → 跳出上游读取循环，不再白耗 token。
+
+三种事件：
+
+| 事件 | 含义 | 前端处理 |
+|---|---|---|
+| `delta` | 一段增量文本（单行 JSON） | 打字机式追加 |
+| `done` | 本轮回答结束 | Promise `resolve` |
+| `error` | 失败原因（JSON） | 提示并 `reject` |
+
+> 完整链路（BM25 按轮检索增强 → 上游大模型 SSE → 逐 token 回传）见「十三、AI 能力」与 [`md/架构与请求链路图.md`](md/架构与请求链路图.md) 第八节。
+
+### HLS（直播：HTTP PUT 上行 + HLS 下行拉流）
+
+抖音式「**推流端上传切片、观众端拉 HLS**」，媒体面与控制面彻底分离：Java 后端（`im-live`）只管房间状态、播放地址签名、弹幕 WS，**一个媒体字节都不碰**。
+
+- **上行（HTTP PUT，不是 RTMP/SRT）**：只有 Electron 桌面端能开播。主进程 `spawn` ffmpeg 采集本机（屏幕 `gdigrab` / 摄像头 `dshow`）→ H.264 硬编（NVENC > QSV > AMF，缺驱动回落 `libx264`）+ AAC → 切 **HLS fMP4**、每 1 秒一片（`-hls_time 1`）落到本机临时目录；Node 上传泵 `fs.watch` 到新文件就 `PUT /hls/{roomId}/{streamKey}/{file}` 到媒体服务器（本机自测 `:8088`，生产换 Nginx）。
+- **落盘原子性**：媒体服务器先写 `{file}.part`、收完再 `rename`，保证 GET 永远看到**完整文件或 404**，绝不会读到半截分片（成功回 201）。
+- **下行（HLS over HTTP GET）**：观众端 `hls.js`（桌面 / Web）或 iOS 原生 `<video>`，经前端同源代理拉 `index.m3u8` 与分片；`m3u8` 滚动更新**绝不缓存**（`no-store`），分片不可变可长缓存（`max-age=3600`）。
+- **防盗链签名**：播放地址带 `?expire=&sign=`，`sign = base64url(md5(uri + expire + secret))`，与 Nginx `ngx_http_secure_link_module` 的 `secure_link_md5 "$uri$arg_expire$secret"` 逐字对应，`expire` 过期即失效。局域网自测的 `live-media-server.js` **不校验签名**，靠路径里不可猜的 `streamKey`（每场随机、关播作废）兜底。
+- **延迟**：HLS 固有延迟比 RTMP 高，靠 `-hls_time 1` + 播放器 `liveSyncDurationCount 2` 把端到端压到几秒。弹幕不在这条链路，走独立 WS `/ws/live`（高频、可丢、房间级广播）。
+
+> 完整链路（开播建房 → ffmpeg 推流 → 观众进房 → 关播 / abort）见「十四、直播」、[`md/直播.md`](md/直播.md) 与 [`md/架构与请求链路图.md`](md/架构与请求链路图.md) 第十一节。
+
+### DXP（远程桌面自定义直连协议）
+
+远程桌面既要**低延迟**又要扛**大流量**（一个屏幕脏块就几十 KB），而浏览器开不了原始 UDP、也不想引 WebRTC 那套 ICE/STUN/TURN 依赖，于是自研 **DXP** 直连协议。
+
+**三档阶梯**（逐消息实时选路，中继全程常开兜底）：
+
+| 档位 | 通道 | 可用场景 | 端口 |
+|---|---|---|---|
+| `tcp` | 局域网 WebSocket（被控端自实现 RFC6455） | 同网段的浏览器与 Electron，不需打洞 | TCP 18924 |
+| `udp` | UDP 打洞 + Go-Back-N | 仅 Electron 桌面端（浏览器开不了原始 UDP，手机浏览器永远享受不到） | UDP 18925 |
+| `relay` | 原有中继 WS | 始终可用，兼作兼容底线 | 经服务端 8080 |
+
+- **报文格式**：统一 `[12B 头][body]`，头里是 `type / channel / flags / msgId / seq`（`seq` 在第 8–11 字节，`UInt32BE`）；body 复用 `RemoteFrame` 的 13B 帧头 + **AES-256-GCM** 加密。
+- **可靠性分级**：画面走**不可靠**通道（丢了等下一帧、不重传），指令 / 信封 / 文件块走**可靠**通道；UDP 档自实现 **Go-Back-N**（窗口 `WINDOW=64`、`RTO` 250ms 起翻倍封顶 1000ms、可靠队列 = 窗口 ×2），ACK 携带 `lastContiguousSeq`。
+- **打洞**：NAT 后的两端看不到自己对外的 `ip:port`，靠反射服务回答「我看起来是谁」，需服务端配 `IM_DIRECT_PUNCH_HOST` 并放行 **UDP 8947** 入站。
+- **握手鉴权两道门**：一次性 `directToken` + 会话 `aesKey` 的 **HMAC-SHA256** `proof`（带 nonce 防重放）双向互证；`aesKey` 只在服务端内存与 `session-start` 帧里，不落库、不进 Redis。
+- **失败即退回**：直连失败**永远不是错误**——防火墙拒连、对称 NAT、没开开关都是常态，任一档失败只把 `linkPath` 记为 `relay` 加一行日志，中继兜住，表现与不开直连完全一致。
+
+> 完整链路（控制面授权 → 数据面绑定 → 直连阶梯 → 帧中继与记账）见「十二、远程控制」与 [`md/架构与请求链路图.md`](md/架构与请求链路图.md) 第七节。
 
 ## 十一、文件存储：local / MinIO 切换
 
@@ -854,7 +1315,7 @@ UDP 档自带 Go-Back-N 重传与分片重组（画面走不可靠通道、丢�
 
 **被控机零 Java**：桌面安装包经 `extraResources` 内置 `agent/im-remote-agent.jar` 与 jlink 裁剪 JRE（约 74MB），
 桌面端启动时自动后台拉起 Agent（已在运行则跳过），或双击 `resources\启动被控端.bat`；详见
-[`md/Electron打包指南.md`](md/Electron打包指南.md) 十二节与 [`md/远程控制Agent使用说明.md`](md/远程控制Agent使用说明.md)。
+[`md/打包/Electron打包指南.md`](md/打包/Electron打包指南.md) 十二节与 [`md/远程控制Agent使用说明.md`](md/远程控制Agent使用说明.md)。
 
 主要配置（`im.remote.*`）：`enabled` 总开关、`aes` 端到端加密开关、`invite-timeout-seconds` 授权超时、
 `control-ticket-ttl-seconds` 票据 TTL、`max-frame-bytes` 单帧上限；直连子节 `im.remote.direct.*`
@@ -997,6 +1458,8 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 
 ## 十五、已知坑（踩过的，别再踩）
 
+[踩坑](md/已踩坑.md)
+
 ## 十六、目录结构
 
 ```
@@ -1006,7 +1469,9 @@ spring-boot-duomokuia/
 ├── sql/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
 │   └── im_data.sql          演示数据（用户/角色/权限/好友/会话/消息）
-├── md/                      专项文档（架构与请求链路图、Electron 打包指南、远程控制 Agent 使用说明、手机真机调试 HTTPS 配置、MinIO 部署指南等）
+├── md/                      专项文档（项目启动流程、架构与请求链路图、多端入口与缓存全链路图、已踩坑、
+│                            远程控制 Agent 使用说明、手机真机调试 HTTPS 配置、MinIO 部署指南、直播等；
+│                            打包/ 子目录含 Electron 打包指南、打包为 EXE 和 Android 指南）
 ├── im-common/               公共层 + SPI 契约（含 logback-spring.xml 与慢 SQL 拦截器）
 ├── im-user/                 用户中心
 ├── im-friend/               好友关系
@@ -1088,17 +1553,6 @@ spring-boot-duomokuia/
     桌面端开播（多屏先选屏）→ 几秒内 `electron/live-data/hls/{roomId}/{streamKey}/` 出现 `init.mp4`/`segN.m4s`/`index.m3u8` →
     浏览器/手机（同 WiFi，`http://<本机IP>:5173`）进房出画面、弹幕连通；关播超 60 分钟后该场次从大厅列表消失
 
-已实测通过的项：1、2、3、4、5（9 个分组已核实）、6/7 中的
-「登录 → WS 握手 → 双向收发 → 未读数 → 已读回执 → 顶下线」主链路，
-以及 9 的远程控制主链路（Agent 识别码注册 → 凭码跨账号邀请 → 弹窗同意 →
-票据消费 → 中继绑定 → 出画面，含桌面端自启 Agent 与内置 JRE）。
-第 10 项需自备 `ALI_BABA_API_KEY` 实测；第 11 项的前端分节布局已实测（本地/网络两段分隔正常），
-网络条目需重启后端加载新接口后才算跑通（旧进程里 `/api/ai/search/web` 会返回 404）。
-
-> 群聊后端功能完整实现，前端聊天页以单聊交互为主，**群聊 UI 不在交付范围内**。
-> 单元测试不纳入本次交付，验证以真实启动 + 接口/WebSocket 串测为准。
->
-> **桌面端（可选）**：`cd im-ui; npm run build:electron`（直接产出到 `electron/dist`，无需手动复制）→
-> `cd ..\electron; npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
-> 应能登录、收发、上传、下载大文件（前提：`main.js` 的 `SERVER_BASE` 指向的后端已启动）；
+> **桌面端（可选）**：`cd ..\electron; npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
 > 启动后还会自动后台拉起内置的被控端 Agent（回环接口 `127.0.0.1:18923/local-info` 可验证）。
+
