@@ -15,6 +15,7 @@ import com.im.websocket.dto.WsActionPayload;
 import com.im.websocket.dto.WsChatPayload;
 import com.im.websocket.manager.WsConnection;
 import com.im.websocket.manager.WsSessionManager;
+import com.im.websocket.service.CallSignalingService;
 import com.im.websocket.service.WsPresenceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +43,7 @@ public class WsInboundDispatcher {
 
     private final WsPresenceService presenceService;
     private final WsSessionManager sessionManager;
+    private final CallSignalingService callSignalingService;
     private final JsonUtil jsonUtil;
     private final RateLimiter rateLimiter;
     private final ImProperties imProperties;
@@ -108,6 +110,7 @@ public class WsInboundDispatcher {
             case RECALL -> handleRecall(connection, packet.getData());
             case PING -> presenceService.onHeartbeat(connection);
             case PULL_OFFLINE -> presenceService.pullOffline(connection);
+            case CALL -> callSignalingService.handle(connection, packet);
             // 剩下的全是下行类型。客户端发这些过来，要么是前端写错了枚举，
             // 要么是有人在探协议边界，两种情况都只回错误、不断连
             default -> reject(connection, packet.getClientMsgId(), ResultCode.BAD_REQUEST.getCode(),

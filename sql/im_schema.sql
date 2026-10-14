@@ -23,6 +23,7 @@ USE `im_db`;
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS `im_live_room`;
+DROP TABLE IF EXISTS `im_live_video`;
 DROP TABLE IF EXISTS `im_interview_event`;
 DROP TABLE IF EXISTS `im_interview_message`;
 DROP TABLE IF EXISTS `im_interview_session`;
@@ -323,7 +324,7 @@ CREATE TABLE `im_file`
 (
     `id`            BIGINT       NOT NULL COMMENT '文件 ID',
     `uploader_id`   BIGINT       NOT NULL COMMENT '上传者用户 ID',
-    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice',
+    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice / video / video_cover',
     `storage_type`  VARCHAR(16)  NOT NULL DEFAULT 'local' COMMENT '存储实现：local / minio',
     `bucket`        VARCHAR(64)           DEFAULT NULL COMMENT '存储桶，本地实现为空',
     `object_key`    VARCHAR(512) NOT NULL COMMENT '对象键 / 相对路径',
@@ -532,3 +533,33 @@ CREATE TABLE `im_live_room`
     KEY `idx_status_start` (`status`, `start_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='直播房间表（一行一场直播）';
+
+-- 直播页「视频」板块的短视频信息流：一行一个视频。视频与封面本体存 im_file（bizType=video / video_cover，
+-- 对所有登录用户公开），本表只存元数据与受控访问地址，供大厅分页展示与播放。
+CREATE TABLE `im_live_video`
+(
+    `id`            BIGINT        NOT NULL COMMENT '视频 ID',
+    `uploader_id`   BIGINT        NOT NULL COMMENT '上传用户 ID',
+    `title`         VARCHAR(60)   NOT NULL COMMENT '视频标题',
+    `file_id`       BIGINT        NOT NULL COMMENT '视频文件 ID（im_file.id，bizType=video）',
+    `file_url`      VARCHAR(1024) NOT NULL COMMENT '视频受控访问地址（/api/file/download/{fileId}，前端经 mediaUrl 取 blob 播放）',
+    `cover_file_id` BIGINT                 DEFAULT NULL COMMENT '封面图文件 ID（im_file.id，bizType=video_cover），可空',
+    `cover_url`     VARCHAR(1024)          DEFAULT NULL COMMENT '封面图受控访问地址，可空（前端退化为占位图）',
+    `duration`      INT           NOT NULL DEFAULT 0 COMMENT '时长（秒），上传前由客户端读取元数据后上报，缺省 0',
+    `width`         INT                    DEFAULT NULL COMMENT '视频宽（像素），客户端上报',
+    `height`        INT                    DEFAULT NULL COMMENT '视频高（像素），客户端上报',
+    `size`          BIGINT        NOT NULL DEFAULT 0 COMMENT '文件字节数',
+    `ext`           VARCHAR(32)            DEFAULT NULL COMMENT '扩展名，不含点',
+    `content_type`  VARCHAR(128)           DEFAULT NULL COMMENT 'MIME 类型',
+    `play_count`    INT           NOT NULL DEFAULT 0 COMMENT '播放次数（每次点开 +1，非去重）',
+    `status`        TINYINT       NOT NULL DEFAULT 1 COMMENT '状态：1 正常 2 已下架',
+    `create_time`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`       TINYINT       NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    -- 信息流主查询：按状态过滤后按创建时间倒序分页
+    KEY `idx_status_create` (`status`, `create_time`),
+    -- 「我上传的视频」按上传者查
+    KEY `idx_uploader_create` (`uploader_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='直播页视频板块（短视频信息流）';

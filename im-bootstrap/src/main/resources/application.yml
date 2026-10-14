@@ -349,6 +349,40 @@ im:
       # 单文件最多分片数，防御性上限
       max-chunks: 100000
 
+  # ---------------------------------------------------------------------------
+  # 图片内容审核（鉴黄 + 血腥 / 暴力）
+  #
+  # 推理在发送端浏览器本地跑，两个模型两套运行时：
+  #   色情——nsfwjs + TensorFlow.js，MobileNetV2 权重约 3.5MB 随前端构建产物离线分发；
+  #   血腥 / 暴力——ViT-Base 的 int8 ONNX（约 83MB）+ onnxruntime-web，默认不启用，
+  #   只有下面的 thresholds 里出现 Violent 才会被激活（运行时随构建产物发出，模型本体不入库）。
+  # 服务端只下发阈值、只接收命中上报。
+  # 键名对应 com.im.common.config.ImProperties.Moderation。
+  #
+  # ★ 这是「正常使用路径」上的闸门，不是对抗性防御：判定在客户端做，改前端代码或直接
+  #   调上传接口就能绕过。要成真防线得在服务端补一条推理链路（阈值与上报口径可直接复用），
+  #   详见 md/图片内容审核接入指南.md。
+  # ★ 阈值调低会开始误伤正常照片，调高则漏放；上线前先观察 MODERATION/moderation.log
+  #   里的实际分布，不要一上来就按最严的值拍。
+  # ---------------------------------------------------------------------------
+  moderation:
+    enabled: ${IM_MODERATION_ENABLED:true}
+    audit-enabled: true
+    # 任一类超过阈值即拒发；没列出的类别不参与判定。
+    # 默认不拦 Sexy：它在泳装、健身照上误报严重。
+    thresholds:
+      Porn: 0.80
+      Hentai: 0.80
+      # 血腥 / 暴力（模型只有这一个违规类，斗殴与血迹都归它，卡通打斗它看不懂）。
+      # 打开前必须先把模型投放到 im-ui/public/models/violence/model.onnx（约 83MB，不入库），
+      # 下载命令见 md/图片内容审核接入指南.md 第九节；没投放就留着注释，否则每个客户端
+      # 发图都要白撞一次下载（只撞一次 404 就停用该检测器，色情那条链路不受影响）。
+      # 起点取 0.75 而不是更低：实测纯黑 / 纯红这类无结构合成图也能拿到 0.66~0.73 的分，
+      # 再低会大面积误伤；真实照片的分布得靠投放后看日志再校，别照抄这个数。
+      # Violent: 0.75
+    max-score-entries: 16
+    max-text-length: 120
+
   message:
     # 撤回时限（秒），默认 2 小时。超过这个时间的消息只能删除（仅本端不可见），不能撤回。
     recall-limit-seconds: 7200
@@ -380,6 +414,42 @@ im:
     # 超过阈值直接判定该会话不可靠并关闭，而不是让线程陪着等。
     send-time-limit-ms: 10000
     send-buffer-size-bytes: 524288
+
+  # ---------------------------------------------------------------------------
+  # 一对一语音视频通话（WebRTC）+ 桌面端录屏留存
+  #
+  # 信令走已有的用户 WebSocket 长连接（type=call，服务端只校验关系 + 转发 + 维护 Redis 会话态），
+  # 媒体由两端 RTCPeerConnection 直连，一个媒体字节都不经服务器。键名对应
+  # com.im.common.config.ImProperties.Call。
+  #
+  # ★ 内网优先：stun-urls 留空时 ICE 的 host 候选直接命中局域网地址，两端点对点连通，
+  #   既不需要 STUN 探测公网映射，也不消耗服务器出口带宽。只有跨 NAT / 公网互通才自建 STUN，
+  #   对称 NAT 还得配 turn（coturn）。详见 md/语音视频通话接入指南.md。
+  # ★ TURN 走 coturn REST 长效凭据：服务端按「过期时间戳:userId」生成 username、
+  #   用本 secret 做 HMAC-SHA1 生成临时 credential，须与 coturn 的 use-auth-secret 逐字一致，
+  #   realm 与之配套。secret 留空则不下发 TURN（等于只做直连）。
+  # ★ 录制落盘仅桌面端（依赖 __IM_NATIVE__.record）；Web 端通话可用但不落盘。
+  # ---------------------------------------------------------------------------
+  call:
+    # 总开关：关闭后 /api/call/config 回 enabled=false，前端通话入口整体禁用、整链路不加载
+    enabled: ${IM_CALL_ENABLED:true}
+    # STUN 清单（形如 stun:ip:3478）；留空表示只做局域网直连，不探测公网映射地址
+    stun-urls: ${IM_CALL_STUN_URLS:}
+    turn:
+      # TURN 中继总开关：跨公网且对称 NAT 打不通时才打开
+      enabled: ${IM_CALL_TURN_ENABLED:false}
+      # TURN 清单（形如 turn:host:3478?transport=udp）
+      urls: ${IM_CALL_TURN_URLS:}
+      # coturn REST 密钥（与 use-auth-secret 一致）；为空则不下发 TURN。生产经环境变量注入
+      secret: ${IM_TURN_SECRET:}
+      # 临时凭据有效期（秒），默认 24 小时
+      ttl-seconds: 86400
+    # 振铃超时（秒）：被叫在这个时长内未接听，服务端下发 timeout 收起主叫浮层
+    ring-timeout-seconds: 45
+    # 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底
+    max-duration-seconds: 3600
+    # 通话录制产物上传的大小上限；读回本地文件时超过即拒（CALL_RECORD_TOO_LARGE）
+    record-max-size: 200MB
 
   cors:
     # 前端 vite 开发服务器与预览服务器。http 与 https 两种方案都要放行：

@@ -58,6 +58,27 @@ function sidecarOf(filePath) {
   return filePath.replace(/\.[^.]+$/, '') + '.json'
 }
 
+/** 按扩展名推断 MIME，供渲染进程重建 File 对象上传；未知类型回落到 application/octet-stream */
+function inferContentType(filePath) {
+  const ext = path.extname(String(filePath || '')).toLowerCase()
+  switch (ext) {
+    case '.webm':
+      return 'video/webm'
+    case '.mp4':
+      return 'video/mp4'
+    case '.m4a':
+      return 'audio/mp4'
+    case '.opus':
+      return 'audio/opus'
+    case '.wav':
+      return 'audio/wav'
+    case '.mp3':
+      return 'audio/mpeg'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
 /** 写审计元数据：失败只记警告，不能因为写不了 json 就把已经录好的视频判为失败 */
 function writeSidecar(filePath, payload) {
   try {
@@ -92,11 +113,13 @@ function closeActive(meta, auditEvents, reason) {
 
   // 正常收尾由渲染进程带上会话信息与操作审计；异常收尾（进程退出）只补一条中断说明，
   // 免得目录里出现一个没有任何元数据、无法追溯来源的录像文件
+  // type 依 meta 区分：通话录制带 meta.type='im-call-recording'，远控录屏沿用默认值
+  const recordType = (meta && meta.type) || 'im-remote-screen-recording'
   const sidecar = writeSidecar(
     filePath,
     meta
       ? {
-          type: 'im-remote-screen-recording',
+          type: recordType,
           version: 1,
           video: path.basename(filePath),
           videoBytes: size,
@@ -107,7 +130,7 @@ function closeActive(meta, auditEvents, reason) {
           auditEvents: Array.isArray(auditEvents) ? auditEvents : []
         }
       : {
-          type: 'im-remote-screen-recording',
+          type: recordType,
           version: 1,
           video: path.basename(filePath),
           videoBytes: size,
@@ -177,7 +200,9 @@ function setupRecorder() {
       closeActive(null, null, 'superseded')
 
       const extension = safeName(ext, 'webm').replace(/[^a-zA-Z0-9]/g, '').slice(0, 5) || 'webm'
-      const base = `远控录屏_${safeName(meta && meta.deviceName, '设备')}_${timestamp()}`
+      // meta.fileName 允许调用方自定义文件主名前缀（通话录制用「通话录音」），缺省沿用远控录屏命名
+      const prefix = safeName(meta && meta.fileName, '') || '远控录屏'
+      const base = `${prefix}_${safeName(meta && meta.deviceName, '设备')}_${timestamp()}`
       const filePath = uniquePath(target, base, extension)
       active = { fd: fs.openSync(filePath, 'w'), filePath, base, startedAt: Date.now(), bytes: 0 }
       return { filePath, baseName: base }
@@ -211,6 +236,30 @@ function setupRecorder() {
   )
 
   ipcMain.handle('im:record-state', wrap(() => (active ? { filePath: active.filePath, bytes: active.bytes } : null)))
+
+  // 读回已落盘的录制文件字节，供上传前读成 File 交 uploadFileSmart。
+  // 校验绝对路径与大小上限：越界（如误传目录或他人路径）与超限都在此处挡下，不让渲染进程 OOM。
+  ipcMain.handle(
+    'im:record-read',
+    wrap((payload) => {
+      const filePath = payload && payload.filePath
+      if (!filePath || !path.isAbsolute(String(filePath))) {
+        throw new Error('读取路径必须是绝对路径')
+      }
+      if (!fs.existsSync(filePath)) {
+        throw new Error('录制文件不存在')
+      }
+      const maxBytes = Number(payload && payload.maxBytes) > 0 ? Number(payload.maxBytes) : 200 * 1024 * 1024
+      const stat = fs.statSync(filePath)
+      if (stat.size > maxBytes) {
+        throw new Error('CALL_RECORD_TOO_LARGE')
+      }
+      const buffer = fs.readFileSync(filePath)
+      // 转成独立 ArrayBuffer 回传，避免共享 Buffer 的内部池被引用
+      const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+      return { filePath, size: stat.size, contentType: inferContentType(filePath), data: ab }
+    })
+  )
 
   ipcMain.handle(
     'im:record-open-dir',

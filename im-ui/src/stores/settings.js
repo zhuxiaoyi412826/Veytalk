@@ -67,6 +67,13 @@ const DEFAULTS = {
   remoteRecordDir: '',
   /** 随录像写一份同名 .json：会话信息 + 服务端操作审计事件，便于事后追溯 */
   remoteRecordAudit: true,
+  // ---------- 语音视频通话录制（仅桌面端落盘） ----------
+  /** 通话自动录制：开启后每次接通语音/视频通话自动录制上下行画面与声音（依赖本地录制桥） */
+  callAutoRecord: false,
+  /** 通话录制目录：留空表示用默认的「视频\IM远程录屏」（与远控录屏同一目录） */
+  callRecordDir: '',
+  /** 通话录制文件上传留存的大小上限（MB），超限则不上传、仅本地保留 */
+  callRecordMaxMb: 200,
   // ---------- 高级 ----------
   debugLog: false
 }

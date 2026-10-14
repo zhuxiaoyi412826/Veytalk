@@ -27,10 +27,24 @@ import java.util.Set;
  *
  * <p>文件名同样过敏感词：上传接口不碰内容只存原名，若不在这里遮蔽，
  * 「发个带脏字文件名的文件」就能绕过整条过滤链路（图片/视频展示区也叫文件名）。
+ *
+ * <p>图片额外携带两个由服务端收敛的扩展字段：
+ * {@code flash}（闪照标记，查看时长限幅 1~60 秒，销毁状态只能由服务端写）与
+ * {@code ocrText}（发送端 OCR 提取的图内文字，限长后同样过敏感词遮蔽）。
  */
 @Slf4j
 @Component
 public class AttachmentContentHandler implements MessageContentHandler {
+
+    /** 闪照默认查看时长（秒），客户端未传或传了非法值时使用 */
+    private static final int FLASH_DEFAULT_SECONDS = 5;
+
+    /** 闪照查看时长上限（秒），防止把「阅后即焚」玩成常驻预览 */
+    private static final int FLASH_MAX_SECONDS = 60;
+
+    /** OCR 文本入库上限字符数：整页识别结果可能很长，遮蔽与存储都按此截断 */
+    private static final int OCR_TEXT_MAX_LENGTH = 2000;
+
 
     private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
     private final SensitiveWordFilter sensitiveWordFilter;
@@ -82,8 +96,48 @@ public class AttachmentContentHandler implements MessageContentHandler {
         // 存后端受控地址而不是预签名直链：受控地址长期有效，且访问时会再校验一次会话成员身份
         extra.setFileUrl(fileSpi.accessUrl(fileId));
 
+        normalizeFlashAndOcr(cmd, extra);
+
         cmd.setContent(String.valueOf(fileId));
         cmd.setExtra(extra);
+    }
+
+    /**
+     * 闪照与 OCR 文本的服务端收敛：
+     * <ul>
+     *   <li>闪照只对图片生效，其他类型一律清标记；查看时长限幅，销毁状态由服务端独占；</li>
+     *   <li>OCR 文本清洗 + 限长 + 敏感词遮蔽后入库，与文件名同一套遮蔽口径。</li>
+     * </ul>
+     */
+    private void normalizeFlashAndOcr(MessageSendCmd cmd, MessageExtra extra) {
+        boolean image = MsgType.IMAGE.getCode() == (cmd.getMsgType() == null ? -1 : cmd.getMsgType());
+        if (!image) {
+            extra.setFlash(null);
+            extra.setFlashSeconds(null);
+            extra.setFlashViewed(null);
+            extra.setOcrText(null);
+            return;
+        }
+        if (Boolean.TRUE.equals(extra.getFlash())) {
+            Integer seconds = extra.getFlashSeconds();
+            extra.setFlashSeconds(seconds == null || seconds < 1 || seconds > FLASH_MAX_SECONDS
+                    ? FLASH_DEFAULT_SECONDS : seconds);
+            // 销毁标记只能由服务端在首次查看时写入，客户端伪造 true 会让闪照发出去即不可见
+            extra.setFlashViewed(null);
+        } else {
+            extra.setFlash(null);
+            extra.setFlashSeconds(null);
+            extra.setFlashViewed(null);
+        }
+        if (TextUtil.isNotBlank(extra.getOcrText())) {
+            String cleaned = TextUtil.sanitize(extra.getOcrText().trim());
+            if (cleaned.length() > OCR_TEXT_MAX_LENGTH) {
+                cleaned = cleaned.substring(0, OCR_TEXT_MAX_LENGTH);
+            }
+            extra.setOcrText(sensitiveWordFilter.mask(cleaned));
+        } else {
+            extra.setOcrText(null);
+        }
     }
 
     /**

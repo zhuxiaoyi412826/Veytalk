@@ -3,7 +3,7 @@ package com.im.common.api;
 /**
  * 全局响应码。
  *
- * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接、9xxx 远程控制。
+ * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接、9xxx 远程控制、10xxx AI 面试、11xxx 直播、12xxx 音视频通话。
  */
 public enum ResultCode {
 
@@ -90,6 +90,8 @@ public enum ResultCode {
     FILE_UPLOAD_SESSION_NOT_FOUND(7007, "上传会话不存在或已过期，请重新上传"),
     FILE_CHUNK_INVALID(7008, "分片校验失败：{}"),
     FILE_MD5_MISMATCH(7009, "文件内容校验失败，请重新上传"),
+    /* 图片内容审核命中：前端识别出违规后拒发，用这个码统一文案口径 */
+    FILE_CONTENT_UNSAFE(7010, "图片含违规内容，已拒发"),
 
     /* ==================== 8xxx 长连接 ==================== */
     WS_TICKET_INVALID(8001, "连接票据无效或已过期"),
@@ -119,7 +121,16 @@ public enum ResultCode {
     LIVE_ROOM_NOT_FOUND(11003, "直播间不存在"),
     LIVE_NOT_LIVING(11004, "该直播已结束"),
     LIVE_FORBIDDEN(11005, "无权操作该直播间"),
-    LIVE_ALREADY_LIVING(11006, "你已有正在进行的直播，请先关播");
+    LIVE_ALREADY_LIVING(11006, "你已有正在进行的直播，请先关播"),
+
+    /* ==================== 12xxx 音视频通话 ==================== */
+    CALL_DISABLED(12001, "通话功能未开启"),
+    CALL_PEER_OFFLINE(12002, "对方不在线，无法发起通话"),
+    CALL_BUSY(12003, "对方正忙，请稍后再试"),
+    CALL_NOT_FRIEND(12004, "只能与好友发起通话"),
+    CALL_NOT_FOUND(12005, "通话不存在或已结束"),
+    CALL_FORBIDDEN(12006, "无权访问该通话"),
+    CALL_RECORD_TOO_LARGE(12007, "通话录制文件过大，未能上传");
 
     private final int code;
     private final String message;

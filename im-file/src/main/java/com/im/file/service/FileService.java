@@ -97,4 +97,12 @@ public interface FileService {
      * 拿着一条本地磁盘的记录去 MinIO 里找一个不存在的对象。
      */
     InputStream openStream(FileEntity file);
+
+    /**
+     * 销毁一条文件记录（闪照阅后即焚的落地动作）：幂等，记录不存在时静默返回。
+     *
+     * <p>只逻辑删记录、不删存储字节：秒传让多行记录共享同一个 objectKey，
+     * 删字节会连带毁掉其他人的文件；残留字节属于无引用垃圾，不影响正确性。
+     */
+    void destroy(Long fileId);
 }

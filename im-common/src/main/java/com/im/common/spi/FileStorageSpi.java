@@ -43,4 +43,11 @@ public interface FileStorageSpi {
      * 判断用户是否有权访问该文件：本人上传、或与该文件所在会话/群有关联。
      */
     boolean canAccess(Long fileId, Long userId);
+
+    /**
+     * 销毁文件记录（逻辑删，存储字节保留）：幂等，记录不存在时静默返回。
+     *
+     * <p>供闪照阅后即焚调用：销毁后任何人的下载请求都会变成「文件不存在」。
+     */
+    void destroyById(Long fileId);
 }

@@ -82,4 +82,9 @@ public class FileStorageSpiImpl implements FileStorageSpi {
         // 「查不到」和「不给看」对调用方是同一个答案
         return fileService.canAccess(fileMapper.selectById(fileId), userId);
     }
+
+    @Override
+    public void destroyById(Long fileId) {
+        fileService.destroy(fileId);
+    }
 }

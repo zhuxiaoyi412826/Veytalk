@@ -178,6 +178,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Loading, Lock, SwitchButton } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { uploadAvatar } from '@/api/file'
+import { guardImage } from '@/utils/nsfw'
 import { sendSmsCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { signOut } from '@/stores'
@@ -280,8 +281,16 @@ async function onAvatarPicked(event) {
     ElMessage.error(`头像不能超过 ${formatFileSize(MAX_AVATAR_BYTES)}，当前 ${formatFileSize(file.size)}`)
     return
   }
+  // 头像会在每一个会话、每一条消息旁边渲染给所有联系人看，是全站辐射面最大的一张图，
+  // 因此与聊天图片走同一道闸门（识别失败依旧降级放行，不卡用户改头像）。
+  // 放在 avatarUploading 里：首次加载模型要几秒，得让头像上转起来并挡住重复选图
   avatarUploading.value = true
   try {
+    const guard = await guardImage(file, { scene: 'avatar' })
+    if (!guard.pass) {
+      ElMessage.error(guard.message)
+      return
+    }
     const vo = await uploadAvatar(file)
     // /api/file/avatar 服务端已经把地址写进了当前用户资料，
     // 这里只需刷新本地缓存，不必再调一次修改资料接口

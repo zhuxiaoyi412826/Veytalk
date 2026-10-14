@@ -140,6 +140,15 @@ public class MessageController {
         return Result.ok(null, "消息已删除");
     }
 
+    @Operation(summary = "查看闪照",
+            description = "打开预览前上报；首次查看即销毁：服务端标记 flashViewed 并逻辑删原图记录，"
+                    + "此后所有成员（含发送者）都无法再取回图片字节；重复调用幂等")
+    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.flash-view")
+    @PostMapping("/{id}/flash-view")
+    public Result<MessageVO> flashView(@Parameter(description = "消息 ID") @PathVariable("id") Long id) {
+        return Result.ok(messageService.flashView(SecurityUtil.getUserId(), id));
+    }
+
     @Operation(summary = "清空会话聊天记录",
             description = "只对当前用户生效：批量写单端删除记录，此后历史 / 检索 / 离线都不再返回这些消息；"
                     + "其他成员不受影响，清空后对方再发的新消息照常可见")

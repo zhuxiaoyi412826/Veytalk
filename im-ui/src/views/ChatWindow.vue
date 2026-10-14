@@ -15,6 +15,12 @@
         <span v-if="subtitle" class="chat-window__subtitle">{{ subtitle }}</span>
       </div>
       <div class="chat-window__actions">
+        <el-tooltip v-if="canCall" content="语音通话" placement="bottom">
+          <el-button text :icon="Microphone" :disabled="callBusy" @click="startCall('audio')" />
+        </el-tooltip>
+        <el-tooltip v-if="canCall" content="视频通话" placement="bottom">
+          <el-button text :icon="VideoCamera" :disabled="callBusy" @click="startCall('video')" />
+        </el-tooltip>
         <el-tooltip v-if="peerUserId" content="查看资料" placement="bottom">
           <el-button text :icon="User" @click="openProfile" />
         </el-tooltip>
@@ -101,6 +107,7 @@
               @discard="onDiscard"
               @view-file="onViewFile"
               @view-image="onViewImage"
+              @view-flash="onViewFlash"
               @jump-quote="onJumpQuote"
             />
           </div>
@@ -158,6 +165,25 @@
           <el-checkbox v-model="attachWatermark" class="chat-window__wm-check">附件加水印</el-checkbox>
         </el-tooltip>
 
+        <el-tooltip
+          v-if="canUpload"
+          content="开启后本次发送的图片作为闪照：对方只能查看一次，倒计时结束自动销毁"
+          placement="top"
+        >
+          <span class="chat-window__flash-group">
+            <el-checkbox v-model="attachFlash" class="chat-window__wm-check">闪照</el-checkbox>
+            <el-input-number
+              v-if="attachFlash"
+              v-model="flashSeconds"
+              :min="1"
+              :max="60"
+              size="small"
+              controls-position="right"
+              class="chat-window__flash-seconds"
+            />
+          </span>
+        </el-tooltip>
+
         <span
           v-if="uploading"
           class="chat-window__progress"
@@ -207,6 +233,16 @@
               <span class="chat-window__tray-name im-ellipsis" :title="item.name">{{ item.name }}</span>
               <span class="chat-window__tray-size">{{ trayLabel(item) }}</span>
             </div>
+            <!-- 马赛克入口只对图片显形，与 ✕ 同一套 hover 规则（见下方样式） -->
+            <el-button
+              v-if="item.kind === 'image'"
+              class="chat-window__tray-mosaic"
+              text
+              :icon="Grid"
+              size="small"
+              title="打马赛克（发送前像素化敏感区域，纯本地处理不上传原图）"
+              @click="openMosaic(item)"
+            />
             <!-- ✕ 默认藏着，鼠标移到这张卡片上才显形（位置与样式里的说明配套） -->
             <el-button
               class="chat-window__tray-del"
@@ -322,6 +358,34 @@
       :message-id="forwardDialog.messageId"
     />
 
+    <!-- 待发图片的马赛克编辑器：保存产物就地替换托盘里的 File -->
+    <ImageMosaicDialog
+      v-model:visible="mosaic.visible"
+      :file="mosaic.item?.file"
+      @apply="onMosaicApply"
+    />
+
+    <!-- 闪照查看弹窗：倒计时由发送方选定，归零或手动关闭即抹除本地字节；
+         禁掉遮罩点击与右上角关闭，避免没看清就误触销毁 -->
+    <el-dialog
+      v-model="flashViewer.visible"
+      title="闪照预览"
+      width="auto"
+      top="8vh"
+      append-to-body
+      destroy-on-close
+      :close-on-click-modal="false"
+      class="im-flash-viewer"
+    >
+      <div class="im-flash-viewer__stage">
+        <img v-if="flashViewer.url" :src="flashViewer.url" alt="闪照" />
+        <div class="im-flash-viewer__bar">
+          <span class="im-flash-viewer__countdown">{{ flashViewer.left }}s 后自动销毁</span>
+          <el-button text type="primary" size="small" @click="closeFlashViewer">立即关闭</el-button>
+        </div>
+      </div>
+    </el-dialog>
+
     <GroupSettings
       v-if="isGroup"
       v-model="showGroupSettings"
@@ -334,7 +398,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Microphone, Picture, Refresh, Search, Select, Setting, Sunny, User, VideoCamera } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Microphone, Picture, Refresh, Search, Select, Setting, Sunny, User, VideoCamera } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
@@ -342,15 +406,19 @@ import FileViewer from '@/components/FileViewer.vue'
 import WatermarkOverlay from '@/components/WatermarkOverlay.vue'
 import GroupSettings from '@/components/GroupSettings.vue'
 import ForwardDialog from '@/components/ForwardDialog.vue'
+import ImageMosaicDialog from '@/components/ImageMosaicDialog.vue'
 import { useChatStore, newClientMsgId } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
+import { useCallStore } from '@/stores/call'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
 import { uploadFileSmart } from '@/api/file'
-import { searchMessages, clearConversationMessages } from '@/api/message'
-import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo } from '@/utils/media'
+import { searchMessages, clearConversationMessages, flashViewMessage } from '@/api/message'
+import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo, mediaUrlAsync, mediaForget } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
+import { ocrImageText } from '@/utils/ocr'
+import { guardImage } from '@/utils/nsfw'
 import { riskCategoryOf, riskConfirmText } from '@/utils/riskFile'
 // 视频压缩只在桌面端启用：调 Electron 主进程的原生 ffmpeg（GPU 硬件编码）压缩后上传；
 // Web 端不压缩、直传原片（window.__IM_NATIVE__ 只在 Electron 里存在，据此区分）。
@@ -461,6 +529,26 @@ function openProfile() {
   if (peerUserId.value) {
     router.push({ name: 'user-profile', params: { id: asId(peerUserId.value) } })
   }
+}
+
+/* -------------------------------- 音视频通话 -------------------------------- */
+
+const callStore = useCallStore()
+// 单聊（peerUserId 非空）且服务端开启通话时才展示入口
+const canCall = computed(() => !!peerUserId.value && callStore.enabled)
+// 本机已在通话中（非 idle）时禁用，避免拨第二路
+const callBusy = computed(() => callStore.status !== 'idle')
+
+async function startCall(type) {
+  if (!peerUserId.value) {
+    return
+  }
+  await callStore.ensureConfig()
+  if (!callStore.enabled) {
+    ElMessage.warning('通话功能已关闭')
+    return
+  }
+  callStore.dial(peerUserId.value, type, { conversationId: props.conversationId })
 }
 
 /* -------------------------------- 滚动 -------------------------------- */
@@ -858,6 +946,32 @@ function removeTrayItem(item) {
   syncTray()
 }
 
+/* ------------------------------ 待发图马赛克 ------------------------------ */
+
+const mosaic = reactive({ visible: false, item: null })
+
+function openMosaic(item) {
+  mosaic.item = item
+  mosaic.visible = true
+}
+
+/** 编辑产物就地替换：旧缩略图地址必须撤销，否则每张编辑过的图都漏一小段内存 */
+function onMosaicApply(newFile) {
+  const item = mosaic.item
+  if (!item) {
+    return
+  }
+  if (item.url) {
+    URL.revokeObjectURL(item.url)
+  }
+  item.file = newFile
+  item.name = newFile.name
+  item.size = newFile.size
+  item.url = URL.createObjectURL(newFile)
+  tray.value = [...tray.value]
+  syncTray()
+}
+
 function clearTray() {
   releaseTrayUrls(tray.value)
   tray.value = []
@@ -1165,6 +1279,10 @@ const uploadStageText = computed(() => {
   switch (uploadStage.value) {
     case 'compress':
       return `压缩中 ${p}%`
+    case 'nsfw':
+      return '检测图片内容…'
+    case 'ocr':
+      return '识别图内文字…'
     case 'hash':
       return `计算文件中 ${p}%`
     case 'instant':
@@ -1187,6 +1305,10 @@ const canUpload = computed(() => auth.hasPermission('file:upload'))
 
 /** 本次发送是否为图片/文件/视频附加发送者水印（作为发送时的模式开关，跨多条保持） */
 const attachWatermark = ref(false)
+
+/** 闪照模式开关与查看时长：只对图片生效，秒数服务端还会限幅 1~60 兜底默认 5 */
+const attachFlash = ref(false)
+const flashSeconds = ref(5)
 
 /**
  * 聊天窗口全局水印文字：当前登录账号的昵称 + 账号标识。
@@ -1387,6 +1509,47 @@ function ensureFileNameExtension(file) {
 async function uploadAndSend(file, retryClientMsgId = null) {
   const kind = kindOf(file)
   const msgType = kind === 'image' ? TYPE_IMAGE : kind === 'voice' ? TYPE_VOICE : TYPE_FILE
+  // 闪照只对图片生效：新发读工具栏开关，重发沿用占位气泡里已记录的选择，
+  // 免得失败重试期间开关被碰过就把状态改飞
+  let flashOn = false
+  let flashSecs = 5
+  if (kind === 'image') {
+    if (retryClientMsgId) {
+      const placeholder = messages.value.find((m) => !m.messageId && sameId(m.clientMsgId, retryClientMsgId))
+      if (placeholder?.extra?.flash) {
+        flashOn = true
+        flashSecs = placeholder.extra.flashSeconds || 5
+      }
+    } else {
+      flashOn = attachFlash.value
+      flashSecs = flashSeconds.value
+    }
+  }
+  // 内容审核闸门：跑在挂占位气泡之前——被拒发的图不该在聊天记录里留下一条带「重发」按钮的
+  // 失败气泡（重发必然再被拦一次），拦下就只给一句提示。OCR 排在它后面：识别一张
+  // 反正要被拦掉的图纯属白花时间（OCR 首次要加载十几 MB，比本模型贵得多）。
+  if (kind === 'image') {
+    let guard
+    try {
+      uploading.value = true
+      uploadStage.value = 'nsfw'
+      uploadFileName.value = file.name || ''
+      guard = await guardImage(file, { scene: 'chat_image', conversationId: props.conversationId })
+    } finally {
+      uploading.value = false
+      uploadStage.value = 'upload'
+      uploadFileName.value = ''
+    }
+    if (!guard.pass) {
+      // 重发路径上占位气泡已经挂着了，把它落到失败态并撤掉本地 File，免得网络恢复又被自动补传
+      if (retryClientMsgId) {
+        chat.markFailed(props.conversationId, retryClientMsgId)
+        chat.forgetRetryFile(retryClientMsgId)
+      }
+      ElMessage.error(guard.message)
+      return
+    }
+  }
   const clientMsgId = retryClientMsgId || newClientMsgId()
   chat.appendMessage(
     props.conversationId,
@@ -1398,7 +1561,13 @@ async function uploadAndSend(file, retryClientMsgId = null) {
       fromAvatar: auth.avatarRaw,
       msgType,
       content: file.name || '',
-      extra: { fileName: file.name || '', fileSize: file.size, contentType: file.type || '' },
+      extra: {
+        fileName: file.name || '',
+        fileSize: file.size,
+        contentType: file.type || '',
+        flash: flashOn ? true : undefined,
+        flashSeconds: flashOn ? flashSecs : undefined
+      },
       seq: null,
       status: 0,
       recalled: false,
@@ -1423,6 +1592,16 @@ async function uploadAndSend(file, retryClientMsgId = null) {
       if (size) {
         extra.width = size.width
         extra.height = size.height
+      }
+      // 发送端本地 OCR：识别结果随消息上传，服务端过敏感词遮蔽后存入 extra.ocrText。
+      // 任何异常只会得到空串（照常发送），不阻断主流程；闪照不跑 OCR，
+      // 否则图内文字成了销毁后还能看到内容的后门
+      if (!flashOn) {
+        uploadStage.value = 'ocr'
+        const ocrText = await ocrImageText(file)
+        if (ocrText) {
+          extra.ocrText = ocrText
+        }
       }
     } else if (kind === 'voice') {
       duration = await readAudioDuration(file)
@@ -1488,7 +1667,10 @@ async function uploadAndSend(file, retryClientMsgId = null) {
         ext: vo.ext,
         fileUrl: vo.url,
         // 语音没有可视化预览界面，水印只对图片/文件/视频有意义；关时传 undefined 避免存个 false
-        watermark: kind !== 'voice' && attachWatermark.value ? true : undefined
+        watermark: kind !== 'voice' && attachWatermark.value ? true : undefined,
+        // 闪照标记与时长：服务端会再收敛一次（非图片清掉、秒数限幅、flashViewed 强制置空）
+        flash: flashOn ? true : undefined,
+        flashSeconds: flashOn ? flashSecs : undefined
       }
     })
   } catch (error) {
@@ -1565,6 +1747,81 @@ function onViewImage({ url, watermark }) {
   imageViewer.url = url
   imageViewer.watermark = watermark || ''
   imageViewer.visible = true
+}
+
+/* ------------------------------ 闪照查看 ------------------------------ */
+
+const flashViewer = reactive({ visible: false, url: '', rawUrl: '', left: 0 })
+let flashTimer = null
+
+function clearFlashTimer() {
+  if (flashTimer) {
+    clearInterval(flashTimer)
+    flashTimer = null
+  }
+}
+
+/**
+ * 拆闪照：取字节 -> 上报销毁 -> 倒计时预览。
+ *
+ * 时序是硬约束：服务端收到查看上报就逻辑删文件记录，字节必须先取回本地；
+ * noStore 跳过 IndexedDB 持久缓存，关闭后 mediaForget 连内存里的 blob 地址也抹掉，
+ * 这台设备上就不该再有办法翻出原图。
+ */
+async function onViewFlash(message) {
+  const rawUrl = message.extra?.fileUrl
+  if (!rawUrl || !message.messageId || flashViewer.visible) {
+    return
+  }
+  const url = await mediaUrlAsync(rawUrl, { noStore: true })
+  if (!url) {
+    // 取不到字节 = 别人已经拆过了：本地直接标销毁，气泡只剩占位
+    markFlashViewed(message)
+    ElMessage.info('闪照已被查看过，原图已销毁')
+    return
+  }
+  let vo = null
+  try {
+    vo = await flashViewMessage(message.messageId)
+  } catch {
+    // 上报失败（如断网）不拦预览：销毁标记没打上，下次还能再拆 ——
+    // 宁可多给一次机会也不能让人对着已经下载失败的字节干看
+  }
+  if (vo) {
+    chat.appendMessage(props.conversationId, vo, false)
+  } else {
+    markFlashViewed(message)
+  }
+  const seconds = Number(message.extra?.flashSeconds)
+  flashViewer.url = url
+  flashViewer.rawUrl = rawUrl
+  flashViewer.left = seconds > 0 ? seconds : 5
+  flashViewer.visible = true
+  clearFlashTimer()
+  flashTimer = setInterval(() => {
+    flashViewer.left -= 1
+    if (flashViewer.left <= 0) {
+      closeFlashViewer()
+    }
+  }, 1000)
+}
+
+function closeFlashViewer() {
+  clearFlashTimer()
+  flashViewer.visible = false
+  if (flashViewer.rawUrl) {
+    mediaForget(flashViewer.rawUrl)
+  }
+  flashViewer.url = ''
+  flashViewer.rawUrl = ''
+}
+
+/** 服务端权威标记拿不到时的本地兜底：就地改 extra 让气泡变「已销毁」 */
+function markFlashViewed(message) {
+  const target = messages.value.find((m) => m.messageId && sameId(m.messageId, message.messageId))
+  if (target?.extra) {
+    target.extra.flashViewed = true
+  }
 }
 
 /* ------------------------------ 右键菜单 ------------------------------ */
@@ -1650,7 +1907,8 @@ function itemsFor(message) {
     {
       key: 'forward',
       label: '转发',
-      show: !message.recalled
+      // 闪照看过即销毁，转发等于绕过一次性语义（后端同样会拒），前端直接藏掉入口
+      show: !message.recalled && !message.extra?.flash
     },
     {
       key: 'recall',
@@ -1661,7 +1919,9 @@ function itemsFor(message) {
         && (message.self || auth.hasPermission('message:recall:any'))
         && withinRecallWindow(message)
     },
-    { key: 'download', label: '另存为', show: [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType)) },
+    { key: 'download', label: '另存为', show: [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType)) && !message.extra?.flash },
+    // 发送端 OCR 提取的图内文字（已经过服务端敏感词遮蔽），有才给入口；闪照不存 ocrText
+    { key: 'ocr-text', label: '图内文字', show: Number(message.msgType) === TYPE_IMAGE && !message.recalled && !!message.extra?.ocrText },
     // 单端删除：只从自己的记录里移除，对方仍可见；自己发的和对方发的都能删
     { key: 'delete', label: '删除', danger: true, show: true }
   ]
@@ -1706,6 +1966,12 @@ async function onMenuSelect(action) {
         break
       case 'download':
         await onDownload(message)
+        break
+      case 'ocr-text':
+        await ElMessageBox.alert(message.extra.ocrText, '图内文字（由发送端自动识别，仅供参考）', {
+          confirmButtonText: '关闭',
+          customClass: 'chat-window__ocr-box'
+        })
         break
       case 'delete':
         await confirmDelete(message)
@@ -1862,6 +2128,10 @@ onMounted(async () => {
     contentObserver.observe(scrollRef.value)
   }
   await loadInitial()
+  // 通话入口的显隐依赖 callStore.enabled，而它只有 ensureConfig() 拉到配置后才置真；
+  // 不在此预热，canCall 永远为假 → 单聊头部两个通话按钮根本不渲染（点不到也就永不触发 ensureConfig 的死循环）。
+  // 不 await：这是一次独立 HTTP，失败或慢都不该挡住消息加载；结果在 store 里缓存，只发一次。
+  callStore.ensureConfig()
 })
 
 onBeforeUnmount(() => {
@@ -1869,6 +2139,8 @@ onBeforeUnmount(() => {
     contentObserver.disconnect()
     contentObserver = null
   }
+  // 倒计时弹窗开着的时候切走：抹掉本地字节并停表，不给后台留一张能被翻出来的闪照
+  closeFlashViewer()
   document.removeEventListener('visibilitychange', onVisibilityChange)
   document.removeEventListener('paste', onDocumentPaste)
   window.removeEventListener('online', onOnline)
@@ -1958,6 +2230,43 @@ watch(key, async () => {
 .chat-window__wm-check {
   margin-left: 4px;
   height: 32px;
+}
+
+/* 闪照开关与秒数控件同一组，中间不留断档 */
+.chat-window__flash-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-window__flash-seconds {
+  width: 86px;
+}
+
+/* 闪照查看弹窗舞台：图居中、倒计时条贴在图下方 */
+.im-flash-viewer__stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.im-flash-viewer__stage img {
+  display: block;
+  max-width: 72vw;
+  max-height: 70vh;
+  border-radius: 6px;
+}
+
+.im-flash-viewer__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.im-flash-viewer__countdown {
+  font-size: 13px;
+  color: #f56c6c;
 }
 
 /* 带水印图片的放大预览舞台 */
@@ -2336,9 +2645,44 @@ watch(key, async () => {
   color: #fff;
 }
 
+/* 马赛克按钮与 ✕ 同位置同隐藏规则，错开一个按钮位摆在左边 */
+.chat-window__tray-item .chat-window__tray-mosaic {
+  position: absolute;
+  top: 2px;
+  right: 24px;
+  z-index: 1;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  transition: opacity 0.15s;
+}
+
+.chat-window__tray-item:hover .chat-window__tray-mosaic,
+.chat-window__tray-item .chat-window__tray-mosaic:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-window__tray-item .chat-window__tray-mosaic:hover {
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+}
+
 /* 触屏没得 hover，一直藏着就是删不掉：这类设备上常显 */
 @media (hover: none) {
   .chat-window__tray-item .chat-window__tray-del {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .chat-window__tray-item .chat-window__tray-mosaic {
     opacity: 1;
     pointer-events: auto;
   }

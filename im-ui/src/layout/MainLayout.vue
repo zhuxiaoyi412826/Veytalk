@@ -62,6 +62,9 @@
         </keep-alive>
       </router-view>
     </main>
+
+    <!-- 全局通话浮层：与 useCallStore 联动，切会话/翻页都不打断通话 -->
+    <CallOverlay />
   </div>
 </template>
 
@@ -70,6 +73,7 @@ import { computed, onBeforeMount, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ChatDotRound, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import CallOverlay from '@/components/CallOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'

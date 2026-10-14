@@ -26,8 +26,15 @@ import {
   liveHeartbeat,
   startLive,
   stopLive,
-  abortLive
+  abortLive,
+  fetchVideoPage,
+  createVideo,
+  deleteVideo,
+  reportVideoPlay
 } from '@/api/live'
+import { uploadFileSmart } from '@/api/file'
+import { guardImage } from '@/utils/nsfw'
+import { mediaUrl, readVideoMetadata } from '@/utils/media'
 import { getToken } from '@/utils/token'
 import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
 import { useAuthStore } from '@/stores/auth'
@@ -72,6 +79,282 @@ function onFilterStatus(status) {
   listQuery.current = 1
   loadRooms()
 }
+
+/* ==================== 顶层双板块：视频 / 直播 ==================== */
+/** 顶层板块：live 直播间（默认），video 短视频信息流 */
+const activeTab = ref('live')
+
+/* ---------- 视频板块：信息流列表 ---------- */
+const videos = ref([])
+const videoLoading = ref(false)
+const videoQuery = reactive({ current: 1, size: 24, total: 0 })
+let videoLoaded = false
+
+async function loadVideos() {
+  videoLoading.value = true
+  try {
+    const page = await fetchVideoPage({ current: videoQuery.current, size: videoQuery.size })
+    videos.value = page?.records || []
+    videoQuery.total = page?.total || 0
+    videoLoaded = true
+  } catch {
+    // request.js 已弹过提示
+  } finally {
+    videoLoading.value = false
+  }
+}
+
+/* ---------- 视频板块：播放区（点卡片在此内联播放） ---------- */
+const playingVideo = ref(null)
+const playerEl = ref(null)
+// mediaUrl 是响应式的：首次返回空串并触发后台取 blob，取回后本 computed 自动变成 blob 地址
+const playSrc = computed(() => (playingVideo.value ? mediaUrl(playingVideo.value.fileUrl) : ''))
+function openVideo(v) {
+  playingVideo.value = v
+  reportVideoPlay(v.id)
+  // 本地展示计数 +1，省一次重拉
+  v.playCount = (v.playCount || 0) + 1
+}
+function closePlayer() {
+  playingVideo.value = null
+}
+// blob 地址到位后再驱动播放：mediaUrl 异步，src 还是空时 autoplay 不会重试
+watch(playSrc, (src) => {
+  if (src && playerEl.value) {
+    playerEl.value.load?.()
+    playerEl.value.play?.().catch(() => {})
+  }
+})
+
+function coverSrc(v) {
+  return v.coverUrl ? mediaUrl(v.coverUrl) : ''
+}
+
+function fmtDuration(sec) {
+  if (!sec || sec <= 0) {
+    return '0:00'
+  }
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+async function onRemoveVideo(v) {
+  try {
+    await ElMessageBox.confirm(`确定删除视频「${v.title}」吗？`, '删除视频', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteVideo(v.id)
+    videos.value = videos.value.filter((x) => x.id !== v.id)
+    videoQuery.total = Math.max(0, videoQuery.total - 1)
+    if (playingVideo.value && playingVideo.value.id === v.id) {
+      closePlayer()
+    }
+    ElMessage.success('已删除')
+  } catch {
+    // request.js 已弹过提示
+  }
+}
+
+/* ---------- 视频板块：上传对话框（复用 uploadFileSmart 传输链路） ---------- */
+const uploadDialog = ref(false)
+const videoInput = ref(null)
+const coverInput = ref(null)
+const videoFile = ref(null)
+const videoMeta = reactive({ duration: null, width: null, height: null })
+const coverFile = ref(null)
+const coverPreview = ref('')
+const uploadForm = reactive({ title: '' })
+const uploading = ref(false)
+const uploadPercent = ref(0)
+const uploadStage = ref('')
+const uploadStageText = computed(() => {
+  const map = { hash: '计算文件指纹', upload: '上传中', merge: '合并中', instant: '秒传命中', done: '完成' }
+  return map[uploadStage.value] || '上传中'
+})
+
+function clearCoverPreview() {
+  if (coverPreview.value) {
+    URL.revokeObjectURL(coverPreview.value)
+    coverPreview.value = ''
+  }
+}
+
+function resetUploadForm() {
+  videoFile.value = null
+  coverFile.value = null
+  videoMeta.duration = null
+  videoMeta.width = null
+  videoMeta.height = null
+  uploadForm.title = ''
+  uploadPercent.value = 0
+  uploadStage.value = ''
+  clearCoverPreview()
+}
+
+function openUpload() {
+  resetUploadForm()
+  uploadDialog.value = true
+}
+
+async function onVideoChange(e) {
+  const file = e.target.files && e.target.files[0]
+  e.target.value = ''
+  if (!file) {
+    return
+  }
+  videoFile.value = file
+  const meta = await readVideoMetadata(file)
+  videoMeta.duration = meta ? meta.duration : null
+  videoMeta.width = meta ? meta.width : null
+  videoMeta.height = meta ? meta.height : null
+  if (!uploadForm.title) {
+    uploadForm.title = file.name.replace(/\.[^.]+$/, '').slice(0, 60)
+  }
+  // 默认取首帧作封面；用户可自行替换；抓帧失败则留空退化为占位图
+  await grabFirstFrame(file)
+}
+
+async function grabFirstFrame(file) {
+  clearCoverPreview()
+  coverFile.value = null
+  const url = URL.createObjectURL(file)
+  try {
+    const frame = await captureFrame(url)
+    if (frame) {
+      coverFile.value = frame
+      coverPreview.value = URL.createObjectURL(frame)
+    }
+  } catch {
+    // 抓帧失败不阻断：无封面时前端退化为占位图
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+// 把视频首帧画进 canvas 导出 jpeg File；很多编码器 time 0 帧是空的，先 seek 一小段再画更稳
+function captureFrame(videoUrl) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+    video.muted = true
+    video.playsInline = true
+    video.src = videoUrl
+    video.onerror = () => reject(new Error('video load error'))
+    const drawFrame = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth || 320
+        canvas.height = video.videoHeight || 180
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('no frame blob'))
+            return
+          }
+          resolve(new File([blob], 'cover.jpg', { type: 'image/jpeg' }))
+        }, 'image/jpeg', 0.85)
+      } catch (err) {
+        reject(err)
+      }
+    }
+    video.onloadedmetadata = () => {
+      const t = Math.min(0.1, (video.duration || 1) / 2)
+      if (Math.abs(video.currentTime - t) > 0.01) {
+        video.currentTime = t
+      } else {
+        drawFrame()
+      }
+    }
+    video.onseeked = drawFrame
+  })
+}
+
+function pickCover() {
+  if (coverInput.value) {
+    coverInput.value.click()
+  }
+}
+
+function onCoverChange(e) {
+  const file = e.target.files && e.target.files[0]
+  e.target.value = ''
+  if (!file) {
+    return
+  }
+  coverFile.value = file
+  clearCoverPreview()
+  coverPreview.value = URL.createObjectURL(file)
+}
+
+function resetCover() {
+  if (videoFile.value) {
+    grabFirstFrame(videoFile.value)
+  } else {
+    coverFile.value = null
+    clearCoverPreview()
+  }
+}
+
+async function submitUpload() {
+  if (!videoFile.value) {
+    ElMessage.warning('请先选择视频文件')
+    return
+  }
+  if (!uploadForm.title.trim()) {
+    ElMessage.warning('请填写视频标题')
+    return
+  }
+  // 封面是信息流里人人可见的静态图，与头像同级，过同一道闸门。
+  // 排在视频本体上传之前：封面被拦就没必要先把几百 MB 的原片传上去再放弃
+  if (coverFile.value) {
+    const guard = await guardImage(coverFile.value, { scene: 'video_cover' })
+    if (!guard.pass) {
+      ElMessage.error(guard.message)
+      return
+    }
+  }
+  uploading.value = true
+  try {
+    const vo = await uploadFileSmart(videoFile.value, 'video', videoMeta.duration, (p, stage) => {
+      uploadPercent.value = p
+      uploadStage.value = stage
+    })
+    let coverFileId = null
+    if (coverFile.value) {
+      const cvo = await uploadFileSmart(coverFile.value, 'video_cover', null, () => {})
+      coverFileId = cvo && cvo.fileId
+    }
+    await createVideo({
+      title: uploadForm.title.trim(),
+      fileId: vo.fileId,
+      coverFileId,
+      duration: videoMeta.duration,
+      width: videoMeta.width,
+      height: videoMeta.height,
+      size: vo.size,
+      ext: vo.ext,
+      contentType: vo.contentType
+    })
+    ElMessage.success('发布成功')
+    uploadDialog.value = false
+    videoQuery.current = 1
+    await loadVideos()
+  } catch (err) {
+    ElMessage.error('发布失败：' + ((err && err.message) || '上传中断'))
+  } finally {
+    uploading.value = false
+  }
+}
+
+// 首次切到视频板块才拉列表，避免进大厅就多打一次请求
+watch(activeTab, (tab) => {
+  if (tab === 'video' && !videoLoaded) {
+    loadVideos()
+  }
+})
 
 function enterRoom(id) {
   router.push({ name: 'live-room', params: { roomId: String(id) } })
@@ -645,6 +928,16 @@ watch(() => route.params.roomId, () => syncRoute())
 
     <!-- ==================== 大厅形态 ==================== -->
     <div v-else class="live-lobby">
+      <!-- 顶层双板块切换：视频 / 直播 -->
+      <div class="live-lobby__tabs">
+        <el-radio-group v-model="activeTab" size="large">
+          <el-radio-button value="live">直播</el-radio-button>
+          <el-radio-button value="video">视频</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <!-- ===== 直播板块（原大厅）===== -->
+      <template v-if="activeTab === 'live'">
       <div class="live-lobby__head">
         <div class="live-lobby__filters">
           <el-radio-group :model-value="listQuery.status" size="default" @change="onFilterStatus">
@@ -716,6 +1009,63 @@ watch(() => route.params.roomId, () => syncRoute())
           @current-change="(p) => { listQuery.current = p; loadRooms() }"
         />
       </div>
+      </template>
+
+      <!-- ===== 视频板块：短视频信息流 ===== -->
+      <template v-else>
+        <div class="live-video__head">
+          <span class="live-video__count">共 {{ videoQuery.total }} 个视频</span>
+          <el-button type="primary" @click="openUpload">上传视频</el-button>
+        </div>
+
+        <!-- 播放区：点下方卡片在此内联播放 -->
+        <div v-if="playingVideo" class="live-video__player">
+          <div class="live-video__player-bar">
+            <UserAvatar :src="playingVideo.uploaderAvatar" :name="playingVideo.uploaderName" :size="26" />
+            <div class="live-video__player-info">
+              <div class="live-video__player-title im-ellipsis">{{ playingVideo.title }}</div>
+              <div class="live-video__player-meta">
+                {{ playingVideo.uploaderName }} · {{ fmtDuration(playingVideo.duration) }} · {{ playingVideo.playCount || 0 }} 次播放
+              </div>
+            </div>
+            <el-button text @click="closePlayer">关闭 ✕</el-button>
+          </div>
+          <video ref="playerEl" class="live-video__video" :src="playSrc" controls autoplay playsinline></video>
+        </div>
+
+        <div v-loading="videoLoading" class="live-grid live-grid--video">
+          <div v-for="v in videos" :key="v.id" class="video-card" @click="openVideo(v)">
+            <div class="video-card__cover">
+              <img v-if="coverSrc(v)" :src="coverSrc(v)" alt="" />
+              <div v-else class="video-card__placeholder">
+                <el-icon :size="34"><VideoCamera /></el-icon>
+              </div>
+              <span class="video-card__play">▶ {{ v.playCount || 0 }}</span>
+              <span class="video-card__duration">{{ fmtDuration(v.duration) }}</span>
+              <span v-if="playingVideo && playingVideo.id === v.id" class="video-card__playing">播放中</span>
+              <span v-if="v.mine" class="video-card__del" @click.stop="onRemoveVideo(v)">删除</span>
+            </div>
+            <div class="video-card__info">
+              <div class="video-card__title">{{ v.title }}</div>
+              <div class="video-card__uploader">
+                <UserAvatar :src="v.uploaderAvatar" :name="v.uploaderName" :size="20" />
+                <span class="im-ellipsis video-card__name">{{ v.uploaderName }}</span>
+              </div>
+            </div>
+          </div>
+          <el-empty v-if="!videoLoading && !videos.length" description="还没有视频，点右上角上传" class="live-grid__empty" />
+        </div>
+
+        <div v-if="videoQuery.total > videoQuery.size" class="live-lobby__pager">
+          <el-pagination
+            layout="prev, pager, next"
+            :total="videoQuery.total"
+            :page-size="videoQuery.size"
+            :current-page="videoQuery.current"
+            @current-change="(p) => { videoQuery.current = p; loadVideos() }"
+          />
+        </div>
+      </template>
     </div>
 
     <!-- ==================== 开播对话框 ==================== -->
@@ -753,6 +1103,53 @@ watch(() => route.params.roomId, () => syncRoute())
       <template #footer>
         <el-button @click="startDialog = false">取消</el-button>
         <el-button type="primary" :loading="starting" @click="submitStart">开始推流</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ==================== 上传视频对话框 ==================== -->
+    <el-dialog
+      v-model="uploadDialog"
+      title="上传视频"
+      width="520px"
+      :close-on-click-modal="!uploading"
+      :close-on-press-escape="!uploading"
+    >
+      <el-form label-width="72px">
+        <el-form-item label="视频">
+          <div class="live-up__row">
+            <input ref="videoInput" type="file" accept="video/*" hidden @change="onVideoChange" />
+            <el-button @click="videoInput && videoInput.click()">{{ videoFile ? '重新选择' : '选择视频文件' }}</el-button>
+            <span v-if="videoFile" class="live-up__name im-ellipsis">{{ videoFile.name }}</span>
+          </div>
+          <div v-if="videoFile" class="live-up__meta">
+            <span v-if="videoMeta.duration">时长 {{ fmtDuration(videoMeta.duration) }}</span>
+            <span v-if="videoMeta.width"> · {{ videoMeta.width }}×{{ videoMeta.height }}</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="标题">
+          <el-input v-model="uploadForm.title" maxlength="60" show-word-limit placeholder="给视频起个标题" />
+        </el-form-item>
+        <el-form-item label="封面">
+          <div class="live-up__cover">
+            <input ref="coverInput" type="file" accept="image/*" hidden @change="onCoverChange" />
+            <div class="live-up__cover-preview">
+              <img v-if="coverPreview" :src="coverPreview" alt="" />
+              <div v-else class="live-up__cover-ph">默认首帧</div>
+            </div>
+            <div class="live-up__cover-btns">
+              <el-button size="small" @click="pickCover">选择封面</el-button>
+              <el-button v-if="coverPreview" size="small" text @click="resetCover">恢复首帧</el-button>
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="uploading" label="进度">
+          <el-progress :percentage="uploadPercent" :status="uploadPercent >= 100 ? 'success' : ''" style="width: 100%" />
+          <span class="live-up__stage">{{ uploadStageText }}</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="uploadDialog = false" :disabled="uploading">取消</el-button>
+        <el-button type="primary" :loading="uploading" @click="submitUpload">发布</el-button>
       </template>
     </el-dialog>
   </div>
@@ -1140,5 +1537,267 @@ watch(() => route.params.roomId, () => syncRoute())
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px;
   }
+}
+
+/* ------------------------------ 顶层视频/直播双板块 ------------------------------ */
+.live-lobby__tabs {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+/* ------------------------------ 视频板块 ------------------------------ */
+.live-video__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.live-video__count {
+  font-size: 13px;
+  color: #909399;
+}
+
+.live-video__player {
+  margin-bottom: 16px;
+  border: 1px solid var(--im-border, #e4e7ed);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+}
+
+.live-video__player-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #fff;
+}
+
+.live-video__player-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.live-video__player-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.live-video__player-meta {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+.live-video__video {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  background: #000;
+}
+
+/* B 站风：无框卡片，封面 16:9 裁切，标题两行 */
+.video-card {
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+
+.video-card__cover {
+  position: relative;
+  width: 100%;
+  /* 兼容写法：padding-top 撑出 16:9，避免旧内核 aspect-ratio 失效被竖图撑高 */
+  padding-top: 56.25%;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1f2329;
+  transition: box-shadow 0.2s;
+}
+
+.video-card:hover .video-card__cover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.video-card__cover img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-card__placeholder {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4b5563;
+}
+
+.video-card__duration {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 2px 6px;
+  border-radius: 0 0 6px 0;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.video-card__play {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 12px;
+}
+
+.video-card__playing {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #fb7299;
+  color: #fff;
+  font-size: 12px;
+}
+
+.video-card__del {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.video-card:hover .video-card__del {
+  opacity: 1;
+}
+
+.video-card__info {
+  padding: 8px 2px 0;
+}
+
+.video-card__title {
+  font-size: 14px;
+  line-height: 20px;
+  color: #18191c;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.video-card:hover .video-card__title {
+  color: var(--el-color-primary, #409eff);
+}
+
+.video-card__uploader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.video-card__name {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 视频卡片更密一些，接近 B 站首页多列瀑布流观感 */
+.live-grid--video {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px 12px;
+}
+
+/* ------------------------------ 上传视频对话框 ------------------------------ */
+.live-up__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.live-up__name {
+  flex: 1;
+  min-width: 0;
+  color: #606266;
+  font-size: 13px;
+}
+
+.live-up__meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.live-up__cover {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.live-up__cover-preview {
+  width: 128px;
+  height: 72px;
+  border: 1px solid var(--im-border, #e4e7ed);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1f2329;
+  flex: none;
+}
+
+.live-up__cover-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.live-up__cover-ph {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.live-up__cover-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.live-up__stage {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
 }
 </style>

@@ -20,7 +20,12 @@ public enum MsgType {
     /** 语音消息 */
     VOICE(4, "语音"),
     /** 系统通知，由服务端生成，客户端只读 */
-    SYSTEM(5, "系统通知");
+    SYSTEM(5, "系统通知"),
+    /**
+     * 通话记录：一次语音 / 视频通话结束后落的一条消息，{@code content} 存录音录像文件 ID（可空表示未录制），
+     * {@code extra} 带时长、媒体类型与是否录屏。与 {@link #VOICE} 区分：那是语音留言，这是一次实时通话的结算凭证。
+     */
+    CALL(6, "通话");
 
     @JsonValue
     private final int code;

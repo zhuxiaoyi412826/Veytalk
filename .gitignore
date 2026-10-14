@@ -27,6 +27,13 @@ im-ui/dist-ssr/
 *.local
 .vite/
 
+# 图片审核的可投放资产：体积上百 MB，不进仓库，由运维按 md/图片内容审核接入指南.md 放好。
+# 前端对它存在与否做了降级（模型不在就停用那个检测器），仓库不投放不影响构建。
+# 只模型不入库：血腥 / 暴力那个 ONNX 的推理运行时（onnxruntime-web 的 wasm）走 npm 依赖
+# 随构建产出，不必再拷到 public 下。
+# 注意 public/tesseract、public/tessdata（OCR 离线包约 32MB）是要提交的，不在这里。
+im-ui/public/models/
+
 # Electron 桌面端：只忽略构建产物 / 依赖 / 大二进制，源码要提交
 # 保留提交：main.js、preload.js、package.json、package-lock.json、bin/ffmpeg放置说明.txt
 # （node_modules、ffmpeg.exe 其实已被全局规则 node_modules/、*.exe 覆盖，这里显式列出更直观）

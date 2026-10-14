@@ -6,6 +6,7 @@ import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useGroupStore } from '@/stores/group'
+import { useCallStore } from '@/stores/call'
 import { on, connect } from './socket'
 
 /**
@@ -30,6 +31,7 @@ export function installWsDispatch() {
   const conversation = useConversationStore()
   const friend = useFriendStore()
   const group = useGroupStore()
+  const call = useCallStore()
 
   const disposers = []
 
@@ -116,6 +118,9 @@ export function installWsDispatch() {
   )
 
   disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend })))
+
+  // 音视频通话信令：整帧交给通话 store 的状态机裁决（invite/accept/offer/answer/ice/hangup/failed 等）
+  disposers.push(on('call-signal', (packet) => call.onSignal(packet.data)))
 
   disposers.push(
     on('kickout', (packet) => {

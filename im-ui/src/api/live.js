@@ -60,3 +60,38 @@ export function fetchLivePage(params) {
 export function fetchMyLive() {
   return http.get('/live/mine', { silent: true })
 }
+
+/* ============================================================================
+ * 直播页「视频」板块：短视频信息流
+ *
+ * 视频与封面本体的上传复用通用文件接口（api/file.js 的 uploadFileSmart，
+ * bizType 传 video / video_cover）；这里只负责信息流记录的增删查与播放计数。
+ * 返回的 fileUrl / coverUrl 是长期受控地址，前端经 utils/media.js 的 mediaUrl 取 blob 播放/渲染。
+ * ========================================================================== */
+
+/**
+ * 视频分页：仅正常状态视频，按发布时间倒序。
+ * @param {{ current?: number, size?: number }} params
+ */
+export function fetchVideoPage(params) {
+  return http.get('/live/video/page', { params })
+}
+
+/**
+ * 发布视频：先用 bizType=video 上传拿到 fileId（可选再用 video_cover 传封面），再建信息流记录。
+ * @param {{ title: string, fileId: string, coverFileId?: string, duration?: number,
+ *           width?: number, height?: number, size: number, ext?: string, contentType?: string }} body
+ */
+export function createVideo(body) {
+  return http.post('/live/video', body)
+}
+
+/** 删除视频：仅上传者本人可删；记录不存在后端幂等返回成功 */
+export function deleteVideo(id) {
+  return http.delete(`/live/video/${id}`)
+}
+
+/** 播放上报：点开视频时 +1，静默失败不打扰观看 */
+export function reportVideoPlay(id) {
+  return http.post(`/live/video/${id}/play`, {}, { silent: true })
+}

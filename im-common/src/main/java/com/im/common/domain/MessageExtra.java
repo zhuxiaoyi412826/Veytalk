@@ -74,6 +74,24 @@ public class MessageExtra implements Serializable {
     @Schema(description = "图片/文件是否带发送者水印：为真时接收端查看该附件会叠加发送者昵称水印")
     private Boolean watermark;
 
+    @Schema(description = "是否闪照（仅图片）：查看一次即销毁，销毁后服务端不再可下载原图")
+    private Boolean flash;
+
+    @Schema(description = "闪照查看时长（秒），倒计时由前端执行，到期仅关闭预览")
+    private Integer flashSeconds;
+
+    @Schema(description = "闪照是否已被查看过：服务端权威标记，任何人看过一次即对所有成员销毁")
+    private Boolean flashViewed;
+
+    @Schema(description = "发送端 OCR 提取的图内文字（已经过敏感词遮蔽），供接收端「图内文字」功能展示")
+    private String ocrText;
+
+    @Schema(description = "通话媒体类型（仅通话记录）：audio 语音 / video 视频")
+    private String callMediaType;
+
+    @Schema(description = "通话是否录屏留存（仅通话记录）：为真时 content 指向的录制文件包含屏幕画面")
+    private Boolean callScreenRecorded;
+
     /**
      * 是否包含 @ 提醒，供会话模块判断是否需要打破免打扰。
      */

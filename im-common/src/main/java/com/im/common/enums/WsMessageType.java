@@ -22,6 +22,8 @@ public enum WsMessageType {
     PING("ping"),
     /** 拉取离线消息 */
     PULL_OFFLINE("pull-offline"),
+    /** 音视频通话信令上行（invite/accept/reject/offer/answer/ice/cancel/hangup），子类型见 data.action */
+    CALL("call"),
 
     /* ---------- 下行（服务端 -> 客户端） ---------- */
     /** 发送结果回执，携带服务端消息 ID 与 seq */
@@ -44,6 +46,8 @@ public enum WsMessageType {
     ONLINE_STATE("online-state"),
     /** 会话未读数变更 */
     UNREAD("unread"),
+    /** 音视频通话信令下行：服务端在两端间转发信令，以及主动下发的 busy/offline/timeout/canceled */
+    CALL_SIGNAL("call-signal"),
     /** 错误响应 */
     ERROR("error");
 

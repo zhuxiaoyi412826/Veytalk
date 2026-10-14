@@ -57,7 +57,30 @@ public enum FileBizType {
      * 聊天语音。opus 是现在录音与网络语音的默认编码之一（装在 Ogg 容器里），
      * Chrome / Firefox 的 {@code <audio>} 原生能播，不必再要用户转成 mp3。
      */
-    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus"));
+    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus")),
+
+    /**
+     * 直播页视频板块的视频（短视频信息流）。与 {@link #CHAT_FILE} 分开：聊天视频只有同会话成员
+     * 可见，而信息流视频天然面向所有登录用户，故单列一种类型，由 {@link #isPublic()} 让
+     * {@code FileServiceImpl#canAccess} 免会话校验直接放行下载。
+     */
+    VIDEO("video", Set.of("mp4", "avi", "mov", "mkv", "webm", "flv", "wmv")),
+
+    /**
+     * 视频板块封面图。图片之所以也要公开，与 {@link #VIDEO} 同理：信息流卡片要在 {@code <img>}
+     * 里直接渲染别人传的封面，逐个校验会话关系既做不到也没意义。
+     */
+    VIDEO_COVER("video_cover", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp")),
+
+    /**
+     * 音视频通话录制产物（桌面端录屏 / 录音）。与 {@link #CHAT_VOICE} 分开：那是语音留言，
+     * 这是一次实时通话的录制，且多为带画面的容器。
+     *
+     * <p>不开 {@code isPublic()}：录音录像属会话私有内容，只有同会话成员可回放，走 {@code canAccess} 的会话校验。
+     * 主用桌面端 MediaRecorder 产出的 webm（流式落盘的必然选择），同时放行 mp4/m4a/opus 等常见录音编码，
+     * 便于日后用 ffmpeg 转封装或改换录制容器。
+     */
+    CALL_RECORD("call_record", Set.of("webm", "mp4", "m4a", "opus", "wav", "mp3"));
 
     private final String code;
     private final Set<String> allowedExtensions;
@@ -100,5 +123,13 @@ public enum FileBizType {
      */
     public boolean isImage() {
         return this == AVATAR || this == CHAT_IMAGE;
+    }
+
+    /**
+     * 是否为公开资源：头像、视频板块的视频与封面都属于「非上传者、非同一会话也应当能看」的内容。
+     * {@code FileServiceImpl#canAccess} 据此放行，不再走会话可见性判定。
+     */
+    public boolean isPublic() {
+        return this == AVATAR || this == VIDEO || this == VIDEO_COVER;
     }
 }

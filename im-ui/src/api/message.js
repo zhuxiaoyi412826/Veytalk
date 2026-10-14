@@ -85,6 +85,17 @@ export function searchMessages(params) {
 }
 
 /**
+ * 上报闪照已被查看。
+ *
+ * 服务端收到即把 extra.flashViewed 置真并逻辑删除原图文件记录：
+ * 必须在图片字节已经取回本地（blob）之后再调，否则还没渲染就永久 404。
+ * 返回查看者视角的最新消息 VO，用它就地刷新气泡状态。
+ */
+export function flashViewMessage(messageId) {
+  return http.post(`/message/${messageId}/flash-view`, null, { silent: true })
+}
+
+/**
  * 转发消息。
  *
  * 把一条已存在的消息复制到目标会话，附件复用原文件不重新上传。

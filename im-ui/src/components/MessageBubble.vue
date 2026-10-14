@@ -12,8 +12,8 @@
     />
 
     <div class="bubble__main">
-      <!-- 群聊里需要区分是谁说的；单聊显示昵称纯属噪音 -->
-      <div v-if="!message.self && showSender" class="bubble__sender im-ellipsis">{{ message.fromNickname }}</div>
+      <!-- 群聊里需要区分是谁说的；单聊显示昵称纯属噪音。备注优先：别人在我这里的显示名由我定 -->
+      <div v-if="!message.self && showSender" class="bubble__sender im-ellipsis">{{ senderDisplayName }}</div>
 
       <!-- 引用预览块：显示在气泡上方，点击可跳转到原消息 -->
       <div
@@ -21,7 +21,7 @@
         class="bubble__quote"
         @click.stop="emit('jump-quote', message.quote.messageId)"
       >
-        <span class="bubble__quote-nick">回复 {{ message.quote.fromNickname }}</span>
+        <span class="bubble__quote-nick">回复 {{ quoteDisplayName }}</span>
         <span class="bubble__quote-text im-ellipsis">{{ quoteContent }}</span>
       </div>
 
@@ -39,25 +39,32 @@
 
           <!-- 图片 -->
           <div v-else-if="msgType === 2" class="bubble__image-wrap" @click="onImageClick">
-            <el-image
-              class="im-msg-image"
-              :src="imageUrl"
-              :preview-src-list="imagePreviewList"
-              :preview-teleported="true"
-              :style="imageStyle"
-              fit="cover"
-              hide-on-click-modal
-            >
-              <template #placeholder>
-                <div class="bubble__media-loading">
-                  <el-icon class="is-loading"><Loading /></el-icon>
-                </div>
-              </template>
-              <template #error>
-                <div class="bubble__media-loading">图片加载失败</div>
-              </template>
-            </el-image>
-            <WatermarkOverlay v-if="attachWatermark && senderWatermarkText" :text="senderWatermarkText" />
+            <!-- 闪照：拆封前不露任何像素（连预取都不做），销毁后只剩占位块 -->
+            <div v-if="isFlash" class="bubble__flash" :class="{ 'bubble__flash--viewed': flashViewed }">
+              <el-icon :size="20"><Delete v-if="flashViewed" /><Picture v-else /></el-icon>
+              <span>{{ flashViewed ? '闪照已销毁' : '闪照 · 点击查看（仅限一次）' }}</span>
+            </div>
+            <template v-else>
+              <el-image
+                class="im-msg-image"
+                :src="imageUrl"
+                :preview-src-list="imagePreviewList"
+                :preview-teleported="true"
+                :style="imageStyle"
+                fit="cover"
+                hide-on-click-modal
+              >
+                <template #placeholder>
+                  <div class="bubble__media-loading">
+                    <el-icon class="is-loading"><Loading /></el-icon>
+                  </div>
+                </template>
+                <template #error>
+                  <div class="bubble__media-loading">图片加载失败</div>
+                </template>
+              </el-image>
+              <WatermarkOverlay v-if="attachWatermark && senderWatermarkText" :text="senderWatermarkText" />
+            </template>
           </div>
 
           <!-- 视频 -->
@@ -105,6 +112,30 @@
             <span class="bubble__voice-duration">{{ voiceDuration }}</span>
           </div>
 
+          <!-- 通话记录：类型图标 + 时长；已录制则可回放 -->
+          <div v-else-if="msgType === 6" class="bubble__call">
+            <el-icon :size="16"><component :is="callIsVideo ? VideoCameraFilled : PhoneFilled" /></el-icon>
+            <span class="bubble__call-label">{{ callLabel }}</span>
+            <span class="bubble__call-duration">{{ callDurationText }}</span>
+            <!-- 已录制：视频内联播放器 / 音频点击播放 -->
+            <video
+              v-if="callPlayableVideo"
+              :src="callVideoSrc"
+              controls
+              preload="metadata"
+              class="bubble__call-video"
+            />
+            <button
+              v-else-if="callHasRecording"
+              class="bubble__call-play"
+              :class="{ 'is-playing': callPlaying }"
+              title="回放通话录音"
+              @click="toggleCallAudio"
+            >
+              <el-icon :size="14"><component :is="callPlaying ? VideoPause : VideoPlay" /></el-icon>
+            </button>
+          </div>
+
           <!-- 兜底：后端将来加了新类型而前端还没跟上时，至少把原文露出来 -->
           <div v-else class="bubble__text">{{ textContent }}</div>
         </div>
@@ -125,11 +156,12 @@
 <script setup>
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Loading, View, VideoPause, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
+import { useFriendStore } from '@/stores/friend'
 import { mediaUrl, downloadFile, isPreviewableFile, isVideo } from '@/utils/media'
 import { riskCategoryOf } from '@/utils/riskFile'
 import { formatDuration, formatFileSize } from '@/utils/format'
@@ -149,10 +181,11 @@ const props = defineProps({
   isGroup: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'jump-quote'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
+const friends = useFriendStore()
 
 const msgType = computed(() => Number(props.message.msgType))
 const isSystem = computed(() => msgType.value === 5)
@@ -167,6 +200,31 @@ const attachWatermark = computed(() => extra.value.watermark === true)
 const senderWatermarkText = computed(
   () => props.message.fromNickname || (props.message.self ? auth.nickname : '')
 )
+
+/** 本条图片是否为闪照（拆封前不渲染像素，看过一次即销毁） */
+const isFlash = computed(() => msgType.value === 2 && extra.value.flash === true)
+const flashViewed = computed(() => isFlash.value && extra.value.flashViewed === true)
+
+/**
+ * 群聊发送者显示名：好友备注优先，其次服务端给的昵称。
+ *
+ * 备注是「别人在我这里的显示名」，存在好友关系里、只影响本机展示；
+ * 非好友（群里的陌生人）friendOf 查不到，自然回退到昵称。
+ */
+const senderDisplayName = computed(() => {
+  const friend = props.message.fromUserId != null ? friends.friendOf(props.message.fromUserId) : null
+  return (friend && friend.remark) || props.message.fromNickname
+})
+
+/** 引用块的发送者名字同样吃备注覆盖 */
+const quoteDisplayName = computed(() => {
+  const q = props.message.quote
+  if (!q) {
+    return ''
+  }
+  const friend = q.fromUserId != null ? friends.friendOf(q.fromUserId) : null
+  return (friend && friend.remark) || q.fromNickname
+})
 
 const plainText = computed(() => {
   if (props.message.recalled) {
@@ -185,10 +243,13 @@ const plainText = computed(() => {
  */
 const textContent = computed(() => {
   if (msgType.value === 2) {
-    return '[图片]'
+    return isFlash.value ? '[闪照]' : '[图片]'
   }
   if (msgType.value === 4) {
     return '[语音]'
+  }
+  if (msgType.value === 6) {
+    return callLabel.value
   }
   if (msgType.value === 3) {
     return `[文件] ${extra.value.fileName || ''}`.trim()
@@ -200,7 +261,7 @@ const textContent = computed(() => {
 const boxClass = computed(() => ({
   'bubble__box--self': props.message.self,
   // 附件类气泡自带白底卡片，再套一层气泡底色会出现双重边框
-  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4
+  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4 || msgType.value === 6
 }))
 
 /**
@@ -217,6 +278,7 @@ const quoteContent = computed(() => {
   if (type === 2) return '[图片]'
   if (type === 3) return '[文件]'
   if (type === 4) return '[语音]'
+  if (type === 6) return '[通话]'
   return q.content || ''
 })
 
@@ -270,6 +332,13 @@ const imagePreviewList = computed(() => {
 })
 
 function onImageClick() {
+  // 闪照不在气泡里拆：把意图抛给父组件走「取回字节 -> 上报销毁 -> 倒计时预览」的完整流程
+  if (isFlash.value) {
+    if (!flashViewed.value) {
+      emit('view-flash', props.message)
+    }
+    return
+  }
   if (attachWatermark.value && imageUrl.value) {
     emit('view-image', { url: imageUrl.value, watermark: senderWatermarkText.value })
   }
@@ -426,10 +495,61 @@ async function toggleVoice() {
   }
 }
 
+/* -------------------------------- 通话记录 -------------------------------- */
+
+const callIsVideo = computed(() => extra.value.callMediaType === 'video')
+const callLabel = computed(() => (callIsVideo.value ? '视频通话' : '语音通话'))
+const callDurationText = computed(() => {
+  const sec = Number(extra.value.duration) || 0
+  return sec > 0 ? formatDuration(sec) : '未接通'
+})
+/** 本次通话是否留有录制文件（fileUrl 存在才能回放） */
+const callHasRecording = computed(() => msgType.value === 6 && !!extra.value.fileUrl)
+/** 录制是否为可内联播放的视频（webm/mp4 等视频容器） */
+const callPlayableVideo = computed(() => callHasRecording.value && isVideo(extra.value.fileName || 'x.webm'))
+const callVideoSrc = computed(() => (callPlayableVideo.value ? mediaUrl(extra.value.fileUrl) : ''))
+
+const callPlaying = ref(false)
+let callAudio = null
+
+async function toggleCallAudio() {
+  if (callPlaying.value) {
+    callAudio?.pause()
+    callPlaying.value = false
+    return
+  }
+  if (!callAudio) {
+    const url = mediaUrl(extra.value.fileUrl)
+    if (!url) {
+      ElMessage.info('录音加载中，请稍候再点一次')
+      return
+    }
+    callAudio = new Audio(url)
+    callAudio.addEventListener('ended', () => {
+      callPlaying.value = false
+    })
+    callAudio.addEventListener('error', () => {
+      callPlaying.value = false
+      ElMessage.error('录音播放失败')
+    })
+  }
+  try {
+    await callAudio.play()
+    callPlaying.value = true
+  } catch {
+    callPlaying.value = false
+    ElMessage.error('录音播放失败，可能是不支持的音频格式')
+  }
+}
+
 onBeforeUnmount(() => {
   if (audio) {
     audio.pause()
     audio = null
+  }
+  if (callAudio) {
+    callAudio.pause()
+    callAudio = null
   }
 })
 </script>
@@ -635,6 +755,30 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+/* 闪照占位块：尺寸与普通图片加载框一致，未销毁前可点、销毁后置灰 */
+.bubble__flash {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 213px;
+  height: 133px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--im-text-secondary);
+  background: var(--im-panel);
+  border: 1px dashed var(--im-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bubble__flash--viewed {
+  cursor: default;
+  opacity: 0.7;
+}
+
 .bubble__file-wm {
   color: var(--im-primary);
 }
@@ -658,6 +802,54 @@ onBeforeUnmount(() => {
 .bubble__voice-duration {
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* 通话记录：图标 + 类型 + 时长；若留有录制则附带回放入口 */
+.bubble__call {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--im-panel);
+  border: 1px solid var(--im-border);
+  border-radius: 12px;
+  color: var(--im-primary);
+}
+
+.bubble__call-label {
+  font-size: 13px;
+  color: var(--im-text-primary);
+}
+
+.bubble__call-duration {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.bubble__call-video {
+  width: 100%;
+  max-width: 260px;
+  margin-top: 6px;
+  border-radius: 8px;
+  background: #000;
+}
+
+.bubble__call-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--im-primary);
+  color: #fff;
+  cursor: pointer;
+}
+
+.bubble__call-play.is-playing {
+  background: var(--im-text-secondary);
 }
 
 .bubble__retry {

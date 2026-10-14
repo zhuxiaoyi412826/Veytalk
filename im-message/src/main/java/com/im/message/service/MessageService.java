@@ -87,6 +87,16 @@ public interface MessageService {
     void recall(Long messageId, Long operatorId);
 
     /**
+     * 查看闪照：首次查看即销毁。
+     *
+     * <p>会话成员调用；服务端把 {@code extra.flashViewed} 置真并销毁原图文件记录，
+     * 此后任何成员（含发送者）都无法再取回图片字节。重复调用幂等。
+     *
+     * @return 销毁后的最新消息视图（extra.flashViewed=true）
+     */
+    MessageVO flashView(Long userId, Long messageId);
+
+    /**
      * 单端删除消息，只对操作者本人不可见。
      */
     void deleteForUser(Long userId, Long messageId);

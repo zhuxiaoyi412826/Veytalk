@@ -48,14 +48,45 @@ export function mediaUrl(rawUrl) {
   return ''
 }
 
-async function loadMedia(rawUrl) {
+/**
+ * 取回受控地址的 blob 地址（可 await，与 mediaUrl 的同步响应式相对）。
+ *
+ * 闪照的时序要求是硬性的：必须先把字节完整取回本地，才能向服务端上报销毁
+ * （上报后 fileUrl 永久 404），所以这里要等而不是先渲染后补。noStore 跳过
+ * IndexedDB 持久缓存：销毁后不该在本地还留着底片。
+ */
+export async function mediaUrlAsync(rawUrl, { noStore = false } = {}) {
+  if (!rawUrl) {
+    return ''
+  }
+  if (DIRECT_PATTERN.test(rawUrl)) {
+    return rawUrl
+  }
+  const cached = objectUrls.get(rawUrl)
+  if (cached) {
+    return cached
+  }
+  await loadMedia(rawUrl, noStore)
+  return objectUrls.get(rawUrl) || ''
+}
+
+/** 关闭后彻底丢弃本地字节：撤销 blob 地址并从内存映射移除（闪照专用，普通图片不适用） */
+export function mediaForget(rawUrl) {
+  const url = objectUrls.get(rawUrl)
+  if (url) {
+    URL.revokeObjectURL(url)
+  }
+  objectUrls.delete(rawUrl)
+}
+
+async function loadMedia(rawUrl, noStore = false) {
   if (inflight.has(rawUrl)) {
     return inflight.get(rawUrl)
   }
   const task = (async () => {
     try {
-      // 1) 持久缓存命中：立即渲染，后台复核；未命中才走网络
-      const hit = await mediaCacheGet(rawUrl).catch(() => null)
+      // 1) 持久缓存命中：立即渲染，后台复核；未命中才走网络（noStore 直接跳过缓存环节）
+      const hit = noStore ? null : await mediaCacheGet(rawUrl).catch(() => null)
       if (hit && hit.blob) {
         objectUrls.set(rawUrl, URL.createObjectURL(hit.blob))
         revalidate(rawUrl, hit.etag)
@@ -65,8 +96,10 @@ async function loadMedia(rawUrl) {
       // Web 同源下前缀为空串，Electron 里必须是后端绝对地址（file:// 解析相对路径必挂）
       const { blob, etag } = await fetchBlobMeta(rawUrl, { baseURL: mediaBaseURL() })
       objectUrls.set(rawUrl, URL.createObjectURL(blob))
-      // 写缓存失败（配额满等）不影响展示，只丢一次优化机会
-      mediaCachePut(rawUrl, blob, etag).catch(() => undefined)
+      // 写缓存失败（配额满等）不影响展示，只丢一次优化机会；闪照不落盘
+      if (!noStore) {
+        mediaCachePut(rawUrl, blob, etag).catch(() => undefined)
+      }
     } catch {
       // 失败不写缓存，下次渲染还会重试；错误提示已由 fetchBlobMeta 内部的登录态判断处理，
       // 这里再弹一次会在列表页刷出一屏重复的「文件获取失败」

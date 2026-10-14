@@ -24,6 +24,7 @@ import com.im.common.enums.MsgType;
 import com.im.common.enums.WsMessageType;
 import com.im.common.exception.BusinessException;
 import com.im.common.spi.ConversationSpi;
+import com.im.common.spi.FileStorageSpi;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.GroupSpi;
 import com.im.common.spi.PushSpi;
@@ -116,6 +117,8 @@ public class MessageServiceImpl implements MessageService {
     private final ObjectProvider<GroupSpi> groupSpiProvider;
     private final ObjectProvider<FriendRelationSpi> friendSpiProvider;
     private final ObjectProvider<PushSpi> pushSpiProvider;
+    /** 闪照销毁原图用；im-file 未装配时只标记已查看、不拦下载（单模块启动的开发形态） */
+    private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
 
     /** 消息类型到内容处理器的路由表，启动时一次性摊平 */
     private final Map<MsgType, MessageContentHandler> handlerRegistry = new EnumMap<>(MsgType.class);
@@ -718,6 +721,35 @@ public class MessageServiceImpl implements MessageService {
         afterCommit(() -> pushRecall(message.getConversationId(), messageId, operatorId, summary));
     }
 
+    @Override
+    public MessageVO flashView(Long userId, Long messageId) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwIf(message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        MessageExtra extra = message.getExtra();
+        BusinessException.throwIf(extra == null || !Boolean.TRUE.equals(extra.getFlash()),
+                ResultCode.BAD_REQUEST, "该消息不是闪照");
+        if (!Boolean.TRUE.equals(extra.getFlashViewed())) {
+            extra.setFlashViewed(Boolean.TRUE);
+            // 只补写 extra 一列：新建空实体带上 id + extra，updateById 生成的 SET 子句不会碰其他列；
+            // 不用「谁查看谁销毁」的细粒度状态：闪照语义就是一次性广播，任何人看过即全员销毁
+            Message patch = new Message();
+            patch.setId(message.getId());
+            patch.setExtra(extra);
+            messageMapper.updateById(patch);
+            FileStorageSpi fileSpi = fileStorageSpiProvider.getIfAvailable();
+            if (fileSpi != null && extra.getFileId() != null) {
+                // 销毁原图记录：此后所有成员的下载请求都变成「文件不存在」，直链 URL 也拿不到字节
+                fileSpi.destroyById(extra.getFileId());
+            }
+            log.info("[闪照] 首次查看已销毁: messageId={}, viewer={}", messageId, userId);
+        }
+        UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
+        return MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
+    }
+
     /**
      * 撤回权限：本人 &gt; 群主 / 管理员 &gt; 持有全局撤回权限者。
      *
@@ -1042,6 +1074,11 @@ public class MessageServiceImpl implements MessageService {
         // 转发者必须是原会话成员，否则任何人都能通过猜 messageId 把别人会话里的文件广播出去
         BusinessException.throwUnless(conversationSpi.isMember(origin.getConversationId(), userId),
                 ResultCode.MESSAGE_FORWARD_FORBIDDEN);
+        // 闪照不可转发：原图可能已销毁，转发只会收到指向空气的消息；
+        // 即使未销毁，转发也会绕开「首次查看即销毁」的一次性语义
+        BusinessException.throwIf(origin.getExtra() != null
+                        && Boolean.TRUE.equals(origin.getExtra().getFlash()),
+                ResultCode.BAD_REQUEST, "闪照不支持转发");
 
         String clientMsgId = TextUtil.isNotBlank(request.getClientMsgId())
                 ? request.getClientMsgId().trim()

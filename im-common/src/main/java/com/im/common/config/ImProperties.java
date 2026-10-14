@@ -5,7 +5,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.util.unit.DataSize;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 项目自定义配置，统一挂载在 {@code im.*} 前缀下。
@@ -25,6 +27,8 @@ public class ImProperties {
     private RateLimiting rateLimit = new RateLimiting();
     private Cache cache = new Cache();
     private Log log = new Log();
+    private Moderation moderation = new Moderation();
+    private Call call = new Call();
 
     @Data
     public static class Jwt {
@@ -271,6 +275,99 @@ public class ImProperties {
         private long l2TtlSeconds = 1800;
         /** 空值哨兵在 L2 的过期秒数：防缓存穿透，又不至于让新建数据长期隐身 */
         private long nullTtlSeconds = 60;
+    }
+
+    /**
+     * 图片内容审核（鉴黄）策略。
+     *
+     * <p>推理跑在发送端浏览器里，两个模型两套运行时：色情用 nsfwjs + TensorFlow.js
+     * （模型权重内置在 npm 包里，随前端构建产物离线分发）；血腥 / 暴力用独立的一份 ONNX
+     * 加 onnxruntime-web（见下）。服务端只做两件事：把阈值下发给客户端、接收命中上报
+     * 并落审计通道。之所以不在服务端跑模型：内网部署无外网出口，模型文件与推理运行时
+     * 都得随包落地，而同一份 MobileNetV2 权重在前端 WebGL 上单张只要几十毫秒，
+     * 没有把它搬到服务端的收益。
+     *
+     * <p>代价必须知道：客户端的判定它可以绕过（改前端代码或直接调上传接口），
+     * 这套闸门拦的是「正常使用路径下的违规内容」，不是对抗性防御。
+     * 要升级成真防线，得在服务端补一条同样的推理链路（阈值与上报口径可以原样复用）。
+     */
+    @Data
+    public static class Moderation {
+        /** 总开关：关掉后策略接口回 enabled=false，前端整个识别环节直接跳过 */
+        private boolean enabled = true;
+        /** 命中后是否让客户端上报审计；关掉只拦不记，审计通道不再写条目 */
+        private boolean auditEnabled = true;
+        /**
+         * 判违规的类别与阈值：类别名 → 概率（0~1），任一类别命中即拒发。
+         *
+         * <p>key 与前端模型的输出同名，本服务只原样下发、不校类别名：
+         * nsfwjs 输出 Drawing / Hentai / Neutral / Porn / Sexy，
+         * 血腥 / 暴力那个 ONNX 模型只输出 NonViolent / Violent。
+         * 匹配在 im-ui/src/utils/nsfw.js 里做（忽略大小写），
+         * 没写进这个 Map 的类别一律不参与判定——默认不放 Sexy 是因为它在泳装、健身照上
+         * 误报严重，把它加进来会拦掉大量正常图片。
+         *
+         * <p>Drawing（二次元色情插画）与 Hentai 是模型独立输出的一类，
+         * 只写实照片的人可以只保留 Porn。
+         *
+         * <p>加一行 {@code Violent: 0.75} 就会激活血腥 / 暴力检测（推理运行时随前端构建产物
+         * 发出，不必单独配），但那个模型本体约 83MB 不入库，得运维先把它投放到
+         * im-ui/public/models/violence/model.onnx；没投放时前端首次加载 404 会直接停用该检测器
+         * （色情检测不受影响）。投放步骤与阈值起点理由见 md/图片内容审核接入指南.md。
+         */
+        private Map<String, Double> thresholds = new LinkedHashMap<>(Map.of("Porn", 0.80, "Hentai", 0.80));
+        /** 上报里允许携带的评分条目数，防御性上限：超出的部分直接丢弃不入库 */
+        private int maxScoreEntries = 16;
+        /** 上报里文件名与场景等字符串字段的最大长度 */
+        private int maxTextLength = 120;
+    }
+
+    /**
+     * 音视频通话（一对一 WebRTC）。
+     *
+     * <p>媒体面走浏览器 / Electron 原生 WebRTC，服务端不参与媒体转发，只下发 ICE 服务器清单与
+     * 转发信令（信令复用已认证的 WebSocket 长连接，见 im-websocket 的 CallSignalingService）。
+     *
+     * <p>内网部署下 {@link #stunUrls} 留空即可：两端同处一个局域网时，ICE 的 host 候选地址直接
+     * 命中，媒体流点对点走局域网，既不经过服务器也不消耗服务器出口带宽。只有需要跨 NAT / 公网
+     * 互通时才配自建 STUN，对称 NAT 还得配 {@link Turn}（coturn）。
+     */
+    @Data
+    public static class Call {
+        /** 总开关：关掉后 /api/call/config 回 enabled=false，前端通话入口整体禁用 */
+        private boolean enabled = true;
+        /**
+         * STUN 服务器清单（形如 {@code stun:ip:3478}）；留空表示只做局域网直连，不探测公网映射地址。
+         * 默认空列表是刻意的：本项目定位内网 / 离线，不能默认指向任何外部公网 STUN。
+         */
+        private List<String> stunUrls = List.of();
+        /** TURN 中继：跨公网且对称 NAT 打不通时的兜底，默认关闭 */
+        private Turn turn = new Turn();
+        /** 振铃超时（秒）：被叫在此时长内未接听，服务端主动下发 timeout 并结束 */
+        private int ringTimeoutSeconds = 45;
+        /** 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底 */
+        private int maxDurationSeconds = 3600;
+        /**
+         * 通话录制产物上传的大小上限，默认 200MB。
+         * 桌面端读回本地录像文件时按此裁剪，超限即拒传（{@code CALL_RECORD_TOO_LARGE}），
+         * 避免一场超长通话的录像把渲染进程整块读进内存。
+         */
+        private DataSize recordMaxSize = DataSize.ofMegabytes(200);
+
+        @Data
+        public static class Turn {
+            private boolean enabled = false;
+            /** TURN 服务器清单（形如 {@code turn:host:3478?transport=udp}） */
+            private List<String> urls = List.of();
+            /**
+             * coturn REST 长效凭据密钥（realm 需与此 secret 配套）。
+             * 服务端按 {@code 过期时间戳:userId} 生成 username、用本密钥做 HMAC-SHA1 生成临时 credential，
+             * 与 coturn 的 {@code use-auth-secret} 一致。为空则不下发 TURN。
+             */
+            private String secret = "";
+            /** 临时凭据有效期（秒），默认 24 小时 */
+            private long ttlSeconds = 86400;
+        }
     }
 
     /**

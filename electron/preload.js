@@ -106,6 +106,8 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
     /** params: {meta, auditEvents, reason} → {filePath, size, durationMs, sidecar}；无进行中的录制时为 null */
     stop: (params) => call('im:record-stop', params),
     state: () => call('im:record-state', null),
+    /** 读回落盘录制文件 → {filePath, size, contentType, data:ArrayBuffer}；超 maxBytes 主进程报错 */
+    read: (filePath, maxBytes) => call('im:record-read', { filePath, maxBytes }),
     /** 在资源管理器里定位录像文件；只给 dir 则打开目录本身 */
     openDir: (filePath, dir) => call('im:record-open-dir', { filePath, dir })
   }

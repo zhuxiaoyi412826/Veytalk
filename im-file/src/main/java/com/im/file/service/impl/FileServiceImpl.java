@@ -324,9 +324,10 @@ public class FileServiceImpl implements FileService {
         if (userId.equals(file.getUploaderId())) {
             return true;
         }
-        // 头像是公开资料：会话列表、群成员列表、资料卡都要渲染别人的头像，
-        // 逐个校验会话关系既做不到也没意义
-        if (FileBizType.AVATAR.getCode().equals(file.getBizType())) {
+        // 头像与视频板块的视频/封面是公开资源：会话列表、群成员列表、资料卡、短视频信息流卡片
+        // 都要渲染别人上传的内容，逐个校验会话关系既做不到也没意义
+        FileBizType bizType = FileBizType.of(file.getBizType());
+        if (bizType != null && bizType.isPublic()) {
             return true;
         }
         MessageSpi messageSpi = messageSpiProvider.getIfAvailable();
@@ -378,6 +379,22 @@ public class FileServiceImpl implements FileService {
     @Override
     public InputStream openStream(FileEntity file) {
         return storageOf(file).download(file.getObjectKey());
+    }
+
+    @Override
+    public void destroy(Long fileId) {
+        if (fileId == null) {
+            return;
+        }
+        FileEntity file = fileMapper.selectById(fileId);
+        if (file == null) {
+            // 幂等：已销毁（逻辑删后 selectById 过滤）再调一次不报错，交给调用方自行判断首次与否
+            return;
+        }
+        // 只逻辑删记录：im_file 继承 BaseEntity 带 @TableLogic deleted，deleteById 即置 deleted=1，
+        // 此后 requireAccessible / download 都取不到它。刻意不删存储字节（秒传共享 objectKey）
+        fileMapper.deleteById(fileId);
+        log.info("[文件] 销毁记录: fileId={}, uploader={}", fileId, file.getUploaderId());
     }
 
     /**

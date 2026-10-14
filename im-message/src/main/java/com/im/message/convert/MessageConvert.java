@@ -2,6 +2,7 @@ package com.im.message.convert;
 
 import com.im.common.constant.ImConstants;
 import com.im.common.domain.MessageDTO;
+import com.im.common.domain.MessageExtra;
 import com.im.common.domain.QuotePreview;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.enums.MessageStatus;
@@ -179,14 +180,40 @@ public final class MessageConvert {
         }
         MsgType type = MsgType.of(entity.getMsgType());
         return switch (type) {
-            case IMAGE -> "[图片]";
+            // 闪照在会话列表/推送摘要里要和普通图片区分开，否则接收方不知道点开会阅后即焚
+            case IMAGE -> entity.getExtra() != null && Boolean.TRUE.equals(entity.getExtra().getFlash())
+                    ? "[闪照]" : "[图片]";
             case VOICE -> "[语音]";
             case FILE -> {
                 String fileName = entity.getExtra() == null ? null : entity.getExtra().getFileName();
                 yield TextUtil.isBlank(fileName) ? "[文件]" : "[文件] " + fileName;
             }
             case TEXT, SYSTEM -> TextUtil.isBlank(entity.getContent()) ? "[" + type.getDesc() + "]" : entity.getContent();
+            // 通话记录：content 是录制文件 ID（可空），不能直出，给类型占位并附时长
+            case CALL -> callSummary(entity);
         };
+    }
+
+    /**
+     * 通话记录摘要：优先按媒体类型给占位（语音/视频通话），有录制文件时附时长。
+     */
+    private static String callSummary(Message entity) {
+        MessageExtra extra = entity.getExtra();
+        String base = (extra != null && "video".equals(extra.getCallMediaType())) ? "[视频通话]" : "[语音通话]";
+        if (extra == null || extra.getDuration() == null || extra.getDuration() <= 0) {
+            return base;
+        }
+        return base + " " + formatDuration(extra.getDuration());
+    }
+
+    /** 秒转 mm:ss，超过一小时补时位 */
+    private static String formatDuration(int seconds) {
+        int h = seconds / 3600;
+        int m = (seconds % 3600) / 60;
+        int s = seconds % 60;
+        return h > 0
+                ? String.format("%d:%02d:%02d", h, m, s)
+                : String.format("%02d:%02d", m, s);
     }
 
     /**
