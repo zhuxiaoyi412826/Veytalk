@@ -186,6 +186,7 @@ npm run dev
 - **AI 面试官**：左侧「面试」入口 → Java 全栈面试，本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式、循序渐进按轮追问、面试会话审计（见「十三」）。
 - **好友备注**：改其他用户在自己这里的显示名，留空即清除、回退对方昵称（`PUT /api/friend/{friendId}/remark`）。
 - **图片内容闸门三件套**：图内文字 OCR 敏感词（tesseract.js 全离线识别、服务端遮蔽后存 `extra.ocrText`）、**色情 NSFW 识别**（nsfwjs + TensorFlow.js 本机推理，命中即拒发 + 审计留痕，聊天图 / 头像 / 直播封面同源同闸）、**闪照 + 马赛克**（阅后即焚 + 纯前端打码）。
+  - **闪照语义：每人各看一次、互不影响**（仅单聊）：`im_message.extra.flashViewedBy` 存已消费查看的用户名单，`flashViewed` 是下发前按查看者现算的瞬态位（名单含自己即已销毁），**发送端自己看一眼不会吃掉接收端那一次**；只有会话**全员**都看过才触发销毁。销毁 = `im_file` 记录**逻辑删**（`@TableLogic` 置 `deleted=1`，应用层 `download` / 直链均取不到字节），**不物理删存储字节**（秒传共享 `objectKey`，删字节会误伤他人同内容文件），无 DDL。需重启后端生效。
 - **血腥 / 暴力图像识别（默认关）**：色情那五类里根本没这两类，所以另接了一个 ViT-Base 的 int8 ONNX 模型走 `onnxruntime-web`（`im-ui/src/utils/violence.js`），`nsfw.js` 升级为**多模型编排层**（按阈值激活、命中早退、单模型挂不拖另一路）；后端零改动、零 DDL，只要 `im.moderation.thresholds` 里出现 `Violent` 就激活。
 - **一对一语音视频通话 + 桌面端录屏留存**：**原生 WebRTC**（不依赖 TRTC 等外部 RTC SDK），信令走已认证的用户 WebSocket 长连接（服务端只校验关系 + 转发 + 维护 Redis 会话态），媒体内网点对点直连不经服务器、跨公网自建 STUN/coturn TURN。通话记录复用 `im_message`（`MsgType.CALL`）、录音文件复用 `im_file`（`call_record`），**零新表零新依赖**；桌面端合成上下行音视频落盘 + 上传留存 + 气泡回放（Web 端通话可用但不落盘）。详见 [`md/语音视频通话接入指南.md`](md/语音视频通话接入指南.md)。
 
@@ -233,7 +234,7 @@ npm run dev
 
 - **国际化 i18n / 深色模式 / 无障碍 a11y**（现界面为中文硬编码）。
 - **AI 未读摘要 / 智能回复建议 / AI 客服机器人**（可复用现有 DashScope 接入）。
-- **直播连麦 / PK**（依赖 TRTC）、**礼物打赏**（依赖钱包）、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
+- **直播连麦 + 礼物打赏**（已完成：连麦走主播↔嘉宾 1:1 WebRTC P2P + 主播端 Canvas 合成 / WebAudio 混音→WebM 分片→观众 MSE 播放；礼物走新建虚拟积分钱包，充值为模拟支付桩）。待办：**PK（热度对比/投票，下一轮）**、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
 
 ---
 
@@ -876,6 +877,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | DELETE | `/clear/{conversationId}` | 清空会话记录（仅当前用户） |
 | PUT | `/read` | 已读上报（写回执 + 清未读，单次 ≤ 500） |
 | POST | `/delivered` | 送达上报（点亮单勾，单次 ≤ 200） |
+| POST | `/{id}/flash-view` | 查看闪照（每人各看一次；全员消费后逻辑删原图记录，同一用户幂等） |
 | POST | `/forward` | 转发消息到目标会话（附件复用原文件） |
 | GET · PUT | `/sensitive-filter` | 敏感词过滤状态查询 / 开关 |
 
@@ -956,6 +958,22 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | GET | `/{roomId}` | 房间详情（签名播放地址 + 弹幕端点，进房现取现用） |
 | GET | `/page` | 房间分页（直播中恒排最前，其次开播时间倒序） |
 | GET | `/mine` | 我的直播（最近一场，用于恢复现场） |
+| POST | `/{roomId}/gift` | 送礼（`{giftId,count}`，经 WalletSpi 原子扣款 + 飘屏广播，`@RateLimit` 防刷） |
+| POST | `/{roomId}/linkmic/request` | 观众申请上麦（返回 callId，主播侧收到 linkmic 请求信令） |
+| POST | `/linkmic/{callId}/respond` | 主播应答上麦申请（accept/reject） |
+| POST | `/linkmic/{callId}/stop` | 结束一次连麦（嘉宾下麦 / 主播下麦） |
+| GET | `/{roomId}/linkmic` | 当前在麦嘉宾列表 |
+| GET | `/{roomId}/linkmic/config` | 连麦配置（`enabled` / `maxSlots` / `iceServers`） |
+
+> 连麦协商信令走主 `/ws` 长连接（`linkmic` / `linkmic-signal`，子类型 `linkAction`：request/accept/reject/offer/answer/ice/leave）；礼物飘屏与连麦上下麦事件走 `/ws/live` 广播。
+
+### 钱包 `/api/wallet` —— 需登录
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/` | 我的钱包（余额 + 礼物目录，供礼簿渲染） |
+| POST | `/recharge` | 充值（`{amount}`；本轮走模拟支付桩 `MockPaymentSpi`，接真实支付以 `@Primary` 覆盖） |
+| POST | `/checkin` | 每日签到（按 `sign_last_date` 去重，赠固定积分） |
 
 > 弹幕走独立 WS `/ws/live`（见「十、协议」）。
 
@@ -1019,6 +1037,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | | `message` | 新消息推送 |
 | | `delivered-notify` / `read-notify` | 把送达/已读状态推回发送方 |
 | | `recall-notify` | 撤回通知 |
+| | `flash-notify` | 闪照已销毁通知（`{messageId, conversationId, viewerId}`，前端只标 viewerId 本人的设备） |
 | | `notify` | 系统/业务通知（好友申请、入群等） |
 | | `kickout` | 多端登录被顶下线 |
 | | `online-state` | 好友在线状态变更 |
@@ -1439,7 +1458,11 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 | `GET /api/live/{roomId}` | 房间详情（含签名播放地址，仅直播中），进房现取现用 |
 | `GET /api/live/page` | 房间分页：直播中恒排最前；**已结束且关播超阈值（默认 60 分钟）的房间不返回** |
 | `GET /api/live/mine` | 我的最近一场（直播中优先），供开播面板恢复现场 |
-| `WS /ws/live` | 弹幕 / 点赞 / 在线人数通道 |
+| `POST /api/live/{roomId}/gift` | 送礼：经 WalletSpi 原子扣款→写送礼流水→事务后广播飘屏帧 |
+| `POST /api/live/{roomId}/linkmic/request` | 观众申请上麦（返回 callId） |
+| `POST /api/live/linkmic/{callId}/respond` / `…/stop` | 主播应答 / 结束一次连麦 |
+| `GET /api/live/{roomId}/linkmic` / `…/config` | 在麦嘉宾列表 / 连麦配置（enabled/maxSlots/iceServers） |
+| `WS /ws/live` | 弹幕 / 点赞 / 在线人数 / 礼物飘屏（`gift`）/ 连麦上下麦（`linkmic`）通道 |
 
 **播放地址签名**：`md5(path + expire + secret)`，与 Nginx `secure_link_md5 "$uri$arg_expire$secret"` 逐字对应；streamKey 是能力凭证（每场随机、关播作废），绝不出现在任何列表接口里。
 

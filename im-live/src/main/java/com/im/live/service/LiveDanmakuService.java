@@ -64,6 +64,10 @@ public class LiveDanmakuService {
     public static final String TYPE_PONG = "pong";
     /** 服务端 → 客户端：错误提示（限流、内容过长），不关连接 */
     public static final String TYPE_ERROR = "error";
+    /** 服务端 → 客户端：有人送礼，前端据此渲染飘屏与收礼榜 */
+    public static final String TYPE_GIFT = "gift";
+    /** 服务端 → 客户端：连麦态变更（有嘉宾上麦/全部下麦），观众据此在 HLS 与 MSE/WebM 播放器间切换 */
+    public static final String TYPE_LINKMIC = "linkmic";
 
     private final RedisUtil redisUtil;
     private final LiveProperties properties;
@@ -223,6 +227,29 @@ public class LiveDanmakuService {
     }
 
     /**
+     * 送礼飘屏广播：把一笔成功落库的送礼事件推给房间内在线的人。
+     *
+     * <p>与弹幕一样是「可丢弃」的临时帧：送礼的业务事实已经落 {@code im_gift_record}，
+     * 这一帧只负责让当下在线的人看到特效，掉线/后进房的人靠礼物面板与历史记录补齐，不补发。
+     */
+    public void broadcastGift(Long roomId, Long giftId, String giftName, String giftIcon, String kind,
+                              int count, long totalPrice, Long senderId, String senderName, String senderAvatar,
+                              Long receiverId) {
+        Map<String, Object> frame = frame(TYPE_GIFT, "giftId", giftId);
+        frame.put("giftName", giftName);
+        frame.put("giftIcon", giftIcon);
+        frame.put("kind", kind);
+        frame.put("count", count);
+        frame.put("totalPrice", totalPrice);
+        frame.put("senderId", senderId);
+        frame.put("senderName", senderName);
+        frame.put("senderAvatar", senderAvatar);
+        frame.put("receiverId", receiverId);
+        frame.put("ts", System.currentTimeMillis());
+        broadcast(roomId, frame);
+    }
+
+    /**
      * 点赞：先攒着，由巡检任务每 2 秒合并成一条广播。
      *
      * <p>百人房间同时点赞时逐条广播会把 WS 打满，而观众其实只关心「数字在涨」；
@@ -266,6 +293,40 @@ public class LiveDanmakuService {
     public int localSessions(Long roomId) {
         Set<WebSocketSession> sessions = rooms.get(roomId);
         return sessions == null ? 0 : sessions.size();
+    }
+
+    /**
+     * 该用户当前是否连着本房间的弹幕通道（是本场活跃观众）。
+     *
+     * <p>供连麦信令（{@code LiveRoomSpi}）把「必须好友」放宽为「被邀者是本场观众」：只有此刻在房间里的人
+     * 才有资格申请上麦。按 session 属性里的 userId 匹配——一个用户多端进房会有多条连接，命中任一即算在房。
+     */
+    public boolean hasUser(Long roomId, Long userId) {
+        if (userId == null) {
+            return false;
+        }
+        Set<WebSocketSession> sessions = rooms.get(roomId);
+        if (sessions == null || sessions.isEmpty()) {
+            return false;
+        }
+        for (WebSocketSession session : sessions) {
+            Object bound = session.getAttributes().get(com.im.live.ws.LiveHandshakeInterceptor.ATTR_USER_ID);
+            if (userId.equals(bound)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 连麦态变更广播：有嘉宾上麦（{@code active=true}，主播端合成流生效）或全部下麦（{@code false}）时推一帧。
+     *
+     * <p>与送礼一样是可丢弃的临时帧：观众当前在麦与否只影响此刻用哪路播放器，进房的人靠 REST 在麦列表补齐初始态。
+     */
+    public void broadcastLinkmic(Long roomId, boolean active) {
+        Map<String, Object> frame = frame(TYPE_LINKMIC, "active", active);
+        frame.put("ts", System.currentTimeMillis());
+        broadcast(roomId, frame);
     }
 
     /**

@@ -5,12 +5,17 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
+import com.im.common.domain.PageQuery;
 import com.im.common.sensitive.SensitiveWordFilter;
 import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.message.dto.req.ForwardMessageRequest;
+import com.im.message.dto.req.EditMessageRequest;
+import com.im.message.dto.req.EssenceRequest;
 import com.im.message.dto.req.MessageIdsRequest;
 import com.im.message.dto.req.MessageSearchQuery;
+import com.im.message.dto.req.ReactionRequest;
+import com.im.message.dto.req.VoteRequest;
 import com.im.message.dto.req.ReadReportRequest;
 import com.im.message.dto.req.SendMessageRequest;
 import com.im.message.dto.vo.MessageVO;
@@ -98,6 +103,16 @@ public class MessageController {
         return Result.ok(messageService.history(userId, conversationId, beforeSeq, size == null ? 0 : size));
     }
 
+    @Operation(summary = "导出完整聊天记录",
+            description = "一次性返回当前用户在指定会话的全部消息（服务端权威数据，非本地缓存），按 seq 正序，已排除本人单端删除的消息；"
+                    + "仅会话成员可导，单次上限 20000 条，供前端拼装为 JSON/CSV 下载与合规备份/迁移")
+    @GetMapping("/export")
+    @RateLimit(count = 20, dimension = RateLimit.Dimension.USER, key = "message.export")
+    public Result<List<MessageVO>> exportConversation(
+            @Parameter(description = "会话 ID") @RequestParam("conversationId") Long conversationId) {
+        return Result.ok(messageService.exportConversation(SecurityUtil.getUserId(), conversationId));
+    }
+
     @Operation(summary = "离线消息",
             description = "返回上次确认位点之后的全部消息，按会话与 seq 升序，单次最多 500 条；"
                     + "拉取后自动推进位点，但不清未读数——未读要等用户真正打开会话才消失")
@@ -132,6 +147,92 @@ public class MessageController {
         return Result.ok(null, "消息已撤回");
     }
 
+    @Operation(summary = "编辑消息",
+            description = "仅发送者本人、时限内（复用 im.message.recall-limit-seconds）且未撤回的文本消息可编辑；"
+                    + "新正文重新过 XSS 清洗与敏感词遮蔽，就地改写并在 extra 打 edited 标记，新正文实时推给会话全员")
+    @PutMapping("/{id}/edit")
+    public Result<MessageVO> edit(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                  @RequestBody @Valid EditMessageRequest request) {
+        return Result.ok(messageService.edit(SecurityUtil.getUserId(), id, request.getContent()));
+    }
+
+    @Operation(summary = "语音转文字",
+            description = "对一条未撤回的语音消息调用外部 ASR 服务转写为文本（仅展示不落库，仅会话成员可用）；"
+                    + "未接入 ASR 厂商时优雅降级为『语音转文字服务未配置或暂不可用』")
+    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.to-text")
+    @PostMapping("/{id}/to-text")
+    public Result<String> toText(@Parameter(description = "消息 ID") @PathVariable("id") Long id) {
+        return Result.ok(messageService.toText(SecurityUtil.getUserId(), id));
+    }
+
+    @Operation(summary = "消息翻译",
+            description = "对一条未撤回的文本消息调用外部翻译服务译为目标语言（仅展示不改写原消息，仅会话成员可用）；"
+                    + "lang 为空时取配置默认目标语言；未接入翻译厂商时优雅降级为『消息翻译服务未配置或暂不可用』")
+    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.translate")
+    @PostMapping("/{id}/translate")
+    public Result<String> translate(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                    @Parameter(description = "目标语言代码，如 en-US/ja-JP，为空取默认")
+                                    @RequestParam(value = "lang", required = false) String lang) {
+        return Result.ok(messageService.translate(SecurityUtil.getUserId(), id, lang));
+    }
+
+    @Operation(summary = "表情回应",
+            description = "对一条消息贴 / 取消一个表情（所有消息类型适用，已撤回不可）；一人对一条消息的同一表情只计一次，重复添加幂等")
+    @RateLimit(count = 120, dimension = RateLimit.Dimension.USER, key = "message.reaction")
+    @PostMapping("/{id}/reaction")
+    public Result<MessageVO> react(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                   @RequestBody @Valid ReactionRequest request) {
+        return Result.ok(messageService.react(SecurityUtil.getUserId(), id,
+                request.getEmoji(), Boolean.TRUE.equals(request.getRemove())));
+    }
+
+    @Operation(summary = "投票",
+            description = "对一条投票消息选择若干选项（整体替换旧票，空集合表示撤回本人投票）；close=true 由发起人截止")
+    @RateLimit(count = 120, dimension = RateLimit.Dimension.USER, key = "message.vote")
+    @PostMapping("/{id}/vote")
+    public Result<MessageVO> vote(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                  @RequestBody @Valid VoteRequest request) {
+        return Result.ok(messageService.vote(SecurityUtil.getUserId(), id,
+                request.getOptions(), Boolean.TRUE.equals(request.getClose())));
+    }
+
+    @Operation(summary = "群文件 / 群相册",
+            description = "按群会话 + 消息类型分页取沉淀的附件消息：msgType=2 为群相册（图片）、3 为群文件；仅群成员可查，按发送时间倒序")
+    @GetMapping("/group-media")
+    public Result<PageResult<MessageVO>> groupMedia(
+            @Parameter(description = "群会话 ID") @RequestParam("conversationId") Long conversationId,
+            @Parameter(description = "消息类型：2 图片（群相册）/ 3 文件（群文件）") @RequestParam("msgType") Integer msgType,
+            @Parameter(description = "页码，从 1 开始") @RequestParam(value = "current", defaultValue = "1") Long current,
+            @Parameter(description = "每页条数，最大 100") @RequestParam(value = "size", defaultValue = "20") Long size) {
+        PageQuery query = new PageQuery();
+        query.setCurrent(current);
+        query.setSize(size);
+        return Result.ok(messageService.pageConversationMedia(SecurityUtil.getUserId(), conversationId, msgType, query));
+    }
+
+    @Operation(summary = "群精华消息列表",
+            description = "按群会话分页取被群主/管理员标为精华的消息，按标记时间倒序；仅群成员可查")
+    @GetMapping("/group-essence")
+    public Result<PageResult<MessageVO>> groupEssence(
+            @Parameter(description = "群会话 ID") @RequestParam("conversationId") Long conversationId,
+            @Parameter(description = "页码，从 1 开始") @RequestParam(value = "current", defaultValue = "1") Long current,
+            @Parameter(description = "每页条数，最大 100") @RequestParam(value = "size", defaultValue = "20") Long size) {
+        PageQuery query = new PageQuery();
+        query.setCurrent(current);
+        query.setSize(size);
+        return Result.ok(messageService.pageEssence(SecurityUtil.getUserId(), conversationId, query));
+    }
+
+    @Operation(summary = "标记 / 取消精华消息",
+            description = "仅群聊会话、仅群主与管理员可操作；essence=true 设为精华（幂等）、false 取消；变更后推 essence-notify 给群成员")
+    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.essence")
+    @PutMapping("/{id}/essence")
+    public Result<MessageVO> markEssence(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                         @RequestBody @Valid EssenceRequest request) {
+        return Result.ok(messageService.markEssence(SecurityUtil.getUserId(), id,
+                Boolean.TRUE.equals(request.getEssence())));
+    }
+
     @Operation(summary = "删除消息",
             description = "只对当前用户不可见，其他成员照常看到，与撤回是两件事；删除没有时间限制")
     @DeleteMapping("/{id}")
@@ -141,8 +242,9 @@ public class MessageController {
     }
 
     @Operation(summary = "查看闪照",
-            description = "打开预览前上报；首次查看即销毁：服务端标记 flashViewed 并逻辑删原图记录，"
-                    + "此后所有成员（含发送者）都无法再取回图片字节；重复调用幂等")
+            description = "打开预览前上报。采用「每人各看一次、互不影响」语义：把当前用户计入 flashViewedBy 名单，"
+                    + "仅当会话全员都已消费才逻辑删原图记录（字节因秒传共享 objectKey 不物理删，但应用层再不可访问）；"
+                    + "同一用户重复调用幂等，不会吃掉其他成员的查看机会")
     @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.flash-view")
     @PostMapping("/{id}/flash-view")
     public Result<MessageVO> flashView(@Parameter(description = "消息 ID") @PathVariable("id") Long id) {

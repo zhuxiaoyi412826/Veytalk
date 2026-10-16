@@ -80,6 +80,15 @@ public class GroupVO implements Serializable {
     @Schema(description = "群聊会话 ID，用于前端直接跳转聊天窗口")
     private Long conversationId;
 
+    @Schema(description = "入群是否需要审批")
+    private Boolean joinApproval;
+
+    @Schema(description = "群邀请码（邀请链接 / 二维码的载荷）；仅对群主与管理员可见，其他角色为空。未生成过时也为空，前端需要时调 /invite-code 懒生成")
+    private String inviteCode;
+
+    @Schema(description = "本群当前待审批的入群申请数；仅对管理层可见，方便前端直接画红点")
+    private Long pendingJoinCount;
+
     @Schema(description = "建群时间")
     private LocalDateTime createTime;
 }

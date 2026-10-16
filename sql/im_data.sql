@@ -56,6 +56,10 @@ DELETE FROM `im_interview_event`     WHERE `id` BETWEEN 9300 AND 9399;
 DELETE FROM `im_interview_message`   WHERE `id` BETWEEN 3300 AND 3399;
 DELETE FROM `im_interview_session`   WHERE `id` BETWEEN 2300 AND 2399;
 
+-- 礼物目录（5000~5999）与演示钱包（user_id<10000）。运行期送礼流水/钱包账本为雪花 ID不在此段，不受影响。
+DELETE FROM `im_gift`                WHERE `id` BETWEEN 5000 AND 5999;
+DELETE FROM `im_user_wallet`         WHERE `user_id` < 10000;
+
 -- -------------------------------------------------------------------------------------
 -- 1. 角色
 -- -------------------------------------------------------------------------------------
@@ -290,4 +294,24 @@ WHERE `event_type` = 'turn-submit'
 UPDATE `im_interview_event`
 SET `update_time` = `create_time`
 WHERE `id` BETWEEN 9300 AND 9399;
+
+-- -------------------------------------------------------------------------------------
+-- 10. 礼物目录与演示钱包（直播连麦/礼物，D 组第二项）
+--     礼物不涉真实货币；钱包余额=积分。运行期真实用户首次访问钱包时由服务端自动建 0 余额行。
+-- -------------------------------------------------------------------------------------
+INSERT INTO `im_gift` (`id`, `name`, `icon`, `price`, `kind`, `sort`, `status`)
+VALUES (5001, '小心心', '❤️', 1, 'normal', 1, 1),
+       (5002, '棒棒糖', '🍭', 10, 'normal', 2, 1),
+       (5003, '大啤酒', '🍺', 52, 'normal', 3, 1),
+       (5004, '加油鸭', '🦆', 66, 'normal', 4, 1),
+       (5005, '玫瑰花', '🌹', 99, 'normal', 5, 1),
+       (5006, '烟花', '🎆', 520, 'effect', 6, 1),
+       (5007, '火箭', '🚀', 1314, 'effect', 7, 1),
+       (5008, '星球', '🪐', 5200, 'effect', 8, 1);
+
+-- alice/bob 各 1000 积分便于体验送礼；admin(id=1) 10000。
+INSERT INTO `im_user_wallet` (`user_id`, `balance`, `total_recharged`)
+VALUES (1, 10000, 10000),
+       (1001, 1000, 1000),
+       (1002, 1000, 1000);
 

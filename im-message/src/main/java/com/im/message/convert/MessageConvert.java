@@ -44,8 +44,8 @@ public final class MessageConvert {
                 .conversationId(entity.getConversationId())
                 .conversationType(conversationType)
                 .fromUserId(entity.getFromUserId())
-                .fromNickname(nicknameOf(sender, entity.getFromUserId()))
-                .fromAvatar(sender == null ? null : sender.getAvatar())
+                .fromNickname(displayNickname(sender, entity.getFromUserId(), entity.getExtra()))
+                .fromAvatar(displayAvatar(sender, entity.getExtra()))
                 .msgType(entity.getMsgType())
                 // 撤回后不再下发原文：内容已经对所有人生效失效，继续返回等于撤回功能形同虚设
                 .content(recalled ? null : entity.getContent())
@@ -82,12 +82,12 @@ public final class MessageConvert {
                 .clientMsgId(entity.getClientMsgId())
                 .conversationId(entity.getConversationId())
                 .fromUserId(entity.getFromUserId())
-                .fromNickname(nicknameOf(sender, entity.getFromUserId()))
-                .fromAvatar(sender == null ? null : sender.getAvatar())
+                .fromNickname(displayNickname(sender, entity.getFromUserId(), entity.getExtra()))
+                .fromAvatar(displayAvatar(sender, entity.getExtra()))
                 .msgType(entity.getMsgType())
                 .msgTypeDesc(type.getDesc())
                 .content(recalled ? null : entity.getContent())
-                .extra(recalled ? null : entity.getExtra())
+                .extra(recalled ? null : flashForViewer(entity.getExtra(), viewerId))
                 .quote(quote)
                 .seq(entity.getSeq())
                 .status(status.getCode())
@@ -121,7 +121,7 @@ public final class MessageConvert {
                 .msgType(dto.getMsgType())
                 .msgTypeDesc(type.getDesc())
                 .content(dto.getContent())
-                .extra(dto.getExtra())
+                .extra(flashForViewer(dto.getExtra(), viewerId))
                 .quote(dto.getQuote())
                 .seq(dto.getSeq())
                 .status(status.getCode())
@@ -131,6 +131,29 @@ public final class MessageConvert {
                 .self(self)
                 .readCount(0)
                 .build();
+    }
+
+    /**
+     * 按当前查看者换算闪照的销毁态。
+     *
+     * <p>闪照是「每人各看一次」而不是全员广播销毁：实体里只存权威的 {@code flashViewedBy} 名单，
+     * 下发前复制一份只为当前查看者算出他自己的 {@code flashViewed}，不能直接改实体那份共享对象
+     * （否则会把某一个人的已阅状态烤进 extra，坑了其他还没看的人）。
+     * 对已阅的人顺带清空 fileUrl：物理文件可能还要等其他人看完才销毁，但这个人不该再有机会拉原图。
+     */
+    private static MessageExtra flashForViewer(MessageExtra stored, Long viewerId) {
+        if (stored == null || !Boolean.TRUE.equals(stored.getFlash())) {
+            return stored;
+        }
+        boolean viewed = viewerId != null
+                && stored.getFlashViewedBy() != null
+                && stored.getFlashViewedBy().contains(viewerId);
+        MessageExtra copy = stored.toBuilder().build();
+        copy.setFlashViewed(viewed);
+        if (viewed) {
+            copy.setFileUrl(null);
+        }
+        return copy;
     }
 
     /**
@@ -188,9 +211,21 @@ public final class MessageConvert {
                 String fileName = entity.getExtra() == null ? null : entity.getExtra().getFileName();
                 yield TextUtil.isBlank(fileName) ? "[文件]" : "[文件] " + fileName;
             }
-            case TEXT, SYSTEM -> TextUtil.isBlank(entity.getContent()) ? "[" + type.getDesc() + "]" : entity.getContent();
+            case TEXT, SYSTEM, ROBOT -> TextUtil.isBlank(entity.getContent()) ? "[" + type.getDesc() + "]" : entity.getContent();
             // 通话记录：content 是录制文件 ID（可空），不能直出，给类型占位并附时长
             case CALL -> callSummary(entity);
+            // 名片：content 存的是昵称快照，摘要统一加 [名片] 前缀区分普通文本
+            case CARD -> "[名片] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getCardNickname())
+                    ? "联系人" : entity.getExtra().getCardNickname());
+            // 位置：content 存的是文字地址，摘要加 [位置] 前缀
+            case LOCATION -> "[位置] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getLocationName())
+                    ? "地图位置" : entity.getExtra().getLocationName());
+            // 合并转发：content 存的是标题，摘要加 [聊天记录] 前缀
+            case MERGED_FORWARD -> "[聊天记录] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getMergedTitle())
+                    ? "会话记录" : entity.getExtra().getMergedTitle());
+            // 投票：content 存的是标题，摘要加 [投票] 前缀
+            case VOTE -> "[投票] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getVoteTitle())
+                    ? entity.getContent() : entity.getExtra().getVoteTitle());
         };
     }
 
@@ -238,6 +273,29 @@ public final class MessageConvert {
             return sender.getNickname();
         }
         return TextUtil.isNotBlank(sender.getUsername()) ? sender.getUsername() : "用户" + sender.getUserId();
+    }
+
+    /**
+     * 机器人消息的展示昵称：优先用 extra 里的机器人名称快照。
+     *
+     * <p>机器人没有真实用户账号，{@code fromUserId} 查不到资料，{@code sender} 恒为 null；
+     * 名称与头像在发送时已随消息定格进 extra，这里直接取用，接收端无需（也无处）再查库。
+     */
+    private static String displayNickname(UserBriefDTO sender, Long fromUserId, MessageExtra extra) {
+        if (extra != null && TextUtil.isNotBlank(extra.getRobotName())) {
+            return extra.getRobotName();
+        }
+        return nicknameOf(sender, fromUserId);
+    }
+
+    /**
+     * 机器人消息的展示头像：机器人取 extra 快照，其余取发送者资料头像。
+     */
+    private static String displayAvatar(UserBriefDTO sender, MessageExtra extra) {
+        if (extra != null && TextUtil.isNotBlank(extra.getRobotName())) {
+            return extra.getRobotAvatar();
+        }
+        return sender == null ? null : sender.getAvatar();
     }
 
     /**

@@ -60,4 +60,19 @@ public class WsCallPayload implements Serializable {
      * 接收端据此知道「这条 offer/answer/hangup 是对端发来的」。
      */
     private Long fromUserId;
+
+    /**
+     * 连麦所属房间 ID，仅 {@code linkmic} 报文使用（{@code call} 报文为 null）。
+     * 与 {@link #linkAction} 一起把通话信令的形状复用到连麦，服务端按 roomId 查房间态与主播。
+     */
+    private Long roomId;
+
+    /**
+     * 连麦信令子类型：request / accept / reject / offer / answer / ice / leave，仅 {@code linkmic} 使用。
+     *
+     * <p>与 {@link #action}（call 的子类型）分开：两套子类型词表不同，混用一个字段会让 switch 分支
+     * 同时面对 call 与 linkmic 的 action，易漏判。连麦不复用 {@code action} 而另立此字段，就是为了让
+     * {@code CallSignalingService} 的分支不被连麦语义污染。
+     */
+    private String linkAction;
 }

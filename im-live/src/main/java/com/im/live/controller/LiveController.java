@@ -4,8 +4,11 @@ import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.im.common.api.Result;
 import com.im.common.security.ratelimit.RateLimit;
+import com.im.common.util.SecurityUtil;
 import com.im.live.dto.req.LiveStartRequest;
+import com.im.live.dto.req.SendGiftRequest;
 import com.im.live.dto.vo.LiveRoomVO;
+import com.im.live.service.GiftService;
 import com.im.live.service.LiveRoomService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -38,6 +41,7 @@ import java.util.Map;
 public class LiveController {
 
     private final LiveRoomService roomService;
+    private final GiftService giftService;
 
     @Operation(summary = "开播",
             description = "新建一场直播并下发推流信息：roomId / streamKey（只此一次）/ pushUrl / playUrl / heartbeatSeconds / danmakuWs")
@@ -88,5 +92,15 @@ public class LiveController {
     @GetMapping("/mine")
     public Result<LiveRoomVO> mine() {
         return Result.ok(roomService.mine());
+    }
+
+    @Operation(summary = "送礼",
+            description = "在直播中的房间给主播送礼：经钱包原子扣积分、写送礼流水、事务提交后广播飘屏；余额不足回「积分余额不足」")
+    @RateLimit(count = 30, seconds = 10, dimension = RateLimit.Dimension.USER, key = "live.gift")
+    @PostMapping("/{roomId}/gift")
+    public Result<Map<String, Object>> sendGift(@PathVariable("roomId") Long roomId,
+                                                @RequestBody @Valid SendGiftRequest request) {
+        int count = request.getCount() == null ? 1 : request.getCount();
+        return Result.ok(giftService.sendGift(SecurityUtil.getUserId(), roomId, request.getGiftId(), count));
     }
 }

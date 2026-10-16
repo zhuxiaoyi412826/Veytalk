@@ -62,6 +62,29 @@ export function fetchMyLive() {
 }
 
 /* ============================================================================
+ * 直播连麦：信令走已认证的主 /ws 长连接（见 stores/linkmic.js），这里只留两个控制面 REST：
+ * 拉本端连麦 ICE 配置、查房间当前在麦嘉宾列表。上麦申请/接受/拒绝/挂断都不是 REST，
+ * 而是经 linkmic 帧的 linkAction 收发，与音视频通话同构。
+ * ========================================================================== */
+
+/**
+ * 拉连麦配置与 ICE 服务器清单。
+ * @returns {Promise<{ enabled: boolean, maxSlots: number, iceServers: Array<{ urls: string|string[], username?: string, credential?: string }> }>}
+ *          enabled=false 时连麦整体关闭，前端据此隐藏上麦入口。
+ */
+export function fetchLinkmicConfig(roomId) {
+  return http.get(`/live/${roomId}/linkmic/config`, { silent: true })
+}
+
+/**
+ * 房间当前在麦嘉宾列表（观众进房时补齐初始态，之后靠 /ws/live 的 linkmic 帧驱动切换）。
+ * @returns {Promise<Array<{ userId: string, name: string, avatar: string }>>}
+ */
+export function fetchLinkmicList(roomId) {
+  return http.get(`/live/${roomId}/linkmic`, { silent: true })
+}
+
+/* ============================================================================
  * 直播页「视频」板块：短视频信息流
  *
  * 视频与封面本体的上传复用通用文件接口（api/file.js 的 uploadFileSmart，

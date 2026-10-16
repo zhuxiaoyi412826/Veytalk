@@ -24,6 +24,8 @@ public enum WsMessageType {
     PULL_OFFLINE("pull-offline"),
     /** 音视频通话信令上行（invite/accept/reject/offer/answer/ice/cancel/hangup），子类型见 data.action */
     CALL("call"),
+    /** 直播连麦信令上行（request/accept/reject/offer/answer/ice/leave），子类型见 data.linkAction，载荷复用 call 的形状并带 roomId */
+    LINKMIC("linkmic"),
 
     /* ---------- 下行（服务端 -> 客户端） ---------- */
     /** 发送结果回执，携带服务端消息 ID 与 seq */
@@ -38,6 +40,14 @@ public enum WsMessageType {
     READ_NOTIFY("read-notify"),
     /** 撤回通知 */
     RECALL_NOTIFY("recall-notify"),
+    /** 编辑通知：发送者改了自己已发出的文本消息后推给会话全员，各端气泡实时刷新正文并标「已编辑」 */
+    EDIT_NOTIFY("edit-notify"),
+    /** 表情回应变更通知：某人添加/取消某条消息的一个表情后推给会话全员，各端气泡表情栏据此增量刷新 */
+    REACTION_NOTIFY("reaction-notify"),
+    /** 投票变更通知：有人投 / 改票后推给会话全员，各端据服务端下发的权威票数刷新投票卡片 */
+    VOTE_NOTIFY("vote-notify"),
+    /** 精华消息变更通知：群主/管理员标记或取消精华后推给群成员，各端气泡的精华标签实时增减 */
+    ESSENCE_NOTIFY("essence-notify"),
     /** 系统 / 业务通知（好友申请、入群等） */
     NOTIFY("notify"),
     /** 多端登录被踢下线 */
@@ -48,6 +58,10 @@ public enum WsMessageType {
     UNREAD("unread"),
     /** 音视频通话信令下行：服务端在两端间转发信令，以及主动下发的 busy/offline/timeout/canceled */
     CALL_SIGNAL("call-signal"),
+    /** 直播连麦信令下行：服务端在观众与主播间转发协商，以及申请到达、上麦成功、被拒/下麦等事件 */
+    LINKMIC_SIGNAL("linkmic-signal"),
+    /** 闪照已被查看并销毁的通知：任一成员首次查看后推给会话全员（含查看者自己的其他设备） */
+    FLASH_NOTIFY("flash-notify"),
     /** 错误响应 */
     ERROR("error");
 

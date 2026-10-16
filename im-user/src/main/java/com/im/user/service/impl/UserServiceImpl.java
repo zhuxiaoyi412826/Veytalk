@@ -12,6 +12,7 @@ import com.im.common.security.PasswordEncryptor;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.OnlineStatusSpi;
 import com.im.common.spi.PermissionProvider;
+import com.im.common.spi.UserDataEraseSpi;
 import com.im.common.util.TextUtil;
 import com.im.user.convert.UserConvert;
 import com.im.user.dto.req.BindPhoneRequest;
@@ -65,6 +66,8 @@ public class UserServiceImpl implements UserService {
     private final CaptchaService captchaService;
     /** 资料变更后失效 UserQuerySpiImpl 写入的三级缓存，key 前缀收口在 ImConstants */
     private final ThreeLevelCache cache;
+    /** 账号注销时收集各模块的数据清除实现；某模块未装配则该模块不参与级联（im-user 单独跑不报错） */
+    private final ObjectProvider<UserDataEraseSpi> userDataEraseSpiProvider;
 
     @Override
     public User requireById(Long userId) {
@@ -403,6 +406,46 @@ public class UserServiceImpl implements UserService {
     @Override
     public List<String> listPermissions(Long userId) {
         return permissionProvider.getPermissionList(userId, ImConstants.LOGIN_TYPE);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelAccount(Long userId, String rawPassword) {
+        User user = requireById(userId);
+        // 验证码自动建号且未设密码的账号无法用密码二次确认，先引导设置密码再注销
+        if (User.NO_PASSWORD.equals(user.getPassword())) {
+            throw new BusinessException(ResultCode.USER_PASSWORD_NOT_SET);
+        }
+        if (!passwordEncryptor.matches(rawPassword, user.getPassword())) {
+            throw new BusinessException(ResultCode.USER_PASSWORD_ERROR);
+        }
+
+        // 匿名化：用显式 set 覆盖 PII（updateById 忽略 null 字段，无法把列改空），
+        // 让库里的这一行不再指向可识别的个人——历史消息里的 from_user_id 因此只剩假名
+        userMapper.update(null, Wrappers.<User>lambdaUpdate()
+                .eq(User::getId, userId)
+                .set(User::getUsername, "cancelled_" + userId)
+                .set(User::getNickname, "已注销用户")
+                .set(User::getPassword, User.NO_PASSWORD)
+                .set(User::getStatus, User.STATUS_DISABLED)
+                .set(User::getAvatar, null)
+                .set(User::getSignature, null)
+                .set(User::getPhone, null)
+                .set(User::getEmail, null)
+                .set(User::getLastLoginIp, null));
+        // 逻辑删除主记录：此后一切按 ID 的常规查询都取不到该用户，与匿名化叠加构成「删除」
+        userMapper.deleteById(userId);
+        userRoleMapper.delete(Wrappers.<UserRole>lambdaQuery().eq(UserRole::getUserId, userId));
+        cache.evict(ImConstants.CACHE_USER_BRIEF_PREFIX + userId);
+
+        // 级联清除各模块持有的用户数据：与各 mapper 共用同一数据源、并入本事务，
+        // 任一模块删除失败整体回滚，绝不出现「删一半」
+        int modules = 0;
+        for (UserDataEraseSpi spi : userDataEraseSpiProvider) {
+            spi.eraseUserData(userId);
+            modules++;
+        }
+        log.info("[账号注销] 用户 {} 已注销：主记录匿名化+逻辑删除，级联清除 {} 个模块的数据", userId, modules);
     }
 
     private boolean isOnline(Long userId) {

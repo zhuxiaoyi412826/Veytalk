@@ -68,6 +68,13 @@ public enum ResultCode {
     MESSAGE_SEND_FORBIDDEN(5007, "当前状态下无法发送消息"),
     MESSAGE_QUOTE_INVALID(5008, "引用的消息不存在、已撤回或不属于当前会话"),
     MESSAGE_FORWARD_FORBIDDEN(5009, "无权转发该消息"),
+    MESSAGE_EDIT_TIMEOUT(5010, "该消息已超过可编辑时限"),
+    MESSAGE_EDIT_FORBIDDEN(5011, "只能编辑自己发送的文本消息"),
+    /* 语音转文字 / 翻译：依赖外部 ASR/翻译服务，未接入时优雅降级到这两个码（与 LIVE_NOT_CONFIGURED、MAIL_NOT_CONFIGURED 同构） */
+    MESSAGE_TO_TEXT_UNSUPPORTED(5012, "只有未撤回的语音消息支持转文字"),
+    MESSAGE_TRANSLATE_UNSUPPORTED(5013, "只有未撤回的文本消息支持翻译"),
+    MESSAGE_TO_TEXT_UNAVAILABLE(5014, "语音转文字服务未配置或暂不可用"),
+    MESSAGE_TRANSLATE_UNAVAILABLE(5015, "消息翻译服务未配置或暂不可用"),
 
     /* ==================== 6xxx 群组 ==================== */
     GROUP_NOT_FOUND(6001, "群组不存在"),
@@ -79,6 +86,8 @@ public enum ResultCode {
     GROUP_MUTED(6007, "你已被禁言"),
     GROUP_MUTED_ALL(6008, "群主已开启全员禁言"),
     GROUP_DISMISSED(6009, "群组已解散"),
+    GROUP_ROBOT_NOT_FOUND(6010, "群机器人不存在或已被移除"),
+    GROUP_ROBOT_DISABLED(6011, "该群机器人已被停用"),
 
     /* ==================== 7xxx 文件 ==================== */
     FILE_NOT_FOUND(7001, "文件不存在"),
@@ -122,6 +131,11 @@ public enum ResultCode {
     LIVE_NOT_LIVING(11004, "该直播已结束"),
     LIVE_FORBIDDEN(11005, "无权操作该直播间"),
     LIVE_ALREADY_LIVING(11006, "你已有正在进行的直播，请先关播"),
+    /* 连麦：主播邀请观众上麦，放宽好友校验但仍需登录且为本场观众 */
+    LIVE_LINK_FULL(11007, "连麦位已满，先请一位下麦再试"),
+    LIVE_LINK_NOT_FOUND(11008, "连麦申请不存在或已结束"),
+    LIVE_LINK_FORBIDDEN(11009, "无权操作该连麦"),
+    LIVE_LINK_DISABLED(11010, "连麦功能未开启"),
 
     /* ==================== 12xxx 音视频通话 ==================== */
     CALL_DISABLED(12001, "通话功能未开启"),
@@ -130,7 +144,18 @@ public enum ResultCode {
     CALL_NOT_FRIEND(12004, "只能与好友发起通话"),
     CALL_NOT_FOUND(12005, "通话不存在或已结束"),
     CALL_FORBIDDEN(12006, "无权访问该通话"),
-    CALL_RECORD_TOO_LARGE(12007, "通话录制文件过大，未能上传");
+    CALL_RECORD_TOO_LARGE(12007, "通话录制文件过大，未能上传"),
+
+    /* ==================== 13xxx 钱包与礼物 ==================== */
+    /* 虚拟积分/币体系：不涉真实货币，充值走模拟支付桩（预留 PaymentSpi），与 D1 语音转文字降级同构 */
+    WALLET_DISABLED(13001, "钱包功能未开启"),
+    WALLET_BALANCE_NOT_ENOUGH(13002, "积分余额不足，请先充值或每日签到领取"),
+    GIFT_NOT_FOUND(13003, "礼物不存在"),
+    GIFT_DISABLED(13004, "该礼物已下架"),
+    GIFT_AMOUNT_INVALID(13005, "送礼数量不合法"),
+    RECHARGE_AMOUNT_INVALID(13006, "充值数额超出允许范围"),
+    PAYMENT_UNAVAILABLE(13007, "支付服务未配置，暂时无法充值"),
+    CHECKIN_ALREADY_DONE(13008, "今日已签到，明天再来吧");
 
     private final int code;
     private final String message;

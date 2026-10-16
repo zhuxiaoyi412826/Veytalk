@@ -23,6 +23,10 @@ USE `im_db`;
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS `im_live_room`;
+DROP TABLE IF EXISTS `im_gift_record`;
+DROP TABLE IF EXISTS `im_wallet_transaction`;
+DROP TABLE IF EXISTS `im_gift`;
+DROP TABLE IF EXISTS `im_user_wallet`;
 DROP TABLE IF EXISTS `im_live_video`;
 DROP TABLE IF EXISTS `im_interview_event`;
 DROP TABLE IF EXISTS `im_interview_message`;
@@ -32,7 +36,12 @@ DROP TABLE IF EXISTS `im_remote_session`;
 DROP TABLE IF EXISTS `im_remote_device`;
 DROP TABLE IF EXISTS `im_file`;
 DROP TABLE IF EXISTS `im_group_member`;
+DROP TABLE IF EXISTS `im_group_join_request`;
+DROP TABLE IF EXISTS `im_group_robot`;
 DROP TABLE IF EXISTS `im_group`;
+DROP TABLE IF EXISTS `im_message_reaction`;
+DROP TABLE IF EXISTS `im_message_vote`;
+DROP TABLE IF EXISTS `im_message_essence`;
 DROP TABLE IF EXISTS `im_message_delete`;
 DROP TABLE IF EXISTS `im_message_read`;
 DROP TABLE IF EXISTS `im_message`;
@@ -274,6 +283,45 @@ CREATE TABLE `im_message_delete`
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='消息单端删除表（仅对本人不可见，不影响其他成员）';
 
+CREATE TABLE `im_message_reaction`
+(
+    `id`          BIGINT      NOT NULL COMMENT '主键（雪花）',
+    `message_id`  BIGINT      NOT NULL COMMENT '被回应的消息 ID',
+    `user_id`     BIGINT      NOT NULL COMMENT '回应者 ID',
+    `emoji`       VARCHAR(32) NOT NULL COMMENT '表情字符，如 👍 ❤️ 😄',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '回应时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_msg_user_emoji` (`message_id`, `user_id`, `emoji`),
+    KEY `idx_message` (`message_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='消息表情回应表（一人对一条消息的同一表情只计一次，再点为取消）';
+
+CREATE TABLE `im_message_vote`
+(
+    `id`           BIGINT   NOT NULL COMMENT '主键（雪花）',
+    `message_id`   BIGINT   NOT NULL COMMENT '投票消息 ID',
+    `user_id`      BIGINT   NOT NULL COMMENT '投票人 ID',
+    `option_index` INT      NOT NULL COMMENT '所选选项下标（从 0 开始）',
+    `create_time`  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '投票时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_msg_user_opt` (`message_id`, `user_id`, `option_index`),
+    KEY `idx_message` (`message_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='消息投票选项记录表（一人对一条投票的每个选项至多一行；重新投票先清后写）';
+
+CREATE TABLE `im_message_essence`
+(
+    `id`              BIGINT   NOT NULL COMMENT '主键（雪花）',
+    `conversation_id` BIGINT   NOT NULL COMMENT '所属群会话 ID（精华是群维度沉淀，按会话聚合查询）',
+    `message_id`      BIGINT   NOT NULL COMMENT '被标记为精华的消息 ID',
+    `mark_user_id`    BIGINT   NOT NULL COMMENT '标记人 ID（群主/管理员）',
+    `create_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '标记时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_message` (`message_id`),
+    KEY `idx_conversation` (`conversation_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='群精华消息表（一条消息至多一行，取消即删；按会话查询群内全部精华）';
+
 -- =====================================================================================
 --  五、群组（im-group）
 -- =====================================================================================
@@ -287,12 +335,16 @@ CREATE TABLE `im_group`
     `owner_id`    BIGINT      NOT NULL COMMENT '群主用户 ID',
     `max_member`  INT         NOT NULL DEFAULT 200 COMMENT '最大成员数',
     `mute_all`    TINYINT     NOT NULL DEFAULT 0 COMMENT '全员禁言：1 是 0 否',
+    `invite_code` VARCHAR(32)          DEFAULT NULL COMMENT '群邀请码（邀请链接 / 二维码使用，懒生成）',
+    `join_approval` TINYINT   NOT NULL DEFAULT 0 COMMENT '入群是否需要审批：1 需要（邀请链接与二维码入口提交后进入待审批），0 不需要（扫码链接直接入群）',
     `status`      TINYINT     NOT NULL DEFAULT 1 COMMENT '状态：1 正常 0 已解散',
     `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`     TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
     PRIMARY KEY (`id`),
-    KEY `idx_owner` (`owner_id`)
+    KEY `idx_owner` (`owner_id`),
+    -- 邀请码全局唯一，MySQL 的 UNIQUE 允许多个 NULL，未生成的群不占位
+    UNIQUE KEY `uk_invite_code` (`invite_code`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='群组表';
 
@@ -315,6 +367,45 @@ CREATE TABLE `im_group_member`
     KEY `idx_user_status` (`user_id`, `status`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='群成员表';
+
+CREATE TABLE `im_group_join_request`
+(
+    `id`              BIGINT   NOT NULL COMMENT '主键（雪花）',
+    `group_id`        BIGINT   NOT NULL COMMENT '目标群 ID',
+    `user_id`         BIGINT   NOT NULL COMMENT '申请人用户 ID',
+    `status`          TINYINT  NOT NULL DEFAULT 0 COMMENT '状态：0 待审批 1 已通过 2 已拒绝',
+    `message`         VARCHAR(255)      DEFAULT NULL COMMENT '申请留言',
+    `source`          VARCHAR(32)       DEFAULT NULL COMMENT '申请来源：link / qrcode',
+    `handle_user_id`  BIGINT            DEFAULT NULL COMMENT '处理人用户 ID（群主/管理员）',
+    `handle_time`     DATETIME          DEFAULT NULL COMMENT '处理时间',
+    `create_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '提交时间',
+    `update_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 同一人同一群只留一行：拒绝后重新提交会复用行并把状态拉回 0，不堆积历史记录
+    UNIQUE KEY `uk_group_user` (`group_id`, `user_id`),
+    KEY `idx_group_status` (`group_id`, `status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='入群申请表（仅当群开启入群审批时写入）';
+
+CREATE TABLE `im_group_robot`
+(
+    `id`             BIGINT      NOT NULL COMMENT '机器人 ID（雪花）',
+    `group_id`       BIGINT      NOT NULL COMMENT '所属群 ID',
+    `name`           VARCHAR(64) NOT NULL COMMENT '机器人展示名（发送时快照进消息 extra）',
+    `avatar`         VARCHAR(512)         DEFAULT NULL COMMENT '机器人头像',
+    `description`    VARCHAR(255)         DEFAULT NULL COMMENT '用途说明',
+    `webhook_token`  VARCHAR(64) NOT NULL COMMENT 'Webhook 密钥（回调 URL 凭证，全局唯一）',
+    `creator_id`     BIGINT      NOT NULL COMMENT '创建者用户 ID（群主/管理员）',
+    `status`         TINYINT     NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    `create_time`    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`        TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    -- token 即访问凭证，全局唯一；删除走逻辑删除，软删后不再命中但保留历史可审计
+    UNIQUE KEY `uk_webhook_token` (`webhook_token`),
+    KEY `idx_group` (`group_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='群机器人表（外部系统 Webhook 入站通道）';
 
 -- =====================================================================================
 --  六、文件（im-file）
@@ -563,3 +654,81 @@ CREATE TABLE `im_live_video`
     KEY `idx_uploader_create` (`uploader_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='直播页视频板块（短视频信息流）';
+
+-- =====================================================================================
+--  十一、钱包与礼物（im-user 持有钱包、im-live 持有礼物）
+--  虚拟积分/币体系：不涉真实货币，充值走模拟支付桩（预留 PaymentSpi），每日签到赠送。
+--  连麦本身是瞬时态，走 Redis 不建表。
+-- =====================================================================================
+
+-- 用户钱包：一行一个用户，主键即 user_id（与 im_user.id 同值，非雪花）。
+-- balance 非负，扣款走条件 UPDATE（balance >= 扣款额）在数据库层兜住并发超扣，应用层再校验一次。
+CREATE TABLE `im_user_wallet`
+(
+    `user_id`         BIGINT   NOT NULL COMMENT '用户 ID（与 im_user.id 同值）',
+    `balance`         BIGINT   NOT NULL DEFAULT 0 COMMENT '积分/币余额（非负，扣款用条件 UPDATE balance>=? 兜底防超扣）',
+    `total_recharged` BIGINT   NOT NULL DEFAULT 0 COMMENT '累计充值到账',
+    `total_consumed`  BIGINT   NOT NULL DEFAULT 0 COMMENT '累计消费（送礼等）',
+    `sign_last_date`  DATE              DEFAULT NULL COMMENT '最近签到自然日，按天去重',
+    `create_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`         TINYINT  NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`user_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='用户钱包（虚拟积分/币，一行一个用户）';
+
+-- 礼物目录：运营可增删改，前端礼簿按 status=1 且 sort 升序渲染。
+CREATE TABLE `im_gift`
+(
+    `id`          BIGINT      NOT NULL COMMENT '礼物 ID',
+    `name`        VARCHAR(32) NOT NULL COMMENT '礼物名称',
+    `icon`        VARCHAR(512)         DEFAULT NULL COMMENT '图标（表情符号或图片地址）',
+    `price`       INT         NOT NULL DEFAULT 0 COMMENT '单价（积分）',
+    `kind`        VARCHAR(16) NOT NULL DEFAULT 'normal' COMMENT '类型：normal 普通 / effect 特效',
+    `sort`        INT         NOT NULL DEFAULT 0 COMMENT '排序，小的在前',
+    `status`      TINYINT     NOT NULL DEFAULT 1 COMMENT '状态：1 上架 0 下架',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`     TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_status_sort` (`status`, `sort`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='礼物目录';
+
+-- 钱包账本：充值/送礼/签到/后台调整逐条流水（只增，供对账与明细页），流水表继承 AuditEntity 不带 deleted。
+CREATE TABLE `im_wallet_transaction`
+(
+    `id`            BIGINT      NOT NULL COMMENT '流水 ID（雪花）',
+    `user_id`       BIGINT      NOT NULL COMMENT '钱包归属用户 ID',
+    `type`          VARCHAR(16) NOT NULL COMMENT '类型：recharge 充值 / gift 送礼 / checkin 签到 / adjust 后台调整',
+    `amount`        BIGINT      NOT NULL COMMENT '变动额（有符号，支出为负）',
+    `balance_after` BIGINT      NOT NULL COMMENT '交易后余额快照',
+    `ref_id`        BIGINT               DEFAULT NULL COMMENT '关联业务 ID（如送礼记录 ID / 房间 ID）',
+    `remark`        VARCHAR(128)         DEFAULT NULL COMMENT '备注',
+    `create_time`   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_user_time` (`user_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='钱包账本流水（只增不改）';
+
+-- 送礼流水：一行一笔送礼，冗余礼物名/图标/成交单价，礼物后续下架或改价也不影响历史展示与对账。
+CREATE TABLE `im_gift_record`
+(
+    `id`          BIGINT      NOT NULL COMMENT '送礼记录 ID（雪花）',
+    `sender_id`   BIGINT      NOT NULL COMMENT '送礼人用户 ID',
+    `receiver_id` BIGINT      NOT NULL COMMENT '收礼主播用户 ID',
+    `room_id`     BIGINT      NOT NULL COMMENT '直播间 ID',
+    `gift_id`     BIGINT      NOT NULL COMMENT '礼物 ID',
+    `gift_name`   VARCHAR(32) NOT NULL COMMENT '冗余：送礼时的礼物名',
+    `gift_icon`   VARCHAR(512)         DEFAULT NULL COMMENT '冗余：送礼时的礼物图标',
+    `count`       INT         NOT NULL DEFAULT 1 COMMENT '数量',
+    `unit_price`  INT         NOT NULL COMMENT '冗余：成交单价',
+    `total_price` BIGINT      NOT NULL COMMENT '总价 = unit_price * count',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_room_time` (`room_id`, `create_time`),
+    KEY `idx_receiver_time` (`receiver_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='送礼流水（账本性质，只增不改）';

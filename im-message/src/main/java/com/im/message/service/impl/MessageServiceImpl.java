@@ -2,6 +2,7 @@ package com.im.message.service.impl;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
@@ -14,6 +15,7 @@ import com.im.common.domain.MessageDTO;
 import com.im.common.domain.MessageEvent;
 import com.im.common.domain.MessageExtra;
 import com.im.common.domain.MessageSendCmd;
+import com.im.common.domain.PageQuery;
 import com.im.common.domain.QuotePreview;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.domain.WsPacket;
@@ -23,11 +25,14 @@ import com.im.common.enums.MessageStatus;
 import com.im.common.enums.MsgType;
 import com.im.common.enums.WsMessageType;
 import com.im.common.exception.BusinessException;
+import com.im.common.sensitive.SensitiveWordFilter;
 import com.im.common.spi.ConversationSpi;
 import com.im.common.spi.FileStorageSpi;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.GroupSpi;
 import com.im.common.spi.PushSpi;
+import com.im.common.spi.SpeechToTextSpi;
+import com.im.common.spi.TranslationSpi;
 import com.im.common.spi.UserQuerySpi;
 import com.im.common.util.RedisUtil;
 import com.im.common.util.TextUtil;
@@ -37,13 +42,22 @@ import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.MessageSearchQuery;
 import com.im.message.dto.req.SendMessageRequest;
 import com.im.message.dto.vo.MessageVO;
+import com.im.message.dto.vo.ReactionItemVO;
+import com.im.message.dto.vo.VoteOptionVO;
+import com.im.message.dto.vo.VoteViewVO;
 import com.im.message.entity.Message;
 import com.im.message.entity.MessageDelete;
 import com.im.message.entity.MessageRead;
+import com.im.message.entity.MessageReaction;
+import com.im.message.entity.MessageVote;
+import com.im.message.entity.MessageEssence;
 import com.im.message.handler.MessageContentHandler;
 import com.im.message.mapper.MessageDeleteMapper;
 import com.im.message.mapper.MessageMapper;
 import com.im.message.mapper.MessageReadMapper;
+import com.im.message.mapper.MessageReactionMapper;
+import com.im.message.mapper.MessageVoteMapper;
+import com.im.message.mapper.MessageEssenceMapper;
 import com.im.message.service.MessageSequenceService;
 import com.im.message.service.MessageService;
 import jakarta.annotation.PostConstruct;
@@ -63,6 +77,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -102,11 +117,15 @@ public class MessageServiceImpl implements MessageService {
     private final MessageMapper messageMapper;
     private final MessageReadMapper messageReadMapper;
     private final MessageDeleteMapper messageDeleteMapper;
+    private final MessageReactionMapper messageReactionMapper;
+    private final MessageVoteMapper messageVoteMapper;
+    private final MessageEssenceMapper messageEssenceMapper;
     private final MessageSequenceService sequenceService;
     private final UserQuerySpi userQuerySpi;
     private final ConversationSpi conversationSpi;
     private final RedisUtil redisUtil;
     private final ImProperties imProperties;
+    private final SensitiveWordFilter sensitiveWordFilter;
     private final List<MessageContentHandler> contentHandlers;
 
     /**
@@ -119,6 +138,9 @@ public class MessageServiceImpl implements MessageService {
     private final ObjectProvider<PushSpi> pushSpiProvider;
     /** 闪照销毁原图用；im-file 未装配时只标记已查看、不拦下载（单模块启动的开发形态） */
     private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
+    /** 语音转文字 / 翻译：依赖外部厂商，未接入时无 bean，getIfAvailable() 回 null 即降级 */
+    private final ObjectProvider<SpeechToTextSpi> speechToTextSpiProvider;
+    private final ObjectProvider<TranslationSpi> translationSpiProvider;
 
     /** 消息类型到内容处理器的路由表，启动时一次性摊平 */
     private final Map<MsgType, MessageContentHandler> handlerRegistry = new EnumMap<>(MsgType.class);
@@ -152,8 +174,10 @@ public class MessageServiceImpl implements MessageService {
                 ResultCode.BAD_REQUEST, "发送者不能为空");
         MsgType type = MsgType.of(cmd.getMsgType());
         boolean internal = Boolean.TRUE.equals(cmd.getInternal());
-        // 系统通知只能由服务端内部产生：客户端若能伪造 msgType=5，就能冒充系统给任意会话推送文案
-        BusinessException.throwIf(type == MsgType.SYSTEM && !internal, ResultCode.MESSAGE_SEND_FORBIDDEN);
+        // 系统通知与机器人消息都只能由服务端内部产生：客户端若能伪造 msgType=5/11，
+        // 就能冒充系统推送文案、或凭空造出一批没有真实账号的「机器人」身份
+        BusinessException.throwIf((type == MsgType.SYSTEM || type == MsgType.ROBOT) && !internal,
+                ResultCode.MESSAGE_SEND_FORBIDDEN);
 
         Long conversationId = resolveConversation(cmd);
         Integer conversationType = conversationSpi.getType(conversationId);
@@ -466,6 +490,74 @@ public class MessageServiceImpl implements MessageService {
     }
 
     @Override
+    public List<MessageVO> exportConversation(Long userId, Long conversationId) {
+        BusinessException.throwUnless(conversationSpi.isMember(conversationId, userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        List<Message> all = new ArrayList<>();
+        Long cursor = null;
+        // 游标向更早翻页：selectHistory 按 seq 倒序返回一批，取本批最小 seq 作下批游标，直到取空或触顶
+        while (all.size() < ImConstants.MAX_EXPORT_MESSAGES) {
+            List<Message> batch = messageMapper.selectHistory(conversationId, cursor, ImConstants.EXPORT_BATCH_SIZE);
+            if (batch.isEmpty()) {
+                break;
+            }
+            all.addAll(batch);
+            cursor = batch.get(batch.size() - 1).getSeq();
+            if (batch.size() < ImConstants.EXPORT_BATCH_SIZE) {
+                break;
+            }
+        }
+        if (all.isEmpty()) {
+            return List.of();
+        }
+        // 累积顺序是 seq 从新到旧，导出前反转回时间正序，与在线聊天阅读顺序一致
+        Collections.reverse(all);
+        return toViewList(all, userId);
+    }
+
+    @Override
+    public String toText(Long userId, Long messageId) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null || message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        BusinessException.throwIf(MsgType.of(message.getMsgType()) != MsgType.VOICE,
+                ResultCode.MESSAGE_TO_TEXT_UNSUPPORTED);
+        SpeechToTextSpi spi = imProperties.getIntelligence().isEnabled() ? speechToTextSpiProvider.getIfAvailable() : null;
+        if (spi == null || !spi.available()) {
+            throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_UNAVAILABLE);
+        }
+        MessageExtra extra = message.getExtra();
+        String text = spi.toText(extra == null ? null : extra.getFileUrl(),
+                extra == null ? null : extra.getDuration());
+        if (TextUtil.isBlank(text)) {
+            throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_UNAVAILABLE);
+        }
+        return text;
+    }
+
+    @Override
+    public String translate(Long userId, Long messageId, String targetLang) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null || message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        BusinessException.throwIf(MsgType.of(message.getMsgType()) != MsgType.TEXT,
+                ResultCode.MESSAGE_TRANSLATE_UNSUPPORTED);
+        TranslationSpi spi = imProperties.getIntelligence().isEnabled() ? translationSpiProvider.getIfAvailable() : null;
+        if (spi == null || !spi.available()) {
+            throw new BusinessException(ResultCode.MESSAGE_TRANSLATE_UNAVAILABLE);
+        }
+        String lang = TextUtil.isBlank(targetLang)
+                ? imProperties.getIntelligence().getDefaultTargetLang() : targetLang;
+        String text = spi.translate(message.getContent(), lang);
+        if (TextUtil.isBlank(text)) {
+            throw new BusinessException(ResultCode.MESSAGE_TRANSLATE_UNAVAILABLE);
+        }
+        return text;
+    }
+
+    @Override
     public PageResult<MessageVO> search(Long userId, MessageSearchQuery query) {
         String keyword = TextUtil.sanitize(query.getKeyword());
         if (TextUtil.isBlank(keyword)) {
@@ -496,6 +588,90 @@ public class MessageServiceImpl implements MessageService {
                 ? List.of()
                 : toViewList(new ArrayList<>(page.getRecords()), userId);
         return PageResult.of(records, page.getTotal(), page.getCurrent(), page.getSize());
+    }
+
+    @Override
+    public PageResult<MessageVO> pageConversationMedia(Long userId, Long conversationId, Integer msgType, PageQuery query) {
+        validateGroupViewable(conversationId, userId);
+        // 只允许图片 / 文件两类沉淀为群相册 / 群文件（文本正文不是文件名，语音不作为相册/文件面板展示）
+        BusinessException.throwIf(msgType == null
+                        || (msgType != MsgType.IMAGE.getCode() && msgType != MsgType.FILE.getCode()),
+                ResultCode.MESSAGE_TYPE_UNSUPPORTED);
+        Page<Message> page = messageMapper.pageMediaByConversation(query.toPage(), conversationId, msgType);
+        List<MessageVO> records = page.getRecords().isEmpty()
+                ? List.of()
+                : toViewList(new ArrayList<>(page.getRecords()), userId);
+        return PageResult.of(records, page.getTotal(), page.getCurrent(), page.getSize());
+    }
+
+    @Override
+    public PageResult<MessageVO> pageEssence(Long userId, Long conversationId, PageQuery query) {
+        validateGroupViewable(conversationId, userId);
+        IPage<MessageEssence> ep = messageEssenceMapper.pageByConversation(
+                query.safeCurrent(), query.safeSize(), conversationId);
+        List<MessageEssence> rows = ep.getRecords();
+        if (rows.isEmpty()) {
+            return PageResult.of(List.of(), ep.getTotal(), ep.getCurrent(), ep.getSize());
+        }
+        List<Long> messageIds = rows.stream().map(MessageEssence::getMessageId).toList();
+        // selectByIdIn 按会话 + seq 升序返回；toViewList 会剔除查看者单端删除的行，保留行统一标回 essence
+        List<Message> messages = messageMapper.selectByIdIn(messageIds);
+        List<MessageVO> records = toViewList(new ArrayList<>(messages), userId);
+        records.forEach(vo -> vo.setEssence(Boolean.TRUE));
+        return PageResult.of(records, ep.getTotal(), ep.getCurrent(), ep.getSize());
+    }
+
+    @Override
+    public MessageVO markEssence(Long userId, Long messageId, boolean essence) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null || message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        Long conversationId = message.getConversationId();
+        // 精华是群维度能力：单聊会话不能设精华
+        Integer conversationType = conversationSpi.getType(conversationId);
+        BusinessException.throwIf(conversationType == null || ConvType.GROUP.getCode() != conversationType,
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        // 仅群主 / 管理员可标记
+        requireGroupManager(conversationId, userId);
+        if (essence) {
+            // 幂等：已是精华则不重复插入
+            if (!messageEssenceMapper.existsByMessage(messageId)) {
+                MessageEssence row = new MessageEssence();
+                row.setConversationId(conversationId);
+                row.setMessageId(messageId);
+                row.setMarkUserId(userId);
+                messageEssenceMapper.insert(row);
+            }
+        } else {
+            messageEssenceMapper.deleteByMessageId(messageId);
+        }
+        afterCommit(() -> pushEssence(conversationId, messageId, essence));
+        UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
+        MessageVO vo = MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
+        vo.setEssence(essence);
+        return vo;
+    }
+
+    /**
+     * 校验当前查看者可以浏览该群会话的内容（成员身份 + 会话为群聊）；群文件 / 群相册 / 精华面板公用。
+     */
+    private void validateGroupViewable(Long conversationId, Long userId) {
+        BusinessException.throwUnless(conversationSpi.isMember(conversationId, userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        Integer type = conversationSpi.getType(conversationId);
+        BusinessException.throwIf(type == null || ConvType.GROUP.getCode() != type,
+                ResultCode.CONVERSATION_NO_PERMISSION);
+    }
+
+    /**
+     * 校验操作者为该群会话的群主或管理员（精华标记权限），否则拒。
+     */
+    private void requireGroupManager(Long conversationId, Long userId) {
+        GroupSpi groupSpi = groupSpiProvider.getIfAvailable();
+        BusinessException.throwIf(groupSpi == null, ResultCode.CONVERSATION_NO_PERMISSION);
+        Long groupId = conversationSpi.getTargetId(conversationId, userId);
+        Integer role = groupId == null ? null : groupSpi.getRole(groupId, userId);
+        BusinessException.throwIf(role == null || !GroupRole.of(role).isManager(),
+                ResultCode.CONVERSATION_NO_PERMISSION);
     }
 
     @Override
@@ -592,7 +768,7 @@ public class MessageServiceImpl implements MessageService {
         // 批量加载引用预览：收集所有 quoteMsgId，一次查出原消息与发送者
         Map<Long, QuotePreview> quotes = loadQuotePreviews(visible);
 
-        return visible.stream().map(message -> {
+        List<MessageVO> vos = visible.stream().map(message -> {
             boolean self = viewerId.equals(message.getFromUserId());
             Receipt receipt = Receipt.EMPTY;
             if (self) {
@@ -606,6 +782,11 @@ public class MessageServiceImpl implements MessageService {
             QuotePreview quote = message.getQuoteMsgId() == null ? null : quotes.get(message.getQuoteMsgId());
             return MessageConvert.toVO(message, senders.get(message.getFromUserId()), viewerId, status, receipt.read(), quote);
         }).toList();
+        // 表情回应批量聚合：整页一次取回应行、内存分组，避免逐条回表；已撤回的消息不挂
+        attachReactions(vos, viewerId);
+        attachVotes(vos, viewerId);
+        attachEssence(vos);
+        return vos;
     }
 
     /**
@@ -722,6 +903,147 @@ public class MessageServiceImpl implements MessageService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public MessageVO edit(Long userId, Long messageId, String content) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
+        // 只有发送者本人能改，且只能改未撤回的文本消息：附件类改了会与实际字节不一致，系统通知是业务凭证不可动
+        boolean text = MsgType.of(message.getMsgType()) == MsgType.TEXT;
+        BusinessException.throwIf(!userId.equals(message.getFromUserId())
+                || message.isRecalledNow()
+                || !text,
+                ResultCode.MESSAGE_EDIT_FORBIDDEN);
+        // 编辑时限：与撤回同源，复用 im.message.recall-limit-seconds
+        int limitSeconds = imProperties.getMessage().getRecallLimitSeconds();
+        LocalDateTime deadline = message.getSendTime().plusSeconds(limitSeconds);
+        BusinessException.throwIf(LocalDateTime.now().isAfter(deadline), ResultCode.MESSAGE_EDIT_TIMEOUT);
+        // 与发送同口径：XSS 清洗 + 长度校验 + 敏感词遮蔽，防止绕过发送链路填入脏内容
+        int maxLength = imProperties.getMessage().getMaxTextLength();
+        String cleaned = TextUtil.sanitize(content);
+        BusinessException.throwIf(TextUtil.isBlank(cleaned) || cleaned.length() > maxLength,
+                ResultCode.MESSAGE_CONTENT_ILLEGAL);
+        cleaned = sensitiveWordFilter.mask(cleaned);
+        if (cleaned.equals(message.getContent())) {
+            // 内容未变：不写库也不广播，直接回当前视图
+            return MessageConvert.toVO(message, senderOf(message), userId, MessageStatus.SENT, 0);
+        }
+        // 文本消息发送时 extra 被清空，新建一份只带编辑标记；已有则就地追加
+        MessageExtra extra = message.getExtra() == null
+                ? MessageExtra.builder().build() : message.getExtra();
+        LocalDateTime editTime = LocalDateTime.now();
+        extra.setEdited(true);
+        extra.setEditTime(editTime);
+        // 只补写 content + extra 两列：新建空实体带上 id + 两列，updateById 生成的 SET 子句不碰其他列
+        Message patch = new Message();
+        patch.setId(message.getId());
+        patch.setContent(cleaned);
+        patch.setExtra(extra);
+        messageMapper.updateById(patch);
+        // 回填内存实体，返回值与广播都用最新值
+        message.setContent(cleaned);
+        message.setExtra(extra);
+        log.info("[消息编辑] messageId={}, operator={}", messageId, userId);
+        afterCommit(() -> pushEdit(message, editTime));
+        return MessageConvert.toVO(message, senderOf(message), userId, MessageStatus.SENT, 0);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public MessageVO react(Long userId, Long messageId, String emoji, boolean remove) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
+        // 已撤回的消息不再接受回应（与列表不挂 reactions 的口径一致）
+        BusinessException.throwIf(message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        String trimmed = emoji == null ? "" : emoji.trim();
+        BusinessException.throwIf(trimmed.isEmpty() || trimmed.length() > 32,
+                ResultCode.BAD_REQUEST, "表情不合法");
+        if (remove) {
+            // 删 0 行不报错：并发取消或重复取消都视作成功
+            messageReactionMapper.deleteOne(messageId, userId, trimmed);
+        } else if (!messageReactionMapper.exists(messageId, userId, trimmed)) {
+            MessageReaction row = new MessageReaction();
+            row.setMessageId(messageId);
+            row.setUserId(userId);
+            row.setEmoji(trimmed);
+            // id 由雪花、create_time 由自动填充
+            messageReactionMapper.insert(row);
+        }
+        // 推增量：只告知「谁对哪条消息加了/删了哪个表情」，各端本地聚合自行加减；不推服务端权威快照（self 因人而异）
+        afterCommit(() -> pushReaction(message.getConversationId(), messageId, userId, trimmed, remove));
+        UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
+        MessageVO vo = MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
+        attachReactions(List.of(vo), userId);
+        return vo;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public MessageVO vote(Long userId, Long messageId, List<Integer> options, boolean close) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwIf(message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwIf(message.getMsgType() == null || message.getMsgType() != MsgType.VOTE.getCode(),
+                ResultCode.MESSAGE_TYPE_UNSUPPORTED);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        MessageExtra extra = message.getExtra();
+        BusinessException.throwIf(extra == null || extra.getVoteOptions() == null || extra.getVoteOptions().isEmpty(),
+                ResultCode.MESSAGE_CONTENT_ILLEGAL);
+        int optionCount = extra.getVoteOptions().size();
+
+        if (close) {
+            // 仅发起人可截止
+            BusinessException.throwIf(!userId.equals(message.getFromUserId()), ResultCode.CONVERSATION_NO_PERMISSION);
+            if (!Boolean.TRUE.equals(extra.getVoteClosed())) {
+                extra.setVoteClosed(true);
+                message.setExtra(extra);
+                messageMapper.updateById(message);
+            }
+            afterCommit(() -> pushVote(message.getConversationId(), messageId, optionCount, true));
+            return singleVoteView(message, userId);
+        }
+
+        BusinessException.throwIf(Boolean.TRUE.equals(extra.getVoteClosed()), ResultCode.BAD_REQUEST, "投票已截止");
+
+        Set<Integer> chosen = new HashSet<>();
+        if (options != null) {
+            for (Integer idx : options) {
+                if (idx == null) {
+                    continue;
+                }
+                BusinessException.throwIf(idx < 0 || idx >= optionCount, ResultCode.BAD_REQUEST, "选项下标越界");
+                chosen.add(idx);
+            }
+        }
+        boolean multiple = Boolean.TRUE.equals(extra.getVoteMultiple());
+        if (!multiple) {
+            // 单选：至多一个（chosen 为空视为撤回本人本次投票）；多选不限个数
+            BusinessException.throwIf(chosen.size() > 1, ResultCode.BAD_REQUEST, "单选投票只能选一个选项");
+        }
+        // 先清后写：以本次选择整体替换该用户旧票
+        messageVoteMapper.deleteByUser(messageId, userId);
+        for (Integer idx : chosen) {
+            MessageVote row = new MessageVote();
+            row.setMessageId(messageId);
+            row.setUserId(userId);
+            row.setOptionIndex(idx);
+            messageVoteMapper.insert(row);
+        }
+        afterCommit(() -> pushVote(message.getConversationId(), messageId, optionCount, false));
+        return singleVoteView(message, userId);
+    }
+
+    /** 单条投票消息重新聚合票数后的视图（供 vote 接口回带）。 */
+    private MessageVO singleVoteView(Message message, Long viewerId) {
+        UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
+        MessageVO vo = MessageConvert.toVO(message, sender, viewerId, MessageStatus.SENT, 0);
+        attachVotes(List.of(vo), viewerId);
+        return vo;
+    }
+
+    @Override
     public MessageVO flashView(Long userId, Long messageId) {
         Message message = messageMapper.selectById(messageId);
         BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
@@ -731,20 +1053,30 @@ public class MessageServiceImpl implements MessageService {
         MessageExtra extra = message.getExtra();
         BusinessException.throwIf(extra == null || !Boolean.TRUE.equals(extra.getFlash()),
                 ResultCode.BAD_REQUEST, "该消息不是闪照");
-        if (!Boolean.TRUE.equals(extra.getFlashViewed())) {
-            extra.setFlashViewed(Boolean.TRUE);
-            // 只补写 extra 一列：新建空实体带上 id + extra，updateById 生成的 SET 子句不会碰其他列；
-            // 不用「谁查看谁销毁」的细粒度状态：闪照语义就是一次性广播，任何人看过即全员销毁
+        List<Long> viewedBy = extra.getFlashViewedBy() == null
+                ? new ArrayList<>() : new ArrayList<>(extra.getFlashViewedBy());
+        // 每人各有一次查看机会：本人已消费过就幂等返回，不重复写入也不重复广播
+        if (!viewedBy.contains(userId)) {
+            viewedBy.add(userId);
+            extra.setFlashViewedBy(viewedBy);
+            // 只有会话全员都看过才物理销毁原图：单人销毁不影响其他人「各看一次」的语义
+            List<Long> memberIds = conversationSpi.getMemberIds(message.getConversationId());
+            boolean allViewed = !memberIds.isEmpty() && viewedBy.containsAll(memberIds);
+            if (allViewed) {
+                FileStorageSpi fileSpi = fileStorageSpiProvider.getIfAvailable();
+                if (fileSpi != null && extra.getFileId() != null) {
+                    // 销毁原图记录：此后所有人的下载请求都变成「文件不存在」，直链 URL 也拿不到字节
+                    fileSpi.destroyById(extra.getFileId());
+                }
+            }
+            // 只补写 extra 一列：新建空实体带上 id + extra，updateById 生成的 SET 子句不会碰其他列
             Message patch = new Message();
             patch.setId(message.getId());
             patch.setExtra(extra);
             messageMapper.updateById(patch);
-            FileStorageSpi fileSpi = fileStorageSpiProvider.getIfAvailable();
-            if (fileSpi != null && extra.getFileId() != null) {
-                // 销毁原图记录：此后所有成员的下载请求都变成「文件不存在」，直链 URL 也拿不到字节
-                fileSpi.destroyById(extra.getFileId());
-            }
-            log.info("[闪照] 首次查看已销毁: messageId={}, viewer={}", messageId, userId);
+            log.info("[闪照] 查看消费: messageId={}, viewer={}, 全员已阅={}", messageId, userId, allViewed);
+            // 只通知「谁看了」：前端据此只把查看者本人的其他设备标销毁，其他成员仍能各看一次不受影响
+            afterCommit(() -> pushFlashViewed(message.getConversationId(), messageId, userId));
         }
         UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
         return MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
@@ -808,6 +1140,257 @@ public class MessageServiceImpl implements MessageService {
         data.put("summary", summary);
         // 撤回要对全体成员生效，包括操作者自己的其他设备，因此不排除任何人
         pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.RECALL_NOTIFY, data));
+    }
+
+    /**
+     * 编辑通知：推给会话全体成员（含操作者自己的其他设备），各端气泡立即把正文换成新内容并标「已编辑」。
+     */
+    private void pushEdit(Message message, LocalDateTime editTime) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(message.getConversationId());
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", message.getId());
+        data.put("conversationId", message.getConversationId());
+        data.put("content", message.getContent());
+        data.put("editTime", editTime);
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.EDIT_NOTIFY, data));
+    }
+
+    /**
+     * 表情回应变更通知：把增量（谁、哪条、哪个表情、加还是删）推给会话全员（含操作者其他设备），
+     * 各端在本地聚合列表上做加减，不需要重拉整页。
+     */
+    private void pushReaction(Long conversationId, Long messageId, Long userId, String emoji, boolean remove) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(conversationId);
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("userId", userId);
+        data.put("emoji", emoji);
+        data.put("remove", remove);
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.REACTION_NOTIFY, data));
+    }
+
+    /**
+     * 把一批消息的表情回应一次性取回并按 messageId + emoji 聚合，写进各 VO 的 reactions。
+     *
+     * <p>{@code self} 按当前查看者判定（同一表情谁贴了才高亮）；count 是全局人数。已撤回的消息不挂。
+     */
+    private void attachReactions(List<MessageVO> vos, Long viewerId) {
+        if (vos.isEmpty()) {
+            return;
+        }
+        Set<Long> ids = vos.stream()
+                .filter(vo -> !Boolean.TRUE.equals(vo.getRecalled()))
+                .map(MessageVO::getMessageId)
+                .collect(Collectors.toSet());
+        if (ids.isEmpty()) {
+            return;
+        }
+        List<MessageReaction> rows = messageReactionMapper.selectByMessageIds(ids);
+        if (rows.isEmpty()) {
+            return;
+        }
+        // messageId -> (emoji -> 聚合项)，LinkedHashMap 保留表情首次出现顺序
+        Map<Long, Map<String, ReactionItemVO>> grouped = new HashMap<>();
+        for (MessageReaction row : rows) {
+            Map<String, ReactionItemVO> byEmoji = grouped.computeIfAbsent(row.getMessageId(), k -> new LinkedHashMap<>());
+            ReactionItemVO item = byEmoji.get(row.getEmoji());
+            boolean mine = viewerId.equals(row.getUserId());
+            if (item == null) {
+                byEmoji.put(row.getEmoji(),
+                        ReactionItemVO.builder().emoji(row.getEmoji()).count(1).self(mine).build());
+            } else {
+                item.setCount(item.getCount() + 1);
+                if (mine) {
+                    item.setSelf(true);
+                }
+            }
+        }
+        for (MessageVO vo : vos) {
+            Map<String, ReactionItemVO> byEmoji = grouped.get(vo.getMessageId());
+            if (byEmoji != null) {
+                vo.setReactions(new ArrayList<>(byEmoji.values()));
+            }
+        }
+    }
+
+    /**
+     * 把一批投票消息的选项行一次性取回并按 messageId 聚合票数 / 总人数 / 本人选择，写进各 VO.vote。
+     *
+     * <p>定义（标题/选项/多选/匿名/截止）来自 extra，票数来自 {@code im_message_vote}。已撤回与非投票消息不挂。
+     */
+    private void attachVotes(List<MessageVO> vos, Long viewerId) {
+        if (vos.isEmpty()) {
+            return;
+        }
+        Set<Long> voteIds = vos.stream()
+                .filter(vo -> !Boolean.TRUE.equals(vo.getRecalled()))
+                .filter(vo -> vo.getMsgType() != null && vo.getMsgType() == MsgType.VOTE.getCode())
+                .map(MessageVO::getMessageId)
+                .collect(Collectors.toSet());
+        if (voteIds.isEmpty()) {
+            return;
+        }
+        List<MessageVote> rows = messageVoteMapper.selectByMessageIds(voteIds);
+        Map<Long, Map<Integer, Integer>> countsBy = new HashMap<>();
+        Map<Long, Set<Long>> votersBy = new HashMap<>();
+        Map<Long, Set<Integer>> mineBy = new HashMap<>();
+        for (MessageVote row : rows) {
+            Long mid = row.getMessageId();
+            Integer oi = row.getOptionIndex();
+            if (oi != null) {
+                countsBy.computeIfAbsent(mid, k -> new HashMap<>()).merge(oi, 1, Integer::sum);
+                if (viewerId != null && viewerId.equals(row.getUserId())) {
+                    mineBy.computeIfAbsent(mid, k -> new HashSet<>()).add(oi);
+                }
+            }
+            votersBy.computeIfAbsent(mid, k -> new HashSet<>()).add(row.getUserId());
+        }
+        for (MessageVO vo : vos) {
+            if (vo.getMsgType() == null || vo.getMsgType() != MsgType.VOTE.getCode()) {
+                continue;
+            }
+            MessageExtra ex = vo.getExtra();
+            if (ex == null || ex.getVoteOptions() == null) {
+                continue;
+            }
+            Long mid = vo.getMessageId();
+            Map<Integer, Integer> counts = countsBy.getOrDefault(mid, Map.of());
+            Set<Integer> mine = mineBy.getOrDefault(mid, Set.of());
+            List<String> texts = ex.getVoteOptions();
+            List<VoteOptionVO> opts = new ArrayList<>(texts.size());
+            for (int i = 0; i < texts.size(); i++) {
+                opts.add(VoteOptionVO.builder()
+                        .index(i)
+                        .text(texts.get(i))
+                        .count(counts.getOrDefault(i, 0))
+                        .selfVoted(mine.contains(i))
+                        .build());
+            }
+            vo.setVote(VoteViewVO.builder()
+                    .title(ex.getVoteTitle())
+                    .multiple(Boolean.TRUE.equals(ex.getVoteMultiple()))
+                    .anonymous(Boolean.TRUE.equals(ex.getVoteAnonymous()))
+                    .closed(Boolean.TRUE.equals(ex.getVoteClosed()))
+                    .totalVoters(votersBy.getOrDefault(mid, Set.of()).size())
+                    .options(opts)
+                    .build());
+        }
+    }
+
+    /**
+     * 把一批消息中哪些是群精华一次性取回，命中的 VO 置 {@code essence=true}。整页一次取行，避免逐条回表。
+     */
+    private void attachEssence(List<MessageVO> vos) {
+        if (vos.isEmpty()) {
+            return;
+        }
+        Set<Long> ids = vos.stream()
+                .map(MessageVO::getMessageId)
+                .collect(Collectors.toSet());
+        if (ids.isEmpty()) {
+            return;
+        }
+        List<MessageEssence> rows = messageEssenceMapper.selectByMessageIds(ids);
+        if (rows.isEmpty()) {
+            return;
+        }
+        Set<Long> essenceIds = rows.stream().map(MessageEssence::getMessageId).collect(Collectors.toSet());
+        for (MessageVO vo : vos) {
+            if (essenceIds.contains(vo.getMessageId())) {
+                vo.setEssence(Boolean.TRUE);
+            }
+        }
+    }
+
+    /**
+     * 精华变更通知：把「哪条消息、是设为还是取消」推给群成员（含操作者其他设备），各端气泡的精华标签实时增减。
+     */
+    private void pushEssence(Long conversationId, Long messageId, boolean essence) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(conversationId);
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("essence", essence);
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.ESSENCE_NOTIFY, data));
+    }
+
+    /**
+     * 投票变更通知：把服务端重算的权威票数（逐选项计数 + 总人数 + 是否截止）推给会话全员。
+     *
+     * <p>不携带投票人身份（避免泄露匿名投票），各端据此直接刷新选项条；本人选择由发送端 HTTP 回包就地更新。
+     */
+    private void pushVote(Long conversationId, Long messageId, int optionCount, boolean closed) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(conversationId);
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        List<MessageVote> rows = messageVoteMapper.selectByMessageIds(List.of(messageId));
+        int[] counts = new int[optionCount];
+        Set<Long> voters = new HashSet<>();
+        for (MessageVote row : rows) {
+            Integer oi = row.getOptionIndex();
+            if (oi != null && oi >= 0 && oi < optionCount) {
+                counts[oi]++;
+            }
+            voters.add(row.getUserId());
+        }
+        List<Integer> optionCounts = new ArrayList<>(optionCount);
+        for (int c : counts) {
+            optionCounts.add(c);
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("optionCounts", optionCounts);
+        data.put("totalVoters", voters.size());
+        data.put("closed", closed);
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.VOTE_NOTIFY, data));
+    }
+
+    /**
+     * 闪照销毁通知：推给会话全体成员（含查看者自己的其他设备），
+     * 让所有端的气泡实时切换到「已销毁」占位，不再展示原图。
+     */
+    private void pushFlashViewed(Long conversationId, Long messageId, Long viewerId) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(conversationId);
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("viewerId", viewerId);
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.FLASH_NOTIFY, data));
     }
 
     @Override

@@ -515,6 +515,96 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
+     * 闪照销毁通知：data = { messageId, conversationId, viewerId }。
+     * 闪照是「每人各看一次」：只有 viewerId 是自己（含自己在其它设备上看）时才把本地气泡标销毁，
+     * 别人看了不影响自己仍未消费的那一次。消息不在当前已加载列表里时忽略（历史拉取自带最新 extra）。
+     */
+    applyFlashViewed(payload) {
+      if (!payload) {
+        return
+      }
+      const auth = useAuthStore()
+      if (!auth.userId || !sameId(auth.userId, payload.viewerId)) {
+        // 不是自己拆的：其他成员各看各的，本端气泡维持原状
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (target) {
+        target.extra = { ...(target.extra || {}), flash: true, flashViewed: true, fileUrl: '' }
+        dbUpsertMessage(payload.conversationId, target)
+      }
+    },
+
+    /**
+     * 编辑通知：data = { messageId, conversationId, content, editTime }。
+     * 就地改写本地气泡正文并打「已编辑」标记，对所有成员（含发送者其他设备）生效。
+     * 服务端推回的是经 XSS 清洗 + 敏感词遮蔽后的权威正文，以它为准。
+     */
+    applyEdit(payload) {
+      if (!payload) {
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (target) {
+        target.content = payload.content
+        target.extra = { ...(target.extra || {}), edited: true, editTime: payload.editTime }
+        dbUpsertMessage(payload.conversationId, target)
+      }
+    },
+
+    /**
+     * 表情回应增量通知：data = { messageId, conversationId, userId, emoji, remove }。
+     *
+     * 服务端只推「谁对哪条消息加/删了哪个表情」这一条增量，不推权威快照（self 因人而异），
+     * 所以这里必须在本地聚合列表上做加减。与 applyEdit 的赋值不同，increment 不幂等，
+     * 每个 notify 只能应用一次——react() 因此不做本地乐观更新，完全依赖这条回执（含本端）。
+     * 自己那一路用 userId==auth.userId 判 self；自己重复贴时 count 不 +1（防双计）。
+     */
+    applyReaction(payload) {
+      if (!payload) {
+        return
+      }
+      const auth = useAuthStore()
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (!target) {
+        return
+      }
+      const isSelf = !!auth.userId && sameId(auth.userId, payload.userId)
+      const list = Array.isArray(target.reactions) ? target.reactions.slice() : []
+      const idx = list.findIndex((r) => r.emoji === payload.emoji)
+      if (payload.remove) {
+        if (idx >= 0) {
+          const item = { ...list[idx] }
+          item.count = Math.max(0, (item.count || 0) - 1)
+          if (isSelf) {
+            item.self = false
+          }
+          if (item.count <= 0) {
+            list.splice(idx, 1)
+          } else {
+            list[idx] = item
+          }
+        }
+      } else if (idx >= 0) {
+        const item = { ...list[idx] }
+        if (!(isSelf && item.self === true)) {
+          item.count = (item.count || 0) + 1
+        }
+        if (isSelf) {
+          item.self = true
+        }
+        list[idx] = item
+      } else {
+        list.push({ emoji: payload.emoji, count: 1, self: !!isSelf })
+      }
+      target.reactions = list
+      dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
      * 送达 / 已读回执：data = { messageIds, userId, timestamp }，推给原发送者。
      *
      * 只在自己发出的消息上升级状态，且状态只能往前走 ——
@@ -556,6 +646,103 @@ export const useChatStore = defineStore('chat', {
     async recall(conversationId, messageId) {
       await messageApi.recallMessage(messageId)
       this.applyRecall({ conversationId, messageId, summary: '' })
+    },
+
+    /**
+     * 编辑消息（HTTP 通道）。
+     * 先本地乐观更新把气泡正文换成用户刚输入的文本，紧接着本端会收到 edit-notify
+     * 带服务端清洗/遮蔽后的权威正文再覆盖一次，applyEdit 是幂等的。
+     */
+    async edit(conversationId, messageId, content) {
+      await messageApi.editMessage(messageId, content)
+      this.applyEdit({ conversationId, messageId, content })
+    },
+
+    /**
+     * 表情回应（HTTP 通道）。
+     * 不做本地乐观更新：reaction-notify 会推给会话全员（含本端），由 applyReaction 统一应用一次，
+     * 避免本地改 + 回执再改导致 count 双计。失败由全局 toast 提示。
+     */
+    async react(conversationId, messageId, emoji, remove) {
+      await messageApi.reactMessage(messageId, emoji, remove)
+    },
+
+    /**
+     * 精华标记变更（服务端下发）：就地把目标消息的 essence 布尔位赋值。
+     * essence 是全量赋值（非增量），本端 HTTP 回包与 essence-notify 双路抵达也不会错乱。
+     */
+    applyEssence(payload) {
+      if (!payload) {
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (!target) {
+        return
+      }
+      target.essence = !!payload.essence
+      dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
+     * 标记 / 取消精华（HTTP 通道）：仅群主/管理员可用。本端就地刷新，其他成员由 essence-notify 同步。
+     */
+    async markEssence(conversationId, messageId, essence) {
+      await messageApi.markMessageEssence(messageId, essence)
+      this.applyEssence({ conversationId, messageId, essence })
+    },
+
+    /**
+     * 投票变更（服务端下发）：直接以权威票数覆盖各选项计数 + 总人数 + 是否截止。
+     * 票数是全量赋值（非增量），所以 HTTP 回包与 vote-notify 双路抵达也不会双计。
+     * 不携带投票人身份，本人已选（selfVoted）从现有视图保留。
+     */
+    applyVote(payload) {
+      if (!payload) {
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (!target) {
+        return
+      }
+      const counts = Array.isArray(payload.optionCounts) ? payload.optionCounts : []
+      let view = target.vote
+      if (!view || !Array.isArray(view.options)) {
+        const texts = target.extra && Array.isArray(target.extra.voteOptions) ? target.extra.voteOptions : []
+        view = {
+          title: (target.extra && target.extra.voteTitle) || '投票',
+          multiple: !!(target.extra && target.extra.voteMultiple),
+          anonymous: !!(target.extra && target.extra.voteAnonymous),
+          closed: false,
+          totalVoters: 0,
+          options: texts.map((text, index) => ({ index, text, count: 0, selfVoted: false }))
+        }
+      }
+      view.options = view.options.map((o) => ({ ...o, count: counts[o.index] || 0 }))
+      view.totalVoters = payload.totalVoters || 0
+      if (payload.closed) {
+        view.closed = true
+      }
+      target.vote = view
+      dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
+     * 投票（HTTP 通道）：本端用服务端回包的最新聚合视图（含本人 selfVoted）就地刷新；
+     * 其他成员随后通过 vote-notify 拿到同一份权威票数。
+     */
+    async vote(conversationId, messageId, options, close) {
+      const vo = await messageApi.voteMessage(messageId, options, close)
+      if (vo && vo.vote) {
+        const key = this.bucket(conversationId)
+        const target = this.messages[key].find((item) => sameId(item.messageId, messageId))
+        if (target) {
+          target.vote = vo.vote
+          dbUpsertMessage(conversationId, target)
+        }
+      }
+      return vo
     },
 
     /** 单端删除，只对自己不可见 */

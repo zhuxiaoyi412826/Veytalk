@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getCallConfig } from '@/api/call'
 import { uploadFileSmart } from '@/api/file'
@@ -57,6 +58,7 @@ export const useCallStore = defineStore('call', () => {
   let engine = null
   let recorder = null
   let tickTimer = null
+  let failTimer = null
   let startedAtTs = 0
   let wasConnected = false
   let recordedFilePath = ''
@@ -107,6 +109,18 @@ export const useCallStore = defineStore('call', () => {
 
   /* ------------------------------ 媒体引擎 ------------------------------ */
 
+  /**
+   * 本环境能不能拿到麦/摄像头。浏览器只在安全上下文（https 或 localhost/127.0.0.1）
+   * 暴露 navigator.mediaDevices：手机用 http://局域网IP 访问时它是 undefined，
+   * 不预检直接调 getUserMedia 会撞一个天书一样的 TypeError（navigator.mediaDevices 不存在），
+   * 用户只看到「接通后就关闭」——这正是那个 bug 的主要现场。
+   */
+  function hasMediaApi() {
+    return !!(typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  }
+
+  const INSECURE_HINT = '当前访问地址不是 HTTPS/localhost，浏览器禁止使用麦克风/摄像头：手机请用 https://<电脑IP>:5173 访问（npm run gen:cert 生成证书）'
+
   async function buildEngine() {
     engine = createCallPeer({
       iceServers: (config && config.iceServers) || [],
@@ -121,9 +135,24 @@ export const useCallStore = defineStore('call', () => {
       onConnectionState: (state) => {
         dlog('[call] pc connectionState', state)
         if (state === 'connected') {
+          clearFailTimer()
+          if (status.value === 'active') {
+            hint.value = ''
+          }
           startTimer()
         } else if (state === 'failed') {
-          hint.value = '连接失败，可能因网络限制无法直连'
+          // ICE 彻底失败（同网段但防火墙拦了 UDP、两端不同网段等）：不自动收口的话
+          // 本端卡在一个无声无像的浮层里，对端也不知道你挂了 —— 给 5s 重连窗口，
+          // 没救回来就主动挂断（hangup 会同时通知对端 teardown）
+          hint.value = 'P2P 连接失败：确认两端在同一局域网，且电脑防火墙未拦截 UDP'
+          clearFailTimer()
+          failTimer = setTimeout(() => {
+            failTimer = null
+            if (status.value === 'active') {
+              ElMessage.error('通话无法建立，已挂断（检查同网段 / 防火墙 UDP）')
+              hangup()
+            }
+          }, 5000)
         }
       }
     })
@@ -161,6 +190,13 @@ export const useCallStore = defineStore('call', () => {
     }
   }
 
+  function clearFailTimer() {
+    if (failTimer) {
+      clearTimeout(failTimer)
+      failTimer = null
+    }
+  }
+
   /* ------------------------------ 主叫：拨出 ------------------------------ */
 
   /**
@@ -184,12 +220,19 @@ export const useCallStore = defineStore('call', () => {
     mediaType.value = type === 'video' ? 'video' : 'audio'
     peerUserId.value = asId(userId)
     conversationId.value = ctx.conversationId != null ? asId(ctx.conversationId) : null
+    // 取流前先验安全上下文：非 https/localhost 下浏览器根本不给麦照，
+    // 拨出去只会在接通环节默默失败；这里直接拦下并告诉用户原因，不进 dialing
+    if (!hasMediaApi()) {
+      ElMessage.error(INSECURE_HINT)
+      return
+    }
     status.value = 'dialing'
     hint.value = '正在呼叫…'
     try {
       await buildEngine()
     } catch (error) {
       hint.value = `无法获取麦克风/摄像头：${(error && error.name) || ''}`
+      ElMessage.error(hint.value)
       teardown(false)
       return
     }
@@ -211,10 +254,19 @@ export const useCallStore = defineStore('call', () => {
     if (status.value !== 'ringing') {
       return
     }
+    if (!hasMediaApi()) {
+      // 同样先验安全上下文：拿不到麦照就早点拒接并说明原因，
+      // 不要让用户点了接听、界面瞬间自己关闭（看起来像通话坏了）
+      ElMessage.error(INSECURE_HINT)
+      signal('reject')
+      teardown(false)
+      return
+    }
     try {
       await buildEngine()
     } catch (error) {
       hint.value = `无法获取麦克风/摄像头：${(error && error.name) || ''}`
+      ElMessage.error(hint.value)
       signal('reject')
       teardown(false)
       return
@@ -464,6 +516,7 @@ export const useCallStore = defineStore('call', () => {
     const recordWasConnected = wasConnected
 
     stopTimer()
+    clearFailTimer()
     if (recorder) {
       await stopRecording()
     }
@@ -483,6 +536,9 @@ export const useCallStore = defineStore('call', () => {
     status.value = 'ended'
     if (endHint) {
       hint.value = endHint
+      // hint 会随 800ms 后的 reset 一起被清，弹框才能让人看清「为什么刚点就关了」：
+      // 最常见就是 failed(offline)——对端设备根本没连上服务器（多半是网络不通 / 非 HTTPS）
+      ElMessage.warning(endHint)
     }
 
     // 主叫、且这通电话真正接通过，才落一条通话记录，避免两端各发一条 / 未接通的噪音
@@ -552,6 +608,7 @@ export const useCallStore = defineStore('call', () => {
 
   function reset() {
     status.value = 'idle'
+    clearFailTimer()
     role.value = ''
     callId.value = ''
     mediaType.value = 'audio'

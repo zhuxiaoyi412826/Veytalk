@@ -65,6 +65,25 @@
         </div>
       </div>
 
+      <!-- ==================== 群聊内容（文件 / 相册 / 精华） ==================== -->
+      <div class="group-settings__section">
+        <div class="group-settings__label">群聊内容</div>
+        <div class="group-settings__content-row">
+          <div class="group-settings__content-item" @click="openContent('files')">
+            <el-icon><Document /></el-icon>
+            <span>群文件</span>
+          </div>
+          <div class="group-settings__content-item" @click="openContent('album')">
+            <el-icon><Picture /></el-icon>
+            <span>群相册</span>
+          </div>
+          <div class="group-settings__content-item" @click="openContent('essence')">
+            <el-icon><Star /></el-icon>
+            <span>群精华</span>
+          </div>
+        </div>
+      </div>
+
       <!-- ==================== 全员禁言（管理员以上） ==================== -->
       <div v-if="canManage" class="group-settings__section">
         <div class="group-settings__label-row">
@@ -76,6 +95,49 @@
         </div>
         <div v-if="group.currentGroup.muteAll" class="group-settings__hint">
           已开启全员禁言，仅管理员与群主可发言
+        </div>
+      </div>
+
+      <!-- ==================== 入群方式（管理员以上） ==================== -->
+      <div v-if="canManage" class="group-settings__section">
+        <div class="group-settings__label">入群方式</div>
+        <div class="group-settings__label-row">
+          <span class="group-settings__sub-label">入群审批</span>
+          <el-switch
+            :model-value="!!group.currentGroup.joinApproval"
+            @change="onToggleJoinApproval"
+          />
+        </div>
+        <div class="group-settings__hint">
+          {{ group.currentGroup.joinApproval
+            ? '已开启：通过邀请链接 / 二维码申请入群需管理员确认'
+            : '未开启：任何拿到邀请链接或扫码的人可直接入群' }}
+        </div>
+        <div class="group-settings__content-row">
+          <div class="group-settings__content-item" @click="openInvite">
+            <el-icon><Share /></el-icon>
+            <span>邀请二维码</span>
+          </div>
+          <div class="group-settings__content-item" @click="openJoinRequests">
+            <el-badge :value="group.currentGroup.pendingJoinCount || 0" :hidden="!(group.currentGroup.pendingJoinCount > 0)" :offset="[8, 4]">
+              <el-icon><Postcard /></el-icon>
+            </el-badge>
+            <span>入群申请</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 群机器人（管理员以上） ==================== -->
+      <div v-if="canManage" class="group-settings__section">
+        <div class="group-settings__label">群机器人</div>
+        <div class="group-settings__content-row">
+          <div class="group-settings__content-item" @click="openRobots">
+            <el-icon><Cpu /></el-icon>
+            <span>机器人 / Webhook</span>
+          </div>
+        </div>
+        <div class="group-settings__hint">
+          创建机器人后，外部系统可凭回调地址向本群推送消息
         </div>
       </div>
 
@@ -232,6 +294,32 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- ==================== 群聊内容浏览面板 ==================== -->
+    <GroupContentDialog
+      v-model="showContent"
+      :conversation-id="group.currentGroup?.conversationId"
+      :mode="contentMode"
+    />
+
+    <!-- ==================== 邀请入群（链接 + 二维码） ==================== -->
+    <GroupInviteDialog
+      v-model="showInvitePanel"
+      :group-id="props.groupId"
+      :group-name="group.currentGroup?.name || '群聊'"
+    />
+
+    <!-- ==================== 入群申请审批面板 ==================== -->
+    <GroupJoinRequestDialog
+      v-model="showJoinRequests"
+      :group-id="props.groupId"
+    />
+
+    <!-- ==================== 群机器人管理面板 ==================== -->
+    <GroupRobotDialog
+      v-model="showRobotPanel"
+      :group-id="props.groupId"
+    />
   </el-drawer>
 </template>
 
@@ -239,8 +327,12 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MoreFilled, Plus, Search } from '@element-plus/icons-vue'
+import { MoreFilled, Plus, Search, Document, Picture, Star, Share, Postcard, Cpu } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import GroupContentDialog from '@/components/GroupContentDialog.vue'
+import GroupInviteDialog from '@/components/GroupInviteDialog.vue'
+import GroupJoinRequestDialog from '@/components/GroupJoinRequestDialog.vue'
+import GroupRobotDialog from '@/components/GroupRobotDialog.vue'
 import { useGroupStore, ROLE_OWNER, ROLE_ADMIN, ROLE_MEMBER } from '@/stores/group'
 import { useFriendStore } from '@/stores/friend'
 import { useConversationStore } from '@/stores/conversation'
@@ -498,6 +590,34 @@ async function onDismiss() {
 
 const showInvite = ref(false)
 const inviting = ref(false)
+
+/* ------------------------------ 群聊内容面板 ------------------------------ */
+const showContent = ref(false)
+const contentMode = ref('files') // files | album | essence
+function openContent(mode) {
+  contentMode.value = mode
+  showContent.value = true
+}
+
+/* ------------------------------ 入群方式 ------------------------------ */
+const showInvitePanel = ref(false)
+const showJoinRequests = ref(false)
+function openInvite() {
+  showInvitePanel.value = true
+}
+function openJoinRequests() {
+  showJoinRequests.value = true
+}
+const showRobotPanel = ref(false)
+function openRobots() {
+  showRobotPanel.value = true
+}
+async function onToggleJoinApproval(val) {
+  try {
+    await group.setJoinApproval(props.groupId, val)
+    ElMessage.success(val ? '已开启入群审批' : '已关闭入群审批')
+  } catch { /* request.js 已处理 */ }
+}
 const inviteKeyword = ref('')
 const inviteSelected = reactive(new Set())
 
@@ -626,6 +746,43 @@ watch(visible, (val) => {
   font-size: 12px;
   color: var(--im-text-secondary);
   margin-top: 4px;
+}
+
+.group-settings__sub-label {
+  font-size: 13px;
+  color: var(--im-text);
+}
+
+/* 群聊内容 / 入群方式快捷入口：横向等分的一排图标按钮 */
+.group-settings__content-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.group-settings__content-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 0;
+  border-radius: 8px;
+  background: var(--im-bg-hover, #f5f7fa);
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.group-settings__content-item:hover {
+  background: var(--im-bg-active, #ecf0f5);
+}
+
+.group-settings__content-item .el-icon {
+  font-size: 20px;
+  color: var(--im-primary, #409eff);
 }
 
 /* 成员列表 */

@@ -353,6 +353,17 @@
           </div>
         </div>
 
+        <div class="settings__row settings__row--stack">
+          <div class="settings__label">
+            <span>导出云端完整记录（合规备份 / 迁移）</span>
+            <span class="settings__desc">从服务端拉取全部会话的完整消息历史（非仅本地已加载部分）导出为 JSON / CSV；服务端单次上限 20000 条/会话</span>
+          </div>
+          <div class="settings__bg">
+            <el-button :icon="Download" :loading="cloudExporting" @click="exportCloudRecords('json')">导出 JSON</el-button>
+            <el-button :icon="Download" :loading="cloudExporting" @click="exportCloudRecords('csv')">导出 CSV</el-button>
+          </div>
+        </div>
+
         <!-- 桌面端专属：当前为纯 Web，无法落地，保留入口但禁用并标注 -->
         <div class="settings__row">
           <div class="settings__label">
@@ -389,6 +400,14 @@
           </div>
           <el-button type="danger" plain :icon="SwitchButton" @click="onLogout">退出登录</el-button>
         </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>注销账号</span>
+            <span class="settings__desc">合规（GDPR/个保法）要求的销号：验证登录密码后匿名化并删除本人资料，级联清除好友关系、会话成员、群组与消息行为数据，历史消息按去标识化处理。此操作不可逆，须输入登录密码确认</span>
+          </div>
+          <el-button type="danger" :icon="DeleteFilled" @click="onCancelAccount">注销账号</el-button>
+        </div>
       </section>
 
       <div class="settings__footer">
@@ -402,7 +421,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, User } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, User, DeleteFilled } from '@element-plus/icons-vue'
 import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
@@ -412,7 +431,8 @@ import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
 import { clearMediaCache } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
 import { fetchDefaultRecordDir, openRecordDir, pickRecordDir, recordSupported } from '@/utils/recorder'
-import { fetchSensitiveFilter, setSensitiveFilter } from '@/api/message'
+import { fetchSensitiveFilter, setSensitiveFilter, exportConversationMessages } from '@/api/message'
+import { cancelAccount } from '@/api/user'
 
 defineOptions({ name: 'Settings' })
 
@@ -714,6 +734,92 @@ async function exportChatRecords() {
   ElMessage.success('已导出本地聊天记录到 JSON 文件（仅本机磁盘，非云端备份）')
 }
 
+/** 云端导出进行中标志，避免会话较多时重复点击 */
+const cloudExporting = ref(false)
+
+/**
+ * 从服务端导出全部会话的完整聊天记录（合规备份 / 迁移）。
+ *
+ * 与本地导出的区别：这里拉的是服务端权威数据，覆盖从未在本地打开过的历史，不依赖本地缓存。
+ * 逐个会话调 /message/export，拼成统一结构后按选定的 json / csv 下载到本机磁盘。
+ */
+async function exportCloudRecords(format) {
+  if (cloudExporting.value) {
+    return
+  }
+  if (!conversations.list.length) {
+    await conversations.fetchList()
+  }
+  const items = conversations.list
+  if (!items.length) {
+    ElMessage.warning('当前没有任何会话可导出')
+    return
+  }
+  cloudExporting.value = true
+  const groups = []
+  try {
+    for (const item of items) {
+      const messages = (await exportConversationMessages(item.conversationId)) || []
+      if (!messages.length) {
+        continue
+      }
+      groups.push({
+        conversationId: item.conversationId,
+        name: item.name || item.conversationId,
+        exportedAt: new Date().toISOString(),
+        source: 'server',
+        messages: messages.map((m) => ({
+          messageId: m.messageId || m.clientMsgId || '',
+          from: m.fromNickname || '',
+          self: !!m.self,
+          type: m.msgTypeDesc || '',
+          content: m.recalled ? '[已撤回]' : m.content || '',
+          time: m.sendTime || '',
+          status: m.statusDesc || ''
+        }))
+      })
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '导出失败，请稍后重试')
+    return
+  } finally {
+    cloudExporting.value = false
+  }
+  if (!groups.length) {
+    ElMessage.warning('没有可导出的消息记录')
+    return
+  }
+  const stamp = Date.now()
+  if (format === 'csv') {
+    const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
+    const lines = ['"会话","发送者","是否本人","类型","内容","时间","状态"']
+    groups.forEach((g) => {
+      g.messages.forEach((m) => {
+        lines.push([esc(g.name), esc(m.from), esc(m.self ? '是' : '否'), esc(m.type), esc(m.content), esc(m.time), esc(m.status)].join(','))
+      })
+    })
+    // 前置 BOM 让 Excel 能按 UTF-8 正确识别中文
+    const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    triggerDownload(blob, `im-chat-export-${stamp}.csv`)
+  } else {
+    const blob = new Blob([JSON.stringify(groups, null, 2)], { type: 'application/json' })
+    triggerDownload(blob, `im-chat-export-${stamp}.json`)
+  }
+  ElMessage.success(`已从服务端导出 ${groups.length} 个会话的完整记录`)
+}
+
+/** 统一的 Blob 落盘：创建临时 <a> 触发下载后释放 URL */
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 async function onReset() {
   try {
     await ElMessageBox.confirm('将把外观、消息行为等所有设置恢复为默认值，确定继续？', '恢复默认设置', {
@@ -743,6 +849,41 @@ async function onLogout() {
   }
   await signOut()
   ElMessage.success('已退出登录')
+  router.replace({ name: 'login' })
+}
+
+// 账号注销：先二次确认不可逆后果，再弹密码框，通过后提交。成功后本地无态可留，直接 signOut 回登录页
+async function onCancelAccount() {
+  try {
+    await ElMessageBox.confirm(
+      '注销将永久删除账号及全部个人数据，且无法恢复。历史消息会做去标识化处理但仍保留在他人会话中。确定继续？',
+      '注销账号',
+      { confirmButtonText: '继续注销', cancelButtonText: '取消', type: 'warning', confirmButtonClass: 'el-button--danger' }
+    )
+  } catch {
+    return
+  }
+  let password = ''
+  try {
+    const { value } = await ElMessageBox.prompt('请输入登录密码以确认注销', '身份验证', {
+      inputType: 'password',
+      inputPlaceholder: '登录密码',
+      inputValidator: (v) => (v && v.length ? true : '密码不能为空'),
+      confirmButtonText: '确认注销',
+      cancelButtonText: '取消'
+    })
+    password = value
+  } catch {
+    return
+  }
+  try {
+    await cancelAccount({ password })
+  } catch (e) {
+    ElMessage.error(e?.message || '注销失败，请检查密码或稍后重试')
+    return
+  }
+  await signOut()
+  ElMessage.success('账号已注销')
   router.replace({ name: 'login' })
 }
 </script>

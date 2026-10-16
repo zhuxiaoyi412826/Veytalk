@@ -24,6 +24,9 @@
         <el-tooltip v-if="peerUserId" content="查看资料" placement="bottom">
           <el-button text :icon="User" @click="openProfile" />
         </el-tooltip>
+        <el-tooltip content="多选（选中多条消息可合并转发）" placement="bottom">
+          <el-button text :icon="Finished" @click="enterSelectMode" />
+        </el-tooltip>
         <el-tooltip content="搜索消息" placement="bottom">
           <el-button text :icon="Search" @click="toggleSearch" />
         </el-tooltip>
@@ -102,6 +105,8 @@
               :message="item"
               :show-sender="isGroup"
               :is-group="isGroup"
+              :selectable="selectMode"
+              :selected="isSelected(item)"
               @menu="(event) => onBubbleMenu(event, item)"
               @resend="onResend"
               @discard="onDiscard"
@@ -109,6 +114,13 @@
               @view-image="onViewImage"
               @view-flash="onViewFlash"
               @jump-quote="onJumpQuote"
+              @react="onReact"
+              @view-card="onViewCard"
+              @open-location="onOpenLocation"
+              @view-merged="onViewMerged"
+              @toggle-select="toggleSelect"
+              @vote="onVote"
+              @close-vote="onCloseVote"
             />
           </div>
         </template>
@@ -129,8 +141,17 @@
       </div>
     </transition>
 
+    <!-- ==================== 多选操作栏（选中模式下顶替输入区） ==================== -->
+    <footer v-show="selectMode" class="chat-window__select-bar">
+      <span class="chat-window__select-count">已选 {{ selectedCount }} 条</span>
+      <el-button text @click="toggleSelectAll">全选</el-button>
+      <span class="chat-window__select-spacer"></span>
+      <el-button @click="exitSelectMode">取消</el-button>
+      <el-button type="primary" :disabled="selectedCount < 2" @click="openMergedPicker">合并转发</el-button>
+    </footer>
+
     <!-- ==================== 输入区 ==================== -->
-    <footer class="chat-window__input">
+    <footer v-show="!selectMode" class="chat-window__input">
       <div class="chat-window__toolbar">
         <el-popover
           v-model:visible="emojiVisible"
@@ -154,6 +175,15 @@
         <el-tooltip v-if="canUpload" content="添加文件到输入框（可拖进窗口或 Ctrl+V 粘贴；音频会作为语音消息）" placement="top">
           <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
         </el-tooltip>
+        <el-tooltip content="发送名片（把一位好友的资料卡发到当前会话）" placement="top">
+          <el-button text :icon="Postcard" @click="openCardPicker" />
+        </el-tooltip>
+        <el-tooltip content="发送位置（一个坐标 + 文字地址，对方可在地图里打开）" placement="top">
+          <el-button text :icon="Location" @click="openLocationPicker" />
+        </el-tooltip>
+        <el-tooltip content="发起投票（一个主题 + 多个选项，成员可选并实时计票）" placement="top">
+          <el-button text :icon="Histogram" @click="openVoteDialog" />
+        </el-tooltip>
         <input ref="imageInputRef" type="file" accept="image/*" multiple class="chat-window__file-input" @change="onPicked" />
         <input ref="fileInputRef" type="file" multiple class="chat-window__file-input" @change="onPicked" />
 
@@ -166,8 +196,8 @@
         </el-tooltip>
 
         <el-tooltip
-          v-if="canUpload"
-          content="开启后本次发送的图片作为闪照：对方只能查看一次，倒计时结束自动销毁"
+          v-if="canUpload && !isGroup"
+          content="开启后本次发送的图片作为闪照：对方只能查看一次，倒计时结束自动销毁（仅单聊支持，群聊不生效）"
           placement="top"
         >
           <span class="chat-window__flash-group">
@@ -214,6 +244,15 @@
         <el-button text :icon="Close" size="small" @click="cancelReply" />
       </div>
 
+      <!-- 编辑横幅：进入编辑态后在输入框上方展示，把原文回填进输入框，点右侧 X 取消 -->
+      <div v-if="editingMessage" class="chat-window__reply-banner">
+        <div class="chat-window__reply-info">
+          <span class="chat-window__reply-label">编辑消息</span>
+          <span class="chat-window__reply-content im-ellipsis">{{ editingMessage.content }}</span>
+        </div>
+        <el-button text :icon="Close" size="small" @click="cancelEdit" />
+      </div>
+
       <!-- 待发送附件托盘：选 / 拖 / 粘 三个入口都先落这里，点「发送」才真正上传发送。
            卡片在左侧一个挨着一个横向排，「待发送 N / 9」与「清空」放在同一行的右侧 -->
       <div v-if="tray.length" class="chat-window__tray">
@@ -233,7 +272,7 @@
               <span class="chat-window__tray-name im-ellipsis" :title="item.name">{{ item.name }}</span>
               <span class="chat-window__tray-size">{{ trayLabel(item) }}</span>
             </div>
-            <!-- 马赛克入口只对图片显形，与 ✕ 同一套 hover 规则（见下方样式） -->
+            <!-- 马赛克入口只对图片显形；常驻可见（旧版 hover 才显形，用户普遍找不到入口） -->
             <el-button
               v-if="item.kind === 'image'"
               class="chat-window__tray-mosaic"
@@ -307,7 +346,7 @@
 
       <div class="chat-window__send-row">
         <el-button type="primary" :loading="sending || uploading" :disabled="!canSend" @click="sendMessage">
-          发送<span v-if="tray.length">（{{ pendingCount }} 条）</span>
+          {{ editingMessage ? '保存' : '发送' }}<span v-if="!editingMessage && tray.length">（{{ pendingCount }} 条）</span>
         </el-button>
       </div>
 
@@ -358,6 +397,122 @@
       :message-id="forwardDialog.messageId"
     />
 
+    <!-- 合并转发目标选择：多选会话，一次把打包记录发到多个会话 -->
+    <el-dialog v-model="mergedPicker.visible" title="合并转发到" width="400px" append-to-body>
+      <el-input
+        v-model="mergedPicker.keyword"
+        placeholder="搜索会话名称"
+        clearable
+        :prefix-icon="Search"
+        style="margin-bottom: 10px"
+      />
+      <div class="chat-window__merged-list im-scroll">
+        <div
+          v-for="conv in mergedTargets"
+          :key="asId(conv.conversationId)"
+          class="chat-window__merged-item"
+          :class="{ 'is-selected': mergedPicker.selected.some((sid) => sameId(sid, conv.conversationId)) }"
+          @click="toggleMergedTarget(conv)"
+        >
+          <UserAvatar :src="conv.avatar" :name="conv.name" :size="36" />
+          <div class="chat-window__merged-item-name im-ellipsis">{{ conv.name }}</div>
+          <el-icon v-if="mergedPicker.selected.some((sid) => sameId(sid, conv.conversationId))" class="chat-window__merged-check"><Select /></el-icon>
+        </div>
+        <el-empty v-if="!mergedTargets.length" description="暂无匹配的会话" :image-size="60" />
+      </div>
+      <template #footer>
+        <el-button @click="mergedPicker.visible = false">取消</el-button>
+        <el-button type="primary" :disabled="!mergedPicker.selected.length" @click="doMergedForward">
+          发送{{ mergedPicker.selected.length ? `（${mergedPicker.selected.length}）` : '' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 聊天记录查看器：展开气泡里的合并转发快照 -->
+    <MergedRecordDialog
+      v-model:visible="mergedViewer.visible"
+      :title="mergedViewer.title"
+      :messages="mergedViewer.messages"
+    />
+
+    <!-- 名片选择器：搜好友、选中即把他资料卡发到当前会话 -->
+    <el-dialog v-model="cardPicker.visible" title="发送名片" width="420px" append-to-body>
+      <el-input
+        v-model="cardPicker.keyword"
+        placeholder="搜索好友昵称 / 备注"
+        clearable
+        :prefix-icon="Search"
+        class="chat-window__card-search"
+      />
+      <div class="chat-window__card-list im-scroll">
+        <el-empty v-if="!cardCandidates.length" description="没有可分享的好友" :image-size="60" />
+        <div
+          v-for="f in cardCandidates"
+          :key="asId(f.friendId)"
+          class="chat-window__card-item"
+          @click="sendCard(f)"
+        >
+          <UserAvatar :src="f.avatar" :name="friendDisplayName(f)" :size="36" />
+          <div class="chat-window__card-item-name im-ellipsis">{{ friendDisplayName(f) }}</div>
+          <el-button link type="primary" size="small">发送</el-button>
+        </div>
+      </div>
+    </el-dialog>
+
+    <!-- 位置发送：填地址 + 经纬度（可一键取本机定位） -->
+    <el-dialog v-model="locationDialog.visible" title="发送位置" width="420px" append-to-body>
+      <el-form label-width="72px" @submit.prevent>
+        <el-form-item label="地址">
+          <el-input v-model="locationDialog.name" placeholder="例如：公司楼下 / XX 路 XX 号" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="纬度">
+          <el-input v-model="locationDialog.latitude" placeholder="-90 ~ 90" />
+        </el-form-item>
+        <el-form-item label="经度">
+          <el-input v-model="locationDialog.longitude" placeholder="-180 ~ 180" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="chat-window__loc-footer">
+          <el-button text :loading="locationDialog.locating" :icon="Location" @click="useMyLocation">获取我的位置</el-button>
+          <span class="chat-window__loc-spacer"></span>
+          <el-button @click="locationDialog.visible = false">取消</el-button>
+          <el-button type="primary" @click="sendLocation">发送</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 发起投票：主题 + 动态选项 + 单选/多选 + 是否匿名 -->
+    <el-dialog v-model="voteDialog.visible" title="发起投票" width="440px" append-to-body>
+      <el-form label-width="64px" @submit.prevent>
+        <el-form-item label="主题">
+          <el-input v-model="voteDialog.title" placeholder="例如：周会时间怎么定？" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="选项">
+          <div class="chat-window__vote-options">
+            <div v-for="(opt, idx) in voteDialog.options" :key="idx" class="chat-window__vote-option">
+              <el-input v-model="voteDialog.options[idx]" :placeholder="'选项 ' + (idx + 1)" maxlength="100" />
+              <el-button
+                text
+                :icon="DeleteIcon"
+                :disabled="voteDialog.options.length <= 2"
+                @click="removeVoteOption(idx)"
+              />
+            </div>
+            <el-button text :icon="Plus" :disabled="voteDialog.options.length >= MAX_VOTE_OPTIONS" @click="addVoteOption">添加选项</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="方式">
+          <el-switch v-model="voteDialog.multiple" active-text="多选" inactive-text="单选" />
+          <el-switch v-model="voteDialog.anonymous" class="chat-window__vote-anon" active-text="匿名" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="voteDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="voteDialog.submitting" @click="sendVote">发送</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 待发图片的马赛克编辑器：保存产物就地替换托盘里的 File -->
     <ImageMosaicDialog
       v-model:visible="mosaic.visible"
@@ -398,7 +553,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Microphone, Picture, Refresh, Search, Select, Setting, Sunny, User, VideoCamera } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Plus, Delete as DeleteIcon } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
@@ -406,15 +561,18 @@ import FileViewer from '@/components/FileViewer.vue'
 import WatermarkOverlay from '@/components/WatermarkOverlay.vue'
 import GroupSettings from '@/components/GroupSettings.vue'
 import ForwardDialog from '@/components/ForwardDialog.vue'
+import MergedRecordDialog from '@/components/MergedRecordDialog.vue'
 import ImageMosaicDialog from '@/components/ImageMosaicDialog.vue'
+import UserAvatar from '@/components/UserAvatar.vue'
 import { useChatStore, newClientMsgId } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useCallStore } from '@/stores/call'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
+import { useFriendStore } from '@/stores/friend'
 import { uploadFileSmart } from '@/api/file'
-import { searchMessages, clearConversationMessages, flashViewMessage } from '@/api/message'
+import { searchMessages, clearConversationMessages, flashViewMessage, toMessageText, translateMessage } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo, mediaUrlAsync, mediaForget } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
 import { ocrImageText } from '@/utils/ocr'
@@ -425,6 +583,7 @@ import { riskCategoryOf, riskConfirmText } from '@/utils/riskFile'
 import { isElectron } from '@/utils/env'
 import { formatFileSize, formatMsgTime, needTimeDivider } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
+import { externalMapUrl } from '@/utils/geo'
 
 defineOptions({ name: 'ChatWindow' })
 
@@ -448,10 +607,12 @@ const MAX_PENDING_FILES = 9
 const TYPE_IMAGE = 2
 const TYPE_FILE = 3
 const TYPE_VOICE = 4
+const TYPE_CARD = 7
 
 const router = useRouter()
 const chat = useChatStore()
 const conversations = useConversationStore()
+const friends = useFriendStore()
 const auth = useAuthStore()
 const groupStore = useGroupStore()
 const settings = useSettingsStore()
@@ -511,6 +672,12 @@ const isMuteAll = computed(() => {
   return !!groupStore.currentGroup?.muteAll
 })
 
+/** 群内我的角色（进群时 fetchDetail 已回填 currentGroup.myRole） */
+const myGroupRole = computed(() => Number(groupStore.currentGroup?.myRole) || 0)
+/** 仅群主 / 管理员可将消息设为精华（与后端 requireGroupManager 同口径） */
+const canMarkEssence = computed(() =>
+  isGroup.value && (myGroupRole.value === ROLE_OWNER || myGroupRole.value === ROLE_ADMIN))
+
 const title = computed(() => conv.value?.name || '会话')
 
 const subtitle = computed(() => {
@@ -528,6 +695,363 @@ const subtitle = computed(() => {
 function openProfile() {
   if (peerUserId.value) {
     router.push({ name: 'user-profile', params: { id: asId(peerUserId.value) } })
+  }
+}
+
+/* ------------------------------ 名片 ------------------------------ */
+
+/** 名片选择弹窗：从好友里选一个联系人，把他的名片发到当前会话 */
+const cardPicker = reactive({ visible: false, keyword: '' })
+const cardCandidates = computed(() => {
+  const kw = (cardPicker.keyword || '').trim().toLowerCase()
+  if (!kw) {
+    return friends.friends
+  }
+  return friends.friends.filter((f) => {
+    const name = (f.remark || f.displayName || f.nickname || '').toLowerCase()
+    return name.includes(kw) || String(f.friendId).includes(kw)
+  })
+})
+
+function openCardPicker() {
+  cardPicker.keyword = ''
+  cardPicker.visible = true
+  // 好友列表未加载过时拉一次（本地快照为空时 friends 长度为 0）
+  if (!friends.friends.length && !friends.loading) {
+    friends.fetchFriends().catch(() => {})
+  }
+}
+
+function friendDisplayName(f) {
+  return f.remark || f.displayName || f.nickname || `用户${f.friendId}`
+}
+
+/**
+ * 发送一张名片。服务端会按 cardUserId 重查并定格昵称/头像快照，所以本地只传 ID；
+ * 乐观占位先把昵称/头像填上，免得气泡在回执回来前空一下（随后会被服务端权威快照覆盖）。
+ */
+async function sendCard(f) {
+  if (!f || !f.friendId) {
+    return
+  }
+  cardPicker.visible = false
+  try {
+    await chat.send(props.conversationId, {
+      msgType: TYPE_CARD,
+      extra: { cardUserId: f.friendId, cardNickname: friendDisplayName(f), cardAvatar: f.avatar }
+    })
+  } catch {
+    /* 失败已由占位气泡标红并提重发，全局 toast 提示原因 */
+  }
+}
+
+/** 点击气泡里的名片→打开那个用户的资料页 */
+function onViewCard(userId) {
+  if (userId) {
+    router.push({ name: 'user-profile', params: { id: asId(userId) } })
+  }
+}
+
+/* ------------------------------ 位置 ------------------------------ */
+
+const TYPE_LOCATION = 8
+const locationDialog = reactive({ visible: false, name: '', latitude: '', longitude: '', locating: false })
+
+function openLocationPicker() {
+  locationDialog.name = ''
+  locationDialog.latitude = ''
+  locationDialog.longitude = ''
+  locationDialog.visible = true
+}
+
+/** 调浏览器定位 API 填回当前坐标（非安全上下文/拒授权时提示改手写） */
+function useMyLocation() {
+  if (!navigator.geolocation) {
+    ElMessage.warning('当前环境不支持定位，请手动填写经纬度')
+    return
+  }
+  locationDialog.locating = true
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      locationDialog.latitude = pos.coords.latitude.toFixed(6)
+      locationDialog.longitude = pos.coords.longitude.toFixed(6)
+      locationDialog.locating = false
+    },
+    () => {
+      locationDialog.locating = false
+      ElMessage.error('获取位置失败，请检查定位权限或手动填写经纬度')
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  )
+}
+
+async function sendLocation() {
+  const lat = Number(locationDialog.latitude)
+  const lng = Number(locationDialog.longitude)
+  const name = (locationDialog.name || '').trim()
+  if (!name) {
+    ElMessage.warning('请填写地址 / 地点名称')
+    return
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    ElMessage.warning('经纬度不合法（纬 -90~90，经 -180~180）')
+    return
+  }
+  locationDialog.visible = false
+  try {
+    await chat.send(props.conversationId, {
+      msgType: TYPE_LOCATION,
+      content: name,
+      extra: { locationName: name, latitude: lat, longitude: lng }
+    })
+  } catch {
+    /* 失败已由占位气泡标红并提重发，全局 toast 提示原因 */
+  }
+}
+
+/** 点击气泡里的位置→在系统/浏览器地图打开 */
+function onOpenLocation({ latitude, longitude }) {
+  const url = externalMapUrl(latitude, longitude)
+  window.open(url, '_blank', 'noopener')
+}
+
+/* ------------------------------ 合并转发（多选） ------------------------------ */
+
+const TYPE_MERGED = 9
+/** 多选模式开关：开启后每条消息气泡左侧出现勾选框，底部浮现操作栏 */
+const selectMode = ref(false)
+/** 已选消息 ID 列表（asId 字符串），按消息时序累积 */
+const selectedIds = ref([])
+/** 合并记录查看器 */
+const mergedViewer = reactive({ visible: false, title: '', messages: [] })
+/** 合并转发目标会话选择器 */
+const mergedPicker = reactive({ visible: false, keyword: '', selected: [] })
+
+const selectedCount = computed(() => selectedIds.value.length)
+
+/** 可选：有真实 messageId、未撤回、非系统消息。本地占位/失败态消息不能打包 */
+function canSelect(m) {
+  return !!m.messageId && !m.recalled && Number(m.msgType) !== 5
+}
+
+function isSelected(m) {
+  return m.messageId ? selectedIds.value.includes(asId(m.messageId)) : false
+}
+
+function toggleSelect(m) {
+  if (!canSelect(m)) {
+    return
+  }
+  const id = asId(m.messageId)
+  const idx = selectedIds.value.findIndex((sid) => sameId(sid, id))
+  if (idx >= 0) {
+    selectedIds.value.splice(idx, 1)
+  } else {
+    selectedIds.value.push(id)
+  }
+}
+
+function enterSelectMode() {
+  selectedIds.value = []
+  selectMode.value = true
+}
+
+function exitSelectMode() {
+  selectMode.value = false
+  selectedIds.value = []
+  mergedPicker.visible = false
+  mergedPicker.selected = []
+  mergedPicker.keyword = ''
+}
+
+/** 全选当前可选项：已全选则清空，否则全选 */
+function toggleSelectAll() {
+  const selectable = messages.value.filter(canSelect)
+  const allChecked = selectable.length > 0 && selectable.every((m) => isSelected(m))
+  selectedIds.value = allChecked ? [] : selectable.map((m) => asId(m.messageId))
+}
+
+/** 快照摘要：与气泡一致，附件类给类型占位 + 关键文字，不回表取原文 */
+function mergedSummaryOf(m) {
+  const ex = m.extra || {}
+  if (m.recalled) return '[已撤回]'
+  switch (Number(m.msgType)) {
+    case 2: return ex.flash ? '[闪照]' : '[图片]'
+    case 3: return `[文件] ${ex.fileName || ''}`.trim()
+    case 4: return '[语音]'
+    case 6: return '[通话]'
+    case 7: return `[名片] ${ex.cardNickname || ''}`.trim()
+    case 8: return `[位置] ${ex.locationName || ''}`.trim()
+    case 9: return `[聊天记录] ${ex.mergedTitle || ''}`.trim()
+    default: return m.content || ''
+  }
+}
+
+/** 把选中消息按列表原有时序折算成快照数组 */
+function buildMergedItems() {
+  return messages.value
+    .filter((m) => isSelected(m))
+    .map((m) => ({
+      nickname: m.self ? auth.nickname || '我' : m.fromNickname || '',
+      msgType: Number(m.msgType),
+      summary: mergedSummaryOf(m),
+      time: m.sendTime
+    }))
+}
+
+/** 合并转发按钮：至少选 2 条，打开目标会话选择器 */
+function openMergedPicker() {
+  if (selectedCount.value < 2) {
+    ElMessage.warning('请至少选择 2 条消息再合并转发')
+    return
+  }
+  mergedPicker.keyword = ''
+  mergedPicker.selected = []
+  mergedPicker.visible = true
+}
+
+const mergedTargets = computed(() => {
+  const list = conversations.list || []
+  const kw = (mergedPicker.keyword || '').trim().toLowerCase()
+  if (!kw) return list
+  return list.filter((conv) => (conv.name || '').toLowerCase().includes(kw))
+})
+
+function toggleMergedTarget(conv) {
+  const id = asId(conv.conversationId)
+  const idx = mergedPicker.selected.findIndex((sid) => sameId(sid, id))
+  if (idx >= 0) {
+    mergedPicker.selected.splice(idx, 1)
+  } else {
+    mergedPicker.selected.push(id)
+  }
+}
+
+async function doMergedForward() {
+  const items = buildMergedItems()
+  if (items.length < 2) {
+    ElMessage.warning('请至少选择 2 条消息')
+    return
+  }
+  if (!mergedPicker.selected.length) {
+    ElMessage.warning('请选择目标会话')
+    return
+  }
+  const title = `聊天记录（${items.length} 条）`
+  let ok = 0
+  let fail = 0
+  for (const cid of mergedPicker.selected) {
+    try {
+      await chat.send(cid, {
+        msgType: TYPE_MERGED,
+        content: title,
+        extra: { mergedTitle: title, mergedMessages: items }
+      })
+      ok++
+    } catch {
+      fail++
+    }
+  }
+  if (fail === 0) {
+    ElMessage.success(`已合并转发到 ${ok} 个会话`)
+  } else if (ok === 0) {
+    ElMessage.error('合并转发失败')
+  } else {
+    ElMessage.warning(`已转发到 ${ok} 个会话，${fail} 个失败`)
+  }
+  exitSelectMode()
+}
+
+/** 点击气泡里的聊天记录卡片→展开查看器 */
+function onViewMerged({ title, messages: items }) {
+  mergedViewer.title = title || '聊天记录'
+  mergedViewer.messages = Array.isArray(items) ? items : []
+  mergedViewer.visible = true
+}
+
+/* ------------------------------ 投票 ------------------------------ */
+
+const TYPE_VOTE = 10
+const MAX_VOTE_OPTIONS = 20
+const voteDialog = reactive({
+  visible: false,
+  title: '',
+  options: ['', ''],
+  multiple: false,
+  anonymous: false,
+  submitting: false
+})
+
+function openVoteDialog() {
+  voteDialog.title = ''
+  voteDialog.options = ['', '']
+  voteDialog.multiple = false
+  voteDialog.anonymous = false
+  voteDialog.visible = true
+}
+
+function addVoteOption() {
+  if (voteDialog.options.length < MAX_VOTE_OPTIONS) {
+    voteDialog.options.push('')
+  }
+}
+
+function removeVoteOption(index) {
+  if (voteDialog.options.length > 2) {
+    voteDialog.options.splice(index, 1)
+  }
+}
+
+async function sendVote() {
+  const title = (voteDialog.title || '').trim()
+  if (!title) {
+    ElMessage.warning('请填写投票主题')
+    return
+  }
+  const options = voteDialog.options.map((o) => (o || '').trim()).filter(Boolean)
+  if (options.length < 2) {
+    ElMessage.warning('至少需要 2 个非空选项')
+    return
+  }
+  voteDialog.submitting = true
+  try {
+    await chat.send(props.conversationId, {
+      msgType: TYPE_VOTE,
+      content: title,
+      extra: { voteTitle: title, voteOptions: options, voteMultiple: voteDialog.multiple, voteAnonymous: voteDialog.anonymous }
+    })
+    voteDialog.visible = false
+  } catch {
+    /* 失败已由占位气泡标红并提重发 */
+  } finally {
+    voteDialog.submitting = false
+  }
+}
+
+/** 气泡里选中选项→提交投票（整体替换旧票） */
+async function onVote({ message, options }) {
+  try {
+    await chat.vote(props.conversationId, message.messageId, options, false)
+  } catch {
+    /* 服务端拒绝（越界/已截止等）已由全局 toast 提示 */
+  }
+}
+
+/** 发起人截止投票 */
+async function onCloseVote(message) {
+  try {
+    await ElMessageBox.confirm('截止后所有人不能再投票，确定吗？', '截止投票', {
+      confirmButtonText: '截止',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  try {
+    await chat.vote(props.conversationId, message.messageId, [], true)
+  } catch {
+    /* 同上 */
   }
 }
 
@@ -1068,6 +1592,11 @@ async function sendMessage() {
   if (sending.value || uploading.value || (!draft.value.trim() && !items.length)) {
     return
   }
+  // 编辑态：无论托盘如何，本次只提交对新正文的编辑，不发送附件
+  if (editingMessage.value) {
+    await submitEdit()
+    return
+  }
   if (!items.length) {
     await sendText()
     return
@@ -1510,10 +2039,11 @@ async function uploadAndSend(file, retryClientMsgId = null) {
   const kind = kindOf(file)
   const msgType = kind === 'image' ? TYPE_IMAGE : kind === 'voice' ? TYPE_VOICE : TYPE_FILE
   // 闪照只对图片生效：新发读工具栏开关，重发沿用占位气泡里已记录的选择，
-  // 免得失败重试期间开关被碰过就把状态改飞
+  // 免得失败重试期间开关被碰过就把状态改飞；群聊一律不套闪照（一次性销毁对多成员语义不清，
+  // 工具栏开关也已隐藏，这里再兜一道防拖拽/粘贴等旁路带着旧开关发出去）
   let flashOn = false
   let flashSecs = 5
-  if (kind === 'image') {
+  if (kind === 'image' && !isGroup.value) {
     if (retryClientMsgId) {
       const placeholder = messages.value.find((m) => !m.messageId && sameId(m.clientMsgId, retryClientMsgId))
       if (placeholder?.extra?.flash) {
@@ -1797,6 +2327,9 @@ async function onViewFlash(message) {
   flashViewer.rawUrl = rawUrl
   flashViewer.left = seconds > 0 ? seconds : 5
   flashViewer.visible = true
+  // 桌面端拆照期间把窗口从截屏/录屏里抹掉（主进程 SetWindowDisplayAffinity）；
+  // 浏览器/手机端没有这个桥也没有对应 Web API，静默跳过 —— 防截图仅 Electron 能做到
+  window.__IM_NATIVE__?.setContentProtection?.(true)?.catch?.(() => {})
   clearFlashTimer()
   flashTimer = setInterval(() => {
     flashViewer.left -= 1
@@ -1809,6 +2342,8 @@ async function onViewFlash(message) {
 function closeFlashViewer() {
   clearFlashTimer()
   flashViewer.visible = false
+  // 预览关了就撤销防截图，不要把整个应用长期屏蔽在截图工具外
+  window.__IM_NATIVE__?.setContentProtection?.(false)?.catch?.(() => {})
   if (flashViewer.rawUrl) {
     mediaForget(flashViewer.rawUrl)
   }
@@ -1856,6 +2391,73 @@ function cancelReply() {
 }
 
 /**
+ * 当前正在编辑的消息（仅自己的文本消息）。
+ * 不为空时把正文回填进输入框、上方展示编辑横幅，此时「发送」按钮改为提交编辑。
+ * 切换会话由 ChatHome 的 :key 重挂载自然重置。
+ */
+const editingMessage = ref(null)
+
+function startEdit(message) {
+  // 进编辑态先退出回复，两者互斥；编辑只针对文本，忽略托盘附件
+  replyTarget.value = null
+  editingMessage.value = message
+  draft.value = message.content || ''
+  nextTick(() => inputRef.value?.focus())
+}
+
+function cancelEdit() {
+  editingMessage.value = null
+  draft.value = ''
+}
+
+/**
+ * 提交编辑：内容未变直接退出，变了才走后端。
+ * editMessage 非 silent，失败（超时限/无权/内容不合法）的提示由全局拦截器弹出。
+ */
+async function submitEdit() {
+  const target = editingMessage.value
+  const text = draft.value.trim()
+  if (!target) {
+    return
+  }
+  if (!text) {
+    ElMessage.warning('消息内容不能为空')
+    return
+  }
+  if (text === target.content) {
+    cancelEdit()
+    return
+  }
+  sending.value = true
+  try {
+    await chat.edit(props.conversationId, target.messageId, text)
+    ElMessage.success('已编辑')
+    cancelEdit()
+  } catch {
+    // 提示已由下层弹出
+  } finally {
+    sending.value = false
+  }
+}
+
+/**
+ * 贴/取消表情回应。
+ *
+ * 只发 HTTP，不做本地乐观更新：reaction-notify 会推回本端，由 chat.applyReaction 统一应用一次，
+ * 避免本端改 + 回执改把 count 算重。messageId 为空（尚在发送中/失败）时忽略。
+ */
+async function onReact({ message, emoji, remove }) {
+  if (!message?.messageId || !emoji) {
+    return
+  }
+  try {
+    await chat.react(props.conversationId, message.messageId, emoji, remove)
+  } catch {
+    /* 失败原因（无权 / 已撤回 / 限流）由全局 toast 弹出 */
+  }
+}
+
+/**
  * 点击气泡里的引用块时跳转到原消息。
  *
  * 当前列表里能找到就滚过去并短暂高亮；
@@ -1899,6 +2501,12 @@ function itemsFor(message) {
   const items = [
     { key: 'copy', label: '复制', show: Number(message.msgType) === 1 && !message.recalled },
     {
+      key: 'edit',
+      label: '编辑',
+      // 只能改自己发的、未撤回的文本消息，且在时限内（与后端同源）
+      show: message.self && Number(message.msgType) === 1 && !message.recalled && withinRecallWindow(message)
+    },
+    {
       key: 'reply',
       label: '回复',
       // 已撤回的消息不能回复；自己发的消息也没必要回复自己
@@ -1922,6 +2530,11 @@ function itemsFor(message) {
     { key: 'download', label: '另存为', show: [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType)) && !message.extra?.flash },
     // 发送端 OCR 提取的图内文字（已经过服务端敏感词遮蔽），有才给入口；闪照不存 ocrText
     { key: 'ocr-text', label: '图内文字', show: Number(message.msgType) === TYPE_IMAGE && !message.recalled && !!message.extra?.ocrText },
+    // 语音转文字 / 文本翻译：依赖服务端外部能力，未接入时点击会降级为一句提示（入口照常展示）
+    { key: 'to-text', label: '转文字', show: Number(message.msgType) === TYPE_VOICE && !message.recalled },
+    { key: 'translate', label: '翻译', show: Number(message.msgType) === 1 && !message.recalled && !!message.content },
+    // 精华：仅群主/管理员可标记，未撤回的消息才能操作；已标则文案变“取消精华”
+    { key: 'essence', label: message.essence ? '取消精华' : '设为精华', show: canMarkEssence.value && !message.recalled },
     // 单端删除：只从自己的记录里移除，对方仍可见；自己发的和对方发的都能删
     { key: 'delete', label: '删除', danger: true, show: true }
   ]
@@ -1951,6 +2564,9 @@ async function onMenuSelect(action) {
       case 'copy':
         await copyText(message.content || '')
         break
+      case 'edit':
+        startEdit(message)
+        break
       case 'reply':
         replyTarget.value = message
         // 回复时自动把焦点拉回输入框，省得用户再点一次
@@ -1972,6 +2588,29 @@ async function onMenuSelect(action) {
           confirmButtonText: '关闭',
           customClass: 'chat-window__ocr-box'
         })
+        break
+      case 'to-text': {
+        // 接口 silent：服务端未配置外部 ASR 会回一句降级文案，这里捕获后本地弹出
+        try {
+          const text = await toMessageText(message.messageId)
+          await ElMessageBox.alert(text, '语音转文字（仅供参考）', { confirmButtonText: '关闭', customClass: 'chat-window__ocr-box' })
+        } catch (e) {
+          ElMessage.error(e?.message || '转文字失败，请稍后重试')
+        }
+        break
+      }
+      case 'translate': {
+        try {
+          const text = await translateMessage(message.messageId)
+          await ElMessageBox.alert(text, '消息翻译（仅供参考）', { confirmButtonText: '关闭', customClass: 'chat-window__ocr-box' })
+        } catch (e) {
+          ElMessage.error(e?.message || '翻译失败，请稍后重试')
+        }
+        break
+      }
+      case 'essence':
+        await chat.markEssence(props.conversationId, message.messageId, !message.essence)
+        ElMessage.success(message.essence ? '已取消精华' : '已设为精华')
         break
       case 'delete':
         await confirmDelete(message)
@@ -2154,10 +2793,12 @@ onBeforeUnmount(() => {
 // 万一将来去掉了 :key，靠这个 watcher 也能正确重新加载
 watch(key, async () => {
   detail.value = null
+  exitSelectMode()
   draft.value = drafts.get(key.value) || ''
   // 托盘按会话各自一份：切走时不清掉刚挑的图，切回来还在（与草稿同一套机制）
   tray.value = trays.get(key.value) || []
   replyTarget.value = null
+  editingMessage.value = null
   nearBottom = true
   showJump.value = false
   await loadInitial()
@@ -2262,6 +2903,119 @@ watch(key, async () => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+/* 名片选择器 */
+.chat-window__card-search {
+  margin-bottom: 10px;
+}
+
+.chat-window__card-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-window__card-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chat-window__card-item:hover {
+  background: var(--im-hover-bg, #f5f7fa);
+}
+
+.chat-window__card-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.chat-window__loc-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-window__loc-spacer {
+  flex: 1;
+}
+
+/* 多选操作栏：与输入区同层，选中模式时顶替它 */
+.chat-window__select-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--im-border, #ebeef5);
+  background: var(--im-panel, #fff);
+}
+
+.chat-window__select-count {
+  font-size: 13px;
+  color: var(--im-text, #303133);
+}
+
+.chat-window__select-spacer {
+  flex: 1;
+}
+
+/* 合并转发目标列表 */
+.chat-window__merged-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-window__merged-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.chat-window__merged-item:hover {
+  background: var(--im-bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.chat-window__merged-item.is-selected {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+}
+
+.chat-window__merged-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--im-text, #303133);
+}
+
+.chat-window__merged-check {
+  flex: none;
+  color: var(--el-color-primary, #409eff);
+  font-size: 18px;
+}
+
+/* 发起投票：选项行 */
+.chat-window__vote-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.chat-window__vote-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-window__vote-anon {
+  margin-left: 16px;
 }
 
 .im-flash-viewer__countdown {
@@ -2645,7 +3399,7 @@ watch(key, async () => {
   color: #fff;
 }
 
-/* 马赛克按钮与 ✕ 同位置同隐藏规则，错开一个按钮位摆在左边 */
+/* 马赛克按钮常驻可见：之前和 ✕ 一样 hover 才显形，反馈普遍说找不到编辑器入口 */
 .chat-window__tray-item .chat-window__tray-mosaic {
   position: absolute;
   top: 2px;
@@ -2656,18 +3410,12 @@ watch(key, async () => {
   height: 18px;
   min-height: 18px;
   padding: 0;
-  opacity: 0;
-  pointer-events: none;
+  opacity: 1;
+  pointer-events: auto;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.45);
   color: #fff;
   transition: opacity 0.15s;
-}
-
-.chat-window__tray-item:hover .chat-window__tray-mosaic,
-.chat-window__tray-item .chat-window__tray-mosaic:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 .chat-window__tray-item .chat-window__tray-mosaic:hover {
@@ -2675,14 +3423,9 @@ watch(key, async () => {
   color: #fff;
 }
 
-/* 触屏没得 hover，一直藏着就是删不掉：这类设备上常显 */
+/* 触屏没得 hover，✕ 一直藏着就是删不掉：这类设备上常显（马赛克按钮已改为全端常显） */
 @media (hover: none) {
   .chat-window__tray-item .chat-window__tray-del {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .chat-window__tray-item .chat-window__tray-mosaic {
     opacity: 1;
     pointer-events: auto;
   }

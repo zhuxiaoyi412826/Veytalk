@@ -19,6 +19,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Hls from 'hls.js'
+import { createWebmPlayer, webmPlayerSupported } from '@/utils/webmPlayer'
 import {
   fetchLivePage,
   fetchLiveRoom,
@@ -30,14 +31,17 @@ import {
   fetchVideoPage,
   createVideo,
   deleteVideo,
-  reportVideoPlay
+  reportVideoPlay,
+  fetchLinkmicList
 } from '@/api/live'
 import { uploadFileSmart } from '@/api/file'
+import { fetchWallet, recharge, checkin, sendGift } from '@/api/wallet'
 import { guardImage } from '@/utils/nsfw'
 import { mediaUrl, readVideoMetadata } from '@/utils/media'
 import { getToken } from '@/utils/token'
 import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
 import { useAuthStore } from '@/stores/auth'
+import { useLinkmicStore } from '@/stores/linkmic'
 import UserAvatar from '@/components/UserAvatar.vue'
 
 const route = useRoute()
@@ -554,8 +558,195 @@ const streamEnded = ref(false)
 let hls = null
 let danmakuWs = null
 let pingTimer = null
+// 连麦合成流的 MSE/WebM 播放器（与 hls 二选一，同一 <video> 上切换）
+let webmPlayer = null
+// 当前播放器形态：'' | 'hls' | 'webm'，避免重复重建
+const playerMode = ref('')
 
 const isAnchor = computed(() => !!room.value && room.value.mine)
+
+/* ==================== 钱包与礼物（直播间内） ==================== */
+// 余额/目录经 /api/wallet 拉取；送礼是 REST + 服务端经 /ws/live 广播 gift 帧，本端飘屏统一由广播驱动（含自己），
+// 不做本地乐观飘屏以免同一笔礼出现两条特效；余额则用送礼响应即时回填。
+const wallet = reactive({ enabled: false, balance: 0, gifts: [], signedToday: false, checkinBonus: 0 })
+const giftPanelOpen = ref(false)
+const selectedGiftId = ref(null)
+const giftCount = ref(1)
+const giftSubmitting = ref(false)
+const signInBusy = ref(false)
+const rechargeBusy = ref(false)
+const rechargeAmount = ref(100)
+const floatingGifts = ref([]) // 特效飘屏：{ id, giftIcon, giftName, count, senderName, kind }
+const giftRank = ref([]) // 贡献榜（按送礼人累计价值降序）：{ senderId, senderName, avatar, totalPrice, count }
+
+const selectedGift = computed(() => wallet.gifts.find((g) => g.giftId === selectedGiftId.value) || null)
+const giftTotal = computed(() => (selectedGift.value ? (selectedGift.value.price || 0) * giftCount.value : 0))
+const giftAffordable = computed(() => wallet.balance >= giftTotal.value)
+
+async function loadWallet() {
+  try {
+    const vo = await fetchWallet()
+    if (vo) {
+      wallet.enabled = !!vo.enabled
+      wallet.balance = vo.balance || 0
+      wallet.gifts = vo.gifts || []
+      wallet.signedToday = !!vo.signedToday
+      wallet.checkinBonus = vo.checkinBonus || 0
+      if (vo.enabled && !selectedGiftId.value && wallet.gifts.length) {
+        selectedGiftId.value = wallet.gifts[0].giftId
+      }
+    }
+  } catch {
+    // 钱包未装配或被限流：静默，礼物面板显示为空目录
+  }
+}
+
+function pickGift(gift) {
+  selectedGiftId.value = gift.giftId
+}
+
+async function onSendGift() {
+  const gift = selectedGift.value
+  if (!gift) {
+    ElMessage.warning('请选择礼物')
+    return
+  }
+  if (!giftAffordable.value) {
+    ElMessage.warning('积分不足，请先充值或签到')
+    return
+  }
+  giftSubmitting.value = true
+  try {
+    const res = await sendGift(roomId.value, gift.giftId, giftCount.value)
+    if (res && res.balance != null) {
+      wallet.balance = res.balance
+    } else {
+      wallet.balance = Math.max(0, wallet.balance - giftTotal.value)
+    }
+    giftPanelOpen.value = false
+  } catch {
+    // 余额不足 / 房间已结束等由 request.js 统一提示
+  } finally {
+    giftSubmitting.value = false
+  }
+}
+
+async function onCheckin() {
+  if (wallet.signedToday) {
+    ElMessage.info('今日已签到')
+    return
+  }
+  signInBusy.value = true
+  try {
+    const vo = await checkin()
+    if (vo) {
+      wallet.balance = vo.balance || wallet.balance
+      wallet.signedToday = true
+    }
+    ElMessage.success(`签到成功 +${wallet.checkinBonus} 积分`)
+  } catch {
+    // request.js 已提示
+  } finally {
+    signInBusy.value = false
+  }
+}
+
+async function onRecharge() {
+  const amount = Number(rechargeAmount.value)
+  if (!amount || amount <= 0) {
+    ElMessage.warning('请输入充值积分')
+    return
+  }
+  rechargeBusy.value = true
+  try {
+    const vo = await recharge(amount)
+    if (vo) {
+      wallet.balance = vo.balance || wallet.balance
+    }
+    ElMessage.success('充值已到账（模拟）')
+  } catch {
+    // request.js 已提示
+  } finally {
+    rechargeBusy.value = false
+  }
+}
+
+/** 收到 gift 帧：压入飘屏队列（数秒后自动出列）并累计贡献榜 */
+function pushFloatingGift(frame) {
+  const id = `g-${frame.ts || Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  floatingGifts.value.push({
+    id,
+    giftIcon: frame.giftIcon,
+    giftName: frame.giftName,
+    count: frame.count,
+    senderName: frame.senderName,
+    kind: frame.kind
+  })
+  setTimeout(() => {
+    const i = floatingGifts.value.findIndex((g) => g.id === id)
+    if (i >= 0) {
+      floatingGifts.value.splice(i, 1)
+    }
+  }, 3200)
+}
+
+function bumpGiftRank(frame) {
+  const sid = frame.senderId
+  let entry = giftRank.value.find((r) => r.senderId === sid)
+  if (!entry) {
+    entry = { senderId: sid, senderName: frame.senderName, avatar: frame.senderAvatar, totalPrice: 0, count: 0 }
+    giftRank.value.push(entry)
+  }
+  entry.totalPrice += frame.totalPrice || 0
+  entry.count += frame.count || 0
+  giftRank.value.sort((a, b) => b.totalPrice - a.totalPrice)
+  if (giftRank.value.length > 20) {
+    giftRank.value.splice(20)
+  }
+}
+
+/* ==================== 连麦（嘉宾申请上麦 / 主播接受，主播侧合成推流） ==================== */
+// 信令走主 /ws（linkmic / linkmic-signal），由 stores/linkmic 状态机裁决；本视图只做入口与展示：
+// 观众看到「申请上麦」，主播看到「待处理申请 + 在麦嘉宾」；观众侧据 /ws/live 的 linkmic 帧切换播放器（mse-fe 片）。
+const linkmic = useLinkmicStore()
+const linkmicOn = ref(false) // 本场当前是否在连麦合成中（观众侧徽标与播放器分流用）
+
+/** 进房后按身份初始化连麦：主播拉 ICE + 记合成流媒体目录；观众补齐在麦列表并判初始连麦态 */
+async function setupLinkmic(vo) {
+  linkmicOn.value = false
+  try {
+    if (vo.mine) {
+      await linkmic.initAsAnchor(roomId.value, vo.playUrl)
+    } else {
+      await linkmic.initAsGuest(roomId.value)
+      const list = await fetchLinkmicList(roomId.value)
+      linkmicOn.value = Array.isArray(list) && list.length > 0
+    }
+  } catch {
+    // 连麦配置拉取失败：静默，入口自然禁用
+  }
+}
+
+/** 观众侧：空闲=申请，申请中=取消，已上麦=下麦 */
+function onRequestMic() {
+  if (linkmic.guestStatus === 'active' || linkmic.guestStatus === 'requesting') {
+    linkmic.leaveMic()
+  } else {
+    linkmic.requestMic()
+  }
+}
+
+function onAcceptRequest(req) {
+  linkmic.acceptRequest(req.callId, { guestUserId: req.guestUserId })
+}
+
+function onRejectRequest(req) {
+  linkmic.rejectRequest(req.callId)
+}
+
+function onKickGuest(guest) {
+  linkmic.kickGuest(guest.callId)
+}
 
 async function openRoom(id) {
   roomLoading.value = true
@@ -570,6 +761,8 @@ async function openRoom(id) {
     }
     likeCount.value = 0
     danmakuList.value = []
+    floatingGifts.value = []
+    giftRank.value = []
     // 已结束但处于聊天模式（status=2 且带 danmakuWs）：不起播放器（黑屏），只接聊天室
     streamEnded.value = vo.status !== 1
     await nextTick()
@@ -579,6 +772,10 @@ async function openRoom(id) {
       destroyPlayer()
     }
     connectDanmaku(vo.danmakuWs)
+    loadWallet()
+    await setupLinkmic(vo)
+    // 进房即处于连麦（观众从在麦列表补齐）：从默认 hls 切到 webm 合成流
+    ensurePlayerMode()
   } catch {
     room.value = null
     streamEnded.value = false
@@ -593,6 +790,7 @@ function setupPlayer(playUrl) {
   if (!video || !playUrl) {
     return
   }
+  playerMode.value = 'hls'
   // playUrl 后端下发：自测是相对路径（/hls/...，走前端同源代理），生产可能是绝对 CDN 地址。
   // 相对路径按环境补 host：Web 用同源（空串），Electron 用本机流媒体绝对地址（见 env.js livePlayBase）
   const src = /^https?:\/\//i.test(playUrl) ? playUrl : livePlayBase() + playUrl
@@ -646,9 +844,59 @@ function destroyPlayer() {
     hls.destroy()
     hls = null
   }
+  if (webmPlayer) {
+    webmPlayer.stop()
+    webmPlayer = null
+  }
+  playerMode.value = ''
   if (videoEl.value) {
     videoEl.value.removeAttribute('src')
     videoEl.value.load?.()
+  }
+}
+
+/** 连麦合成流（WebM/MSE）播放器：与 hls 互斥，先销 hls 再建 webm 流 */
+function setupWebmPlayer(playUrl) {
+  destroyPlayer()
+  const video = videoEl.value
+  if (!video || !playUrl || !webmPlayerSupported()) {
+    return
+  }
+  playerMode.value = 'webm'
+  webmPlayer = createWebmPlayer({
+    video,
+    playUrl,
+    onState: (s) => {
+      if (s === 'error') {
+        // MSE 建流失败（编码不支持等）：回退到 hls，不致于黑屏
+        ElMessage.warning('连麦合成流播放失败，回退普通直播')
+        if (room.value) {
+          setupPlayer(room.value.playUrl)
+        }
+      }
+    }
+  })
+  webmPlayer.start()
+}
+
+/** 据当前是否连麦选播放器：连麦→WebM/MSE，非连麦→HLS；已处目标形态则不重建 */
+function ensurePlayerMode() {
+  // 主播不自看合成流（本地有预览，回看自己上传的合成流无意义且多一路解码开销）
+  if (isAnchor.value) {
+    return
+  }
+  const living = room.value && room.value.status === 1 && !streamEnded.value
+  if (!living) {
+    return
+  }
+  const want = linkmicOn.value && webmPlayerSupported() ? 'webm' : 'hls'
+  if (playerMode.value === want) {
+    return
+  }
+  if (want === 'webm') {
+    setupWebmPlayer(room.value.playUrl)
+  } else {
+    setupPlayer(room.value.playUrl)
   }
 }
 
@@ -719,6 +967,16 @@ function onWsFrame(raw) {
       break
     case 'like':
       likeCount.value += frame.count || 0
+      break
+    case 'gift':
+      pushFloatingGift(frame)
+      bumpGiftRank(frame)
+      break
+    case 'linkmic':
+      // 主播侧合成流生效/失效：观众据此在 HLS 与 MSE/WebM 播放器间切换
+      linkmicOn.value = !!frame.active
+      ensurePlayerMode()
+      appendSystem(frame.active ? '主播正在连麦' : '连麦已结束')
       break
     case 'notice':
       appendSystem(`公告：${frame.content}`)
@@ -813,6 +1071,11 @@ function teardownRoom() {
   danmakuList.value = []
   onlineCount.value = 0
   streamEnded.value = false
+  floatingGifts.value = []
+  giftRank.value = []
+  giftPanelOpen.value = false
+  linkmicOn.value = false
+  linkmic.reset()
 }
 
 /* ==================== 生命周期 / 路由联动 ==================== */
@@ -877,6 +1140,20 @@ watch(() => route.params.roomId, () => syncRoute())
             <div v-else-if="!room || room.status !== 1 || streamEnded" class="live-player__mask">
               {{ streamEnded || (room && room.status === 2) ? '主播已结束直播，可继续聊天' : '直播已结束' }}
             </div>
+            <!-- 礼物飘屏：服务端 gift 帧驱动，从右下向左上滑过 -->
+            <div class="live-gift__floats">
+              <div
+                v-for="g in floatingGifts"
+                :key="g.id"
+                class="live-gift__float"
+                :class="{ 'live-gift__float--effect': g.kind === 'effect' }"
+              >
+                <span class="live-gift__float-icon">{{ g.giftIcon }}</span>
+                <span class="live-gift__float-text">{{ g.senderName }} 送出 {{ g.giftName }} ×{{ g.count }}</span>
+              </div>
+            </div>
+            <!-- 连麦中徽标：观众侧据 /ws/live linkmic 帧显示，提示当前为合成连麦流 -->
+            <div v-if="linkmicOn" class="live-linkmic__badge">🎤 连麦中</div>
           </div>
           <div v-if="room" class="live-room__title">
             <h3 class="im-ellipsis">{{ room.title }}</h3>
@@ -911,6 +1188,85 @@ watch(() => route.params.roomId, () => syncRoute())
             </div>
             <div v-if="!danmakuList.length" class="live-danmaku__empty">还没有互动，来说点什么吧</div>
           </div>
+
+          <!-- 贡献榜：本场按送礼人累计价值排序，有送礼才显 -->
+          <div v-if="giftRank.length" class="live-gift__rank">
+            <div class="live-gift__rank-title">🏆 本场贡献榜</div>
+            <div v-for="(r, idx) in giftRank.slice(0, 5)" :key="r.senderId" class="live-gift__rank-item">
+              <span class="live-gift__rank-no">{{ idx + 1 }}</span>
+              <UserAvatar :src="r.avatar" :name="r.senderName" :size="22" />
+              <span class="live-gift__rank-name im-ellipsis">{{ r.senderName }}</span>
+              <span class="live-gift__rank-score">{{ r.totalPrice }}</span>
+            </div>
+          </div>
+
+          <!-- 礼物面板：选中礼物、数量、余额与发送；附签到/充值 -->
+          <div v-if="giftPanelOpen && wallet.enabled" class="live-gift__panel">
+            <div class="live-gift__balance">余额 {{ wallet.balance }} 积分</div>
+            <div class="live-gift__grid">
+              <button
+                v-for="gift in wallet.gifts"
+                :key="gift.giftId"
+                class="live-gift__item"
+                :class="{ 'live-gift__item--active': gift.giftId === selectedGiftId }"
+                @click="pickGift(gift)"
+              >
+                <span class="live-gift__item-icon">{{ gift.icon }}</span>
+                <span class="live-gift__item-name">{{ gift.name }}</span>
+                <span class="live-gift__item-price">{{ gift.price }}</span>
+              </button>
+              <div v-if="!wallet.gifts.length" class="live-gift__empty">暂无可送礼物</div>
+            </div>
+            <div class="live-gift__row">
+              <span class="live-gift__label">数量</span>
+              <el-input-number v-model="giftCount" :min="1" :max="99" size="small" controls-position="right" />
+              <span class="live-gift__total">合计 {{ giftTotal }}</span>
+            </div>
+            <div class="live-gift__row live-gift__row--btns">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="giftSubmitting"
+                :disabled="!selectedGift || !giftAffordable"
+                @click="onSendGift"
+              >
+                送礼
+              </el-button>
+              <el-button size="small" :loading="signInBusy" :disabled="wallet.signedToday" @click="onCheckin">
+                {{ wallet.signedToday ? '已签到' : `签到 +${wallet.checkinBonus}` }}
+              </el-button>
+              <el-input v-model="rechargeAmount" size="small" class="live-gift__recharge" placeholder="充值积分" />
+              <el-button size="small" :loading="rechargeBusy" @click="onRecharge">充值</el-button>
+            </div>
+          </div>
+
+          <!-- 连麦区：主播看待处理申请 + 在麦嘉宾；观众看自己的连麦状态提示 -->
+          <div v-if="linkmic.enabled" class="live-linkmic">
+            <template v-if="isAnchor">
+              <div v-if="linkmic.pendingRequests.length" class="live-linkmic__reqs">
+                <div class="live-linkmic__title">🎤 上麦申请</div>
+                <div v-for="req in linkmic.pendingRequests" :key="req.callId" class="live-linkmic__req">
+                  <span class="live-linkmic__req-name">观众 {{ req.guestUserId }}</span>
+                  <div class="live-linkmic__req-btns">
+                    <el-button size="small" type="primary" @click="onAcceptRequest(req)">接受</el-button>
+                    <el-button size="small" @click="onRejectRequest(req)">拒绝</el-button>
+                  </div>
+                </div>
+              </div>
+              <div v-if="linkmic.onMicGuests.length" class="live-linkmic__mic">
+                <div class="live-linkmic__title">在麦嘉宾（{{ linkmic.onMicGuests.length }}/{{ linkmic.maxSlots }}）</div>
+                <div v-for="g in linkmic.onMicGuests" :key="g.callId" class="live-linkmic__guest">
+                  <UserAvatar :src="g.avatar" :name="g.name" :size="22" />
+                  <span class="live-linkmic__guest-name im-ellipsis">{{ g.name }}</span>
+                  <el-button size="small" text type="danger" @click="onKickGuest(g)">下麦</el-button>
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              <div v-if="linkmic.guestHint" class="live-linkmic__hint">{{ linkmic.guestHint }}</div>
+            </template>
+          </div>
+
           <div class="live-danmaku__input">
             <el-input
               v-model="danmakuText"
@@ -921,6 +1277,16 @@ watch(() => route.params.roomId, () => syncRoute())
             />
             <el-button type="primary" :disabled="wsStatus !== 'open'" @click="sendDanmaku">发送</el-button>
             <el-button class="live-danmaku__like" @click="sendLike">❤ 点赞</el-button>
+            <el-button v-if="wallet.enabled" class="live-danmaku__gift" @click="giftPanelOpen = !giftPanelOpen">🎁 礼物</el-button>
+            <el-button
+              v-if="linkmic.enabled && !isAnchor"
+              class="live-danmaku__mic"
+              :type="linkmic.guestStatus === 'active' ? 'success' : 'default'"
+              :loading="linkmic.guestStatus === 'requesting'"
+              @click="onRequestMic"
+            >
+              {{ linkmic.guestStatus === 'active' ? '下麦' : linkmic.guestStatus === 'requesting' ? '取消申请' : '申请上麦' }}
+            </el-button>
           </div>
         </aside>
       </div>
@@ -1235,6 +1601,240 @@ watch(() => route.params.roomId, () => syncRoute())
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
   font-size: 15px;
+}
+
+/* 连麦：观众侧徽标 + 主播/嘉宾面板 */
+.live-linkmic__badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 13px;
+  color: #fff;
+  background: rgba(64, 158, 255, 0.85);
+  pointer-events: none;
+}
+
+.live-linkmic {
+  border-top: 1px solid #ebeef5;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.live-linkmic__title {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+
+.live-linkmic__req,
+.live-linkmic__guest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.live-linkmic__req-name,
+.live-linkmic__guest-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.live-linkmic__req-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.live-linkmic__hint {
+  font-size: 12px;
+  color: #e6a23c;
+}
+
+.live-danmaku__mic {
+  margin-left: 4px;
+}
+
+/* 礼物飘屏：覆盖在画面上，不拦截鼠标 */
+.live-gift__floats {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.live-gift__float {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #ffd76a;
+  font-size: 14px;
+  align-self: flex-start;
+  animation: im-gift-float 3.2s ease-out forwards;
+}
+
+.live-gift__float--effect {
+  background: linear-gradient(90deg, rgba(255, 94, 158, 0.55), rgba(120, 80, 255, 0.45));
+  color: #fff;
+  font-weight: 600;
+}
+
+.live-gift__float-icon {
+  font-size: 22px;
+}
+
+@keyframes im-gift-float {
+  0% {
+    opacity: 0;
+    transform: translateX(-40px);
+  }
+  12% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(30%);
+  }
+}
+
+/* 贡献榜 */
+.live-gift__rank {
+  flex: none;
+  padding: 8px 12px;
+  border-top: 1px solid var(--im-border, #e4e7ed);
+  background: #fafafa;
+}
+
+.live-gift__rank-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.live-gift__rank-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+
+.live-gift__rank-no {
+  width: 18px;
+  text-align: center;
+  color: #909399;
+}
+
+.live-gift__rank-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.live-gift__rank-score {
+  color: #ff7a45;
+  font-weight: 600;
+}
+
+/* 礼物面板 */
+.live-gift__panel {
+  flex: none;
+  padding: 10px 12px;
+  border-top: 1px solid var(--im-border, #e4e7ed);
+  background: #fff;
+}
+
+.live-gift__balance {
+  font-size: 13px;
+  color: #ff7a45;
+  margin-bottom: 8px;
+}
+
+.live-gift__grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.live-gift__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 2px;
+  border: 1px solid var(--im-border, #e4e7ed);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.live-gift__item--active {
+  border-color: #ff7a45;
+  box-shadow: 0 0 0 1px #ff7a45 inset;
+}
+
+.live-gift__item-icon {
+  font-size: 22px;
+}
+
+.live-gift__item-name {
+  font-size: 12px;
+}
+
+.live-gift__item-price {
+  font-size: 11px;
+  color: #ff7a45;
+}
+
+.live-gift__empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: #909399;
+  font-size: 12px;
+}
+
+.live-gift__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.live-gift__row--btns {
+  flex-wrap: wrap;
+}
+
+.live-gift__label {
+  font-size: 13px;
+  color: #606266;
+}
+
+.live-gift__total {
+  margin-left: auto;
+  font-size: 13px;
+  color: #ff7a45;
+}
+
+.live-gift__recharge {
+  width: 90px;
+}
+
+.live-danmaku__gift {
+  flex: none;
 }
 
 .live-room__title {

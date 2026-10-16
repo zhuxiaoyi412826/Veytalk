@@ -9,6 +9,7 @@ import lombok.NoArgsConstructor;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -25,7 +26,7 @@ import java.util.List;
  * </ul>
  */
 @Data
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -80,7 +81,10 @@ public class MessageExtra implements Serializable {
     @Schema(description = "闪照查看时长（秒），倒计时由前端执行，到期仅关闭预览")
     private Integer flashSeconds;
 
-    @Schema(description = "闪照是否已被查看过：服务端权威标记，任何人看过一次即对所有成员销毁")
+    @Schema(description = "闪照已消费查看的成员 ID 名单：服务端权威，每人各有一次查看机会，互不影响；全员都看过才物理销毁原图")
+    private List<Long> flashViewedBy;
+
+    @Schema(description = "闪照对当前查看者是否已销毁：下发前按查看者从 flashViewedBy 现算的瞬态字段，不落库（List 里含自己即为已销毁）")
     private Boolean flashViewed;
 
     @Schema(description = "发送端 OCR 提取的图内文字（已经过敏感词遮蔽），供接收端「图内文字」功能展示")
@@ -91,6 +95,57 @@ public class MessageExtra implements Serializable {
 
     @Schema(description = "通话是否录屏留存（仅通话记录）：为真时 content 指向的录制文件包含屏幕画面")
     private Boolean callScreenRecorded;
+
+    @Schema(description = "文本消息是否已被发送者编辑过：编辑标记落 extra JSON 列，不新增表字段")
+    private Boolean edited;
+
+    @Schema(description = "最近一次编辑时间（仅 edited=true 时有值）")
+    private LocalDateTime editTime;
+
+    @Schema(description = "名片消息：被分享用户的 ID（服务端按此回填下两个快照字段，不信任客户端上报）")
+    private Long cardUserId;
+
+    @Schema(description = "名片消息：被分享用户昵称快照（发送时定格，接收端无需再查库）")
+    private String cardNickname;
+
+    @Schema(description = "名片消息：被分享用户头像快照")
+    private String cardAvatar;
+
+    @Schema(description = "位置消息：地址 / 地点文字描述")
+    private String locationName;
+
+    @Schema(description = "位置消息：纬度（-90~90）")
+    private Double latitude;
+
+    @Schema(description = "位置消息：经度（-180~180）")
+    private Double longitude;
+
+    @Schema(description = "合并转发：记录卡片标题（如 “XX 与 XX 的聊天记录”）")
+    private String mergedTitle;
+
+    @Schema(description = "合并转发：定格的消息快照列表，接收端展开查看器直接渲染")
+    private List<MergedMessageItem> mergedMessages;
+
+    @Schema(description = "投票：标题")
+    private String voteTitle;
+
+    @Schema(description = "投票：选项文本列表（静态定义，票数不在此）")
+    private List<String> voteOptions;
+
+    @Schema(description = "投票：是否多选")
+    private Boolean voteMultiple;
+
+    @Schema(description = "投票：是否匿名")
+    private Boolean voteAnonymous;
+
+    @Schema(description = "投票：是否已截止")
+    private Boolean voteClosed;
+
+    @Schema(description = "机器人消息：机器人名称快照（仅群机器人 Webhook 发出时写入，接收端据此覆盖发送者昵称）")
+    private String robotName;
+
+    @Schema(description = "机器人消息：机器人头像快照（仅群机器人 Webhook 发出时写入）")
+    private String robotAvatar;
 
     /**
      * 是否包含 @ 提醒，供会话模块判断是否需要打破免打扰。

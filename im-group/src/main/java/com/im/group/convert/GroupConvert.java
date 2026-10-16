@@ -6,7 +6,9 @@ import com.im.common.enums.GroupRole;
 import com.im.common.util.TextUtil;
 import com.im.group.dto.vo.GroupMemberVO;
 import com.im.group.dto.vo.GroupVO;
+import com.im.group.dto.vo.JoinRequestVO;
 import com.im.group.entity.Group;
+import com.im.group.entity.GroupJoinRequest;
 import com.im.group.entity.GroupMember;
 
 /**
@@ -34,8 +36,20 @@ public final class GroupConvert {
      */
     public static GroupVO toVO(Group group, GroupMember myMember, UserBriefDTO owner,
                               int memberCount, Long conversationId) {
+        return toVO(group, myMember, owner, memberCount, conversationId, null);
+    }
+
+    /**
+     * 完整群 VO 组装，额外把邀请码与待审批数以「仅管理层可见」的方式写进 VO。
+     *
+     * <p>{@code inviteCode} 与 {@code pendingJoinCount} 都不属于公共信息：普通成员不需要看邀请码（他不能分享），
+     * 也不能看见待审批数字（那属于群管理内部事项）。非管理员时保持为 null，前端自然不渲染。
+     */
+    public static GroupVO toVO(Group group, GroupMember myMember, UserBriefDTO owner,
+                              int memberCount, Long conversationId, Long pendingJoinCount) {
         boolean joined = myMember != null && myMember.isInGroup();
         GroupRole myRole = joined ? GroupRole.of(myMember.getRole()) : null;
+        boolean manager = myRole != null && myRole.isManager();
         return GroupVO.builder()
                 .groupId(group.getId())
                 .name(group.getName())
@@ -51,9 +65,12 @@ public final class GroupConvert {
                 .myRoleDesc(myRole == null ? null : myRole.getDesc())
                 .myNickname(joined ? myMember.getNicknameInGroup() : null)
                 .myMuted(mutedNow(group, myMember))
-                .myManager(myRole != null && myRole.isManager())
+                .myManager(manager)
                 .joined(joined)
                 .conversationId(conversationId)
+                .joinApproval(group.isJoinApprovalOn())
+                .inviteCode(manager ? group.getInviteCode() : null)
+                .pendingJoinCount(manager ? pendingJoinCount : null)
                 .createTime(group.getCreateTime())
                 .build();
     }
@@ -140,5 +157,47 @@ public final class GroupConvert {
             return user.getUsername();
         }
         return "用户" + userId;
+    }
+
+    /**
+     * 组装入群申请列表项，申请人资料与处理人资料由 Service 层批量取到后传入。
+     *
+     * @param request     当前行，必非空
+     * @param applicant   申请人资料，注销时可为空
+     * @param handler     处理人资料，未处理时可为空
+     */
+    public static JoinRequestVO toJoinRequestVO(GroupJoinRequest request, UserBriefDTO applicant, UserBriefDTO handler) {
+        return JoinRequestVO.builder()
+                .requestId(request.getId())
+                .groupId(request.getGroupId())
+                .userId(request.getUserId())
+                .username(applicant == null ? null : applicant.getUsername())
+                .nickname(applicant == null ? null : applicant.getNickname())
+                .avatar(applicant == null ? null : applicant.getAvatar())
+                .message(request.getMessage())
+                .source(request.getSource())
+                .status(request.getStatus())
+                .statusDesc(statusDesc(request.getStatus()))
+                .createTime(request.getCreateTime())
+                .handleTime(request.getHandleTime())
+                .handleUserId(request.getHandleUserId())
+                .handleUserName(handler == null ? null : displayName(null, handler, request.getHandleUserId()))
+                .build();
+    }
+
+    private static String statusDesc(Integer status) {
+        if (status == null) {
+            return "";
+        }
+        switch (status) {
+            case GroupJoinRequest.STATUS_PENDING:
+                return "待审批";
+            case GroupJoinRequest.STATUS_APPROVED:
+                return "已通过";
+            case GroupJoinRequest.STATUS_REJECTED:
+                return "已拒绝";
+            default:
+                return "";
+        }
     }
 }

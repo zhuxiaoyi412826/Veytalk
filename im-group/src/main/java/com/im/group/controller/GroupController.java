@@ -9,13 +9,19 @@ import com.im.common.domain.PageQuery;
 import com.im.common.util.SecurityUtil;
 import com.im.group.dto.req.CreateGroupRequest;
 import com.im.group.dto.req.GroupNicknameRequest;
+import com.im.group.dto.req.HandleJoinRequest;
+import com.im.group.dto.req.JoinApplyRequest;
+import com.im.group.dto.req.JoinApprovalRequest;
 import com.im.group.dto.req.MemberIdsRequest;
 import com.im.group.dto.req.MuteAllRequest;
 import com.im.group.dto.req.MuteMemberRequest;
 import com.im.group.dto.req.RoleRequest;
 import com.im.group.dto.req.UpdateGroupRequest;
+import com.im.group.dto.vo.GroupInviteVO;
 import com.im.group.dto.vo.GroupMemberVO;
 import com.im.group.dto.vo.GroupVO;
+import com.im.group.dto.vo.JoinApplyResultVO;
+import com.im.group.dto.vo.JoinRequestVO;
 import com.im.group.service.GroupService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -160,5 +166,51 @@ public class GroupController {
                                         @RequestBody @Valid GroupNicknameRequest request) {
         groupService.updateMyNickname(SecurityUtil.getUserId(), id, request.getNicknameInGroup());
         return Result.ok(null, "群昵称已更新");
+    }
+
+    /* ==================== 入群审批 / 邀请链接 / 群二维码 ==================== */
+
+    @Operation(summary = "开关入群审批", description = "群主与管理员可操作；开启后通过邀请链接 / 二维码进入的申请需管理员确认")
+    @PutMapping("/{id}/join-approval")
+    public Result<GroupVO> setJoinApproval(@Parameter(description = "群 ID") @PathVariable("id") Long id,
+                                           @RequestBody @Valid JoinApprovalRequest request) {
+        boolean on = Boolean.TRUE.equals(request.getJoinApproval());
+        return Result.ok(groupService.setJoinApproval(SecurityUtil.getUserId(), id, on),
+                on ? "已开启入群审批" : "已关闭入群审批");
+    }
+
+    @Operation(summary = "获取群邀请信息", description = "群主与管理员可拉；首次调用懒生成邀请码，同时返回邀请链接与二维码 base64")
+    @GetMapping("/{id}/invite")
+    public Result<GroupInviteVO> invite(@Parameter(description = "群 ID") @PathVariable("id") Long id,
+                                        @Parameter(description = "前端站点根地址，用于拼邀请链接")
+                                        @RequestParam(value = "base", required = false) String base) {
+        return Result.ok(groupService.getGroupInvite(SecurityUtil.getUserId(), id, base));
+    }
+
+    @Operation(summary = "申请入群", description = "凭邀请码入群：目标群未开审批则直接入群，开了审批则提交待管理员确认")
+    @PostMapping("/join")
+    public Result<JoinApplyResultVO> applyJoin(@RequestBody @Valid JoinApplyRequest request) {
+        return Result.ok(groupService.applyJoin(SecurityUtil.getUserId(), request));
+    }
+
+    @Operation(summary = "入群申请列表", description = "仅管理层可看，分页返回本群待审批的入群申请")
+    @GetMapping("/{id}/join-requests")
+    public Result<PageResult<JoinRequestVO>> joinRequests(
+            @Parameter(description = "群 ID") @PathVariable("id") Long id,
+            @Parameter(description = "页码，从 1 开始") @RequestParam(value = "current", defaultValue = "1") Long current,
+            @Parameter(description = "每页条数，最大 100") @RequestParam(value = "size", defaultValue = "20") Long size) {
+        PageQuery query = new PageQuery();
+        query.setCurrent(current);
+        query.setSize(size);
+        return Result.ok(groupService.pageJoinRequests(SecurityUtil.getUserId(), id, query));
+    }
+
+    @Operation(summary = "审批入群申请", description = "群主与管理员可操作；approve=true 将申请人正式写入成员表并通知全群")
+    @PutMapping("/join-request/{requestId}/handle")
+    public Result<Void> handleJoinRequest(@Parameter(description = "申请 ID") @PathVariable("requestId") Long requestId,
+                                          @RequestBody @Valid HandleJoinRequest request) {
+        boolean approve = Boolean.TRUE.equals(request.getApprove());
+        groupService.handleJoinRequest(SecurityUtil.getUserId(), requestId, approve);
+        return Result.ok(null, approve ? "已通过入群申请" : "已拒绝入群申请");
     }
 }

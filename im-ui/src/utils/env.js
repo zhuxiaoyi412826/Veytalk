@@ -55,6 +55,22 @@ export function wsBaseURL() {
 }
 
 /**
+ * Webhook 回调地址的基址（供外部系统 POST，必须是外部可达的绝对地址）：
+ * - Electron：页面从 file:// 加载，location.origin 无意义，用注入的后端绝对地址；
+ * - Web 同源部署：前端 origin 即后端反代入口，直接用 location.origin。
+ * 后端 normalizeBase 只保留 scheme://host[:port]，因此多带的 /api 会被剥掉。
+ */
+export function webhookBase() {
+  if (isElectron()) {
+    const base = serverBase();
+    if (base) {
+      return base.replace(/\/+$/, '');
+    }
+  }
+  return (typeof window !== 'undefined' && window.location.origin) || '';
+}
+
+/**
  * 直播播放地址的 host 前缀。后端下发的 playUrl 是相对路径（/hls/{roomId}/{streamKey}/index.m3u8?...）：
  * - Web：返回空串，浏览器按当前页面 origin 解析（开发期 vite proxy /hls→本机 8088，生产 Nginx 同域反代），
  *   播放地址于是永远跟随前端访问地址，DHCP 换 IP 无需改任何配置；

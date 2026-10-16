@@ -36,6 +36,12 @@ async function call(channel, payload) {
 contextBridge.exposeInMainWorld('__IM_NATIVE__', {
   isDesktop: true,
   /**
+   * 窗口内容防截图：true 时主进程对窗口置 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)，
+   * 截屏/录屏里变黑块，肉眼正常可见。拆闪照预览期间开、关掉预览即关。
+   * 浏览器 Web 端没有这个桥，window.__IM_NATIVE__ 不存在，防截图仅桌面端生效。
+   */
+  setContentProtection: (enabled) => call('im:set-content-protection', { enabled }),
+  /**
    * 取 File 的真实磁盘路径。Electron 32+ 移除了 File.path，必须在 preload 里用 webUtils 取；
    * 主进程拿到路径后能让 ffmpeg 直接流式读写磁盘，不必把大视频读进内存。
    */

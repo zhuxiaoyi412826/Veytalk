@@ -7,6 +7,7 @@ import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.util.SecurityUtil;
 import com.im.user.dto.req.BindPhoneRequest;
+import com.im.user.dto.req.CancelAccountRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
 import com.im.user.dto.req.UpdateProfileRequest;
 import com.im.user.dto.req.UserSearchQuery;
@@ -26,6 +27,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -99,5 +101,15 @@ public class UserController {
             @Parameter(description = "用户 ID 列表，逗号分隔") @RequestParam("userIds")
             @Size(max = 200, message = "单次最多查询 200 个用户") List<Long> userIds) {
         return Result.ok(userService.batchOnline(userIds));
+    }
+
+    @Operation(summary = "账号注销", description = "GDPR/个保法销号：密码二次确认后，匿名化并逻辑删除本人账号，并级联清除好友/群/会话/消息等各模块归属本人的数据；成功后全端下线，不可恢复")
+    @PostMapping("/cancel")
+    public Result<Void> cancel(@RequestBody @Valid CancelAccountRequest request) {
+        Long userId = SecurityUtil.getUserId();
+        userService.cancelAccount(userId, request.getPassword());
+        // 销号后必须立即踢掉全部登录态（含本端），否则旧 token 仍能访问
+        authService.logoutEverywhere(userId);
+        return Result.ok(null, "账号已注销");
     }
 }

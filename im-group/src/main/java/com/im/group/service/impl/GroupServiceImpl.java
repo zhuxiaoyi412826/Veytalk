@@ -22,15 +22,22 @@ import com.im.common.util.TextUtil;
 import com.im.group.convert.GroupConvert;
 import com.im.group.dto.po.GroupMemberCount;
 import com.im.group.dto.req.CreateGroupRequest;
+import com.im.group.dto.req.JoinApplyRequest;
 import com.im.group.dto.req.UpdateGroupRequest;
 import com.im.group.dto.vo.GroupMemberVO;
+import com.im.group.dto.vo.GroupInviteVO;
 import com.im.group.dto.vo.GroupVO;
+import com.im.group.dto.vo.JoinApplyResultVO;
+import com.im.group.dto.vo.JoinRequestVO;
 import com.im.group.entity.Group;
 import com.im.group.entity.GroupMember;
+import com.im.group.entity.GroupJoinRequest;
+import com.im.group.mapper.GroupJoinRequestMapper;
 import com.im.group.mapper.GroupMapper;
 import com.im.group.mapper.GroupMemberMapper;
 import com.im.group.service.GroupPermissionChecker;
 import com.im.group.service.GroupService;
+import com.im.group.util.QrCodeUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -40,6 +47,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -88,6 +96,13 @@ public class GroupServiceImpl implements GroupService {
     private static final String ACTION_MUTED = "muted";
     private static final String ACTION_UNMUTED = "unmuted";
     private static final String ACTION_ROLE_CHANGED = "role-changed";
+    private static final String ACTION_JOIN_APPROVAL_CHANGED = "join-approval-changed";
+    /** 非成员提交入群申请（仅当目标群开了审批），推给管理层 */
+    private static final String ACTION_JOIN_REQUEST = "join-request";
+    /** 管理员同意入群申请，推给申请人 */
+    private static final String ACTION_JOIN_APPROVED = "join-approved";
+    /** 管理员拒绝入群申请，推给申请人 */
+    private static final String ACTION_JOIN_REJECTED = "join-rejected";
 
     /** 单次邀请人数上限，与 {@code CreateGroupRequest} / {@code MemberIdsRequest} 的校验保持一致 */
     private static final int MAX_BATCH_INVITE = 100;
@@ -95,8 +110,18 @@ public class GroupServiceImpl implements GroupService {
     /** 通知文案里最多列出几个人名，超出部分折叠成「等 N 人」 */
     private static final int MAX_NAMES_IN_NOTICE = 3;
 
+    /** 邀请码字符集：大小写字母 + 数字，排除 O/0/I/l/1 等易混淆字符 */
+    private static final char[] INVITE_CODE_ALPHABET =
+            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789".toCharArray();
+    /** 邀请码长度，12 位 ≈ 6.7e20 种组合，全库碰撞概率接近于 0 */
+    private static final int INVITE_CODE_LEN = 12;
+    /** 邀请码生成重试上限，防黑天鹅式重复 */
+    private static final int INVITE_CODE_MAX_RETRY = 4;
+    private static final SecureRandom INVITE_CODE_RANDOM = new SecureRandom();
+
     private final GroupMapper groupMapper;
     private final GroupMemberMapper groupMemberMapper;
+    private final GroupJoinRequestMapper groupJoinRequestMapper;
     private final GroupPermissionChecker permissionChecker;
     private final UserQuerySpi userQuerySpi;
     /** 群静态资料的失效入口，读路径在 GroupSpiImpl；提交后再失效，避免事务内被并发读回填旧值 */
@@ -550,6 +575,229 @@ public class GroupServiceImpl implements GroupService {
         return PageResult.of(records, page.getTotal(), page.getCurrent(), page.getSize());
     }
 
+    /* ==================== 入群审批 / 邀请链接 / 群二维码 ==================== */
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GroupVO setJoinApproval(Long operatorId, Long groupId, boolean joinApproval) {
+        GroupPermissionChecker.GroupContext context = permissionChecker.requireOwnerOrAdmin(groupId, operatorId);
+        Group group = context.group();
+        boolean current = group.isJoinApprovalOn();
+        if (current != joinApproval) {
+            BusinessException.throwIf(groupMapper.updateJoinApproval(groupId, joinApproval ? 1 : 0) == 0,
+                    ResultCode.GROUP_DISMISSED);
+            group.setJoinApproval(joinApproval ? 1 : 0);
+        }
+
+        Long conversationId = conversationIdOf(groupId);
+        Map<String, Object> event = groupEvent(ACTION_JOIN_APPROVAL_CHANGED, groupId, conversationId,
+                Map.of("joinApproval", joinApproval));
+        // 与全员禁言不同：开关入群审批不改聊天行为，不发系统通知，只推 NOTIFY 让客户端刷新面板
+        afterCommit(() -> pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(groupId), event));
+        log.info("[入群审批开关] groupId={}, 操作人={}, 开启={}", groupId, operatorId, joinApproval);
+        return toVO(group, context.member(), conversationId);
+    }
+
+    @Override
+    public String getOrCreateInviteCode(Long operatorId, Long groupId) {
+        permissionChecker.requireOwnerOrAdmin(groupId, operatorId);
+        Group group = permissionChecker.requireGroup(groupId);
+        if (group.getInviteCode() != null && !group.getInviteCode().isEmpty()) {
+            return group.getInviteCode();
+        }
+        // CAS 写入：两个管理员同时首次拉取时，只会有一次 update 命中 isNull 条件；未命中的重新取一次就能拿到先写入的那个
+        for (int attempt = 0; attempt < INVITE_CODE_MAX_RETRY; attempt++) {
+            String candidate = randomInviteCode();
+            int affected = groupMapper.setInviteCodeIfAbsent(groupId, candidate);
+            if (affected > 0) {
+                log.info("[邀请码懒生成] groupId={}, 操作人={}, 尝试={}", groupId, operatorId, attempt + 1);
+                return candidate;
+            }
+            Group reread = groupMapper.selectById(groupId);
+            if (reread != null && reread.getInviteCode() != null && !reread.getInviteCode().isEmpty()) {
+                return reread.getInviteCode();
+            }
+        }
+        throw new BusinessException(ResultCode.BUSINESS_ERROR, "邀请码生成失败，请稍后重试");
+    }
+
+    @Override
+    public GroupInviteVO getGroupInvite(Long operatorId, Long groupId, String base) {
+        String code = getOrCreateInviteCode(operatorId, groupId);
+        // base 由前端传自己的 origin（Web 部署是 history 模式）；清洗一次只留协议+域名，避免带上前端当前路径或查询串
+        String root = normalizeBase(base);
+        String link = root + "/group/join?code=" + code;
+        // 二维码直接编整条链接：手机自带相机扫完就能在浏览器打开入群页，比只编一个裸邀请码实用
+        String qrcode = QrCodeUtil.toPngBase64(link, QrCodeUtil.DEFAULT_SIZE);
+        return GroupInviteVO.builder()
+                .inviteCode(code)
+                .inviteLink(link)
+                .qrcode(qrcode)
+                .build();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public JoinApplyResultVO applyJoin(Long userId, JoinApplyRequest request) {
+        BusinessException.throwIf(userId == null, ResultCode.UNAUTHORIZED);
+        BusinessException.throwIf(request == null || TextUtil.isBlank(request.getCode()),
+                ResultCode.BAD_REQUEST, "邀请码不能为空");
+        Group group = groupMapper.selectByInviteCode(request.getCode().trim());
+        BusinessException.throwIf(group == null, ResultCode.GROUP_NOT_FOUND);
+        // requireGroup 会区分不存在与已解散，这里统一交给它处理 status
+        permissionChecker.requireGroup(group.getId());
+        // 重新取一次以确认上面的 requireGroup 没换行（与上面 selectByInviteCode 同一事务内不会真变，仅防御式写法）
+        BusinessException.throwIf(groupMemberMapper.selectActive(group.getId(), userId) != null,
+                ResultCode.GROUP_ALREADY_MEMBER);
+
+        String source = normalizeSource(request.getSource());
+        String message = TextUtil.isBlank(request.getMessage())
+                ? null : TextUtil.sanitize(request.getMessage(), 255);
+
+        Long conversationId = conversationIdOf(group.getId());
+        if (!group.isJoinApprovalOn()) {
+            // 未开审批 → 直接入群，与管理员邀请入群的链路一致，只是触发人不同
+            int maxMember = group.getMaxMember() == null ? ImConstants.DEFAULT_GROUP_MAX_MEMBER : group.getMaxMember();
+            long active = groupMemberMapper.countActive(group.getId());
+            BusinessException.throwIf(active + 1 > maxMember, ResultCode.GROUP_MEMBER_FULL);
+            boolean inGroupNow = joinMember(group.getId(), userId, GroupRole.MEMBER.getCode(), LocalDateTime.now());
+            if (inGroupNow && conversationId != null) {
+                joinConversation(conversationId, List.of(userId));
+            }
+            Map<String, Object> event = groupEvent(ACTION_MEMBERS_ADDED, group.getId(), conversationId,
+                    Map.of("userIds", List.of(userId)));
+            UserBriefDTO applicant = userQuerySpi.getById(userId);
+            String displayName = GroupConvert.displayName(null, applicant, userId);
+            afterCommit(() -> {
+                noticeQuietly(conversationId, displayName + " 通过邀请链接加入了群聊");
+                pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(group.getId()), event);
+            });
+            log.info("[邀请码直接入群] groupId={}, userId={}, source={}, conversationId={}",
+                    group.getId(), userId, source, conversationId);
+            return JoinApplyResultVO.builder()
+                    .status("joined")
+                    .groupId(group.getId())
+                    .groupName(group.getName())
+                    .conversationId(conversationId)
+                    .memberCount((int) groupMemberMapper.countActive(group.getId()))
+                    .build();
+        }
+
+        // 开了审批 → 写入 or 重置申请行，同 (group,user) 只留一行
+        GroupJoinRequest existing = groupJoinRequestMapper.selectRow(group.getId(), userId);
+        if (existing == null) {
+            GroupJoinRequest row = new GroupJoinRequest();
+            row.setGroupId(group.getId());
+            row.setUserId(userId);
+            row.setStatus(GroupJoinRequest.STATUS_PENDING);
+            row.setMessage(message);
+            row.setSource(source);
+            try {
+                groupJoinRequestMapper.insert(row);
+            } catch (DuplicateKeyException e) {
+                // 并发下同一人重复提交，退化为重置已存在行，语义一致
+                log.debug("[入群申请] 命中唯一键，转为重置: groupId={}, userId={}", group.getId(), userId);
+                groupJoinRequestMapper.resetToPending(group.getId(), userId, message, source);
+            }
+        } else {
+            groupJoinRequestMapper.resetToPending(group.getId(), userId, message, source);
+        }
+
+        // 推 NOTIFY 给全群管理层，提醒有待审批；申请人本端不推，前端自己会提示“已提交”
+        List<Long> managers = groupMemberMapper.selectActiveMembers(group.getId()).stream()
+                .filter(GroupMember::isManager)
+                .map(GroupMember::getUserId)
+                .toList();
+        UserBriefDTO applicant = userQuerySpi.getById(userId);
+        String applicantName = GroupConvert.displayName(null, applicant, userId);
+        Map<String, Object> event = groupEvent(ACTION_JOIN_REQUEST, group.getId(), conversationId,
+                Map.of("userId", userId, "source", source,
+                        "nickname", applicantName, "groupName", group.getName()));
+        afterCommit(() -> pushQuietlyAll(managers, event));
+        log.info("[入群申请提交] groupId={}, userId={}, source={}", group.getId(), userId, source);
+        return JoinApplyResultVO.builder()
+                .status("pending")
+                .groupId(group.getId())
+                .groupName(group.getName())
+                .conversationId(null)
+                .memberCount((int) groupMemberMapper.countActive(group.getId()))
+                .build();
+    }
+
+    @Override
+    public PageResult<JoinRequestVO> pageJoinRequests(Long operatorId, Long groupId, PageQuery query) {
+        permissionChecker.requireOwnerOrAdmin(groupId, operatorId);
+        PageQuery safe = query == null ? new PageQuery() : query;
+        Page<GroupJoinRequest> page = groupJoinRequestMapper.selectPendingPage(safe.toPage(), groupId);
+        List<GroupJoinRequest> rows = page.getRecords();
+        if (rows.isEmpty()) {
+            return PageResult.empty(page.getCurrent(), page.getSize());
+        }
+        Set<Long> userIds = new HashSet<>();
+        for (GroupJoinRequest row : rows) {
+            userIds.add(row.getUserId());
+            if (row.getHandleUserId() != null) {
+                userIds.add(row.getHandleUserId());
+            }
+        }
+        Map<Long, UserBriefDTO> users = userQuerySpi.listByIds(userIds);
+        List<JoinRequestVO> records = rows.stream()
+                .map(row -> GroupConvert.toJoinRequestVO(row, users.get(row.getUserId()), users.get(row.getHandleUserId())))
+                .toList();
+        return PageResult.of(records, page.getTotal(), page.getCurrent(), page.getSize());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void handleJoinRequest(Long operatorId, Long requestId, boolean approve) {
+        BusinessException.throwIf(requestId == null, ResultCode.BAD_REQUEST, "申请 ID 不能为空");
+        GroupJoinRequest row = groupJoinRequestMapper.selectByIdAny(requestId);
+        BusinessException.throwIf(row == null, ResultCode.BAD_REQUEST, "入群申请不存在或已被清理");
+        // 目标群的成员才能审批，且必须是管理层
+        GroupPermissionChecker.GroupContext context = permissionChecker.requireOwnerOrAdmin(row.getGroupId(), operatorId);
+        BusinessException.throwUnless(row.isPending(), ResultCode.BAD_REQUEST, "申请已被处理");
+
+        LocalDateTime now = LocalDateTime.now();
+        int targetStatus = approve ? GroupJoinRequest.STATUS_APPROVED : GroupJoinRequest.STATUS_REJECTED;
+        // handle 里带 status=0 条件，两个管理员并发只会有一次生效，没命中时当作已处理幂等返回
+        if (groupJoinRequestMapper.handle(requestId, targetStatus, operatorId, now) == 0) {
+            log.debug("[入群审批] 已被抢先处理，幂等跳过: requestId={}, approver={}", requestId, operatorId);
+            return;
+        }
+
+        Group group = context.group();
+        Long conversationId = conversationIdOf(group.getId());
+        if (approve) {
+            // 同事务内写入成员行，保证“行已批准 + 人在群里”同生同灭；中途失败回滚后申请行会回到待审批
+            int maxMember = group.getMaxMember() == null ? ImConstants.DEFAULT_GROUP_MAX_MEMBER : group.getMaxMember();
+            long active = groupMemberMapper.countActive(group.getId());
+            BusinessException.throwIf(active + 1 > maxMember, ResultCode.GROUP_MEMBER_FULL);
+            boolean inGroupNow = joinMember(group.getId(), row.getUserId(), GroupRole.MEMBER.getCode(), now);
+            if (inGroupNow && conversationId != null) {
+                joinConversation(conversationId, List.of(row.getUserId()));
+            }
+        }
+
+        UserBriefDTO applicant = userQuerySpi.getById(row.getUserId());
+        String displayName = GroupConvert.displayName(null, applicant, row.getUserId());
+        Map<String, Object> approvedEvent = groupEvent(ACTION_JOIN_APPROVED, group.getId(), conversationId,
+                Map.of("userId", row.getUserId(), "groupName", group.getName()));
+        Map<String, Object> rejectedEvent = groupEvent(ACTION_JOIN_REJECTED, group.getId(), conversationId,
+                Map.of("userId", row.getUserId(), "groupName", group.getName(), "nickname", displayName));
+        afterCommit(() -> {
+            if (approve) {
+                noticeQuietly(conversationId, displayName + " 加入了群聊");
+                // 全群拉新：成员数变了，老成员需要刷新成员列表与 @候选
+                pushQuietlyAll(groupMemberMapper.selectActiveMemberIds(group.getId()), approvedEvent);
+            } else {
+                // 拒绝只推申请人，不打扰全群
+                pushQuietly(row.getUserId(), rejectedEvent);
+            }
+        });
+        log.info("[入群审批] requestId={}, groupId={}, userId={}, 通过={}, 处理人={}",
+                requestId, group.getId(), row.getUserId(), approve, operatorId);
+    }
+
     /* ==================== 内部实现 ==================== */
 
     /**
@@ -595,11 +843,17 @@ public class GroupServiceImpl implements GroupService {
 
     /**
      * 组装群详情 VO，群主资料与成员数在这里补齐。
+     *
+     * <p>当查看者为管理层时顺手带一笔待审批数，前端直接画红点；普通成员与非成员保持 null，
+     * {@code convert} 内已经按角色门控不会泄露。
      */
     private GroupVO toVO(Group group, GroupMember myMember, Long conversationId) {
         UserBriefDTO owner = group.getOwnerId() == null ? null : userQuerySpi.getById(group.getOwnerId());
         int memberCount = (int) groupMemberMapper.countActive(group.getId());
-        return GroupConvert.toVO(group, myMember, owner, memberCount, conversationId);
+        Long pending = myMember != null && myMember.isManager()
+                ? groupJoinRequestMapper.countPending(group.getId())
+                : null;
+        return GroupConvert.toVO(group, myMember, owner, memberCount, conversationId, pending);
     }
 
     private Map<Long, Integer> memberCounts(Collection<Long> groupIds) {
@@ -778,6 +1032,64 @@ public class GroupServiceImpl implements GroupService {
                 .filter(id -> id > 0)
                 .distinct()
                 .toList();
+    }
+
+    /**
+     * 抛取随机邀请码：排除易混淆字符后从 56 个字符里取 12 位，包含数字 + 大小写字母。
+     *
+     * <p>CSPRNG 而非伪随机：邀请码本质上是「知道就能提申请入群的入口」，固定种子或时间可预测会给
+     * 黑产可乘之机。全局唯一 {@code uk_invite_code} + setInviteCodeIfAbsent 保证写入不会互盖。
+     */
+    private static String randomInviteCode() {
+        char[] chars = new char[INVITE_CODE_LEN];
+        for (int i = 0; i < INVITE_CODE_LEN; i++) {
+            chars[i] = INVITE_CODE_ALPHABET[INVITE_CODE_RANDOM.nextInt(INVITE_CODE_ALPHABET.length)];
+        }
+        return new String(chars);
+    }
+
+    /**
+     * 规范申请来源，非法值默认当 link（前端不传或传其他内容时不让接口失败）。
+     */
+    private static String normalizeSource(String source) {
+        if (source == null) {
+            return GroupJoinRequest.SOURCE_LINK;
+        }
+        String lower = source.trim().toLowerCase();
+        if (GroupJoinRequest.SOURCE_QRCODE.equals(lower)) {
+            return GroupJoinRequest.SOURCE_QRCODE;
+        }
+        return GroupJoinRequest.SOURCE_LINK;
+    }
+
+    /**
+     * 清洗前端传来的站点根地址：只保留 {@code scheme://host[:port]}，剥掉尾部斜杠与任何路径 / 查询。
+     *
+     * <p>邀请链接由后端拼，不能把前端传进来的任意字符串直接拼接（防 open-redirect / SSRF）；
+     * 只认 http/https，其他协议或解析失败一律当空处理，退化为相对路径 {@code /group/join}。
+     */
+    private static String normalizeBase(String base) {
+        if (base == null || base.isBlank()) {
+            return "";
+        }
+        try {
+            java.net.URI uri = new java.net.URI(base.trim());
+            String scheme = uri.getScheme();
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+                return "";
+            }
+            if (uri.getHost() == null) {
+                return "";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append(scheme.toLowerCase()).append("://").append(uri.getHost());
+            if (uri.getPort() > 0) {
+                sb.append(':').append(uri.getPort());
+            }
+            return sb.toString();
+        } catch (java.net.URISyntaxException e) {
+            return "";
+        }
     }
 
     /**

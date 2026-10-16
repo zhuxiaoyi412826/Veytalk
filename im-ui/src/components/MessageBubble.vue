@@ -4,7 +4,16 @@
     <span class="bubble__plain-text">{{ plainText }}</span>
   </div>
 
-  <div v-else class="bubble" :class="{ 'bubble--self': message.self }" @contextmenu.prevent="emit('menu', $event)">
+  <div
+    v-else
+    class="bubble"
+    :class="{ 'bubble--self': message.self, 'bubble--selecting': selectable }"
+    @click.capture="onBubbleClick"
+    @contextmenu.prevent="emit('menu', $event)"
+  >
+    <span v-if="selectable" class="bubble__check" :class="{ 'is-checked': selected }">
+      <el-icon v-if="selected"><Select /></el-icon>
+    </span>
     <UserAvatar
       :src="message.self ? auth.avatarRaw : message.fromAvatar"
       :name="message.self ? auth.nickname : message.fromNickname"
@@ -13,7 +22,10 @@
 
     <div class="bubble__main">
       <!-- 群聊里需要区分是谁说的；单聊显示昵称纯属噪音。备注优先：别人在我这里的显示名由我定 -->
-      <div v-if="!message.self && showSender" class="bubble__sender im-ellipsis">{{ senderDisplayName }}</div>
+      <div v-if="!message.self && showSender" class="bubble__sender im-ellipsis">
+        {{ senderDisplayName }}
+        <span v-if="isRobot" class="bubble__robot-tag">机器人</span>
+      </div>
 
       <!-- 引用预览块：显示在气泡上方，点击可跳转到原消息 -->
       <div
@@ -24,6 +36,9 @@
         <span class="bubble__quote-nick">回复 {{ quoteDisplayName }}</span>
         <span class="bubble__quote-text im-ellipsis">{{ quoteContent }}</span>
       </div>
+
+      <!-- 群精华标记：群主/管理员标为精华的消息，在气泡上方挂一个错色小标签 -->
+      <div v-if="message.essence" class="bubble__essence">★ 群精华</div>
 
       <div class="bubble__row">
         <!-- 自己的消息：状态显示在气泡左侧 -->
@@ -136,8 +151,77 @@
             </button>
           </div>
 
+          <!-- 名片：头像 + 昵称快照，点击打开对方资料页 -->
+          <div
+            v-else-if="msgType === 7"
+            class="bubble__card"
+            :class="{ 'is-disabled': !extra.cardUserId }"
+            @click="onCardClick"
+          >
+            <UserAvatar :src="extra.cardAvatar" :name="cardName" :size="40" />
+            <div class="bubble__card-meta">
+              <div class="bubble__card-name im-ellipsis">{{ cardName }}</div>
+              <div class="bubble__card-hint">个人名片 · 点击查看</div>
+            </div>
+          </div>
+
+          <!-- 位置：地图瓦片缩略图 + 文字地址，点击在外部地图打开 -->
+          <div v-else-if="msgType === 8" class="bubble__location" @click="onLocationClick">
+            <div class="bubble__location-map">
+              <img v-if="mapTileSrc" :src="mapTileSrc" class="bubble__location-tile" alt="地图" />
+              <div v-else class="bubble__location-tile bubble__location-tile--empty">地图不可用</div>
+              <div class="bubble__location-pin">📍</div>
+            </div>
+            <div class="bubble__location-meta">
+              <div class="bubble__location-name im-ellipsis">{{ locationName }}</div>
+              <div class="bubble__location-coord">{{ locationCoord }}</div>
+            </div>
+          </div>
+
+          <!-- 合并转发（聊天记录）：卡片，点击展开查看器 -->
+          <div v-else-if="msgType === 9" class="bubble__merged" @click="onMergedClick">
+            <el-icon class="bubble__merged-icon" :size="22"><ChatLineSquare /></el-icon>
+            <div class="bubble__merged-meta">
+              <div class="bubble__merged-title im-ellipsis">{{ mergedTitle }}</div>
+              <div class="bubble__merged-hint">聊天记录 · 共 {{ mergedCount }} 条 · 点击查看</div>
+            </div>
+          </div>
+
+          <!-- 投票：标题 + 选项（票数条），单选即时提交 / 多选勾选后提交 -->
+          <div v-else-if="msgType === 10" class="bubble__vote">
+            <div class="bubble__vote-head">
+              <span class="bubble__vote-title">{{ voteTitle }}</span>
+              <span class="bubble__vote-tag">{{ voteMultiple ? '多选' : '单选' }}{{ voteAnonymous ? ' · 匿名' : '' }}</span>
+            </div>
+            <div class="bubble__vote-options">
+              <div
+                v-for="o in voteOptions"
+                :key="o.index"
+                class="bubble__vote-option"
+                :class="{ 'is-picked': voteMultiple ? votePick.has(o.index) : o.selfVoted, 'is-disabled': voteClosed }"
+                @click="onOptionClick(o)"
+              >
+                <div class="bubble__vote-bar" :style="{ width: votePercent(o) + '%' }"></div>
+                <div class="bubble__vote-line">
+                  <span class="bubble__vote-mark">{{ (voteMultiple ? votePick.has(o.index) : o.selfVoted) ? (voteMultiple ? '☑' : '●') : (voteMultiple ? '☐' : '○') }}</span>
+                  <span class="bubble__vote-text im-ellipsis">{{ o.text }}</span>
+                  <span class="bubble__vote-count">{{ o.count }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="bubble__vote-foot">
+              <span class="bubble__vote-total">共 {{ voteTotal }} 人参与{{ voteClosed ? ' · 已截止' : '' }}</span>
+              <span class="bubble__vote-spacer"></span>
+              <el-button v-if="voteMultiple && !voteClosed" link type="primary" size="small" :disabled="!votePick.size" @click="submitMultiVote">提交</el-button>
+              <el-button v-if="message.self && !voteClosed" link size="small" @click="onCloseVote">截止</el-button>
+            </div>
+          </div>
+
           <!-- 兜底：后端将来加了新类型而前端还没跟上时，至少把原文露出来 -->
           <div v-else class="bubble__text">{{ textContent }}</div>
+
+          <!-- 已编辑标记：放在整条 v-if/v-else 链之后当独立节点，不能插在链中间否则会打断条件渲染 -->
+          <span v-if="msgType === 1 && message.extra && message.extra.edited" class="bubble__edited">已编辑</span>
         </div>
 
         <!-- 对方的消息：留白，让气泡靠左 -->
@@ -149,14 +233,35 @@
         <el-button link type="primary" size="small" @click="emit('resend', message)">重发</el-button>
         <el-button link type="danger" size="small" @click="emit('discard', message)">删除</el-button>
       </div>
+
+      <!-- 表情回应栏：有回应才占位；点 chip——自己贴过的再点取消，否则追加同款 -->
+      <div v-if="reactions.length" class="bubble__reactions">
+        <span
+          v-for="r in reactions"
+          :key="r.emoji"
+          class="bubble__reaction"
+          :class="{ 'is-self': r.self }"
+          @click.stop="toggleReaction(r)"
+        >{{ r.emoji }} <b>{{ r.count }}</b></span>
+      </div>
+
+      <!-- 悬停浮现的快捷回应栏（仅可回应时）：纯 CSS hover，桌面端主用 -->
+      <div v-if="canReact" class="bubble__quick">
+        <span
+          v-for="e in quickEmojis"
+          :key="e"
+          class="bubble__quick-emoji"
+          @click.stop="pickReaction(e)"
+        >{{ e }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -165,6 +270,7 @@ import { useFriendStore } from '@/stores/friend'
 import { mediaUrl, downloadFile, isPreviewableFile, isVideo } from '@/utils/media'
 import { riskCategoryOf } from '@/utils/riskFile'
 import { formatDuration, formatFileSize } from '@/utils/format'
+import { tileUrl, formatCoord } from '@/utils/geo'
 
 /**
  * 单条消息的气泡。
@@ -178,10 +284,14 @@ const props = defineProps({
   /** 是否显示发送者昵称，群聊里为 true */
   showSender: { type: Boolean, default: false },
   /** 是否为群聊消息，用于展示已读人数 */
-  isGroup: { type: Boolean, default: false }
+  isGroup: { type: Boolean, default: false },
+  /** 多选模式：为每条消息渲染勾选框、点气泡即切换选中（不再触发预览/菜单） */
+  selectable: { type: Boolean, default: false },
+  /** 多选模式下本条是否已选中 */
+  selected: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -190,6 +300,118 @@ const friends = useFriendStore()
 const msgType = computed(() => Number(props.message.msgType))
 const isSystem = computed(() => msgType.value === 5)
 const extra = computed(() => props.message.extra || {})
+// 机器人消息：类型 11，或 extra 里带机器人名称快照（接收端据此把发送者标为「机器人」）
+const isRobot = computed(() => msgType.value === 11 || !!extra.value.robotName)
+
+/* -------------------------------- 名片 -------------------------------- */
+const cardName = computed(() => extra.value.cardNickname || '联系人')
+function onCardClick() {
+  if (extra.value.cardUserId) {
+    emit('view-card', extra.value.cardUserId)
+  }
+}
+
+/* -------------------------------- 位置 -------------------------------- */
+const hasCoord = computed(() =>
+  Number.isFinite(Number(extra.value.latitude)) && Number.isFinite(Number(extra.value.longitude))
+)
+const mapTileSrc = computed(() => (hasCoord.value ? tileUrl(extra.value.latitude, extra.value.longitude) : ''))
+const locationName = computed(() => extra.value.locationName || '位置')
+const locationCoord = computed(() =>
+  hasCoord.value ? formatCoord(extra.value.latitude, extra.value.longitude) : ''
+)
+function onLocationClick() {
+  if (hasCoord.value) {
+    emit('open-location', { latitude: Number(extra.value.latitude), longitude: Number(extra.value.longitude) })
+  }
+}
+
+/* ------------------------------ 合并转发 ------------------------------ */
+const mergedTitle = computed(() => extra.value.mergedTitle || '聊天记录')
+const mergedCount = computed(() => (Array.isArray(extra.value.mergedMessages) ? extra.value.mergedMessages.length : 0))
+function onMergedClick() {
+  emit('view-merged', { title: mergedTitle.value, messages: extra.value.mergedMessages || [] })
+}
+
+/* -------------------------------- 投票 -------------------------------- */
+const voteView = computed(() => props.message.vote || null)
+const voteTitle = computed(() => voteView.value?.title || extra.value.voteTitle || '投票')
+const voteMultiple = computed(() => (voteView.value ? voteView.value.multiple === true : extra.value.voteMultiple === true))
+const voteAnonymous = computed(() => (voteView.value ? voteView.value.anonymous === true : extra.value.voteAnonymous === true))
+const voteClosed = computed(() => (voteView.value ? voteView.value.closed === true : extra.value.voteClosed === true))
+// 优先用服务端聚合的 vote（含票数）；新推送的投票只有 extra 定义时，票数从 0 起算
+const voteOptions = computed(() => {
+  if (voteView.value && Array.isArray(voteView.value.options)) {
+    return voteView.value.options
+  }
+  const texts = Array.isArray(extra.value.voteOptions) ? extra.value.voteOptions : []
+  return texts.map((text, index) => ({ index, text, count: 0, selfVoted: false }))
+})
+const voteTotal = computed(() => {
+  if (voteView.value && Number.isFinite(Number(voteView.value.totalVoters))) {
+    return Number(voteView.value.totalVoters)
+  }
+  return voteOptions.value.reduce((sum, o) => sum + (Number(o.count) || 0), 0)
+})
+/** 多选模式下的本地待提交选择；单选直接即时提交 */
+const votePick = ref(new Set())
+// 服务端刷新 vote 后同步本地选择（取本人已选）
+watch(
+  () => voteOptions.value,
+  (opts) => {
+    const next = new Set()
+    opts.forEach((o) => {
+      if (o.selfVoted) next.add(o.index)
+    })
+    votePick.value = next
+  },
+  { immediate: true }
+)
+function votePercent(o) {
+  const total = voteTotal.value
+  if (!total) return 0
+  return Math.round(((Number(o.count) || 0) / total) * 100)
+}
+function onOptionClick(o) {
+  if (voteClosed.value) {
+    return
+  }
+  if (voteMultiple.value) {
+    const next = new Set(votePick.value)
+    if (next.has(o.index)) {
+      next.delete(o.index)
+    } else {
+      next.add(o.index)
+    }
+    votePick.value = next
+  } else {
+    // 单选：点即提交（再点同一项不取消，避免误操作；要改选直接点另一项）
+    if (!o.selfVoted) {
+      emit('vote', { message: props.message, options: [o.index] })
+    }
+  }
+}
+function submitMultiVote() {
+  if (!votePick.value.size) {
+    return
+  }
+  emit('vote', { message: props.message, options: [...votePick.value] })
+}
+function onCloseVote() {
+  emit('close-vote', props.message)
+}
+
+/**
+ * 多选模式下的点选拦截：在捕获阶段抢在内部媒体/菜单处理器之前接管，
+ * 点整行即切换选中，避免选中时误触图片预览、文件下载。
+ */
+function onBubbleClick(event) {
+  if (props.selectable) {
+    event.stopPropagation()
+    event.preventDefault()
+    emit('toggle-select', props.message)
+  }
+}
 
 /** 本条附件是否带发送者水印（发送时选择，随 message.extra 传递到接收端） */
 const attachWatermark = computed(() => extra.value.watermark === true)
@@ -204,6 +426,30 @@ const senderWatermarkText = computed(
 /** 本条图片是否为闪照（拆封前不渲染像素，看过一次即销毁） */
 const isFlash = computed(() => msgType.value === 2 && extra.value.flash === true)
 const flashViewed = computed(() => isFlash.value && extra.value.flashViewed === true)
+
+/* -------------------------------- 表情回应 -------------------------------- */
+
+/** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴 */
+const quickEmojis = ['👍', '❤️', '😄', '😢', '🎉', '🔥']
+/** 已撤回与系统消息不提供回应入口 */
+const canReact = computed(() => !props.message.recalled && !isSystem.value && !!props.message.messageId)
+const reactions = computed(() => (Array.isArray(props.message.reactions) ? props.message.reactions : []))
+
+/** 点已有表情 chip：自己贴过的再点为取消，否则追加同款 */
+function toggleReaction(item) {
+  if (!canReact.value) {
+    return
+  }
+  emit('react', { message: props.message, emoji: item.emoji, remove: item.self === true })
+}
+
+/** 从快捷栏选一个表情贴上 */
+function pickReaction(emoji) {
+  if (!canReact.value) {
+    return
+  }
+  emit('react', { message: props.message, emoji, remove: false })
+}
 
 /**
  * 群聊发送者显示名：好友备注优先，其次服务端给的昵称。
@@ -261,7 +507,7 @@ const textContent = computed(() => {
 const boxClass = computed(() => ({
   'bubble__box--self': props.message.self,
   // 附件类气泡自带白底卡片，再套一层气泡底色会出现双重边框
-  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4 || msgType.value === 6
+  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4 || msgType.value === 6 || msgType.value === 7 || msgType.value === 8 || msgType.value === 9 || msgType.value === 10
 }))
 
 /**
@@ -602,6 +848,19 @@ onBeforeUnmount(() => {
   color: var(--im-text-secondary);
 }
 
+.bubble__robot-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #13a86b;
+  background: #e8f8f1;
+  border: 1px solid #b7ecd4;
+  border-radius: 8px;
+  vertical-align: middle;
+}
+
 .bubble__row {
   display: flex;
   align-items: flex-end;
@@ -678,6 +937,159 @@ onBeforeUnmount(() => {
 
 .bubble__box--bare::before {
   display: none;
+}
+
+/* 名片：头像 + 昵称的横排卡片，整块可点 */
+.bubble__card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+  max-width: 240px;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.bubble__card.is-disabled {
+  cursor: default;
+}
+
+.bubble__card-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.bubble__card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__card-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+/* 位置：地图缩略图 + 地址的竖排卡片 */
+.bubble__location {
+  width: 220px;
+  cursor: pointer;
+}
+
+.bubble__location-map {
+  position: relative;
+  width: 100%;
+  height: 110px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #e8ecf0;
+}
+
+.bubble__location-tile {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.bubble__location-tile--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__location-pin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -100%);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.bubble__location-meta {
+  margin-top: 6px;
+}
+
+.bubble__location-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__location-coord {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__edited {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.2;
+  opacity: 0.55;
+  text-align: right;
+}
+
+.bubble__reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.bubble__reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-radius: 10px;
+  background: var(--el-fill-color-blank, #fff);
+  cursor: pointer;
+  user-select: none;
+}
+
+.bubble__reaction.is-self {
+  border-color: var(--el-color-primary, #409eff);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+}
+
+.bubble__reaction b {
+  font-weight: 600;
+}
+
+.bubble__quick {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.bubble:hover .bubble__quick {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bubble__quick-emoji {
+  padding: 0 4px;
+  font-size: 16px;
+  line-height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bubble__quick-emoji:hover {
+  background: var(--el-fill-color-light, #f0f2f5);
 }
 
 .bubble__text {
@@ -892,6 +1304,23 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.bubble__essence {
+  align-self: flex-start;
+  margin-bottom: 3px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #d48806;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 10px;
+  width: fit-content;
+}
+
+.bubble--self .bubble__essence {
+  margin-left: auto;
+}
+
 .bubble__video {
   display: flex;
   align-items: center;
@@ -919,5 +1348,175 @@ onBeforeUnmount(() => {
   min-height: 120px;
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* 合并转发卡片：聊天气泡式白底块 + 徒章图标 + 标题/条数 */
+.bubble__merged {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+  max-width: 240px;
+  padding: 10px 12px;
+  background: var(--im-panel);
+  border: 1px solid var(--im-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.bubble__merged:hover {
+  border-color: var(--im-primary);
+}
+
+.bubble__merged-icon {
+  flex: none;
+  color: var(--im-primary);
+}
+
+.bubble__merged-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.bubble__merged-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__merged-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+/* 投票卡片 */
+.bubble__vote {
+  width: 260px;
+  padding: 10px 12px;
+  background: var(--im-panel, #fff);
+  border: 1px solid var(--im-border, #ebeef5);
+  border-radius: 8px;
+}
+
+.bubble__vote-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bubble__vote-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__vote-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__vote-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bubble__vote-option {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bubble__vote-option.is-disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.bubble__vote-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--el-color-primary-light-8, #d9ecff);
+  transition: width 0.2s ease;
+}
+
+.bubble__vote-option.is-picked .bubble__vote-bar {
+  background: var(--el-color-primary-light-7, #c6e2ff);
+}
+
+.bubble__vote-line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+}
+
+.bubble__vote-mark {
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--im-primary, #409eff);
+}
+
+.bubble__vote-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--im-text, #303133);
+}
+
+.bubble__vote-count {
+  flex: none;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__vote-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bubble__vote-total {
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__vote-spacer {
+  flex: 1;
+}
+
+/* 多选勾选圈：选中时实心主题色 + 白勾 */
+.bubble__check {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 8px;
+  border: 1.5px solid var(--im-border, #dcdfe6);
+  border-radius: 50%;
+  background: var(--im-panel, #fff);
+  color: #fff;
+  font-size: 13px;
+}
+
+.bubble__check.is-checked {
+  background: var(--el-color-primary, #409eff);
+  border-color: var(--el-color-primary, #409eff);
+}
+
+.bubble--selecting {
+  cursor: pointer;
+  user-select: none;
 }
 </style>

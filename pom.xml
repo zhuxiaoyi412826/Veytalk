@@ -75,6 +75,9 @@
         <!-- 密码加密：Argon2 / BCrypt -->
         <spring-security-crypto.version>7.0.7</spring-security-crypto.version>
         <bouncycastle.version>1.86</bouncycastle.version>
+
+        <!-- 二维码：ZXing（群邀请链接/二维码、后续好友二维码也可复用），本地仓已有 3.5.1 -->
+        <zxing.version>3.5.1</zxing.version>
     </properties>
 
     <dependencyManagement>
@@ -199,6 +202,18 @@
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcprov-jdk18on</artifactId>
                 <version>${bouncycastle.version}</version>
+            </dependency>
+
+            <!-- ==================== 二维码 ==================== -->
+            <dependency>
+                <groupId>com.google.zxing</groupId>
+                <artifactId>core</artifactId>
+                <version>${zxing.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.zxing</groupId>
+                <artifactId>javase</artifactId>
+                <version>${zxing.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

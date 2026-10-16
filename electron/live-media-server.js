@@ -28,7 +28,10 @@ const MIME = {
   '.m3u8': 'application/vnd.apple.mpegurl',
   '.m4s': 'video/iso.segment',
   '.mp4': 'video/mp4',
-  '.ts': 'video/mp2t'
+  '.ts': 'video/mp2t',
+  // 连麦合成流：主播端 liveComposer PUT 的 WebM 分片与轻量清单（观众端 webmPlayer 拉取）
+  '.webm': 'video/webm',
+  '.json': 'application/json'
 }
 
 function contentTypeOf(file) {
@@ -102,8 +105,9 @@ const server = http.createServer((req, res) => {
     fs.stat(abs, (err, stat) => {
       if (err || !stat.isFile()) return send(res, 404, 'not found')
       const type = contentTypeOf(abs)
-      // m3u8 滚动更新绝不缓存；分片不可变可长缓存
-      res.setHeader('Cache-Control', abs.endsWith('.m3u8') ? 'no-store, must-revalidate' : 'public, max-age=3600')
+      // m3u8 清单与连麦 manifest.json 滚动更新绝不缓存；分片（.m4s/.webm）不可变可长缓存
+      const rolling = abs.endsWith('.m3u8') || abs.endsWith('manifest.json')
+      res.setHeader('Cache-Control', rolling ? 'no-store, must-revalidate' : 'public, max-age=3600')
       const range = req.headers.range
       if (range) {
         const m = /bytes=(\d*)-(\d*)/.exec(range)

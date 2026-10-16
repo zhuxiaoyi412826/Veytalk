@@ -108,4 +108,15 @@ public interface UserService {
     List<String> listRoles(Long userId);
 
     List<String> listPermissions(Long userId);
+
+    /**
+     * 账号注销（GDPR / 个保法）：密码二次确认后，匿名化并逻辑删除用户主记录，
+     * 再级联清除好友 / 群 / 会话 / 消息等各模块归属于该用户的数据。
+     *
+     * <p>调用方须在成功后注销该用户全部登录态（{@code logoutEverywhere}）。
+     *
+     * @param userId      当前登录用户 ID
+     * @param rawPassword 登录密码明文，用于二次确认；不匹配抛业务异常
+     */
+    void cancelAccount(Long userId, String rawPassword);
 }

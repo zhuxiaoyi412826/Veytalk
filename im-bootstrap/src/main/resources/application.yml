@@ -451,6 +451,60 @@ im:
     # 通话录制产物上传的大小上限；读回本地文件时超过即拒（CALL_RECORD_TOO_LARGE）
     record-max-size: 200MB
 
+  # ---------------------------------------------------------------------------
+  # 智能能力：语音转文字 / 消息翻译
+  #
+  # 两者都依赖外部厂商（ASR / 机器翻译），本项目不内置真实链路，改为「配置门控 + 优雅降级」：
+  # 键名对应 com.im.common.config.ImProperties.Intelligence。无真实厂商 bean 时，点击入口
+  # 直接回一句降级提示（MESSAGE_TO_TEXT_UNAVAILABLE / MESSAGE_TRANSLATE_UNAVAILABLE），
+  # 不冒充真实结果。接真实厂商时提供一个 @Primary 的 SpeechToTextSpi / TranslationSpi 实现即自动覆盖。
+  # ---------------------------------------------------------------------------
+  intelligence:
+    # 能力总开关：关闭后前端隐藏「转文字 / 翻译」入口，服务端也直接拒绝（不查 SPI）
+    enabled: ${IM_INTELLIGENCE_ENABLED:true}
+    # 无真实厂商时用内置桩返回带「模拟」前缀的占位文本，仅为跑通开发联调全链路；
+    # 生产必须 false（否则会把假转写/假翻译当成真内容展示）。dev profile 会临时打开。
+    mock-when-unconfigured: false
+    # 翻译默认目标语言（前端未指定 lang 时兑底），Bilibili 风格 ISO 代码
+    default-target-lang: en-US
+
+  # ---------------------------------------------------------------------------
+  # 虚拟积分/币钱包与礼物体系（D2 直播礼物）
+  #
+  # 不涉真实货币：充值依赖外部支付厂商，本期不接入，用模拟桩（MockPaymentSpi）直接按请求额
+  # 到账跑通链路，与 intelligence.mock-when-unconfigured 同构；接真实支付时提供 @Primary PaymentSpi 即覆盖。
+  # 键名对应 com.im.common.config.ImProperties.Wallet。
+  # ---------------------------------------------------------------------------
+  wallet:
+    # 总开关：关闭后送礼/充值/签到入口整体拒绝（WALLET_DISABLED），前端礼簿隐藏
+    enabled: ${IM_WALLET_ENABLED:true}
+    # 未接入真实支付时是否注册模拟支付桩（仅开发联调，生产必须 false，否则等于无限白送积分）；dev profile 临时打开
+    mock-when-unconfigured: ${IM_WALLET_MOCK:false}
+    # 每日签到赠送的积分
+    checkin-bonus: 20
+    # 单次送礼数量上限，夹住前端传入的 count 防刷
+    max-gift-count: 99
+    # 单笔充值积分下/上界
+    recharge-min: 1
+    recharge-max: 100000
+
+  # ---------------------------------------------------------------------------
+  # 直播连麦（观众 ↔ 主播 1:1 WebRTC）
+  #
+  # 媒体面与通话同构：走浏览器/Electron 原生 WebRTC，服务端只搬信令、不下发媒体，
+  # ICE 清单直接复用 call 的 STUN/TURN 配置。连麦开启时主播端把主播+嘉宾画面/音频合成
+  # 推成 WebM 分片，观众端从 HLS 切到 MSE/WebM 播放器。键名对应 ImProperties.LinkMic。
+  # ---------------------------------------------------------------------------
+  linkmic:
+    # 总开关：关闭后 /api/live/{roomId}/linkmic/config 回 enabled=false，前端上麦入口整体隐藏
+    enabled: ${IM_LINKMIC_ENABLED:true}
+    # 单主播同时在麦嘉宾上限（每嘉宾一路 1:1），超出回 LIVE_LINK_FULL
+    max-slots: 4
+    # 上麦申请等待主播响应的超时（秒），超时服务端下发 timeout
+    request-timeout-seconds: 60
+    # 单路连麦最大时长（秒），超时服务端下发 leave 兑底
+    max-duration-seconds: 3600
+
   cors:
     # 前端 vite 开发服务器与预览服务器。http 与 https 两种方案都要放行：
     # 局域网真机联调远程控制时 dev server 会自签证书走 https（页面 Origin 变

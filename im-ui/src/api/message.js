@@ -33,6 +33,16 @@ export function fetchHistory(conversationId, beforeSeq, size = 20) {
 }
 
 /**
+ * 导出某会话的完整聊天记录（服务端权威数据，非本地缓存）。
+ *
+ * 一次性返回该会话全部消息（按 seq 正序，已排除本人单端删除），单次上限 20000 条，
+ * 仅会话成员可导。前端拿到后拼装为 JSON/CSV 下载到本机磁盘，用于合规备份与迁移。
+ */
+export function exportConversationMessages(conversationId) {
+  return http.get('/message/export', { params: { conversationId } })
+}
+
+/**
  * 离线消息。
  *
  * 返回上次确认位点之后的全部消息（单次最多 500 条），拉取后后端自动推进位点，
@@ -67,6 +77,71 @@ export function reportDelivered(messageIds) {
  */
 export function recallMessage(messageId) {
   return http.put(`/message/${messageId}/recall`)
+}
+
+/**
+ * 编辑消息。
+ * 后端限制：仅发送者本人、时限内（复用 im.message.recall-limit-seconds）、且未撤回的文本消息可编辑；
+ * 新正文重新过 XSS 清洗与敏感词遮蔽。失败原因（超时限 / 无权 / 内容不合法）由全局 toast 弹出。
+ */
+export function editMessage(messageId, content) {
+  return http.put(`/message/${messageId}/edit`, { content })
+}
+
+/**
+ * 表情回应。
+ * 对一条消息贴（remove=false）或取消（remove=true）一个表情，所有消息类型适用、已撤回不可；
+ * 一人对一条消息的同一表情只计一次，重复添加服务端幂等。本人气泡由 reaction-notify 回执刷新。
+ */
+export function reactMessage(messageId, emoji, remove) {
+  return http.post(`/message/${messageId}/reaction`, { emoji, remove })
+}
+
+/**
+ * 投票：选若干选项（整体替换旧票，空数组表示撤回本人投票）；close=true 由发起人截止。
+ */
+export function voteMessage(messageId, options, close) {
+  return http.post(`/message/${messageId}/vote`, { options, close })
+}
+
+/**
+ * 语音转文字（依赖服务端外部 ASR，未接入时降级为错误提示）。
+ *
+ * 仅对未撤回的语音消息可用；返回识别文本（仅展示不落库）。失败原因（未配置/不支持）
+ * 由全局 toast 弹出，调用方 silent 以免双重弹框。
+ */
+export function toMessageText(messageId) {
+  return http.post(`/message/${messageId}/to-text`, null, { silent: true })
+}
+
+/**
+ * 消息翻译（依赖服务端外部翻译服务，未接入时降级为错误提示）。
+ *
+ * 仅对未撤回的文本消息可用；lang 为空时后端取配置默认目标语言。返回译文仅展示，不改写原消息。
+ */
+export function translateMessage(messageId, lang) {
+  return http.post(`/message/${messageId}/translate`, null, { params: { lang }, silent: true })
+}
+
+/**
+ * 群文件 / 群相册：按群会话 + 消息类型分页取沉淀的附件消息。
+ * msgType 2=群相册（图片）、3=群文件；返回 PageResult<MessageVO>。
+ */
+export function fetchGroupMedia(conversationId, msgType, current = 1, size = 20) {
+  return http.get('/message/group-media', { params: { conversationId, msgType, current, size } })
+}
+
+/** 群精华消息列表：按群会话分页取被标记为精华的消息，返回 PageResult<MessageVO>。 */
+export function fetchGroupEssence(conversationId, current = 1, size = 20) {
+  return http.get('/message/group-essence', { params: { conversationId, current, size } })
+}
+
+/**
+ * 标记 / 取消精华消息：仅群聊、仅群主与管理员可操作；essence=true 设为精华、false 取消。
+ * 返回带最新 essence 标记的消息 VO；其他端由 essence-notify 回执刷新。
+ */
+export function markMessageEssence(messageId, essence) {
+  return http.put(`/message/${messageId}/essence`, { essence })
 }
 
 /** 单端删除：只对自己不可见，对方与会话记录都保留 */

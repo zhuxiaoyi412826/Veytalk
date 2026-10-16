@@ -115,6 +115,7 @@ public class AttachmentContentHandler implements MessageContentHandler {
             extra.setFlash(null);
             extra.setFlashSeconds(null);
             extra.setFlashViewed(null);
+            extra.setFlashViewedBy(null);
             extra.setOcrText(null);
             return;
         }
@@ -122,12 +123,15 @@ public class AttachmentContentHandler implements MessageContentHandler {
             Integer seconds = extra.getFlashSeconds();
             extra.setFlashSeconds(seconds == null || seconds < 1 || seconds > FLASH_MAX_SECONDS
                     ? FLASH_DEFAULT_SECONDS : seconds);
-            // 销毁标记只能由服务端在首次查看时写入，客户端伪造 true 会让闪照发出去即不可见
+            // 已阅名单与销毁标记都只能由服务端写：客户端伪造会让闪照发出去即不可见。
+            // 刚发送时无人消费，名单置空（序列化 NON_NULL 不落库）
             extra.setFlashViewed(null);
+            extra.setFlashViewedBy(null);
         } else {
             extra.setFlash(null);
             extra.setFlashSeconds(null);
             extra.setFlashViewed(null);
+            extra.setFlashViewedBy(null);
         }
         if (TextUtil.isNotBlank(extra.getOcrText())) {
             String cleaned = TextUtil.sanitize(extra.getOcrText().trim());

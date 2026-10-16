@@ -44,3 +44,13 @@ export function searchUsers(params) {
 export function fetchOnlineStatus(userIds) {
   return http.get('/user/online', { params: { userIds } })
 }
+
+/**
+ * 账号注销（GDPR/个保法）：{ password } 需二次确认登录密码。
+ *
+ * 后端校验密码后匿名化并逻辑删除本人主记录，级联清除好友/会话/群组/消息行为数据，最后全端下线。
+ * 该操作不可逆，成功后本地须立即 signOut 并跳登录页。
+ */
+export function cancelAccount(data) {
+  return http.post('/user/cancel', data)
+}

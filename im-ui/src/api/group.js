@@ -83,3 +83,36 @@ export function transferGroup(id, userId) {
 export function updateMyNickname(id, nickname) {
   return http.put(`/group/${id}/my-nickname`, { nicknameInGroup: nickname })
 }
+
+/* ==================== 入群审批 / 邀请链接 / 群二维码 ==================== */
+
+/** 开关入群审批，群主与管理员可操作；返回更新后的群详情 */
+export function setJoinApproval(id, joinApproval) {
+  return http.put(`/group/${id}/join-approval`, { joinApproval })
+}
+
+/**
+ * 获取群邀请信息（邀请码 + 邀请链接 + 二维码 base64），群主与管理员可拉。
+ * base 传前端当前站点根地址（window.location.origin），后端据此拼深度链接。
+ */
+export function fetchGroupInvite(id, base) {
+  return http.get(`/group/${id}/invite`, { params: { base } })
+}
+
+/**
+ * 凭邀请码申请入群。
+ * 目标群未开审批时直接入群（status=joined），开了审批则提交待管理员确认（status=pending）。
+ */
+export function applyJoin(data) {
+  return http.post('/group/join', data)
+}
+
+/** 入群申请分页列表，仅管理层可看 */
+export function fetchJoinRequests(id, current = 1, size = 20) {
+  return http.get(`/group/${id}/join-requests`, { params: { current, size } })
+}
+
+/** 审批入群申请，approve=true 通过（申请人立即入群）、false 拒绝 */
+export function handleJoinRequest(requestId, approve) {
+  return http.put(`/group/join-request/${requestId}/handle`, { approve })
+}

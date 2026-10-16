@@ -148,6 +148,14 @@ public final class RedisKeys {
      */
     public static final String LIVE_PUSHED = PREFIX + "live:pushed:";
 
+    /**
+     * 本场直播的累计礼物热度：im:live:gift:heat:{roomId} -> 累计礼物价值（积分）。
+     *
+     * <p>用 Redis 计数不落库：热度只在直播过程中实时变，且是后续连麦 PK/热度榜的数据源；
+     * 送礼流水本身已落 {@code im_gift_record}，热度只是它的一份易失聚合，房间结束后靠 TTL 自然回收。
+     */
+    public static final String LIVE_GIFT_HEAT = PREFIX + "live:gift:heat:";
+
     public static String liveOnline(Long roomId) {
         return LIVE_ONLINE + roomId;
     }
@@ -158,5 +166,9 @@ public final class RedisKeys {
 
     public static String livePushed(Long roomId) {
         return LIVE_PUSHED + roomId;
+    }
+
+    public static String liveGiftHeat(Long roomId) {
+        return LIVE_GIFT_HEAT + roomId;
     }
 }

@@ -74,6 +74,46 @@ public interface GroupMapper extends BaseMapper<Group> {
     }
 
     /**
+     * 开关入群审批，语义与 {@link #updateMuteAll} 一致：开关未变也当作成功。
+     */
+    default int updateJoinApproval(Long groupId, int joinApproval) {
+        return update(null, Wrappers.<Group>lambdaUpdate()
+                .set(Group::getJoinApproval, joinApproval)
+                .eq(Group::getId, groupId)
+                .eq(Group::getStatus, Group.STATUS_NORMAL));
+    }
+
+    /**
+     * 懒写入邀请码：仅当当前行的 {@code invite_code} 仍为 NULL 时才写入。
+     *
+     * <p>两个管理员同时首次拉取邀请码时只会有一次生效，另一次返回 0；调用方重新查一下就能拿到先写入的那个码。
+     * 全局唯一 {@code uk_invite_code} 理论上会拒插入，但随机长度 12 的字母数字碰撞概率接近于 0，
+     * Service 层仍保留重试循环以防黑天鹅。
+     *
+     * @return 影响行数
+     */
+    default int setInviteCodeIfAbsent(Long groupId, String code) {
+        return update(null, Wrappers.<Group>lambdaUpdate()
+                .set(Group::getInviteCode, code)
+                .eq(Group::getId, groupId)
+                .isNull(Group::getInviteCode)
+                .eq(Group::getStatus, Group.STATUS_NORMAL));
+    }
+
+    /**
+     * 按邀请码查未解散的群（邀请链接 / 二维码入口），不存在或已解散时返回 {@code null}。
+     */
+    default Group selectByInviteCode(String code) {
+        if (code == null || code.isEmpty()) {
+            return null;
+        }
+        return selectOne(Wrappers.<Group>lambdaQuery()
+                .eq(Group::getInviteCode, code)
+                .eq(Group::getStatus, Group.STATUS_NORMAL)
+                .last("LIMIT 1"));
+    }
+
+    /**
      * 解散群：只改状态，成员行与历史消息都保留。
      *
      * <p>条件里带上 {@code status = 1}，两个人同时解散时只有一个能改到行，

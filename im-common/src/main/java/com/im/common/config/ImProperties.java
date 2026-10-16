@@ -29,6 +29,9 @@ public class ImProperties {
     private Log log = new Log();
     private Moderation moderation = new Moderation();
     private Call call = new Call();
+    private Intelligence intelligence = new Intelligence();
+    private Wallet wallet = new Wallet();
+    private LinkMic linkmic = new LinkMic();
 
     @Data
     public static class Jwt {
@@ -398,5 +401,73 @@ public class ImProperties {
         private String totalSizeCap = "5GB";
         /** 错误档单独留更久：出事时最想翻的就是历史错误，而它的量级最小 */
         private int errorMaxHistory = 60;
+    }
+
+    /**
+     * 外部智能能力（语音转文字 ASR / 消息翻译）。
+     *
+     * <p>这两项能力本质依赖外部服务（云厂商 ASR/翻译 API），本期内网/离线部署不接入任何真实厂商：
+     * 接口与调用链路以 SPI 形式留好扩展点（{@code im-common} 的 {@code SpeechToTextSpi}/{@code TranslationSpi}），
+     * 未接入时降级回 {@code MESSAGE_TO_TEXT_UNAVAILABLE}/{@code MESSAGE_TRANSLATE_UNAVAILABLE}。
+     *
+     * <p>{@code mockWhenUnconfigured} 对应 {@code captcha.mockMailWhenUnconfigured} 的同构开发开关：
+     * 打开后内置桩实现返回一段标注清晰的占位文本，用于联调时跑通“UI→接口→SPI→结果展示”全链路；
+     * 生产环境必须为 false（否则会把假转写结果当成真内容展示）。接真实厂商时提供一个 {@code @Primary}
+     * 的 SPI 实现即可自动覆盖桩。
+     */
+    @Data
+    public static class Intelligence {
+        /** 能力总开关：关掉后前端菜单直接隐藏转文字/翻译入口 */
+        private boolean enabled = true;
+        /** 未接入真实厂商时是否用内置桩返回演示占位文本（仅开发联调，生产必须 false） */
+        private boolean mockWhenUnconfigured = false;
+        /** 翻译默认目标语言（Bilibili 风格 ISO 代码，如 zh-CN/en-US），前端未传时用它兑底 */
+        private String defaultTargetLang = "en-US";
+    }
+
+    /**
+     * 虚拟积分/币钱包与礼物体系。
+     *
+     * <p>不涉真实货币：充值依赖外部支付厂商，本期内网/离线部署不接入，用
+     * {@link #mockWhenUnconfigured} 对应的模拟桩（{@code MockPaymentSpi}）直接按请求额到账跑通链路，
+     * 取向与 {@code im.intelligence.mock-when-unconfigured}、{@code captcha.mockMailWhenUnconfigured} 完全一致；
+     * 接真实支付时提供一个 {@code @Primary} 的 {@code PaymentSpi} 实现即覆盖桩，业务代码不变，届时本开关必须为 false。
+     */
+    @Data
+    public static class Wallet {
+        /** 钱包总开关：关掉后送礼/充值/签到入口整体拒绝（{@code WALLET_DISABLED}），前端礼簿隐藏 */
+        private boolean enabled = true;
+        /** 未接入真实支付时是否注册模拟支付桩（仅开发联调，生产必须 false，否则等于无限白送积分） */
+        private boolean mockWhenUnconfigured = false;
+        /** 每日签到赠送的积分 */
+        private long checkinBonus = 20;
+        /** 单次送礼数量上限，夹住前端传入的 count 防刷 */
+        private int maxGiftCount = 99;
+        /** 单笔充值积分下界 */
+        private long rechargeMin = 1;
+        /** 单笔充值积分上界 */
+        private long rechargeMax = 100_000;
+    }
+
+    /**
+     * 直播连麦（观众 ↔ 主播 1:1 WebRTC）。
+     *
+     * <p>媒体面与音视频通话同构：走浏览器 / Electron 原生 WebRTC，服务端不转发媒体，只搬运信令并下发 ICE
+     * （信令复用已认证的 {@code /ws} 长连接，见 im-websocket 的 {@code LiveLinkSignalingService}；ICE 直接复用
+     * {@code CallSignalingService.buildIceServers}，连麦与通话共用同一套 STUN/TURN 配置）。
+     *
+     * <p>配置刻意落在 {@code im.*}（im-common）而非 {@code im.live.*}（im-live）：连麦信令服务位于 im-websocket，
+     * 而 im-websocket 只依赖 im-common，读不到 im-live 的 {@code LiveProperties}。
+     */
+    @Data
+    public static class LinkMic {
+        /** 总开关：关掉后连麦入口整体禁用，REST 回 enabled=false，WS 信令静默丢弃 */
+        private boolean enabled = true;
+        /** 单房间同时在麦嘉宾上限（主播之外的连麦路数），防御性上限，超限回 LIVE_LINK_FULL */
+        private int maxSlots = 4;
+        /** 上麦申请超时（秒）：主播在此时长内未应答，服务端主动下发 timeout 并作废该次申请 */
+        private int requestTimeoutSeconds = 60;
+        /** 单次连麦最长时长（秒），超时由服务端下发 leave 兜底 */
+        private int maxDurationSeconds = 3600;
     }
 }

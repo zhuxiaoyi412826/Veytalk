@@ -20,5 +20,15 @@
             <groupId>com.im</groupId>
             <artifactId>im-common</artifactId>
         </dependency>
+
+        <!-- 群邀请二维码：ZXing core + javase（矩阵 → PNG 字节） -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>javase</artifactId>
+        </dependency>
     </dependencies>
 </project>

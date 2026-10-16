@@ -28,6 +28,17 @@ im:
     # 验证码的生成、频率限制、Redis 存取与校验都在 CaptchaServiceImpl 里，不用改。
     provider: mock
 
+  intelligence:
+    # 语音转文字 / 翻译都靠外部厂商，本地开发一般不接入。打开后内置桩返回带「模拟」前缀的
+    # 占位文本，用于跑通「UI→接口→SPI→结果展示」全链路；与 captcha.mock-mail-when-unconfigured 同构。
+    # prod 一律 false，否则会把假结果当真内容展示。
+    mock-when-unconfigured: true
+
+  wallet:
+    # 本地无真实支付厂商：打开后充值走模拟支付桩（MockPaymentSpi）直接按请求额到账，
+    # 跑通「充值/签到→余额→送礼扣款→飘屏」全链路演示。prod 一律 false，否则等于无限白送积分。
+    mock-when-unconfigured: true
+
   remote:
     # 远程控制的 AES-256-GCM 端到端加密在 dev 下关闭。
     # 原因：手机用局域网 http://<本机IP>:5173 访问时不是安全上下文，

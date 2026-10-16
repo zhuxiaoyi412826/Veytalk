@@ -270,6 +270,21 @@ public interface MessageMapper extends BaseMapper<Message> {
     }
 
     /**
+     * 群文件 / 群相册：按会话 + 消息类型分页取附件消息，按发送时间倒序（同刻雪花 ID 兑底）。
+     *
+     * <p>{@code msgType} 由调用方限定为图片 {@code 2} 或文件 {@code 3}（不会是文本，避免把正文当成文件名）；
+     * {@code is_recalled = 0} 滤掉已撤回的附件。成员身份与会话类型由 Service 层校验，这里只按会话维度取数。
+     */
+    default Page<Message> pageMediaByConversation(Page<Message> page, Long conversationId, Integer msgType) {
+        return selectPage(page, Wrappers.<Message>lambdaQuery()
+                .eq(Message::getConversationId, conversationId)
+                .eq(Message::getMsgType, msgType)
+                .eq(Message::getRecalled, 0)
+                .orderByDesc(Message::getSendTime)
+                .orderByDesc(Message::getId));
+    }
+
+    /**
      * 某会话全部消息 ID，供「清空本会话聊天记录」批量写单端删除记录使用。
      *
      * <p>只取 ID 不取整行：清空是用户低频操作，但重度会话可能有上万条，

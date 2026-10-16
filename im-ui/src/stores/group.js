@@ -174,6 +174,59 @@ export const useGroupStore = defineStore('group', {
       }
     },
 
+    /* ==================== 入群审批 / 邀请链接 / 群二维码 ==================== */
+
+    /**
+     * 开关入群审批。
+     * 后端返回的是更新后的群详情（含新 joinApproval）；这里乐观同步到 currentGroup，
+     * 同时同步 myGroups 里对应项，避免群列表下次刷新前开关状态不一致。
+     */
+    async setJoinApproval(groupId, joinApproval) {
+      const vo = await groupApi.setJoinApproval(groupId, joinApproval)
+      if (vo) {
+        this.currentGroup = vo
+        const idx = this.myGroups.findIndex((item) => sameId(item.groupId, groupId))
+        if (idx >= 0) {
+          this.myGroups[idx] = { ...this.myGroups[idx], joinApproval: vo.joinApproval }
+        }
+      }
+      return vo
+    },
+
+    /** 获取群邀请信息（邀请码 / 链接 / 二维码），base 不传时默认取当前站点 origin */
+    fetchInvite(groupId, base) {
+      return groupApi.fetchGroupInvite(groupId, base || window.location.origin)
+    },
+
+    /** 拉本群待审批入群申请（分页），仅管理层 */
+    fetchJoinRequests(groupId, current = 1, size = 20) {
+      return groupApi.fetchJoinRequests(groupId, current, size)
+    },
+
+    /**
+     * 审批单条入群申请。通过后本地把待审批数减一（后端 NOTIFY 也会驱动全量刷新，
+     * 这里先做乐观更新是为了处理人本端角标即时消失，不等一个网络往返）。
+     */
+    async handleJoinRequest(groupId, requestId, approve) {
+      await groupApi.handleJoinRequest(requestId, approve)
+      if (this.currentGroup && sameId(this.currentGroup.groupId, groupId)) {
+        const pending = this.currentGroup.pendingJoinCount || 0
+        this.currentGroup.pendingJoinCount = Math.max(0, pending - 1)
+      }
+    },
+
+    /**
+     * 凭邀请码申请入群。status=joined 时刷新群列表与会话列表（新群要出现在侧栏）；
+     * status=pending 时什么都不动，等管理员审批后后端会推 join-approved。
+     */
+    async applyJoin(code, source, message) {
+      const result = await groupApi.applyJoin({ code, source, message })
+      if (result && result.status === 'joined') {
+        await this.fetchMyGroups()
+      }
+      return result
+    },
+
     async quitGroup(groupId) {
       await groupApi.quitGroup(groupId)
       this.myGroups = this.myGroups.filter((item) => !sameId(item.groupId, groupId))
@@ -190,9 +243,32 @@ export const useGroupStore = defineStore('group', {
       }
     },
 
-    /** 收到群组相关 WS 通知时刷新群列表 */
-    async onGroupNotify() {
+    /**
+     * 收到群组相关 WS 通知时刷新。
+     *
+     * <p>传入 action 与 data 时做精细化处理，不传则退回「全量刷群列表」的旧行为：
+     * <ul>
+     *   <li>join-approval-changed / 成员变动：重拉 currentGroup（如果正在看这个群），把审批开关 / 待审批数对齐；</li>
+     *   <li>join-request：管理层收到，重拉 currentGroup 以刷新待审批红点；</li>
+     *   <li>join-approved：申请人（本端）已入群，重拉群列表。</li>
+     * </ul>
+     */
+    async onGroupNotify(payload) {
       await this.fetchMyGroups()
+      const action = payload && payload.action
+      if (!action) {
+        return
+      }
+      const groupId = payload.groupId
+      const viewing = this.currentGroup && sameId(this.currentGroup.groupId, groupId)
+      if (action === 'join-approval-changed' || action === 'join-request') {
+        // 开关变更 / 新申请都影响管理层面板数据（审批开关、待审批数），正在看这个群才重拉
+        if (viewing) {
+          await this.fetchDetail(groupId)
+        }
+      } else if (action === 'join-rejected') {
+        // 拒绝只影响申请人，不动列表数据，提示交由 dispatch 统一处理
+      }
     },
 
     reset() {

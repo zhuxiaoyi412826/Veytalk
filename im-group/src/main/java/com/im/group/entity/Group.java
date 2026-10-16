@@ -50,10 +50,33 @@ public class Group extends BaseEntity {
     @TableField("mute_all")
     private Integer muteAll;
 
+    /**
+     * 群邀请码，邀请链接与二维码都基于它。
+     *
+     * <p>懒生成：默认 {@code null}，首次管理员调用 {@code getInviteCode} 时写入一个随机短码（不依赖建群时多写一笔）；
+     * 全局唯一 {@code uk_invite_code}。不采用定时失效，与项目内“退群后可重新入”一样不做过期。
+     */
+    private String inviteCode;
+
+    /**
+     * 入群是否需要审批：1 需要、管理员确认后才正式入；0 不需要，任何拿到邀请码/扫码的人直接入群。
+     *
+     * <p>属性名不带 is 前缀，同 {@code muteAll} 一样避免 getter 推导歧义。
+     */
+    @TableField("join_approval")
+    private Integer joinApproval;
+
     private Integer status;
 
     public boolean isMuteAllOn() {
         return muteAll != null && muteAll == 1;
+    }
+
+    /**
+     * 入群时是否需要管理员审批。
+     */
+    public boolean isJoinApprovalOn() {
+        return joinApproval != null && joinApproval == 1;
     }
 
     public boolean isDismissed() {

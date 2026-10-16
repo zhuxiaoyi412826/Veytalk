@@ -221,6 +221,25 @@ function setupVideoCompress() {
   })
 }
 
+/* ======================= 窗口内容防截图（拆闪照期间） =======================
+ * BrowserWindow.setContentProtection(true) 在 Windows 底层调 SetWindowDisplayAffinity
+ * (WDA_EXCLUDEFROMCAPTURE)，窗口在系统截屏 / 录屏 / 镜像输出里变成黑块，
+ * 肉眼正常可见。只在渲染进程打开闪照预览时开启、关闭预览时撤销，
+ * 避免整个应用长期不进截图工具。浏览器 Web 端没有对应 API，防截图仅桌面端生效。
+ */
+function setupContentProtection() {
+  ipcMain.handle('im:set-content-protection', (event, payload) => {
+    try {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (!win || win.isDestroyed()) return { ok: false, error: '窗口不存在' }
+      win.setContentProtection(!!(payload && payload.enabled))
+      return { ok: true, data: true }
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) }
+    }
+  })
+}
+
 /* ======================= 被控端 Agent 随桌面端自启 =======================
  * 打包安装包经 extraResources 内置了被控端 Agent（resources/agent/im-remote-agent.jar）
  * 与裁剪 JRE（resources/jre）。桌面端启动时后台拉起 Agent，被控机装完包无需再手动
@@ -323,6 +342,7 @@ app.whenReady().then(() => {
   setupDirect()
   setupRecorder()
   setupLive()
+  setupContentProtection()
   setupAgentAutostart()
   createWindow()
 

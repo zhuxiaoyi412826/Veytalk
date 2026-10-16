@@ -7,6 +7,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useGroupStore } from '@/stores/group'
 import { useCallStore } from '@/stores/call'
+import { useLinkmicStore } from '@/stores/linkmic'
 import { on, connect } from './socket'
 
 /**
@@ -32,6 +33,7 @@ export function installWsDispatch() {
   const friend = useFriendStore()
   const group = useGroupStore()
   const call = useCallStore()
+  const linkmic = useLinkmicStore()
 
   const disposers = []
 
@@ -104,6 +106,21 @@ export function installWsDispatch() {
     })
   )
 
+  // 闪照被任一成员拆开销毁后，后端推给全员：本端气泡立即变「已销毁」占位（含发送端）
+  disposers.push(on('flash-notify', (packet) => chat.applyFlashViewed(packet.data)))
+
+  // 发送者改了自己已发出的文本消息，后端把新正文推给全员：各端气泡实时刷新正文并标「已编辑」
+  disposers.push(on('edit-notify', (packet) => chat.applyEdit(packet.data)))
+
+  // 某人给一条消息贴/取消了一个表情，后端推增量给全员（含操作者本端）：各端气泡表情栏据此加减
+  disposers.push(on('reaction-notify', (packet) => chat.applyReaction(packet.data)))
+
+  // 有人投/改票或发起人截止，后端推权威票数给全员：各端投票卡片据此刷新选项条
+  disposers.push(on('vote-notify', (packet) => chat.applyVote(packet.data)))
+
+  // 群主/管理员标记或取消精华，后端推 {messageId, conversationId, essence} 给群成员：各端气泡精华标签实时增减
+  disposers.push(on('essence-notify', (packet) => chat.applyEssence(packet.data)))
+
   // 送达 / 已读回执都推给原发送者，差别只是把状态升到哪一级
   disposers.push(on('delivered-notify', (packet) => chat.applyReceipt(packet.data && packet.data.messageIds, 2)))
   disposers.push(on('read-notify', (packet) => chat.applyReceipt(packet.data && packet.data.messageIds, 3)))
@@ -117,10 +134,13 @@ export function installWsDispatch() {
     })
   )
 
-  disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend })))
+  disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend, group })))
 
   // 音视频通话信令：整帧交给通话 store 的状态机裁决（invite/accept/offer/answer/ice/hangup/failed 等）
   disposers.push(on('call-signal', (packet) => call.onSignal(packet.data)))
+
+  // 直播连麦信令：整帧交给连麦 store（request/accept/offer/answer/ice/leave/reject/failed，按 linkAction 裁决）
+  disposers.push(on('linkmic-signal', (packet) => linkmic.onSignal(packet.data)))
 
   disposers.push(
     on('kickout', (packet) => {
@@ -172,7 +192,7 @@ export function uninstallWsDispatch() {
  * 握手欢迎与好友相关用 action / bizType，群组相关用 biz。
  * 这是后端逐步演进留下的现状，前端必须两种都认，只按其中一种判断会静默漏掉另一半通知。
  */
-function handleNotify(data, { conversation, friend }) {
+function handleNotify(data, { conversation, friend, group }) {
   if (!data) {
     return
   }
@@ -214,7 +234,50 @@ function handleNotify(data, { conversation, friend }) {
     // 群会话会出现在会话列表里，成员变动、群名修改需要同步；
     // 同时刷新群列表，保持群资料与后端一致
     conversation.fetchList()
-    group.onGroupNotify()
+    group.onGroupNotify(data)
+    // 入群相关的子事件额外给用户一条可操作的系统通知
+    handleGroupJoinNotify(data, group)
     return
+  }
+}
+
+/**
+ * 入群审批 / 邀请相关的提醒。
+ *
+ * <p>只处理三种新 action，其余群事件（members-added 等）维持原有的“静默刷新”行为，
+ * 不弹窗打扰。join-request 推给管理层、join-approved/join-rejected 推给申请人本端。
+ */
+function handleGroupJoinNotify(data, group) {
+  const action = data.action
+  if (!action) {
+    return
+  }
+  if (action === 'join-request') {
+    ElNotification({
+      title: '新的入群申请',
+      message: `${data.nickname || '有人'} 申请加入群聊，请前往群设置审批`,
+      type: 'info'
+    })
+    return
+  }
+  if (action === 'join-approved') {
+    ElNotification({
+      title: '入群申请已通过',
+      message: `你已加入群聊${data.groupName ? `「${data.groupName}」` : ''}`,
+      type: 'success',
+      onClick: () => {
+        if (data.conversationId) {
+          router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
+        }
+      }
+    })
+    return
+  }
+  if (action === 'join-rejected') {
+    ElNotification({
+      title: '入群申请被拒绝',
+      message: data.groupName ? `管理员未通过你加入「${data.groupName}」的申请` : '管理员未通过你的入群申请',
+      type: 'warning'
+    })
   }
 }

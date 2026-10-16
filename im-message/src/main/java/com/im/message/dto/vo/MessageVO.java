@@ -11,6 +11,7 @@ import lombok.NoArgsConstructor;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 消息视图对象。
@@ -88,4 +89,13 @@ public class MessageVO implements Serializable {
 
     @Schema(description = "已读人数，群聊展示「n 人已读」，单聊为 0 或 1")
     private Integer readCount;
+
+    @Schema(description = "表情回应聚合列表，无回应时为空；已撤回消息不返回")
+    private List<ReactionItemVO> reactions;
+
+    @Schema(description = "投票聚合视图，仅投票消息非空；票数由服务端实时聚合而来")
+    private VoteViewVO vote;
+
+    @Schema(description = "是否为群精华消息（群主/管理员标记），仅群聊消息可能为 true")
+    private Boolean essence;
 }

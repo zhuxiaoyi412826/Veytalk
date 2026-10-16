@@ -89,6 +89,13 @@ const routes = [
       }
     ]
   },
+  // 扫码 / 点邀请链接入群落地页：独立整屏，不进主布局；需登录（非 public 时守卫带 redirect 回本页）
+  {
+    path: '/group/join',
+    name: 'group-join',
+    component: () => import('@/views/GroupJoin.vue'),
+    meta: { title: '申请入群' }
+  },
   // 未匹配到的地址一律回主界面：手输错地址比看到一个空白 404 页更有用
   { path: '/:pathMatch(.*)*', redirect: { name: 'chat' } }
 ]

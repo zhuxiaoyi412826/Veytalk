@@ -46,7 +46,10 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/auth/login/email",
             "/api/auth/password/**",
             "/api/captcha/**",
-            "/api/file/download/**"
+            "/api/file/download/**",
+            // 群机器人 Webhook：外部系统无登录态回调，凭 URL 里的 token 认证（能力 URL 模式），
+            // 安全性靠 token 不可猜 + 按 IP 的 @RateLimit + 机器人启用状态三重门控
+            "/api/robot/webhook/**"
     );
 
     @Override

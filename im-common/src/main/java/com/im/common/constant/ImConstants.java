@@ -54,6 +54,12 @@ public final class ImConstants {
     /** 消息撤回时限（秒） */
     public static final int RECALL_LIMIT_SECONDS = 120;
 
+    /** 导出聊天记录：单会话一次导出的累积上限，防止超大会话把内存打爆（超出部分需分批/按时间范围导出） */
+    public static final int MAX_EXPORT_MESSAGES = 20000;
+
+    /** 导出聊天记录：游标翻页每批条数（服务端内部批量取数，不受 API {@link #MAX_PAGE_SIZE} 限制） */
+    public static final int EXPORT_BATCH_SIZE = 500;
+
     /** 默认群最大人数 */
     public static final int DEFAULT_GROUP_MAX_MEMBER = 200;
 
@@ -82,6 +88,17 @@ public final class ImConstants {
      */
     public static final String CACHE_USER_BRIEF_PREFIX = "user:brief:";
     public static final String CACHE_GROUP_BRIEF_PREFIX = "group:brief:";
+
+    /**
+     * 钱包账本流水类型：写进 {@code im_wallet_transaction.type}。
+     *
+     * <p>充值/送礼/签到/后台调整四类，扣款侧与入账侧分布在不同模块（im-live 送礼、im-user 充值签到），
+     * 类型串必须收口在这里统一引用——任何一处手打错，账本里就会出现一条归类错乱的流水。
+     */
+    public static final String WALLET_TX_RECHARGE = "recharge";
+    public static final String WALLET_TX_GIFT = "gift";
+    public static final String WALLET_TX_CHECKIN = "checkin";
+    public static final String WALLET_TX_ADJUST = "adjust";
 
     /**
      * 敏感字段名关键词：字段名转小写后包含任一关键词，其值就不允许明文进日志。
