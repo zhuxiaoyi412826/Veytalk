@@ -124,6 +124,10 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
     }
 
     private void onLike(WebSocketSession session, Long roomId, Map<String, Object> frame) {
+        // 主播不能给自己点赞：本连接是主播（进房时已缓存 anchor 标记）则直接忽略该帧
+        if (Boolean.TRUE.equals(session.getAttributes().get(ATTR_ANCHOR))) {
+            return;
+        }
         // count 缺省按 1 处理；夹在 [1, 50] 防单帧灌一大笔把合并计数打爆
         int count = 1;
         Object raw = frame.get("count");

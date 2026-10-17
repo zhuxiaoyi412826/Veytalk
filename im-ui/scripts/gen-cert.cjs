@@ -39,8 +39,42 @@ const localIPv4s = Object.values(os.networkInterfaces())
   .filter((i) => i && i.family === 'IPv4' && !i.address.startsWith('127.'))
   .map((i) => i.address)
 
-const alts = [...new Set(['localhost', '127.0.0.1', ...localIPv4s, ...extraAlts])]
 const isIPv4 = (s) => /^\d+\.\d+\.\d+\.\d+$/.test(s)
+
+/**
+ * node 的网卡枚举在 Windows 上会漏掉「已配地址但介质未连接 / 未进路由表」的适配器。
+ * 实测同一台机器：os.networkInterfaces() 只给出 192.168.251.39，而 Get-NetIPAddress
+ * 还有一条 192.168.1.2 —— 手机偏偏就走这个被漏掉的网段。后果不是报错而是静默：
+ * gen:cert 自以为覆盖齐了，签出的 SAN 仍不含手机访问用的 IP，浏览器按名称不匹配
+ * 处理，于是 https 页面能加载、而 wss 与媒体被静默拒，直播画面与远程控制一起黑屏。
+ * 所以 Windows 上再用 PowerShell 兜一层；拿不到就退回 node 的结果，不阻断签证书。
+ */
+function windowsConfiguredIPv4s() {
+  if (process.platform !== 'win32') {
+    return []
+  }
+  try {
+    const out = require('child_process').execSync(
+      'powershell -NoProfile -NonInteractive -Command "(Get-NetIPAddress -AddressFamily IPv4).IPAddress"',
+      { encoding: 'utf8', timeout: 8000, windowsHide: true }
+    )
+    return out
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter((s) => isIPv4(s) && !s.startsWith('127.'))
+  } catch (e) {
+    console.log('PowerShell 补采 IP 失败，仅用 node 枚举结果：', e.message)
+    return []
+  }
+}
+
+const osIPv4s = windowsConfiguredIPv4s()
+const missedByNode = osIPv4s.filter((ip) => !localIPv4s.includes(ip))
+if (missedByNode.length) {
+  console.log('node 网卡枚举漏掉、已由 PowerShell 补进 SAN：', missedByNode.join(', '))
+}
+
+const alts = [...new Set(['localhost', '127.0.0.1', ...localIPv4s, ...osIPv4s, ...extraAlts])]
 
 // 回拨 1 小时生效，抵消手机与电脑间的时钟偏差
 const notBefore = new Date(Date.now() - 60 * 60 * 1000)

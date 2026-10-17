@@ -155,7 +155,8 @@ public enum ResultCode {
     GIFT_AMOUNT_INVALID(13005, "送礼数量不合法"),
     RECHARGE_AMOUNT_INVALID(13006, "充值数额超出允许范围"),
     PAYMENT_UNAVAILABLE(13007, "支付服务未配置，暂时无法充值"),
-    CHECKIN_ALREADY_DONE(13008, "今日已签到，明天再来吧");
+    CHECKIN_ALREADY_DONE(13008, "今日已签到，明天再来吧"),
+    GIFT_SELF_FORBIDDEN(13009, "不能给自己的直播送礼物");
 
     private final int code;
     private final String message;

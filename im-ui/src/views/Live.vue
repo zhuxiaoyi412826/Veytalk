@@ -606,6 +606,11 @@ function pickGift(gift) {
 }
 
 async function onSendGift() {
+  // 主播不能给自己的直播送礼物（礼物入口对主播已隐藏，后端另有兼底）
+  if (isAnchor.value) {
+    ElMessage.warning('不能给自己的直播送礼物')
+    return
+  }
   const gift = selectedGift.value
   if (!gift) {
     ElMessage.warning('请选择礼物')
@@ -711,12 +716,35 @@ function bumpGiftRank(frame) {
 const linkmic = useLinkmicStore()
 const linkmicOn = ref(false) // 本场当前是否在连麦合成中（观众侧徽标与播放器分流用）
 
+/**
+ * 把 MediaStream 绑到 <video>.srcObject 的自定义指令（script setup 里 vSrcStream 即 v-src-stream）。
+ * 不能用 :src：流对象不是 URL，写成属性会得到 "[object MediaStream]"；靠 ref 手工赋值又兜不住
+ * v-for 格子与流到达时机不定的组合，updated 钩子才能跟着重绑。
+ */
+function attachStream(el, stream) {
+  el.srcObject = stream || null
+  if (stream) {
+    el.play().catch(() => {})
+  }
+}
+const vSrcStream = {
+  mounted: (el, binding) => attachStream(el, binding.value),
+  updated: (el, binding) => {
+    if (el.srcObject !== binding.value) {
+      attachStream(el, binding.value)
+    }
+  },
+  beforeUnmount: (el) => {
+    el.srcObject = null
+  }
+}
+
 /** 进房后按身份初始化连麦：主播拉 ICE + 记合成流媒体目录；观众补齐在麦列表并判初始连麦态 */
 async function setupLinkmic(vo) {
   linkmicOn.value = false
   try {
     if (vo.mine) {
-      await linkmic.initAsAnchor(roomId.value, vo.playUrl)
+      await linkmic.initAsAnchor(roomId.value, vo.playUrl, vo.anchorName)
     } else {
       await linkmic.initAsGuest(roomId.value)
       const list = await fetchLinkmicList(roomId.value)
@@ -734,6 +762,77 @@ function onRequestMic() {
   } else {
     linkmic.requestMic()
   }
+}
+
+/** 主播一键断开全部连麦（不关播，只是把嘉宾请下麦，观众自动回到普通直播画面） */
+function onEndAllLinkmic() {
+  linkmic.endAllLinkmic()
+}
+
+/** 监听静音：连麦双方都是外放时很容易啸叫，给一个一键关掉本地扬声器的入口（不影响观众听到的合成流） */
+const monitorMuted = ref(false)
+
+/**
+ * 连麦分屏舞台的格子数据：固定「左为主播、右为嘉宾」，与观众端看到的合成画面同构。
+ * 以前这一层完全不存在：嘉宾的远端流只被挂进 composer 内部的隐藏静音 <video>（只取帧、不接扬声器），
+ * 而嘉宾端的 guestRemoteStream 根本没被任何元素绑定——所以主播听不到嘉宾、嘉宾也看不到听不到主播。
+ * muted 只加在「自己的画面」上（否则自听回声），对端画面受 monitorMuted 控制。
+ */
+const stageCells = computed(() => {
+  if (isAnchor.value && linkmic.isAnchor) {
+    if (!linkmic.anchorGuestStreams.length) {
+      return null
+    }
+    return {
+      left: { key: 'self', stream: linkmic.anchorSelfStream, name: room.value?.anchorName || '主播（我）', muted: true },
+      rights: linkmic.anchorGuestStreams.map((g) => ({
+        key: g.callId,
+        stream: g.stream,
+        name: g.name || '嘉宾',
+        muted: monitorMuted.value
+      }))
+    }
+  }
+  if (linkmic.guestStatus === 'active') {
+    return {
+      left: {
+        key: 'anchor',
+        stream: linkmic.guestRemoteStream,
+        name: room.value?.anchorName || '主播',
+        muted: monitorMuted.value
+      },
+      rights: [{ key: 'self', stream: linkmic.guestSelfStream, name: '我', muted: true }]
+    }
+  }
+  return null
+})
+const stageActive = computed(() => !!stageCells.value)
+
+// 分屏占位期间把背面的直播流暂停：不藏起来只靠 v-show 的话，hls.js/MSE 仍在背地解码缓冲，
+// 与分屏那几路 WebRTC 叠在一起白耗一份 CPU，低端机上足以把连麦帧率拖下来
+watch(stageActive, (on) => {
+  const v = videoEl.value
+  if (!v) {
+    return
+  }
+  if (on) {
+    v.pause()
+  } else {
+    v.play().catch(() => {})
+  }
+})
+
+/** 自动播放被拦时（无手势/策略差异）至少能点一下补救，不致于黑屏无声 */
+function onStageClick(evt) {
+  const box = evt && evt.currentTarget
+  if (!box) {
+    return
+  }
+  box.querySelectorAll('video').forEach((v) => {
+    if (v.paused) {
+      v.play().catch(() => {})
+    }
+  })
 }
 
 function onAcceptRequest(req) {
@@ -1059,6 +1158,10 @@ function sendDanmaku() {
 }
 
 function sendLike() {
+  // 主播不能给自己的直播点赞（按钮对主播已隐藏，这里兼做防御）
+  if (isAnchor.value) {
+    return
+  }
   sendFrame({ type: 'like', count: 1 })
   // 本地先给一点即时反馈，真实计数以服务端合并广播为准
   likeCount.value += 1
@@ -1135,7 +1238,46 @@ watch(() => route.params.roomId, () => syncRoute())
       <div class="live-room__body">
         <div class="live-room__stage">
           <div class="live-player">
-            <video ref="videoEl" class="live-player__video" controls playsinline></video>
+            <video v-show="!stageActive" ref="videoEl" class="live-player__video" controls playsinline></video>
+            <!-- 连麦分屏舞台：主播与嘉宾本地都看到「左＝主播｜右＝嘉宾」的实时画面，与观众端看到的合成流同构。
+                 未静音的对端 <video> 同时是本地监听的声音出口（走浏览器原生 AEC，比 WebAudio 直连 destination 更不易啸叫）。
+                 连麦期间盖住 HLS 那路：那既是主播自己几秒前的延迟画面，又与分屏重复解码 -->
+            <div v-if="stageCells" class="live-linkmic__stage" @click="onStageClick">
+              <div class="live-linkmic__side">
+                <video
+                  class="live-linkmic__video"
+                  autoplay
+                  playsinline
+                  :muted="stageCells.left.muted"
+                  v-src-stream="stageCells.left.stream"
+                ></video>
+                <span class="live-linkmic__tag">{{ stageCells.left.name }}</span>
+              </div>
+              <div class="live-linkmic__side">
+                <div v-for="cell in stageCells.rights" :key="cell.key" class="live-linkmic__cell">
+                  <video
+                    class="live-linkmic__video"
+                    autoplay
+                    playsinline
+                    :muted="cell.muted"
+                    v-src-stream="cell.stream"
+                  ></video>
+                  <span class="live-linkmic__tag">{{ cell.name }}</span>
+                </div>
+              </div>
+              <div class="live-linkmic__bar">
+                <span class="live-linkmic__bar-title">
+                  🎤 连麦中· {{ isAnchor ? `${stageCells.rights.length} 位嘉宾` : '与主播同屏' }}
+                </span>
+                <el-button size="small" @click.stop="monitorMuted = !monitorMuted">
+                  {{ monitorMuted ? '恢复声音' : '静音' }}
+                </el-button>
+                <el-button v-if="isAnchor" size="small" type="danger" @click.stop="onEndAllLinkmic">
+                  断开连麦
+                </el-button>
+                <el-button v-else size="small" type="danger" @click.stop="onRequestMic">下麦</el-button>
+              </div>
+            </div>
             <div v-if="roomLoading" class="live-player__mask">加载中…</div>
             <div v-else-if="!room || room.status !== 1 || streamEnded" class="live-player__mask">
               {{ streamEnded || (room && room.status === 2) ? '主播已结束直播，可继续聊天' : '直播已结束' }}
@@ -1152,8 +1294,8 @@ watch(() => route.params.roomId, () => syncRoute())
                 <span class="live-gift__float-text">{{ g.senderName }} 送出 {{ g.giftName }} ×{{ g.count }}</span>
               </div>
             </div>
-            <!-- 连麦中徽标：观众侧据 /ws/live linkmic 帧显示，提示当前为合成连麦流 -->
-            <div v-if="linkmicOn" class="live-linkmic__badge">🎤 连麦中</div>
+            <!-- 连麦中徽标：观众侧据 /ws/live linkmic 帧显示，提示当前为合成连麦流；本端已在分屏舞台里就不重复挂标 -->
+            <div v-if="linkmicOn && !stageActive" class="live-linkmic__badge">🎤 连麦中</div>
           </div>
           <div v-if="room" class="live-room__title">
             <h3 class="im-ellipsis">{{ room.title }}</h3>
@@ -1200,45 +1342,8 @@ watch(() => route.params.roomId, () => syncRoute())
             </div>
           </div>
 
-          <!-- 礼物面板：选中礼物、数量、余额与发送；附签到/充值 -->
-          <div v-if="giftPanelOpen && wallet.enabled" class="live-gift__panel">
-            <div class="live-gift__balance">余额 {{ wallet.balance }} 积分</div>
-            <div class="live-gift__grid">
-              <button
-                v-for="gift in wallet.gifts"
-                :key="gift.giftId"
-                class="live-gift__item"
-                :class="{ 'live-gift__item--active': gift.giftId === selectedGiftId }"
-                @click="pickGift(gift)"
-              >
-                <span class="live-gift__item-icon">{{ gift.icon }}</span>
-                <span class="live-gift__item-name">{{ gift.name }}</span>
-                <span class="live-gift__item-price">{{ gift.price }}</span>
-              </button>
-              <div v-if="!wallet.gifts.length" class="live-gift__empty">暂无可送礼物</div>
-            </div>
-            <div class="live-gift__row">
-              <span class="live-gift__label">数量</span>
-              <el-input-number v-model="giftCount" :min="1" :max="99" size="small" controls-position="right" />
-              <span class="live-gift__total">合计 {{ giftTotal }}</span>
-            </div>
-            <div class="live-gift__row live-gift__row--btns">
-              <el-button
-                type="primary"
-                size="small"
-                :loading="giftSubmitting"
-                :disabled="!selectedGift || !giftAffordable"
-                @click="onSendGift"
-              >
-                送礼
-              </el-button>
-              <el-button size="small" :loading="signInBusy" :disabled="wallet.signedToday" @click="onCheckin">
-                {{ wallet.signedToday ? '已签到' : `签到 +${wallet.checkinBonus}` }}
-              </el-button>
-              <el-input v-model="rechargeAmount" size="small" class="live-gift__recharge" placeholder="充值积分" />
-              <el-button size="small" :loading="rechargeBusy" @click="onRecharge">充值</el-button>
-            </div>
-          </div>
+          <!-- 礼物面板已挪到 live-room__body 层的抖音式底部弹层（见 </aside> 之后）：
+               旧版把它竖排在 320px 侧栏里，礼物一多就被窗口底边截断 -->
 
           <!-- 连麦区：主播看待处理申请 + 在麦嘉宾；观众看自己的连麦状态提示 -->
           <div v-if="linkmic.enabled" class="live-linkmic">
@@ -1254,7 +1359,12 @@ watch(() => route.params.roomId, () => syncRoute())
                 </div>
               </div>
               <div v-if="linkmic.onMicGuests.length" class="live-linkmic__mic">
-                <div class="live-linkmic__title">在麦嘉宾（{{ linkmic.onMicGuests.length }}/{{ linkmic.maxSlots }}）</div>
+                <div class="live-linkmic__title">
+                  在麦嘉宾（{{ linkmic.onMicGuests.length }}/{{ linkmic.maxSlots }}）
+                  <el-button class="live-linkmic__end" size="small" text type="danger" @click="onEndAllLinkmic">
+                    断开全部
+                  </el-button>
+                </div>
                 <div v-for="g in linkmic.onMicGuests" :key="g.callId" class="live-linkmic__guest">
                   <UserAvatar :src="g.avatar" :name="g.name" :size="22" />
                   <span class="live-linkmic__guest-name im-ellipsis">{{ g.name }}</span>
@@ -1267,28 +1377,98 @@ watch(() => route.params.roomId, () => syncRoute())
             </template>
           </div>
 
+          <!-- 输入栏分两行：旧版把输入框 + 发送/点赞/礼物/上麦 硬排在一行，320px 宽下右侧按钮必被裁掉 -->
           <div class="live-danmaku__input">
-            <el-input
-              v-model="danmakuText"
-              placeholder="发条弹幕…"
-              maxlength="100"
-              size="default"
-              @keyup.enter="sendDanmaku"
-            />
-            <el-button type="primary" :disabled="wsStatus !== 'open'" @click="sendDanmaku">发送</el-button>
-            <el-button class="live-danmaku__like" @click="sendLike">❤ 点赞</el-button>
-            <el-button v-if="wallet.enabled" class="live-danmaku__gift" @click="giftPanelOpen = !giftPanelOpen">🎁 礼物</el-button>
-            <el-button
-              v-if="linkmic.enabled && !isAnchor"
-              class="live-danmaku__mic"
-              :type="linkmic.guestStatus === 'active' ? 'success' : 'default'"
-              :loading="linkmic.guestStatus === 'requesting'"
-              @click="onRequestMic"
-            >
-              {{ linkmic.guestStatus === 'active' ? '下麦' : linkmic.guestStatus === 'requesting' ? '取消申请' : '申请上麦' }}
-            </el-button>
+            <div class="live-danmaku__send">
+              <el-input
+                v-model="danmakuText"
+                placeholder="发条弹幕…"
+                maxlength="100"
+                size="default"
+                @keyup.enter="sendDanmaku"
+              />
+              <el-button type="primary" :disabled="wsStatus !== 'open'" @click="sendDanmaku">发送</el-button>
+            </div>
+            <div class="live-danmaku__acts">
+              <el-button v-if="!isAnchor" class="live-danmaku__like" @click="sendLike">❤ 点赞</el-button>
+              <el-button
+                v-if="wallet.enabled && !isAnchor"
+                class="live-danmaku__gift"
+                :class="{ 'live-danmaku__gift--on': giftPanelOpen }"
+                @click="giftPanelOpen = !giftPanelOpen"
+              >
+                🎁 礼物
+              </el-button>
+              <el-button
+                v-if="linkmic.enabled && !isAnchor"
+                class="live-danmaku__mic"
+                :type="linkmic.guestStatus === 'active' ? 'success' : 'default'"
+                :loading="linkmic.guestStatus === 'requesting'"
+                @click="onRequestMic"
+              >
+                {{ linkmic.guestStatus === 'active' ? '下麦' : linkmic.guestStatus === 'requesting' ? '取消申请' : '申请上麦' }}
+              </el-button>
+              <span v-if="isAnchor" class="live-danmaku__tip">主播不能给自己点赞/送礼物</span>
+            </div>
           </div>
         </aside>
+
+        <!-- 礼物弹层（抖音式）：挂在 body 层覆盖画面+侧栏底部，整幅宽展示礼物，不再被侧栏宽度限死 -->
+        <transition name="im-gift-up">
+          <div v-if="giftPanelOpen && wallet.enabled" class="live-gift__sheet">
+            <div class="live-gift__sheet-mask" @click="giftPanelOpen = false"></div>
+            <div class="live-gift__sheet-body">
+              <!-- 顶栏不再换行：标题 + 余额 + 关闭。旧版把「收起 ✕」和签到/充值一起塞进 ops 弹性簇，
+                   窄屏下 margin-left:auto 把它们整簇顶出可视区，手机上既没返回入口也看不到签到/充值 -->
+              <div class="live-gift__sheet-head">
+                <span class="live-gift__sheet-title">🎁 送礼物</span>
+                <span class="live-gift__sheet-balance">余额 <b>{{ wallet.balance }}</b> 积分</span>
+                <el-button class="live-gift__sheet-close" size="small" @click="giftPanelOpen = false">
+                  ✕ 关闭
+                </el-button>
+              </div>
+              <div class="live-gift__grid">
+                <button
+                  v-for="gift in wallet.gifts"
+                  :key="gift.giftId"
+                  class="live-gift__item"
+                  :class="{ 'live-gift__item--active': gift.giftId === selectedGiftId }"
+                  @click="pickGift(gift)"
+                >
+                  <span class="live-gift__item-icon">{{ gift.icon }}</span>
+                  <span class="live-gift__item-name">{{ gift.name }}</span>
+                  <span class="live-gift__item-price">{{ gift.price }}</span>
+                </button>
+                <div v-if="!wallet.gifts.length" class="live-gift__empty">
+                  暂无可送礼物：im_gift 表没有数据，需导入 sql/im_data.sql 第 10 节礼物种子
+                </div>
+              </div>
+              <div class="live-gift__sheet-foot">
+                <span class="live-gift__label">数量</span>
+                <el-input-number v-model="giftCount" :min="1" :max="99" size="small" controls-position="right" />
+                <span class="live-gift__total">合计 {{ giftTotal }}</span>
+                <el-button
+                  class="live-gift__send-btn"
+                  type="primary"
+                  :loading="giftSubmitting"
+                  :disabled="!selectedGift || !giftAffordable"
+                  @click="onSendGift"
+                >
+                  立即送礼
+                </el-button>
+                <span v-if="!giftAffordable" class="live-gift__lack">积分不足</span>
+              </div>
+              <!-- 签到/充值：面板内独立一行，窄屏自动换行，不会被顶出屏幕 -->
+              <div class="live-gift__wallet">
+                <el-button size="small" :loading="signInBusy" :disabled="wallet.signedToday" @click="onCheckin">
+                  {{ wallet.signedToday ? '已签到' : `签到 +${wallet.checkinBonus}` }}
+                </el-button>
+                <el-input v-model="rechargeAmount" size="small" class="live-gift__recharge" placeholder="充值积分" />
+                <el-button size="small" type="primary" plain :loading="rechargeBusy" @click="onRecharge">充值</el-button>
+              </div>
+            </div>
+          </div>
+        </transition>
       </div>
     </div>
 
@@ -1566,6 +1746,8 @@ watch(() => route.params.roomId, () => syncRoute())
   display: flex;
   flex: 1;
   min-height: 0;
+  /* 礼物弹层是绝对定位的底部抽屉，锚在这一层才能横跨画面+侧栏整幅宽 */
+  position: relative;
 }
 
 .live-room__stage {
@@ -1616,7 +1798,89 @@ watch(() => route.params.roomId, () => syncRoute())
   pointer-events: none;
 }
 
+/* 连麦分屏舞台：左主播、右嘉宾（多人时右侧纵向堆叠），与 composer 画给观众的分屏同构 */
+.live-linkmic__stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  background: #000;
+}
+
+.live-linkmic__side {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 中缝：一条白线把两栏分开，PK 感更明确 */
+.live-linkmic__side + .live-linkmic__side {
+  border-left: 2px solid rgba(255, 255, 255, 0.18);
+}
+
+.live-linkmic__cell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: #111;
+}
+
+.live-linkmic__video {
+  width: 100%;
+  height: 100%;
+  /* contain 而非 cover：摄像头多为 16:9，分屏每格是竖长条，cover 会只裁中间一条、把人脸切掉 */
+  object-fit: contain;
+  background: #000;
+}
+
+.live-linkmic__tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* 顶部工具条：连麦状态 + 本地静音 + 断开连麦（主播）/ 下麦（嘉宾） */
+.live-linkmic__bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0));
+}
+
+.live-linkmic__bar-title {
+  flex: 1;
+  min-width: 0;
+  color: #fff;
+  font-size: 13px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .live-linkmic {
+  flex: none;
+  /* 申请/在麦人数多时内部滚动，不把输入栏顶出侧栏 */
+  max-height: 168px;
+  overflow-y: auto;
   border-top: 1px solid #ebeef5;
   padding: 8px 10px;
   display: flex;
@@ -1625,9 +1889,17 @@ watch(() => route.params.roomId, () => syncRoute())
 }
 
 .live-linkmic__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: #909399;
   margin-bottom: 4px;
+}
+
+/* 「断开全部」贴右，与计数同一行，不致于多占一行把麦位列表往下顶 */
+.live-linkmic__end {
+  margin-left: auto;
 }
 
 .live-linkmic__req,
@@ -1652,10 +1924,6 @@ watch(() => route.params.roomId, () => syncRoute())
 .live-linkmic__hint {
   font-size: 12px;
   color: #e6a23c;
-}
-
-.live-danmaku__mic {
-  margin-left: 4px;
 }
 
 /* 礼物飘屏：覆盖在画面上，不拦截鼠标 */
@@ -1714,6 +1982,8 @@ watch(() => route.params.roomId, () => syncRoute())
 /* 贡献榜 */
 .live-gift__rank {
   flex: none;
+  max-height: 132px;
+  overflow-y: auto;
   padding: 8px 12px;
   border-top: 1px solid var(--im-border, #e4e7ed);
   background: #fafafa;
@@ -1749,73 +2019,142 @@ watch(() => route.params.roomId, () => syncRoute())
   font-weight: 600;
 }
 
-/* 礼物面板 */
-.live-gift__panel {
-  flex: none;
-  padding: 10px 12px;
-  border-top: 1px solid var(--im-border, #e4e7ed);
-  background: #fff;
+/* 礼物弹层（抖音式底部抽屉）：整幅宽盖在画面+侧栏下沿，礼物再多也绝不截断 */
+.live-gift__sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
 }
 
-.live-gift__balance {
-  font-size: 13px;
+.live-gift__sheet-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.live-gift__sheet-body {
+  position: relative;
+  width: 100%;
+  max-height: 62%;
+  overflow-y: auto;
+  /* 只允许纵向滚动：否则子项一超宽就会产生横向偏移，把右侧按钮静默裁掉 */
+  overflow-x: hidden;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--im-border, #e4e7ed);
+  border-radius: 14px 14px 0 0;
+  background: #fff;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.live-gift__sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.live-gift__sheet-title {
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.live-gift__sheet-balance {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #909399;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.live-gift__sheet-balance b {
   color: #ff7a45;
-  margin-bottom: 8px;
+}
+
+/* 关闭（返回）按钮：靠右且 flex:none，手机上永远可见可点 */
+.live-gift__sheet-close {
+  margin-left: auto;
+  flex: none;
+}
+
+/* 签到 / 充值行 */
+.live-gift__wallet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--im-border, #e4e7ed);
 }
 
 .live-gift__grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 8px;
+  /* 自适应列数：宽屏一排能放 7~8 个，窄屏自动折行；旧版固定 4 列被 320px 侧栏挤扁 */
+  grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+  gap: 10px;
 }
 
 .live-gift__item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 2px;
+  gap: 3px;
+  padding: 8px 4px;
   border: 1px solid var(--im-border, #e4e7ed);
-  border-radius: 8px;
-  background: #fff;
+  border-radius: 10px;
+  background: #f7f8fa;
   cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.live-gift__item:hover {
+  transform: translateY(-2px);
 }
 
 .live-gift__item--active {
   border-color: #ff7a45;
+  background: #fff5f0;
   box-shadow: 0 0 0 1px #ff7a45 inset;
 }
 
 .live-gift__item-icon {
-  font-size: 22px;
+  font-size: 28px;
+  line-height: 1.15;
 }
 
 .live-gift__item-name {
   font-size: 12px;
+  color: #606266;
 }
 
 .live-gift__item-price {
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
   color: #ff7a45;
 }
 
 .live-gift__empty {
   grid-column: 1 / -1;
+  padding: 18px 0;
   text-align: center;
   color: #909399;
   font-size: 12px;
+  line-height: 1.7;
 }
 
-.live-gift__row {
+.live-gift__sheet-foot {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.live-gift__row--btns {
+  gap: 10px;
   flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--im-border, #e4e7ed);
 }
 
 .live-gift__label {
@@ -1824,17 +2163,43 @@ watch(() => route.params.roomId, () => syncRoute())
 }
 
 .live-gift__total {
-  margin-left: auto;
   font-size: 13px;
   color: #ff7a45;
 }
 
-.live-gift__recharge {
-  width: 90px;
+.live-gift__send-btn {
+  margin-left: auto;
+  min-width: 108px;
 }
 
-.live-danmaku__gift {
-  flex: none;
+.live-gift__lack {
+  font-size: 12px;
+  color: #f56c6c;
+}
+
+.live-gift__recharge {
+  width: 96px;
+}
+
+/* 弹层动效：遮罩淡入，面板从底部推上来 */
+.im-gift-up-enter-active,
+.im-gift-up-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.im-gift-up-enter-active .live-gift__sheet-body,
+.im-gift-up-leave-active .live-gift__sheet-body {
+  transition: transform 0.24s ease;
+}
+
+.im-gift-up-enter-from,
+.im-gift-up-leave-to {
+  opacity: 0;
+}
+
+.im-gift-up-enter-from .live-gift__sheet-body,
+.im-gift-up-leave-to .live-gift__sheet-body {
+  transform: translateY(100%);
 }
 
 .live-room__title {
@@ -1861,6 +2226,10 @@ watch(() => route.params.roomId, () => syncRoute())
   flex: none;
   display: flex;
   flex-direction: column;
+  /* 侧栏自身不得溢出：内容多时交给 list / rank / linkmic 各自滚动，
+     否则礼物、连麦、输入栏会被窗口底边直接截掉（用户反馈的「显示不完全」） */
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--im-border, #e4e7ed);
   background: #fff;
 }
@@ -1935,14 +2304,40 @@ watch(() => route.params.roomId, () => syncRoute())
 }
 
 .live-danmaku__input {
+  flex: none;
+  /* 两行布局：第一行输入+发送，第二行点赞/礼物/上麦。旧版单行在 320px 下右侧按钮被裁 */
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
   padding: 10px 12px;
   border-top: 1px solid var(--im-border, #e4e7ed);
 }
 
-.live-danmaku__like {
+.live-danmaku__send {
+  display: flex;
+  gap: 6px;
+}
+
+.live-danmaku__acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.live-danmaku__like,
+.live-danmaku__gift {
   flex: none;
+}
+
+.live-danmaku__gift--on {
+  border-color: #ff7a45;
+  color: #ff7a45;
+}
+
+.live-danmaku__tip {
+  font-size: 12px;
+  color: #909399;
 }
 
 /* ------------------------------ 大厅 ------------------------------ */
@@ -2136,6 +2531,57 @@ watch(() => route.params.roomId, () => syncRoute())
   .live-grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px;
+  }
+
+  /* 礼物弹层手机端适配：面板占高拉开，否则网格+送礼行+签到充值挤不进一屏 */
+  .live-gift__sheet-body {
+    max-height: 80%;
+    padding: 10px 12px 16px;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .live-gift__grid {
+    grid-template-columns: repeat(auto-fill, minmax(66px, 1fr));
+    gap: 8px;
+  }
+
+  .live-gift__item {
+    padding: 6px 2px;
+  }
+
+  .live-gift__item-icon {
+    font-size: 24px;
+  }
+
+  .live-gift__item-name,
+  .live-gift__item-price {
+    font-size: 11px;
+  }
+
+  .live-gift__sheet-foot {
+    gap: 8px;
+  }
+
+  /* 手机上不让 margin-left:auto 把按钮顶到右侧边缘外，改成满宽主操作 */
+  .live-gift__send-btn {
+    margin-left: 0;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .live-gift__wallet {
+    gap: 6px;
+  }
+
+  .live-gift__recharge {
+    width: auto;
+    flex: 1;
+    min-width: 76px;
+  }
+
+  .live-gift__wallet .el-button {
+    flex: 1;
+    margin-left: 0;
   }
 }
 

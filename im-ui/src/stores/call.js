@@ -239,7 +239,10 @@ export const useCallStore = defineStore('call', () => {
     const ok = wsSend('call', {
       action: 'invite',
       callId: id,
-      calleeUserId: Number(userId),
+      // 同 linkmic 的 roomId：雪花用户 ID 超出 JS 安全整数，Number() 会把末尾几位舍掉
+      // （2098796080763510785 → 2098796080763510800）Invite 就发给一个不存在的人。小 id（种子账号）
+      // 暂时看不出来，属于定时炸弹；统一按 asId 传字符串，服务端 Long 字段两种都收
+      calleeUserId: asId(userId),
       mediaType: mediaType.value
     })
     if (!ok) {

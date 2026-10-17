@@ -101,7 +101,7 @@ export function createLiveComposer(options = {}) {
   canvas.height = height
   const ctx = canvas.getContext('2d')
 
-  /** id → { stream, video, kind }，kind='anchor'|'guest'；video 是内部隐藏 <video>，供逐帧取像 */
+  /** id → { stream, video, kind, label }，kind='anchor'|'guest'；video 是内部隐藏 <video>，供逐帧取像 */
   const sources = new Map()
 
   let audioCtx = null
@@ -176,19 +176,21 @@ export function createLiveComposer(options = {}) {
 
   /* --------------------------- 视频源与绘制 --------------------------- */
 
-  /** 为一路流建隐藏 <video> 并接入音频图，开始参与合成 */
-  function addSource(id, stream, kind = 'guest') {
+  /** 为一路流建隐藏 <video> 并接入音频图，开始参与合成。label 是画在分格左下角的名牌（主播/嘉宾昵称） */
+  function addSource(id, stream, kind = 'guest', label = '') {
     if (sources.has(id)) {
       removeSource(id)
     }
     const video = document.createElement('video')
+    // 这里必须静音：本元素只负责给 canvas 取帧，扬声器的声音由界面层的分屏 <video> 负责，
+    // 两边都出声会形成双倍音量与回声
     video.muted = true
     video.autoplay = true
     video.playsInline = true
     video.srcObject = stream
     video.play().catch(() => {})
-    sources.set(id, { stream, video, kind })
-    attachAudio(stream, id)
+    sources.set(id, { stream, video, kind, label })
+    attachAudio(stream, id, kind)
     return video
   }
 
@@ -202,15 +204,26 @@ export function createLiveComposer(options = {}) {
     sources.delete(id)
   }
 
-  function attachAudio(stream, id) {
+  /** 改名牌文案：嘉宾昵称是拉到在麦列表后才异步补齐的，画布上的字要跟着刷新 */
+  function setLabel(id, label) {
+    const src = sources.get(id)
+    if (src) {
+      src.label = label
+    }
+  }
+
+  function attachAudio(stream, id, kind = 'guest') {
+    // 没有音频轨的源（比如纯屏幕共享）只参与画面，跳过即可，不算异常
     if (!audioCtx || !stream.getAudioTracks().length) {
       return
     }
     try {
       const sourceNode = audioCtx.createMediaStreamSource(stream)
       const gain = audioCtx.createGain()
-      gain.gain.value = id === 'anchor' ? 1 : 0.9
+      gain.gain.value = kind === 'anchor' ? 1 : 0.9
       sourceNode.connect(gain)
+      // destNode 是「录制用的那一路」，只连这里就意味着：合成流里有声，但主播本地听不到嘉宾。
+      // 主播的监听走界面层未静音的 <video>（浏览器原生 AEC 更好，不必在这里再连 destination）
       gain.connect(destNode)
       audioNodes.set(id, { sourceNode, gain })
     } catch {
@@ -231,7 +244,11 @@ export function createLiveComposer(options = {}) {
     }
   }
 
-  /** 逐帧绘制：主播铺满背景，嘉宾按网格叠在右下角画中画 */
+  /**
+   * 逐帧绘制。无人上麦时主播铺满整幅（与不连麦时观感一致）；有人上麦即改为抖音式左右分屏：
+   * 左半固定给主播，右半放嘉宾（1 人铺满、2 人上下、3~4 人 2×2）。
+   * 观众看到的画面布局就是这个 canvas，界面层的本地分屏舞台与之同构，以免「主播自看到的和观众看到的不一样」。
+   */
   function drawFrame() {
     if (!running) {
       return
@@ -240,30 +257,18 @@ export function createLiveComposer(options = {}) {
     ctx.fillRect(0, 0, width, height)
 
     const anchor = [...sources.values()].find((s) => s.kind === 'anchor')
-    if (anchor) {
-      drawFit(anchor.video, 0, 0, width, height)
-    }
+    const guests = [...sources.values()].filter((s) => s.kind === 'guest')
 
-    const guests = [...sources.entries()].filter(([, s]) => s.kind === 'guest')
-    const tileW = Math.round(width * 0.28)
-    const tileH = Math.round(tileW * (height / width))
-    const margin = 12
-    guests.forEach(([id, s], i) => {
-      // 单列堆叠，最多 4 格；超出缩略到同列换行（简单布局，够连麦几路人用）
-      const col = i % 2
-      const row = Math.floor(i / 2)
-      const x = width - tileW - margin - col * (tileW + margin)
-      const y = margin + row * (tileH + margin)
-      ctx.save()
-      ctx.fillStyle = '#111'
-      ctx.fillRect(x, y, tileW, tileH)
-      drawFit(s.video, x, y, tileW, tileH)
-      ctx.strokeStyle = 'rgba(255,255,255,0.35)'
-      ctx.strokeRect(x + 0.5, y + 0.5, tileW - 1, tileH - 1)
-      ctx.restore()
-      // 调试友好：id 供 removeSource 定位（此处不参与绘制）
-      void id
-    })
+    if (!guests.length) {
+      if (anchor) {
+        drawCover(anchor.video, 0, 0, width, height)
+        drawLabel(anchor.label || '主播', 14, height - 16)
+      } else {
+        drawPlaceholder(0, 0, width, height, '等待主播画面')
+      }
+    } else {
+      drawSplit(anchor, guests)
+    }
 
     // requestVideoFrameCallback 优先（与主播视频解码同帧，省 CPU 且不重绘撕裂帧），不支持回落 rAF
     const anchorVideo = anchor && anchor.video
@@ -274,8 +279,90 @@ export function createLiveComposer(options = {}) {
     }
   }
 
-  /** 按 cover 铺放视频帧到目标矩形（居中裁边） */
-  function drawFit(video, x, y, w, h) {
+  /** 左右分屏：主播居左、嘉宾居右（多人右侧网格堆叠） */
+  function drawSplit(anchor, guests) {
+    const half = Math.round(width / 2)
+    const gap = 4
+    if (anchor) {
+      drawContain(anchor.video, 0, 0, half - gap, height)
+      drawLabel(anchor.label || '主播', 14, height - 16)
+    } else {
+      drawPlaceholder(0, 0, half - gap, height, '等待主播画面')
+    }
+
+    const n = guests.length
+    const cols = n > 2 ? 2 : 1
+    const rows = Math.ceil(n / cols)
+    const cellW = (width - half - gap * (cols + 1)) / cols
+    const cellH = (height - gap * (rows + 1)) / rows
+    guests.forEach((s, i) => {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      const x = half + gap + col * (cellW + gap)
+      const y = gap + row * (cellH + gap)
+      ctx.fillStyle = '#111'
+      ctx.fillRect(x, y, cellW, cellH)
+      drawContain(s.video, x, y, cellW, cellH)
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)'
+      ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1)
+      drawLabel(s.label || '嘉宾', x + 10, y + cellH - 14)
+    })
+
+    // 中缝分隔线：分屏感更明确，也遮住两格抗锯齿边缘的拼缝
+    ctx.fillStyle = 'rgba(255,255,255,0.18)'
+    ctx.fillRect(half - gap, 0, gap, height)
+  }
+
+  /** 目标矩形内铺满提示文字（流未就绪时不给观众看纯黑块） */
+  function drawPlaceholder(x, y, w, h, text) {
+    ctx.save()
+    ctx.fillStyle = '#111'
+    ctx.fillRect(x, y, w, h)
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.font = `${Math.round(Math.min(w, h) * 0.07)}px system-ui, "Microsoft YaHei", sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, x + w / 2, y + h / 2)
+    ctx.restore()
+  }
+
+  /** 分格左下角名牌：胶囊底 + 白字，字号随画面高自适应 */
+  function drawLabel(text, x, y) {
+    if (!text) {
+      return
+    }
+    ctx.save()
+    const fontSize = Math.max(13, Math.round(height * 0.032))
+    ctx.font = `${fontSize}px system-ui, "Microsoft YaHei", sans-serif`
+    ctx.textBaseline = 'middle'
+    const pillW = ctx.measureText(text).width + 18
+    const pillH = fontSize + 12
+    roundRectPath(x - 9, y - pillH / 2, pillW, pillH, pillH / 2)
+    ctx.fillStyle = 'rgba(0,0,0,0.45)'
+    ctx.fill()
+    ctx.fillStyle = '#fff'
+    ctx.fillText(text, x, y)
+    ctx.restore()
+  }
+
+  /** 圆角矩形路径（不用 ctx.roundRect：旧版 Chromium/Electron 无此 API，会整帧抛错） */
+  function roundRectPath(x, y, w, h, r) {
+    const rad = Math.min(r, w / 2, h / 2)
+    ctx.beginPath()
+    ctx.moveTo(x + rad, y)
+    ctx.lineTo(x + w - rad, y)
+    ctx.arcTo(x + w, y, x + w, y + rad, rad)
+    ctx.lineTo(x + w, y + h - rad)
+    ctx.arcTo(x + w, y + h, x + w - rad, y + h, rad)
+    ctx.lineTo(x + rad, y + h)
+    ctx.arcTo(x, y + h, x, y + h - rad, rad)
+    ctx.lineTo(x, y + rad)
+    ctx.arcTo(x, y, x + rad, y, rad)
+    ctx.closePath()
+  }
+
+  /** 按 cover 铺放视频帧到目标矩形（居中裁边）：单人满屏时用，不致于拉变比例 */
+  function drawCover(video, x, y, w, h) {
     if (!video || video.readyState < 2 || !video.videoWidth) {
       return
     }
@@ -300,6 +387,35 @@ export function createLiveComposer(options = {}) {
     }
   }
 
+  /**
+   * 按 contain 铺放（完整可见、居中留黑边）：分屏专用。
+   * 摄像头常见 16:9，分屏每格是竖长条，若还用 cover 会只裁到画面中间一条，人脸容易被切掉。
+   */
+  function drawContain(video, x, y, w, h) {
+    if (!video || video.readyState < 2 || !video.videoWidth) {
+      return
+    }
+    const vr = video.videoWidth / video.videoHeight
+    const tr = w / h
+    let dw, dh, dx, dy
+    if (vr > tr) {
+      dw = w
+      dh = w / vr
+      dx = x
+      dy = y + (h - dh) / 2
+    } else {
+      dh = h
+      dw = h * vr
+      dy = y
+      dx = x + (w - dw) / 2
+    }
+    try {
+      ctx.drawImage(video, dx, dy, dw, dh)
+    } catch {
+      /* 帧尚未就绪，跳过本帧 */
+    }
+  }
+
   /* --------------------------- 生命周期 --------------------------- */
 
   async function start() {
@@ -313,9 +429,19 @@ export function createLiveComposer(options = {}) {
     }
     // 音频图
     audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    // 关键：AudioContext 可能以 suspended 创建（非用户手势里误新建、或浏览器自动播放策略），
+    // suspended 状态下图不跑→ destNode 的音轨持续输出静音→ 录出来的 WebM 有音轨但全无声，
+    // 表现为「观众看连麦有画面没声音」。resume 是异步的，不 await 则可能连前几帧都依旧静音
+    if (audioCtx.state === 'suspended') {
+      try {
+        await audioCtx.resume()
+      } catch {
+        /* 无用户手势时被拒：不阻断画面，声音等下一次 resume 机会 */
+      }
+    }
     destNode = audioCtx.createMediaStreamDestination()
     // 已存在的源补接音频
-    sources.forEach((s, id) => attachAudio(s.stream, id))
+    sources.forEach((s, id) => attachAudio(s.stream, id, s.kind))
 
     const stream = canvas.captureStream(fps)
     destNode.stream.getAudioTracks().forEach((t) => stream.addTrack(t))
@@ -396,6 +522,7 @@ export function createLiveComposer(options = {}) {
   return {
     addSource,
     removeSource,
+    setLabel,
     start,
     stop,
     get recording() {

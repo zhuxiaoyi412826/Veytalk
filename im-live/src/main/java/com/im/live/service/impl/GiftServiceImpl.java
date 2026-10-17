@@ -65,6 +65,8 @@ public class GiftServiceImpl implements GiftService {
         LiveRoom room = roomMapper.selectById(roomId);
         BusinessException.throwIf(room == null, ResultCode.LIVE_ROOM_NOT_FOUND);
         BusinessException.throwUnless(room.isLiving(), ResultCode.LIVE_NOT_LIVING);
+        // 不能给自己的直播送礼物：主播是收礼方，自送等于刷热度/自灌积分，直接拒
+        BusinessException.throwIf(userId.equals(room.getAnchorId()), ResultCode.GIFT_SELF_FORBIDDEN);
 
         GiftBriefDTO gift = walletSpi.findGift(giftId);
         // findGift 只对「不存在或已下架」返回 null；前端礼簿只渲染上架礼物，走到 null 基本是构造请求，统一按不存在拒

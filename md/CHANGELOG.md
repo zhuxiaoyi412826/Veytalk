@@ -16,6 +16,28 @@
 
 ### 修复 Fixed
 
+- **连麦全程无声音：主播听不到嘉宾、嘉宾看不到也听不到主播、观众端合成流可能整条静音（im-ui）**：处置「现在连麦没有声音」。三处各自独立、叠加成「谁都没声」。
+  - **主播侧（确定性缺陷）**：嘉宾的远端流此前只被 `liveComposer.addSource` 挂进一个**脱离 DOM 且 `muted = true`** 的内部 `<video>`，它只负责给 canvas 取帧；音频侧只连到 `MediaStreamAudioDestinationNode`（录制用的那一路），**没有任何一条边通向扬声器**。于是主播点了接受、麦位列表有人，却始终听不到嘉宾。
+  - **嘉宾侧（确定性缺陷）**：`stores/linkmic.js` 早就把 `guestRemoteStream` 导出，但 `Live.vue` 里**没有任何元素绑定它**（全盘 grep 零命中），所以上麦的嘉宾既看不到也听不到主播。
+  - **观众侧（条件性缺陷）**：`liveComposer.start()` 里 `new AudioContext()` 后**从不 `resume()`**。若上下文以 `suspended` 创建（自动播放策略/非手势路径），音频图不推进 → `destNode` 的音轨持续输出静音 → 录出的 WebM **有 opus 轨但全程无声**，画面正常，正是「有画面没声音」的形状。
+  - **修复**：① `start()` 在建 `destNode` 前加 `if (audioCtx.state === 'suspended') await audioCtx.resume()`；② store 新增 `anchorSelfStream` / `anchorGuestStreams` / `guestSelfStream` 三个 `shallowRef`（MediaStream 经不起响应式代理，数组也只整体替换）把裸流交给界面层；③ `Live.vue` 新增分屏舞台，**未静音的对端 `<video>` 就是本地监听的声音出口**（走浏览器原生 AEC，比 WebAudio 直连 `destination` 更不易啸叫），并配「静音」按钮应对双外放；④ 顺带修一个连带缺陷：主播画面由「先起来的那一路引擎」的本地流供给，而 `engine.close()` 会连摄像头轨一起停，那一路被踢后观众会看到主播格永久黑屏——现 `teardownSession` 检测 `anchorSourceOwner` 并改挂另一路仍活着的 `localStream`；⑤ `attachAudio` 的音量分支原本判 `id === 'anchor'`（依赖调用方传的恰好是这个魔法字符串），现改按 `kind` 判定。
+  - 纯前端，无后端/DDL 改动。服务端 `publishLinkmic` 在麦位清空时已广播 `active=false`，观众会自动切回 HLS，无需改动。
+- **HTTPS 下直播画面与远程控制双黑屏：dev 证书 SAN 漏网卡 + 根 CA 未入信任存储（im-ui / 环境）**：处置「改成 https 后，手机和电脑上都看不到直播画面与远程控制画面」（仍需要 https，因为连麦/通话要安全上下文才有麦照，不能再用 `dev:lan` 退回 http）。
+  - **先排除服务端**：8080/8088/5173/18923 均在监听，当前有房 `2111283799912927233` 正在推流（m3u8 于 10:40:30 更新）；`curl` 直连 8088 与经 Vite https 代理拿到的都是活的 m3u8（`#EXT-X-MEDIA-SEQUENCE:597`）。`play-base-url: ${IM_LIVE_PLAY_BASE_URL:/hls}` 是相对路径，同源 → **不存在混合内容问题**，服务端链路完全健康。
+  - **根因一（名称不匹配）**：旧 `server.pem` 的 SAN 是 `localhost / 127.0.0.1 / 10.97.137.180`，而本机实际 IPv4 已是 `192.168.251.39` 与 `192.168.1.2` —— `10.97.137.180` 早就没了。IP 访问必然名称不匹配，浏览器对媒体与 wss 静默拒（REST 可靠「继续访问」点过去，所以看起来只有画面黑）。
+  - **根因二（`gen:cert` 自动漏采）**：重跑脚本后新 SAN 仍不含 `192.168.1.2`——`os.networkInterfaces()` 在 Windows 上漏掉了「已配地址但介质未连接/未进路由表」的 `以太网` 适配器，而 `Get-NetIPAddress` 能看到它。这个坑的危害在于静默：脚本自认为“本机全部 IPv4 已覆盖”，实际手机用的网段根本没进去。
+  - **根因三（链不受信）**：`Get-ChildItem Cert:\LocalMachine\Root, Cert:\CurrentUser\Root` 查得 `IM Dev Root CA` **NOT INSTALLED**——电脑侧根本没装根 CA，名称修对了也仍会被拒。
+  - **修复**：`im-ui/scripts/gen-cert.cjs` 新增 `windowsConfiguredIPv4s()`，在 win32 上用 `Get-NetIPAddress -AddressFamily IPv4` 再兜一层并与 node 枚举结果合并去重（拿不到则退回原行为、不阻断签证书），并打印「node 枚举漏掉、已由 PowerShell 补进 SAN」提示。非 Windows 行为不变。
+  - **重签结果**：根 CA 复用（`ca.pem` 未改写，已装旧 CA 的设备无需重装），新 `server.pem` SAN = `localhost, 127.0.0.1, 192.168.251.39, 192.168.1.2, 10.97.137.180`（额外带上旧 IP `10.97.137.180` 是为了不弄坏 USB 共享网络那条调试路径），已用 `X509Certificate` 回读逐项核实；`ca.pem` SHA1 指纹 `F8:B6:9F:B7:B5:21:EE:82:33:E3:59:42:96:C8:3D:00:86:6F:82:EA`（有效期至 2036/9/22）。
+  - **待用户执行**（属系统信任根与进程重启，不由助手代做）：① 把 `im-ui/certs/ca.pem` 装入 Windows 「受信任的根证书颁发机构」（需管理员，`certutil -addstore -f Root im-ui\certs\ca.pem`）；② **重启 Vite dev server**（证书在启动时读进内存，不重启不生效）；③ 手机沿用已装的同一张 `ca.pem`（因复用根 CA 无需重装），iOS 还需在「证书信任设置」里打开完全信任。
+  - **遗留设计限制（非 bug）**：`utils/directChannel.js` 的 `canOpenLan()` 在 `location.protocol === 'https:'` 时按设计返回 false（https 页面连 `ws://` 会被浏览器硬拦），所以 https 下远程控制只能走服务端中继、丢直连低延迟；要两者兼得需 Agent 侧提供 `wss://`，尚未实施。
+- **连麦卡死：上行信令 roomId 被 `Number()` 舍掉精度（im-ui）**：处置「电脑浏览器点申请上麦就永久卡在『申请上麦』，而且主播页面完全收不到连麦提示」。
+  - **根因**：`stores/linkmic.js` 的 `linkSend` 用 `roomId: Number(roomId.value)` 组帧，而房间 ID 是 19 位雪花 ID、超出 JS 安全整数 9007199254740991，实测 `Number('2111276027704037378')` → `2111276027704037400`（末三位被四舍五入）。`linkSend` 是所有上行帧（request/accept/reject/leave/offer/answer/ice）的唯一出口，于是每一帧都带着一个不存在的 roomId。
+  - **为何同时表现为“主播无提示”+“观众永久卡住”**：`LiveLinkSignalingService.handleRequest` 先调 `roomSpi.isLiving(坏id)` 得 false，在第 116 行就抛 `LIVE_NOT_LIVING`——**发生在写 Redis 连麦态之前**，所以 Redis 里根本没有 `im:link:*` 键、也不会向主播转发；服务端把异常翻译成 `error` 帧，`ws/dispatch.js` 只弹一个 `ElMessage.error`、不进连麦状态机，而 `requestMic` 已先把 `guestStatus` 置为 `requesting` 且**没有任何超时兜底**，因此永久卡住。（现场取证：Redis 无 `im:link:*`、旧 jar 已排除——连麦 class 编译于 10/17 09:58:37、进程 09:59:37 启动，含 linkmic 代码）
+  - **修复**：`linkSend` 改为原样传字符串 `roomId: roomId.value`。`JacksonConfig` 的 `SafeLongSerializer` 是**条件序列化**（只把超出安全范围的 Long 写成字符串）且注释明确“反序列化不受影响：Jackson 对 Long 字段同时接受字符串和数字”，所以下行本就没有精度问题，只是上行自己把保护拆掉了；`WsCallPayload.roomId` 为包装类 `Long`，接字符串无障碍。
+  - **同时修复同类潜在缺陷**：`stores/call.js` 的 `dialCall` 里 `calleeUserId: Number(userId)` 属于同一类错误——对种子账号的小 id（1000 类）看不出来，一旦换成雪花用户 id（实测 `2098796080763510785` → `2098796080763510800`）邀请就发给不存在的人。现改 `asId(userId)`，与该文件其余 id 写法一致。已全盘扫描 `im-ui/src`，ID 字段上的 `Number()` 滥用仅这两处（`Live.vue` 剩下的 `Number()` 是码率与充值额，属真数字，保留）。
+  - **补上永久卡住的兜底**：`requestMic` 新增 65s 兜底定时器（`armRequestTimeout`），到时若仍为 `requesting` 则 `resetGuest(true)` + 提示「上麦申请超时，主播未响应，请重试」。取 65s 是为了略大于服务端 `im.linkmic.request-timeout-seconds`（默认 60s，那是清主播待处理列表的节拍），保证正常的 accept/reject 总是先赢；`clearRequestTimeout` 在 `resetGuest`/`onAccepted`/`reset` 三个收口点都调，防幽灵定时器。
+  - 纯前端，无后端/DDL 改动。已验证 `build:electron`（`linkmic-Cr7WTJBk.js`）与 `build`（`linkmic-CvTEJSkK.js`）两份产物均含超时兜底且无残留 `roomId:Number`/`calleeUserId:Number`。
 - **通话「接通后就关闭」加固 + 手机⇄电脑局域网互通步骤（im-ui / md）**：处置 `md/待开发功能.txt` 第 10 条下的手写备注两问。
   - **根因判定**：手机用 `http://局域网IP` 访问时处于非安全上下文，浏览器不暴露 `navigator.mediaDevices`，接听方 `getUserMedia` 直接报天书 TypeError → `reject + teardown`，主叫看到「对方拒绝」——用户视角就是「点接听后秒关」。项目里 `dev:lan` 模式（强制 http，为远程控制联调设计）正是踩坑路径；次因是同网段下路由器 AP 隔离 / 电脑防火墙拦浏览器 UDP 导致 ICE `failed`，而旧版 `failed` 只改 hint 不收口，两端卡死在无声浮层。
   - **`stores/call.js` 三项改动**：① `hasMediaApi()` 预检——拨号/接听前先验 `navigator.mediaDevices.getUserMedia` 存在性，缺失直接 `ElMessage.error` 报「需要 HTTPS/localhost + gen:cert 指引」，不再无声关闭；取流异常 catch 也补了 toast（旧版 hint 被 800ms 后的 reset 清掉，用户根本看不见原因）。② ICE `failed` 给 5s 重连窗口，没救回自动 `hangup()`（同时通知对端 teardown）+ 明确提示查同网段/防火墙；重新 `connected` 则撤销定时器并清 hint；`teardown/reset` 统一 `clearFailTimer` 防幽灵挂断。③ 零新依赖，纯前端，重新构建即生效。
@@ -24,6 +46,29 @@
 
 ### 变更 Changed
 
+- **连麦与证书相关的两轮改动同步进描述性文档（`md/直播.md` / `README.md` / `md/已踩坑.md` / `md/手机真机调试HTTPS配置指南.md` / `md/待开发功能.txt`）**：前两轮只登记了本更新日志，五份「事实性文档」仍停在旧结论，会误导后续排查。
+  - `md/直播.md` §12.2：合成布局从「主播铺满 + 嘉宾 **PiP 画中画**（2 列）」改写为实际实现的**左右分屏**（左主播、右嘉宾，1 位占满 / 2 位上下 / 3~4 位 2×2，格内 **contain** 等比居中并说明为何不能继续用 cover、昵称名牌、无画面时的占位块），混音那一条补上「建完 `AudioContext` 必须 `await resume()`」及其失效形状；新增 **§12.5**「连麦时三方的『看得见 + 听得见』：三条独立出口」，用表格拆开观众/主播/嘉宾各自的画面与声音出口，并覆盖 `shallowRef` + `v-src-stream` 绑 `srcObject`、分屏占位期间暂停背面 `<video>`、「断开连麦」的服务端扇出、嘉宾昵称补拉（`refreshGuestProfiles` 选 `handleOffer` 时机的理由）、主播画面改挂避免永久黑屏。§12.4 与 §12.5 的编号顺序已校正。
+  - `README.md` 第十四章：新增「连麦模式」段落（并链到 `md/直播.md` §12）；开头功能清单里连麦那条补上左右分屏、主播「断开连麦」入口与三方视听出口；**自测启动里「手机不信任自签证书就改用 `npm run dev:lan` 走 http」的错误指引纠正**为「连麦与通话必须 https/localhost，http 下拿不到麦照且 `wss` 被拒」，正确做法是把 `im-ui/certs/ca.pem` 装进设备受信任根存储；引用文件名校正为实际存在的 `md/自签证书原理与跨项目HTTPS复用指南.md`。
+  - `md/已踩坑.md`：追加**第十二条**「连麦全程无声」，按症状/三处独立根因/修复模式/可复用边界书写——重点是「`connect(destNode)` 成功只代表参与录制，不代表能听见」这条通用规律与分侧排查顺序。
+  - `md/手机真机调试HTTPS配置指南.md`：「想彻底不碰证书就 `dev:lan` 回落 http」那条补上适用范围——http 下**连麦与音视频通话直接不可用**（非安全上下文里 `navigator.mediaDevices` 不暴露、`wss` 被拒），要测这两项必须装好根 CA 回到 https。
+  - `md/待开发功能.txt`：「已完成连麦」那一段里的合成描述同步为左右分屏，并补上 `AudioContext` 必须 `resume()` 的提醒（该文件是纯文本，未加 markdown 强调）。
+  - 仅文档，不改代码、配置与产物。
+- **礼物弹层手机端适配：补返回按钮 + 签到/充值可见（im-ui）**：处置手机端浏览器「点礼物弹出面板后没有返回按钮，且签到和充值没显示出来」。根因：签到/充值/「收起 ✕」全塞在头部 `.live-gift__sheet-ops` 弹性簇里，该簇 `margin-left: auto`，而 `.live-gift__sheet-body` 只写了 `overflow-y: auto`（按规范会把 `overflow-x: visible` 计为 `auto`），窄屏下整簇被顶出可视区又没横向滚动条——关闭入口与签到/充值一起“静默消失”。
+  - **关闭（返回）按钮提到独立顶栏**：`.live-gift__sheet-head` 去掉 `flex-wrap`，固定为「标题 + 余额（`flex:1` + 省略号）+ `✕ 关闭`」，关闭按钮 `margin-left: auto; flex: none` 保证手机上永远可见可点；点遮罩关闭保留。
+  - **签到/充值下提**：从头部移出，放进面板内独立一行 `.live-gift__wallet`（虚线分隔 + `flex-wrap: wrap`），充值按钮改 `type="primary" plain` 更醒目。
+  - **防横向裁切**：`.live-gift__sheet-body` 加 `overflow-x: hidden`。
+  - **手机端断点 `@media (max-width: 768px)`**：面板 `max-height` 62%→80%、内边距收紧到 10px 12px 16px、礼物格子 `minmax(86px→66px)`、图标 28→24px、「立即送礼」去掉 `margin-left:auto` 改满宽主按钮、充值输入框 `flex:1`、wallet 行按钮均分。
+  - 纯前端样式与模板结构，无接口/数据变更。删除已无引用的 `.live-gift__sheet-ops` 规则。
+- **直播间礼物/连麦 UI 改为抖音式布局（im-ui）**：处置「礼物与连麦界面显示不完全、礼物被窗口底边截断」。旧布局把「贡献榜 + 礼物面板 + 连麦区 + 输入栏」全竖排在 320px 侧栏里且均 `flex: none`，侧栏无 overflow 约束，礼物一多就直接溢出窗口底边被裁掉；输入栏把输入框与发送/点赞/礼物/上麦 硬塞一行，右侧按钮必被截。
+  - **礼物面板→底部弹层（抖音式）**：从侧栏内联位置搬出去，改挂在 `.live-room__body`（新增 `position: relative`）上的 `live-gift__sheet` 绝对定位抽屉：半透明遮罩（点遮罩/「收起 ✕」关闭）+ 圆角顶部面板，整幅宽展示，`max-height: 62%` 内部滚动；`im-gift-up` 动效为遮罩淡入 + 面板从底部推上。
+  - **礼物网格自适应**：`grid-template-columns` 从固定 `repeat(4, 1fr)` 改为 `repeat(auto-fill, minmax(86px, 1fr))`，宽屏一排 7~8 个、窄屏自动折行；图标 22px→28px，新增 hover 上浮与选中橙色描边。签到/充值上移到面板头部，底部一行「数量 + 合计 + 立即送礼」，积分不足右侧提示。
+  - **输入栏改两行**：`.live-danmaku__input` 改为 `flex-direction: column`，第一行输入框+发送，第二行 `.live-danmaku__acts` 放点赞/礼物/申请上麦（`flex-wrap: wrap` 堆叠不裁切）；礼物按钮展开时高亮（`live-danmaku__gift--on`），主播视角改显「主播不能给自己点赞/送礼物」提示。
+  - **侧栏与连麦防溢出**：`.live-danmaku` 加 `min-height: 0; overflow: hidden`，内容多时交给各子区自己滚；贡献榜 `max-height: 132px`、连麦区 `max-height: 168px` 均内部滚动，不再顶掉输入栏。
+  - 纯前端样式与模板结构，无接口/数据变更。另：用户反馈的「具体礼物还是没有」查得 `im_gift` 表 0 条数据（`im_user_wallet` 已有 5 条，说明只导了钱包种子），需用户执行 `sql/im_data.sql` 第 10 节 INSERT；面板空列表处已加该提示文案。
+- **直播：主播不能给自己点赞/送礼物（im-common / im-live / im-ui）**：处置「开播后主播在自己直播间能给自己刷赞/刷礼」的问题。礼物、点赞、连麦三项功能此前已完整实现（前端 `Live.vue` + `stores/linkmic.js`，后端 `GiftServiceImpl`/`LiveLinkSignalingService`/`LinkMicController`/钱包），若在界面上看不到，是客户端/后端为旧构建（`app.asar` 或 jar 早于这些功能），重新构建即恢复。本次补齐缺失的「自购/自赞拦截」：
+  - **后端（双重兜底）**：`ResultCode` 新增 `GIFT_SELF_FORBIDDEN(13009, "不能给自己的直播送礼物")`；`GiftServiceImpl.sendGift` 校验 `userId == room.anchorId` 则拒（防刷热度/自灌积分）；`LiveDanmakuHandler.onLike` 若本连接为主播（进房时缓存的 `anchor` 标记）直接丢弃该 like 帧。
+  - **前端**：主播自身直播间（`isAnchor`）隐藏「❤ 点赞」与「🎁 礼物」按钮（`v-if="!isAnchor"`），并在 `sendLike`/`onSendGift` 加 `isAnchor` 守卫；点赞计数展示（❤ 数字）仍对主播可见。
+  - 需重建后端 jar 并重启、重建前端（桌面端 `npm run build:electron` 后退出运行中的 exe 再重打包）生效。无 DDL 变更。
 - **闪照语义改为「每人各看一次、互不影响」（im-common / im-message / im-ui）**：修正上一轮闪照销毁广播的过强语义。旧模型是「任一成员首次查看即全员销毁」（一次性广播），导致**发送者自己看一眼，接收端也跟着销毁**，不符合预期。现改为按人消费：
   - **数据模型**：`MessageExtra` 新增权威名单 `flashViewedBy`（已消费查看的用户 ID 列表）；`flashViewed` 降为下发前按查看者现算的瞬态字段（名单含自己即为已销毁），不再落库。extra 是 JSON 列，**无需 DDL**；存量闪照消息无 `flashViewedBy` 视作无人看过。
   - **后端**：`MessageServiceImpl.flashView` 改为“将本人加入 `flashViewedBy`，仅当会话全员都已消费才 `destroyById` 物理销毁原图”，本人已消费则幂等返回。`MessageConvert` 新增 `flashForViewer`（`toBuilder` 拷贝一份只为当前查看者算 `flashViewed`，对其本人额外置空 `fileUrl` 防二次拉图），在两个 `toVO` 重载中按 viewerId 应用；`AttachmentContentHandler` 发送时初始化空 `flashViewedBy`。
@@ -34,6 +79,13 @@
 
 ### 新增 Added
 
+- **视频连麦抖音式左右分屏 + 主播「断开连麦」入口（im-ui）**：处置「开播界面增加断开连麦功能」与「增加视频连麦功能，左右分屏左侧是主播右侧是连麦观众，如抖音这种」。
+  - **观众看到的分屏（合成侧）**：`utils/liveComposer.js` 的 `drawFrame` 从「主播铺满 + 嘉宾右下角画中画」改为**有人上麦即左右分屏**：左半固定主播、右半放嘉宾（1 人铺满右半、2 人上下、3~4 人 2×2），中缝一条分隔线；无人时仍是主播满屏。新增 `drawContain`（contain 居中留黑边）用于分屏格、原 `drawFit` 改名 `drawCover` 只留给满屏场景——摄像头多为 16:9，分屏每格是竖长条，继续 cover 会只裁中间一条、把人脸切掉。另加 `drawLabel` 名牌（胶囊底 + 白字，字号随画面高自适应）与 `drawPlaceholder`（流未就绪时显示「等待主播画面」而不是纯黑块）；圆角用 `roundRectPath` 手写路径而非 `ctx.roundRect`（旧版 Chromium/Electron 无此 API，会整帧抛错）。
+  - **主播/嘉宾本地看到的分屏（界面侧）**：`Live.vue` 的 `.live-player` 内新增 `.live-linkmic__stage`，固定「左＝主播｜右＝嘉宾」，与观众端合成画面同构；用自定义指令 `v-src-stream` 绑 `srcObject`（`:src` 不行——流对象写成属性会得到 `[object MediaStream]`；纯 ref 赋值兜不住 v-for 格子与流到达时机不定的组合）。分屏期间 `v-show` 藏起并 `pause()` 背面那路 HLS/MSE（否则与分屏叠一份解码，低端机足以拖垮连麦帧率），并 `@click` 重试被自动播放策略拦下的播放。
+  - **断开连麦**：store 新增 `endAllLinkmic()`（逐路发 `leave` + 本地拆引擎，服务端据此广播 `linkmic active=false`，观众自动回到普通直播画面）。入口两处：分屏舞台顶部工具条的「断开连麦」（嘉宾同位置是「下麦」），以及侧栏「在麦嘉宾」标题行的「断开全部」。待处理申请不在这里拒（那是「拒绝」按钮的语义）。
+  - **嘉宾昵称/头像补齐**：下行信令帧 `WsCallPayload` 只带 `fromUserId`、没有昵称，故 `handleOffer` 里调一次 `refreshGuestProfiles()`（`GET /api/live/{roomId}/linkmic`）把昵称回填到麦位列表与画布名牌，配套 `liveComposer.setLabel(id, label)`；放在 offer 而非 accept 之后，是因为服务端先 `sAdd` 麦位集合再把 accept 推给嘉宾、嘉宾再发 offer，到这里必然查得到（accept 刚发出就查会与服务端写集合抢跑）。失败静默保留占位名 `嘉宾xxxx`。`initAsAnchor` 增第三个参数 `anchorName` 用于主播格名牌。
+  - **一并记录一个既有行为（非本轮引入）**：连麦期间观众看到的不再是主播的屏幕共享，而是 composer 合成的「主播摄像头｜嘉宾」——要合成就必须重取一路 `getUserMedia`，这也正是抖音 PK 的观感；下麦后自动回到 ffmpeg 的屏幕流。
+  - 零新增依赖，纯前端。已验证 `build`（`linkmic-BWp_0tcf.js` + `Live-Dh4Jt-Ql.js` + `Live-esIofOvz.css`）与 `build:electron`（`linkmic-SFkYRuZi.js` + `Live-DKLWqGaO.js`）两份产物均含分屏、监听与断开连麦代码。
 - **Tauri 打包 EXE 方案文档（md/打包，纯文档）**：新增 `md/打包/Tauri打包指南.md`（按 Tauri v2 编写），与现有 `Electron打包指南.md`/`打包为EXE和Android指南.md` 并存。内容涵盖：Tauri vs Electron 选型对比、Rust+MSVC+WebView2 前置环境与 rsproxy 国内镜像（应对本机 HTTPS 中间人拦截）、在 `im-ui` 内初始化 `src-tauri`、**前端「浏览器/桌面壳两用」适配**（扩展 `utils/env.js` 的 `isTauri()`/`isNativeShell()` + `.env.tauri` 编译期后端地址 + hash 路由 + `vite.config.js` 新增 `tauri` 模式）、`tauri.conf.json` 完整配置与逐条 CSP 说明（放行后端/ws/媒体 blob/wasm-unsafe-eval）、Rust 侧能力补齐（下载 dialog+fs、`SetWindowDisplayAffinity` 防截屏、被控端 Agent sidecar）、打包/产物/踩坑。**专设第十节逐条列出本项目在 Tauri 上会退化的能力**（屏幕共享直播 getDisplayMedia 基本不可用、防截屏/被控端 Agent 需自写 Rust），结论建议轻客户端走 Tauri、含直播/防截屏/被控端的全功能形态继续用 Electron。无任何代码/构建/DDL 变更。
 - **直播连麦 + 虚拟礼物 + 积分钱包（D 组第二项，PK 暂缓下一轮）（im-common / im-user / im-live / im-websocket / im-ui / im-bootstrap / electron）**：落地 `md/待开发功能.txt` 第 47 行 D 组第二项。本轮做「连麦 + 礼物」，PK（热度对比/投票）下一轮。零新增 npm 依赖，连麦合成与观众 MSE 播放全用浏览器原生 API。
   - **数据模型（4 张新表，DDL 由用户本地执行）**：`im_user_wallet`（余额/累计充值/累计消费/签到去重日）、`im_gift`（礼物目录：名称/图标/单价/类型/排序/上下架）、`im_gift_record`（送礼流水，`idx_room_time`/`idx_receiver` 支撑房间热度与收礼榜）、`im_wallet_transaction`（钱包账本：recharge/gift/checkin/adjust，带 `balance_after`）。`sql/im_schema.sql` 补建表与前置 DROP 行，`sql/im_data.sql` 补礼物种子数据（清理段按种子 ID 段限定，不清运行数据）。连麦态用 Redis，不建表。

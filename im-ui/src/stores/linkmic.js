@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, shallowRef, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
-import { fetchLinkmicConfig } from '@/api/live'
+import { fetchLinkmicConfig, fetchLinkmicList } from '@/api/live'
 import { createCallPeer } from '@/utils/webrtc'
 import { createLiveComposer, composerSupported, webmBaseFromPlayUrl } from '@/utils/liveComposer'
 import { asId } from '@/utils/id'
@@ -68,6 +68,11 @@ export const useLinkmicStore = defineStore('linkmic', () => {
   const pendingRequests = ref([]) // { callId, guestUserId }
   const onMicGuests = ref([]) // { callId, guestUserId, name, avatar }
   const composerActive = ref(false)
+  // 分屏舞台要直接绑的裸流引用。MediaStream 一旦被响应式代理就会破坏 WebRTC，故一律用 shallowRef；
+  // 数组也只在整体替换时触发更新（不就地 push），保证元素里的 stream 仍是原始对象
+  const anchorSelfStream = shallowRef(null)
+  const anchorGuestStreams = shallowRef([]) // [{ callId, stream, name }]
+  const guestSelfStream = shallowRef(null)
 
   /* ------------------------------ 非响应式内部态 ------------------------------ */
   let config = null // { enabled, maxSlots, iceServers }
@@ -78,7 +83,15 @@ export const useLinkmicStore = defineStore('linkmic', () => {
   /** 主播侧共享的合成推流器（首路连麦建立，最后一路下麦销毁） */
   let composer = null
   let composerAnchorSourceId = null // 记录已挂进 composer 的主播本地流 id，避免多路重复挂
+  /** 当前给 composer 供主播画面的那一路连麦 callId：它被踢时摄像头随引擎一起停，必须改挂另一路的本地流 */
+  let anchorSourceOwner = null
   let guestCallId = ''
+  /** 主播自己的展示名（合成画面左上角名牌），由 initAsAnchor 从房间详情带入 */
+  let anchorName = '主播'
+  /** 上行被服务端拒时只回 error 帧、不进本状态机，没定时器就会永久卡在 requesting */
+  let requestTimer = null
+  /** 略大于 im.linkmic.request-timeout-seconds（默认 60s，那是服务端清主播待处理列表的节拍），保证正常的 accept/reject 总是先赢 */
+  const REQUEST_TIMEOUT_MS = 65_000
   let guestEngine = null
   const guestRemoteStream = shallowRef(null)
 
@@ -126,7 +139,11 @@ export const useLinkmicStore = defineStore('linkmic', () => {
   /* ------------------------------ 组帧上行 ------------------------------ */
 
   function linkSend(linkAction, extra = {}) {
-    const payload = { linkAction, roomId: Number(roomId.value), ...extra }
+    // roomId 必须原样传字符串，不能 Number()：房间 id 是 19 位雪花 ID，超出 JS 安全整数会被四舍五入
+    // （2111276027704037378 → 2111276027704037400），服务端按坏 id 查房间必然「未在直播」，
+    // request 在写连麦状态之前就被拒，表现为观众永久卡住、主播收不到任何上麦提示。
+    // 下行侧 SafeLongSerializer 本就把超范围的 Long 写成字符串，服务端反序列化对 string/number 都接受。
+    const payload = { linkAction, roomId: roomId.value, ...extra }
     return wsSend('linkmic', payload)
   }
 
@@ -152,11 +169,15 @@ export const useLinkmicStore = defineStore('linkmic', () => {
    * 以主播身份初始化本场连麦：记下房间与合成流媒体目录基址，拉 ICE 配置。
    * @param {string|number} id 房间 ID
    * @param {string} playUrl 后端下发的播放地址（用于推导 webm 合成流的写入/读取目录）
+   * @param {string} [name] 主播展示名，只用于合成画面上的名牌
    */
-  async function initAsAnchor(id, playUrl) {
+  async function initAsAnchor(id, playUrl, name) {
     roomId.value = asId(id)
     role.value = 'anchor'
     mediaBase.value = webmBaseFromPlayUrl(playUrl)
+    if (name) {
+      anchorName = name
+    }
     await ensureConfig()
   }
 
@@ -188,10 +209,51 @@ export const useLinkmicStore = defineStore('linkmic', () => {
       ElMessage.error('连麦信令发送失败，请重试')
       return
     }
-    const entry = { callId, role: 'anchor', guestUserId: asId(meta.guestUserId), remoteStream: null, engine: null }
+    const guestUserId = asId(meta.guestUserId)
+    const label = meta.name || `嘉宾${String(guestUserId || '').slice(-4)}`
+    const entry = { callId, role: 'anchor', guestUserId, remoteStream: null, engine: null, label }
     sessions.set(callId, entry)
-    onMicGuests.value.push({ callId, guestUserId: asId(meta.guestUserId), name: meta.name || '嘉宾', avatar: meta.avatar || '' })
+    onMicGuests.value.push({ callId, guestUserId, name: label, avatar: meta.avatar || '' })
     ensureComposer()
+  }
+
+  /** 从服务端在麦列表补齐嘉宾昵称与头像（接受后与每次麦位变化都可调，失败静默保留占位名） */
+  async function refreshGuestProfiles() {
+    if (!roomId.value) {
+      return
+    }
+    try {
+      const list = await fetchLinkmicList(roomId.value)
+      if (!Array.isArray(list) || !list.length) {
+        return
+      }
+      const byUser = new Map(list.map((g) => [asId(g.userId), g]))
+      onMicGuests.value.forEach((g) => {
+        const hit = byUser.get(asId(g.guestUserId))
+        if (!hit) {
+          return
+        }
+        if (hit.name) {
+          g.name = hit.name
+          const entry = sessions.get(g.callId)
+          if (entry) {
+            entry.label = hit.name
+          }
+          if (composer) {
+            composer.setLabel(g.callId, hit.name)
+          }
+        }
+        if (hit.avatar) {
+          g.avatar = hit.avatar
+        }
+      })
+      anchorGuestStreams.value = anchorGuestStreams.value.map((s) => {
+        const hit = byUser.get(asId((sessions.get(s.callId) || {}).guestUserId))
+        return hit && hit.name ? { ...s, name: hit.name } : s
+      })
+    } catch {
+      // 昵称补齐失败不影响连麦本身，继续用占位名
+    }
   }
 
   /** 拒绝某条申请 */
@@ -206,6 +268,22 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     teardownSession(callId)
   }
 
+  /**
+   * 主播一键断开全部连麦：逐路发 leave 并本地拆引擎，服务端收到后会向房间广播 linkmic active=false，
+   * 观众自动从合成流切回普通 HLS。待处理申请不在此处拒（那是「拒绝」按钮的语义）。
+   */
+  function endAllLinkmic() {
+    const ids = [...sessions.keys()]
+    if (!ids.length) {
+      return
+    }
+    ids.forEach((callId) => {
+      linkSend('leave', { callId, reason: 'anchor-end' })
+      teardownSession(callId)
+    })
+    ElMessage.success('已断开连麦')
+  }
+
   /** 收到嘉宾 offer：建/取引擎，落 remoteDescription（引擎自动回 answer） */
   async function handleOffer(callId, sdpType, sdp) {
     let entry = sessions.get(callId)
@@ -218,6 +296,10 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     if (!entry.engine) {
       await startAnchorEngine(entry)
     }
+    // 信令帧里只有 fromUserId、没有昵称（WsCallPayload 不为其建模），补一次 REST 把昵称/头像回填到麦位与画面名牌。
+    // 放在 offer 而不放在 accept 之后：服务端是先 sAdd 麦位集合再把 offer 转给主播，到这里必然已能查到；
+    // 而 accept 刚发出就查会跟服务端写集合同步抢跑，时灵时不灵
+    refreshGuestProfiles()
     try {
       await entry.engine.handleDescription(sdpType, sdp)
     } catch (e) {
@@ -232,22 +314,20 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     }
   }
 
-  /** 主播侧某路引擎：本地流挂进 composer 当主播画面，远端嘉宾流挂进 composer 当画中画 */
+  /** 主播侧某路引擎：本地流既是主播画面（合成 + 本地预览），嘉宾远端流既进合成也要能听到 */
   async function startAnchorEngine(entry) {
     const engine = buildEngine(
       entry.callId,
       (stream) => {
         // 主播本地流只需挂一次（多路连麦共享同一路主播摄像头）
-        if (composer && composerAnchorSourceId == null) {
-          composerAnchorSourceId = 'anchor'
-          composer.addSource('anchor', stream, 'anchor')
-        }
+        attachAnchorLocalStream(entry.callId, stream)
       },
       (stream) => {
         entry.remoteStream = stream
         if (composer) {
-          composer.addSource(entry.callId, stream, 'guest')
+          composer.addSource(entry.callId, stream, 'guest', entry.label)
         }
+        bindGuestStream(entry.callId, stream, entry.label)
       }
     )
     entry.engine = engine
@@ -256,6 +336,40 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     } catch (e) {
       ElMessage.error(`无法获取麦克风/摄像头：${(e && e.name) || ''}`)
       teardownSession(entry.callId)
+    }
+  }
+
+  /**
+   * 把嘉宾远端流登记给界面层。主播之前听不到嘉宾，就是因为远端流只被挂进了 composer 的隐藏静音
+   * <video>（只取帧与参与混音、不接扬声器）；现在界面层拿它绑一个未静音的 <video> 即可听到。
+   * ontrack 对同一路流会按轨各触发一次，stream 引用相同时直接返回，避免反复重建数组与重挂源。
+   */
+  function bindGuestStream(callId, stream, name) {
+    const list = anchorGuestStreams.value
+    const idx = list.findIndex((g) => g.callId === callId)
+    if (idx >= 0) {
+      if (list[idx].stream === stream) {
+        return
+      }
+      const next = list.slice()
+      next[idx] = { ...next[idx], stream, name }
+      anchorGuestStreams.value = next
+      return
+    }
+    anchorGuestStreams.value = [...list, { callId, stream, name: name || '嘉宾' }]
+  }
+
+  function unbindGuestStream(callId) {
+    anchorGuestStreams.value = anchorGuestStreams.value.filter((g) => g.callId !== callId)
+  }
+
+  /** 把某路引擎的本地流登记为主播画面源（预览与合成共用同一对象，不另开一次 getUserMedia） */
+  function attachAnchorLocalStream(ownerCallId, stream) {
+    anchorSelfStream.value = stream
+    if (composer && composerAnchorSourceId == null) {
+      composerAnchorSourceId = 'anchor'
+      anchorSourceOwner = ownerCallId
+      composer.addSource('anchor', stream, 'anchor', anchorName)
     }
   }
 
@@ -286,6 +400,26 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     await ensureConfig()
   }
 
+  function clearRequestTimeout() {
+    if (requestTimer) {
+      clearTimeout(requestTimer)
+      requestTimer = null
+    }
+  }
+
+  /** 给「申请中」上兜底时限：主播不在线之外的所有无响应场景，都能把 UI 拉回 idle */
+  function armRequestTimeout() {
+    clearRequestTimeout()
+    requestTimer = setTimeout(() => {
+      requestTimer = null
+      if (guestStatus.value !== 'requesting') {
+        return
+      }
+      resetGuest(true)
+      ElMessage.warning('上麦申请超时，主播未响应，请重试')
+    }, REQUEST_TIMEOUT_MS)
+  }
+
   /** 申请上麦 */
   async function requestMic() {
     if (guestStatus.value !== 'idle') {
@@ -309,6 +443,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     }
     guestStatus.value = 'requesting'
     guestHint.value = '正在申请上麦…'
+    armRequestTimeout()
   }
 
   /** 收到主播 accept：建嘉宾引擎并发 offer */
@@ -326,7 +461,8 @@ export const useLinkmicStore = defineStore('linkmic', () => {
       guestCallId,
       (stream) => {
         guestEngine = engine
-        void stream
+        // 自己的摄像头也要看得到（分屏右格），否则上麦后画面全黑、无从判断麦是否正常
+        guestSelfStream.value = stream
       },
       (stream) => {
         guestRemoteStream.value = stream
@@ -342,6 +478,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
       resetGuest()
       return
     }
+    clearRequestTimeout()
     guestStatus.value = 'active'
     guestHint.value = '已上麦'
     try {
@@ -372,11 +509,13 @@ export const useLinkmicStore = defineStore('linkmic', () => {
   }
 
   function resetGuest(closeEngine = false) {
+    clearRequestTimeout()
     if (closeEngine && guestEngine) {
       guestEngine.close()
     }
     guestEngine = null
     guestRemoteStream.value = null
+    guestSelfStream.value = null
     guestCallId = ''
     guestStatus.value = 'idle'
     guestHint.value = ''
@@ -468,6 +607,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     const entry = sessions.get(callId)
     pendingRequests.value = pendingRequests.value.filter((r) => r.callId !== callId)
     onMicGuests.value = onMicGuests.value.filter((g) => g.callId !== callId)
+    unbindGuestStream(callId)
     if (!entry) {
       maybeStopComposer()
       return
@@ -479,6 +619,21 @@ export const useLinkmicStore = defineStore('linkmic', () => {
       composer.removeSource(callId)
     }
     sessions.delete(callId)
+    // 主播画面由「先建起来的那一路引擎」的本地流供给，而引擎 close 会连自己的摄像头轨一起停。
+    // 不把它改挂到另一路仍活着的本地流上，观众就会看到主播那一格永久黑屏
+    if (anchorSourceOwner === callId) {
+      anchorSourceOwner = null
+      composerAnchorSourceId = null
+      if (composer) {
+        composer.removeSource('anchor')
+      }
+      const alive = [...sessions.values()].find((e) => e.engine && e.engine.localStream)
+      if (alive) {
+        attachAnchorLocalStream(alive.callId, alive.engine.localStream)
+      } else {
+        anchorSelfStream.value = null
+      }
+    }
     maybeStopComposer()
   }
 
@@ -494,6 +649,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
   /* ------------------------------ 退房/关播统一收尾 ------------------------------ */
 
   function reset() {
+    clearRequestTimeout()
     // 主播：关掉全部连麦路 + 合成器
     sessions.forEach((entry) => entry.engine && entry.engine.close())
     sessions.clear()
@@ -502,6 +658,9 @@ export const useLinkmicStore = defineStore('linkmic', () => {
       composer = null
     }
     composerAnchorSourceId = null
+    anchorSourceOwner = null
+    anchorSelfStream.value = null
+    anchorGuestStreams.value = []
     composerActive.value = false
     pendingRequests.value = []
     onMicGuests.value = []
@@ -511,6 +670,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     }
     guestEngine = null
     guestRemoteStream.value = null
+    guestSelfStream.value = null
     guestCallId = ''
     guestStatus.value = 'idle'
     guestHint.value = ''
@@ -536,6 +696,9 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     onMicGuests,
     composerActive,
     guestRemoteStream,
+    guestSelfStream,
+    anchorSelfStream,
+    anchorGuestStreams,
     // getters
     isAnchor,
     isGuest,
@@ -547,6 +710,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     acceptRequest,
     rejectRequest,
     kickGuest,
+    endAllLinkmic,
     requestMic,
     leaveMic,
     onSignal,

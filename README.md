@@ -234,7 +234,7 @@ npm run dev
 
 - **国际化 i18n / 深色模式 / 无障碍 a11y**（现界面为中文硬编码）。
 - **AI 未读摘要 / 智能回复建议 / AI 客服机器人**（可复用现有 DashScope 接入）。
-- **直播连麦 + 礼物打赏**（已完成：连麦走主播↔嘉宾 1:1 WebRTC P2P + 主播端 Canvas 合成 / WebAudio 混音→WebM 分片→观众 MSE 播放；礼物走新建虚拟积分钱包，充值为模拟支付桩）。待办：**PK（热度对比/投票，下一轮）**、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
+- **直播连麦 + 礼物打赏**（已完成：连麦走主播↔嘉宾 1:1 WebRTC P2P + 主播端 Canvas 合成 / WebAudio 混音→WebM 分片→观众 MSE 播放，合成画面为**抖音式左右分屏**（左主播、右嘉宾）并带主播「断开连麦」入口；三方视听出口已打通——观众听混音轨、主播与嘉宾各听界面层未静音的对端 `<video>`；礼物走新建虚拟积分钱包，充值为模拟支付桩）。待办：**PK（热度对比/投票，下一轮）**、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
 
 ---
 
@@ -1470,6 +1470,8 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 
 **多屏选择**：`gdigrab -i desktop` 默认抓整个虚拟桌面（多屏会拼接错位）；桌面端开播前枚举显示器，选定后用 `-offset_x/-offset_y/-video_size` 只抓该屏。渲染端只传 `displayId`（纯量），主进程按 id 现查 bounds，避免响应式对象过 IPC 克隆失败。
 
+**连麦模式**（链路细节见 [`md/直播.md`](md/直播.md) §12）：主播↔嘉宾走 1:1 WebRTC，协商信令复用主 `/ws`。主播端把「主播画面 + 嘉宾画面」用离屏 canvas 合成成**左右分屏**（左主播、右嘉宾：1 位占满、2 位上下、3~4 位 2×2，格内 contain 等比居中 + 左下角昵称名牌），`AudioContext` 混音后经 `MediaRecorder` 出 WebM 分片 `PUT` 到同源媒体端点；观众端从 hls.js 切到 MSE 播 `webm/manifest.json`，麦位清空时服务端扇出 `linkmic active=false`，观众自动切回 HLS。主播与嘉宾本地看到的是 `Live.vue` 里与 canvas 同构的分屏 `<video>`，其中**对端那一格不静音**——那是本地能听到的唯一出口（composer 内部的 `<video>` 离屏且静音，只负责取帧；`gain → destNode` 只是录制那一路）。主播端「断开连麦」逐路发 `leave`，嘉宾「下麦」只断自己那一路。因合成与上传都在渲染层 fetch 完成，**连麦时 Web 端也能开播**（非连麦开播仍仅桌面端）。
+
 **主要配置**（`im.live.*`，环境变量可覆盖，逐项注释见 `application.yml`）：
 
 | 配置 | 环境变量 | 默认 | 说明 |
@@ -1480,7 +1482,9 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 | `sign-secret` | `IM_LIVE_SIGN_SECRET` | 开发用串 | 播放地址签名密钥，**生产必须替换**且与 Nginx 一致 |
 | `ended-room-visible-minutes` | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束房间在列表的可见时长（分钟），0/负数=不过滤 |
 
-**自测启动**：① 建表 `im_live_room`（`sql/im_schema.sql`）；② `node electron/live-media-server.js`（8088）；③ 后端加载 `im.live` 配置；④ `npm run dev`（vite proxy 已含 `/hls`），手机与本机同 WiFi 打开控制台 `Network` 地址（自签证书手机不信任时改用 `npm run dev:lan` 走 http）。完整部署、生产 Nginx 迁移与排障见 [`md/直播.md`](md/直播.md)。
+**自测启动**：① 建表 `im_live_room`（`sql/im_schema.sql`）；② `node electron/live-media-server.js`（8088）；③ 后端加载 `im.live` 配置；④ `npm run dev`（vite proxy 已含 `/hls`），手机与本机同 WiFi 打开控制台 `Network` 地址。完整部署、生产 Nginx 迁移与排障见 [`md/直播.md`](md/直播.md)。
+
+> ⚠ 连麦与音视频通话**必须走 https/localhost**：http 下浏览器不给麦克风摄像头、`wss` 也被拒，所以不能用 `npm run dev:lan` 退回 http 来解决手机不信任自签证书的问题，正确做法是把 `im-ui/certs/ca.pem` 装进设备受信任根存储（见 `md/自签证书原理与跨项目HTTPS复用指南.md`）。
 
 ---
 

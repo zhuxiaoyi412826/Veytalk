@@ -164,7 +164,9 @@ return `${protocol}//${window.location.host}`
   未通过」，那才是会话侧的问题。
 - **想彻底不碰证书**：后端 `im.remote.aes: false` + 前端 `npm run dev:lan`（强制 http），
   此时用 `http://<本机IP>:5173` 访问，走 ws 明文；代价是 H.264/WebCodecs 与 WebCrypto 都不可用，
-  画面自动回落 JPEG，只适合内网排障与演示。
+  画面自动回落 JPEG，只适合内网排障与演示。另外**连麦与音视频通话在 http 下直接不可用**
+  （非安全上下文里浏览器不暴露 `navigator.mediaDevices`，`wss` 也被拒），要测这两项必须按本文
+  前几节把根 CA 装好并回到 `npm run dev` 的 https。
 - **改了代码 dev server 没起来 / 端口被占**：`5173` 被旧进程占用时 Vite 因 `strictPort`
   直接报错退出，任务管理器结束残留的 `node.exe` 后重跑 `npm run dev`。
 - **不想用 https，只是临时看一眼**：可用 `http://localhost:5173`（本机 localhost 豁免

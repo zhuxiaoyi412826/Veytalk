@@ -45,7 +45,7 @@
 群机器人 / Webhook：群内自动化通知、外部系统接入。
 聊天记录导出 / 迁移 / 备份（远程审计能导 CSV，聊天记录不能）。
 直播连麦 / PK（依赖 Roadmap 的 TRTC）、礼物打赏（依赖 Roadmap 的钱包）、直播回放存档、付费/密码直播、弹幕房管与关键词屏蔽。
-（已完成连麦 + 礼物/钱包，PK 暂缓下一轮：连麦走主播↔嘉宾 1:1 WebRTC P2P（信令复用主 /ws 的 linkmic/linkmic-signal，复用 buildIceServers 下发 ICE，两方无需 SFU）；观众看到的流由主播端 Canvas 合成主播+嘉宾画面、WebAudio 混两路音，经 canvas.captureStream+MediaRecorder 产 WebM 分片 fetch PUT 上传，观众端新增 MSE/WebM 播放器（webmPlayer.js）滚动 appendBuffer——非连麦直播仍走 ffmpeg→HLS→hls.js 不变；礼物新建虚拟积分体系四张表（im_user_wallet/im_gift/im_gift_record/im_wallet_transaction），充值为模拟支付桩（PaymentSpi+MockPaymentSpi，@ConditionalOnProperty 门控，接真实支付以 @Primary 覆盖）+ 每日签到赠送，本轮不接真实货币。零新增 npm 依赖。PK（热度对比/投票）依赖本轮已埋的房间礼物热度，下一轮实现。详见 md/直播.md 连麦合成与 MSE 播放章节、README.md 直播/钱包接口表）
+（已完成连麦 + 礼物/钱包，PK 暂缓下一轮：连麦走主播↔嘉宾 1:1 WebRTC P2P（信令复用主 /ws 的 linkmic/linkmic-signal，复用 buildIceServers 下发 ICE，两方无需 SFU）；观众看到的流由主播端 Canvas 合成（无人时主播铺满，有人连麦时按左主播、右嘉宾的左右分屏，格内 contain 等比居中 + 昵称名牌）、WebAudio 混多路音（新建的 AudioContext 必须 await resume，否则录出的 WebM 有音轨但全无声），经 canvas.captureStream+MediaRecorder 产 WebM 分片 fetch PUT 上传，观众端新增 MSE/WebM 播放器（webmPlayer.js）滚动 appendBuffer——非连麦直播仍走 ffmpeg→HLS→hls.js 不变；礼物新建虚拟积分体系四张表（im_user_wallet/im_gift/im_gift_record/im_wallet_transaction），充值为模拟支付桩（PaymentSpi+MockPaymentSpi，@ConditionalOnProperty 门控，接真实支付以 @Primary 覆盖）+ 每日签到赠送，本轮不接真实货币。零新增 npm 依赖。PK（热度对比/投票）依赖本轮已埋的房间礼物热度，下一轮实现。详见 md/直播.md 连麦合成与 MSE 播放章节、README.md 直播/钱包接口表）
 
 
 
