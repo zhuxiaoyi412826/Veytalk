@@ -6,7 +6,7 @@
 
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.8-brightgreen) ![JDK](https://img.shields.io/badge/JDK-21-orange) ![Vue](https://img.shields.io/badge/Vue-3.5.42-4FC08D) ![MySQL](https://img.shields.io/badge/MySQL-8.x-4479A1) ![Redis](https://img.shields.io/badge/Redis-5%2B-DC382D) [![License](https://img.shields.io/badge/License-Apache%202.0-blue)](LICENSE)
 
-**工程形态**：后端 12 个 Maven 模块 repackage 成单 jar（`im-bootstrap/target/im-server.jar`）；被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上、不打进后端；前端是独立工程，通过 Vite 代理与后端通信、不参与 Maven 构建。
+**工程形态**：后端 **14 个 Maven module**（根 `pom.xml`），其中 13 个 repackage 成单 jar（`im-bootstrap/target/im-server.jar`）；被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上、不打进后端；前端是**两个独立工程**——聊天端 `im-ui`（Web / 桌面 / 手机浏览器）与管理后台 `im-admin-ui`（只在电脑浏览器用），都通过 Vite 代理与后端通信、不参与 Maven 构建。
 
 ---
 
@@ -26,6 +26,7 @@
 - **离线消息补推**（`im_message` 本身当持久队列，重连/上线补拉）
 - **幂等三重设防**（Redis 标记 + 唯一键 + 回查）、断网本地待发送队列重提交
 - 消息历史分页、本地优先（端侧 SQLite/sql.js 缓存，本地凑得出整页就零请求）
+- **消息互动与沉淀**：表情回应 Reaction、投票 / 接龙（`MsgType.CHAIN(14)`，零 DDL，条目存 `im_message.extra.chainItems`）、群精华、常用语快捷回复、聊天记录导出、**我的收藏**（用户维度的私人书签，`im_message_favorite` + 「我的收藏」面板，可跨会话筛选并一键跳回原消息定位高亮）
 
 **社交关系（im-friend）**
 
@@ -63,10 +64,25 @@
 
 **直播（im-live）**
 
-- **抖音式 HLS 直播**：Electron 桌面端 ffmpeg 采集（屏幕 gdigrab / 摄像头 dshow）→ H.264 硬编 → 切 HLS fMP4 1s 分片 → HTTP PUT 上传到媒体服务器 → 观众 hls.js 拉流（见「十四」）
+- **抖音式 HLS 直播**：Electron 桌面端 ffmpeg 采集（屏幕 gdigrab / 摄像头 dshow）→ H.264 硬编 → **一份源同时编成多档** → 切 HLS fMP4 1s 分片 → HTTP PUT 上传到媒体服务器 → 观众 hls.js 拉流（见「十四」）
+- **多档清晰度阶梯 + 观众端真切档**：推 1440p/1080p/720p/480p（主播只选一个原画，高于采集源的档自动砍掉），网页端与桌面端在直播和回放里都能看到**固定的五个选项「自动 / 480p / 720p / 1080p / 1440p」**（与开播面板同名字同顺序；本场没铺到的档位置灰并标出原因，不藏控件也不给假可选项），选档走 `hls.js currentLevel` 真切码流，不是前端放大像素；播放引擎**先试 hls.js（MSE），只有没 MSE 的浏览器（iOS）才退回原生 HLS**，此时四档置灰并写明原因（★ 顺序不能反，`canPlayType` 回 `maybe` 的浏览器一大把，先判原生就把能切档的客户端推进了没有档位 API 的分支，见 `md/已踩坑.md` 第 19 条）；**零后端改动、零 DDL**（主清单沿用 `index.m3u8` 同名，签名/接口/表结构全不动）；★ 生产 Nginx 需改为**只签主清单**（见「十四」§18 与 `md/直播.md` §10.5）
 - 房间管理（开播/关播/撤销 abort）、播放地址签名防盗链、主播心跳超时结算
-- **弹幕/点赞 WS `/ws/live`**、在线人数
+- **弹幕/点赞 WS `/ws/live`**、在线人数、礼物飘屏、连麦上下麦、**PK 进度帧**
+- **弹幕房管**（主播禁言名单 + 自定义屏蔽词）与**连麦 PK**（两个在播房间比热度增量 + 观众投票），均零 DDL 存 Redis（见「十四」§13 / §14）
+- **直播回放存档**：关播时由推流端把整场分片拼成**逐档 VOD 清单 + 回放主清单** PUT 到 `{roomId}/replay/`，入口标记与统计走 Redis，**零 DDL、零新增依赖、分片本来就在盘上**；回放同样可切档；房间页「▶ 看回放」与大厅「🎬 可回看」横条两个入口（见「十四」§15 / §18.5）
+- **主播数据面板**：`GET /api/live/anchor/stats` 一次换回时间窗内的概览（场次 / 时长 / 人次 / 峰值 / 礼物积分）、逐场明细、金主榜、礼物种类榜，外加此刻正在播那场的实时数据；**零 DDL 纯读聚合**（`im_live_room` + `im_gift_record` + 现有 Redis 计数），刻意**不建汇总表**（见「十四」§16）
+- **付费 / 密码直播**：开播可选设「房间密码」或「入场积分价」，未解锁观众拉不到画面、进不了弹幕；**零 DDL**——门禁配置与解锁态都存 Redis（`im:live:gate:{roomId}` / `im:live:unlock:{roomId}:{userId}`），真闸门是 `toVO` 只对已解锁/主播下发 `playUrl`+`danmakuWs`；付费只扣观众积分、不给主播入账（与礼物同口径）（见「十四」§17）
 - **ENDED 聊天模式**：关播后画面作废但聊天室保留 60 分钟
+
+**运营与治理（im-admin / im-admin-ui）**
+
+- **举报闭环一期**：聊天端四个入口（消息右键 / 用户资料卡 / 直播间 / 群设置）共用一个**字典驱动**的弹窗（理由、必填标记、字数上限全从 `GET /api/report/config` 取，前端不复制一份码表）→ 提交即由各归属模块的 `ReportTargetSpi` 抓**证据快照**落 `im_report`（对象事后被删、关播都不影响处理）→ 后台工单队列可受理 / 驳回 / 处置 → 结论经 `/ws` 的 `NOTIFY` 帧推回举报人
+- **处置执行者分界**：`NONE` / `WARN` 由 im-admin 自己完成，`BAN_USER` → im-user、`RECALL_MESSAGE` → im-message、`CLOSE_ROOM` → im-live 经 SPI 交出去，**im-admin 不 import 任何业务模块的 Mapper / Service**（星型约束）
+- **管理后台前端**：独立工程 `im-admin-ui`（登录 + 数据看板 + 用户管理 + 举报队列 + 角色管理）。二期把「拿到就是全量」的单一 `system:manage` 拆成四个细粒度权限点（看板 / 用户管理 / 举报处置 / 角色分配），菜单与路由按 `auth.can()` 逐屏显隐；登录闸门改为「持有伞权限或任意一个细粒度点即可进门」，低权限角色（审核员 / 运营）不再被挡在登录页外
+- **多角色分级与角色分配（二期）**：三个控制器从伞权限 `system:manage` 细化到各自的点（`system:manage` 保留作向后兼容的伞权限，admin 种子里补齐四个新点）；新角色分配经 `AdminUserSpi.setUserRoles`（整体替换 + 三条护栏：拒改自己 / 拒摘最后一个可用管理员 / 拒未知角色，改完 `evictCache` 即时生效），im-admin 不碰 `im_user_role`（星型约束）
+- **处置人可见（二期、默认关）**：`im.admin.report-handler-visible` 静态开关，打开后 `GET /api/report/mine` 每行带 `handlerName`、处理结论通知也署名处置人昵称；关着时后台响应根本不含处置人字段（沿用一期隐私口径）
+- **数据看板**：平台数字与各模块指标经 `AdminMetricsSpi` 汇聚；**取不到的指标显示「—」而不是 0**，模块缺席就少一个分区，页面同时显示「数据截至」与滞后秒数
+- 举报可整体关闭（`im.admin.enabled: false`），关闭后聊天端四个入口一起隐藏；配额与去重见「十八、管理后台与举报闭环」
 
 **公共基础设施（im-common / im-bootstrap）**
 
@@ -117,13 +133,14 @@ npm run dev
 | 文档 | 内容 |
 |---|---|
 | [`md/项目启动流程.md`](md/项目启动流程.md) | 从零跑起来的分步流程（对应本文「三 ~ 七」章） |
-| [`md/架构与请求链路图.md`](md/架构与请求链路图.md) | 三层架构、HTTP / WebSocket 链路、登录鉴权、文件上传下载、远程控制、AI、直播等专项时序图 |
-| [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md) | 四端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron）+ 端侧 IndexedDB·本地 SQLite·服务端 L1 Caffeine + L2 Redis + L3 MySQL 全链路 |
+| [`md/架构与请求链路图.md`](md/架构与请求链路图.md) | 三层架构、HTTP / WebSocket 链路、登录鉴权、文件上传下载、远程控制、AI、直播，以及**举报与后台链路（第十二节）**等专项时序图 |
+| [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md) | 四端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron，另加第五个入口管理后台 `im-admin-ui`）+ 端侧 IndexedDB·本地 SQLite·服务端 L1 Caffeine + L2 Redis + L3 MySQL 全链路 |
 | [`md/直播.md`](md/直播.md) | 直播选型对比与 HLS 推 / 拉流细节、Nginx 生产配置 |
 | [`md/图片内容审核接入指南.md`](md/图片内容审核接入指南.md) | 图片 NSFW 审核：为何把推理放前端、阈值调法、审计日志、血腥 / 暴力模型的投放与三个坑 |
 | [`md/手机真机调试HTTPS配置指南.md`](md/手机真机调试HTTPS配置指南.md) | 手机真机联调远程控制的自签证书配置 |
-| [`im-ui/README.md`](im-ui/README.md) | 前端工程详细说明 |
-| `http://localhost:8080/doc.html` | Knife4j 聚合接口文档（入参 / 出参、在线调试，9 个分组） |
+| [`im-ui/README.md`](im-ui/README.md) | 聊天端前端工程详细说明 |
+| [`im-admin-ui/README.md`](im-admin-ui/README.md) | 管理后台前端工程说明（端口与 CORS、登录链路、部署四事） |
+| `http://localhost:8080/doc.html` | Knife4j 聚合接口文档（入参 / 出参、在线调试；分组按 `@Tag` 增长，不写死个数） |
 | [`md/CHANGELOG.md`](md/CHANGELOG.md) | 版本变更记录 |
 
 ---
@@ -144,6 +161,7 @@ npm run dev
 
 - **后端**：整体打包 `mvn clean package -DskipTests`，产物 `im-bootstrap/target/im-server.jar`。改过跨模块代码（如 `im-common`）后若要用 `spring-boot:run` 跑，**必须先 `mvn install` 到本地仓库 `~/.m2`**，否则会**静默**跑旧 jar——`spring-boot:run` 只编译 `im-bootstrap` 一个模块、跨模块依赖从 `~/.m2` 解析（命令与原因见「六、启动后端」「十五、已知坑」）。
 - **前端**：`cd im-ui; npm install; npm run dev`（开发，5173）/ `npm run build`（生产，产物 `im-ui/dist`）/ `npm run build:electron`（桌面端）；`npm run dev:lan` 局域网模式，`npm run gen:cert` 生成手机真机联调用的自签证书。
+- **管理后台前端**：`cd im-admin-ui; npm install; npm run dev`（开发，5273）/ `npm run build`（产物 `im-admin-ui/dist`）。它是独立工程与 `im-ui` 不共用依赖与构建，登录态却共用同一套 Sa-Token；端口与背后的 CORS 白名单绑死，改一处要改三处（见 `im-admin-ui/README.md`）。
 
 ### 测试
 
@@ -189,6 +207,18 @@ npm run dev
   - **闪照语义：每人各看一次、互不影响**（仅单聊）：`im_message.extra.flashViewedBy` 存已消费查看的用户名单，`flashViewed` 是下发前按查看者现算的瞬态位（名单含自己即已销毁），**发送端自己看一眼不会吃掉接收端那一次**；只有会话**全员**都看过才触发销毁。销毁 = `im_file` 记录**逻辑删**（`@TableLogic` 置 `deleted=1`，应用层 `download` / 直链均取不到字节），**不物理删存储字节**（秒传共享 `objectKey`，删字节会误伤他人同内容文件），无 DDL。需重启后端生效。
 - **血腥 / 暴力图像识别（默认关）**：色情那五类里根本没这两类，所以另接了一个 ViT-Base 的 int8 ONNX 模型走 `onnxruntime-web`（`im-ui/src/utils/violence.js`），`nsfw.js` 升级为**多模型编排层**（按阈值激活、命中早退、单模型挂不拖另一路）；后端零改动、零 DDL，只要 `im.moderation.thresholds` 里出现 `Violent` 就激活。
 - **一对一语音视频通话 + 桌面端录屏留存**：**原生 WebRTC**（不依赖 TRTC 等外部 RTC SDK），信令走已认证的用户 WebSocket 长连接（服务端只校验关系 + 转发 + 维护 Redis 会话态），媒体内网点对点直连不经服务器、跨公网自建 STUN/coturn TURN。通话记录复用 `im_message`（`MsgType.CALL`）、录音文件复用 `im_file`（`call_record`），**零新表零新依赖**；桌面端合成上下行音视频落盘 + 上传留存 + 气泡回放（Web 端通话可用但不落盘）。详见 [`md/语音视频通话接入指南.md`](md/语音视频通话接入指南.md)。
+- **群通话 / 多方会议（小房间 mesh，零 DDL）**：上一条只有一对一，本条把它扩到多人。**拓扑是 mesh**（每两人一路 P2P，房间里 N 人就有 `N(N-1)/2` 条链路）而不是 SFU：后者要新进程 + 原生编译依赖（Windows 无原生支持），而本仓库大量环境是无外网的 Windows 开发机。服务端只搬 SDP/ICE（新帧类型 `groupcall` / `groupcall-signal`，仍复用主 `/ws`），**媒体一个字节不进 Spring Boot 进程**；花名册只存 Redis（`im:gcall:*` 四键，带 TTL 自回收），**不建表不改表**。协商方向恒定「后进房者对每个先到者发 offer」，否则两侧同时 offer 撞车；本地只采一次 `getUserMedia`，N-1 路共用同一路流（Windows 上重复打开同一摄像头不安全，且一路关闭不能停共享轨）。默认 4 人上限（`im.call.group-max-slots`，服务端硬夹 `[2,6]`），**代价三条写在明处**：每人上行 `N-1` 路编码、TURN 要扛 `N(N-1)/2` 路中继、与 1:1 通话及直播连麦的忙线键是三套（跨类型不并发靠前端拦）。群聊 header 两个入口 + 「群里正在通话·加入」提示条 + 浮层头像墙（静音 / 摄像头 / 邀请 / 离开）；通话记录仍复用 `MsgType.CALL`，只发起人落一条、多一个 `extra.callParticipantCount`；**不落盘录制**（mesh 下要录 N-1 路分立流得先混流）。机理与自测步骤见同一份指南 §13。**未做浏览器多端真机联调**。
+- **多档清晰度阶梯（2K 推流 + 观众端真切档，零后端改动，2026-10-20 本批交付）**：主播只选一个「原画」分辨率（新增 `1440p (2K)`），`electron/live.js` 把**一份源用 `split=N` 同时编成 2K/1K/720P/480P**、写成标准 HLS 阶梯（`-var_stream_map` + `-master_pl_name index.m3u8`）；码率按原画的 1 / 0.55 / 0.3 / 0.16 逐档绑定（`-b:v:i`），**高于采集源物理高度的档直接砍掉**（1080p 的屏不出 2K，缩放 150% 的 4K 屏靠 `bounds.height × scaleFactor` 才能正确保留 2K）。网页端与桌面端（共用 `im-ui`）在直播与回放里都能选「自动 / 2K / 1K / 720P / 480P」，走 `hls.levels` + `currentLevel` 真切流（不是前端放大像素），偏好存 `settings.liveQuality`（**存高度不存序号**，本场没那档就回落自动，绝不锁到一个不存在的档上）。**后端零改动**：`LiveUrlSigner` 只签 `index.m3u8`，主清单沿用同名就签名/接口/Redis 键/表结构全不动（`resolution VARCHAR(16)` 装得下 `1440p` 且服务端只存不校验）；回放也升级为**逐档 VOD 清单 + 回放主清单**。**代价与边界写在明处**：四档总码率≈原画 2.01 倍（上行/磁盘/下行同比涨）、阶梯**默认开启不加开关**（本机实测四档 libx264 veryfast 4.20× 实时、NVENC 3.61× 实时）、单档流/连麦 WebM 合成流/Safari 原生 HLS 三种情况**隐藏选择器**（给一个“切了没反应”的假控件比没有更糟）。★ **生产 Nginx 必须改配置**：只对 `~ /index\.m3u8$` 签名，其余 `.m3u8` 不能签（hls.js 拉变体清单不带主清单 query，一律 403 直接黑屏；局域网自测替身不校签名所以自测看不出来）。机理、实测命令要点与已知边界见 [`md/直播.md`](md/直播.md) §18，ffmpeg 四个静默坑见 [`md/已踩坑.md`](md/已踩坑.md) 第 14~16 条。
+- **管理后台一期 + 举报闭环（2026-10-19 本批交付）**：新建 `im-admin` 模块（第 11 个业务模块）与独立前端工程 `im-admin-ui`，只一张新表 `im_report`。聊天端四个入口（消息右键 / 用户资料卡 / 直播间 / 群设置）→ `POST /api/report` 抓证据快照入库 → 后台 `/api/admin/**` 工单队列可受理 / 驳回 / 处置 → 结论经 `PushSpi` 的 `NOTIFY` 帧推回举报人（举报未成立 / 举报已处理）。
+  - **为什么一张表就够**：证据存 JSON 快照而不是事后回查——消息会被撤回、房间会关播、群会解散，**对象事后没了也要能完成处置**；责任人 `reported_user_id` 提交时一次性由 SPI 反查并存下（同一人累计几张工单这个聚合要一直算得出）。
+  - **星型约束不破**：im-admin 不 import 任何业务 Mapper，用户封禁 / 消息撤回 / 关播全部经 `im-common` 的 `AdminUserSpi` / `ReportTargetSpi` 交回归属模块执行；看板指标经 `AdminMetricsSpi` 从四个模块汇聚，模块缺席就少一个分区。
+  - **未做的部分（不是遗留 bug，是一期刻意不抢范围）**：看板只做一期口径（不建埋点、不拉时间序），**系统配置页未做**（举报开关与配额现在只能改 `application.yml` + 重启）；`GET /api/report/mine` 端点已就绪但**聊天端无 UI**（结论已经由 WS 推给举报人，列表只多不少一个刷新入口而已，排在下一批）；无机器复审（队列全人工）；举报人看不到处置人是谁。
+- **管理后台二期 · 多角色分级 + 角色分配 + 处置人可见（2026-10-19 本批交付）**：把一期已存在但只种了 2 角色 1 个后台权限点的 RBAC 底座（`im_role`/`im_permission`/`im_role_permission`/`im_user_role` 四表 + `PermissionProviderImpl` 缓存）真正用起来。**按用户决策「只改代码层」：零新建表**——系统配置页（无 `im_admin_config`）与操作审计表（无 `im_admin_audit`）都不做，处置人可见用 `application.yml` 静态开关。**多角色分级**：`ImConstants` 加 `system:dashboard`/`system:user:manage`/`system:report:handle`/`system:role:manage` 四个细粒度权限点 + `moderator`/`operator` 两个示范角色，三个既有控制器类级 `@SaCheckPermission` 从伞权限 `system:manage` 细化到各自那一个点（`system:manage` 保留为向后兼容伞权限，admin 种子必须补齐 108~111 否则反被拦、四屏全 403）。**角色分配**：`AdminUserSpi` 扩 `listRoles`/`listUserRoleIds`/`setUserRoles`，新建 `AdminRoleController`+`AdminRoleService`，三条硬护栏（拒改自己 / 拒摘最后一个可用管理员 / 拒未知角色）+ 改完 `evictCache` 即时生效，im-admin 经 SPI 不碰 `im_user_role`（星型不破）。**处置人可见**：`im.admin.report-handler-visible` 默认关，打开后 `ReportVO` 才带 `handlerName`（`mine()` 批量解析防 N+1）、驳回/处置通知也署名。前端：`auth.can()` 逐屏判定、路由 `meta.perm` + 守卫回退可访问首屏、菜单按权限显隐、新建 `RolesView`、`UsersView` 加「配角色」弹框。SQL 见 `sql/im_data.sql` 与 `sql/migration_admin_phase2.sql`（纯 DML、幂等，存量库先跑再重启）。**仍缺**：系统配置页 / 操作审计（属建表范畴，本轮刻意不做）、机审复审（与一期同条）；未做重启后端 + 跑迁移后的登录级端到端验证。
+- **主播数据面板（零 DDL，2026-10-19 本批交付）**：直播大厅「📊 我的数据」一次请求换回**窗口内概览**（场次 / 累计时长 / 观看人次 / 平均与最高峰值 / 礼物积分 / 送礼人数 / 上次开播）、**逐场明细**（时长、峰值、人次、礼物笔数与人数、关播原因，可直接进房或看回放）、**金主榜**与**收到最多的礼物**，外加此刻正在播那场的实时行（在线 / 峰值 / 人次 / 礼物 / 点赞 / 已播时长）。取数全部复用既有资产——`im_live_room` 每场一行的定格值、`im_gift_record`（它的 `idx_room_time` 与 `idx_receiver_time` 刚好对上「按场次聚合」和「按主播聚合」两种查法）、现有 Redis 在线与点赞热度键，**不建汇总表、不改任何写入链路**；唯一新增的既有类方法是 `LiveDanmakuService.peekStats`（只读不清，与关播落库用的 `drainStats` 必须分开，否则主播刷一次页面就把自己的峰值归零）。面板脚注把三个「做不到」直接印出来：礼物价值是虚拟积分且**不进主播钱包**、不可提现；点赞只存 24 小时所以历史场次没有、弹幕条数服务端从来没存量；不含 PK 战绩（会话按 `pkId` 寻址、无主播维度索引、只活一天）。概览只覆盖窗口内最近 100 场，被截断时前端显式警告（`sessionsCapped`）。机理与取舍见 [`md/直播.md`](md/直播.md) §16。
+- **消息收藏（2026-10-19 本批交付）**：给消息加一层**只属自己可见的私人书签**。后端新建 `im_message_favorite`（与 `im_message_essence` 同构，唯一键 `uk_user_message(user_id, message_id)`——同一条消息可被多人各自收藏，A 取消不伤 B），`GET /api/message/favorites` 按收藏时间倒序分页（`conversationId` 为空则跨全部会话）、`PUT /api/message/{id}/favorite` 收藏/取消；整页回填走 `toViewList → attachFavorites`（单次 `IN`，导出聊天记录那种两万条走 `FAVORITE_ATTACH_LIMIT=500` 封顶不标）；`favorite-notify` **只推给操作者本人**（收藏不该像精华那样打扰全群，它的真正语义是同一账号多端同步）；单端删除 / 清空会话 / 账号注销三处级联清行，不给收藏列表留点不开的幽灵行。前端：气泡「★ 已收藏」角标、右键菜单收藏项、⭐「我的收藏」面板（只看本会话筛选 + 分页 + 取消），并新建 `locateTarget → ensureMessageLoaded → flashMessage` 跳链路——从收藏列表一键跳回原会话并定位高亮（必要时向前补拉历史，封顶 10 页）。顺手补掉两个旧洞：全局搜索与会话内搜索结果现在都能点击定位（原先只跳转不定位 / 完全不可点）。**本轮三个功能（回放 / 收藏 / 数据面板）里只有收藏需要 DDL**，而且是刻意的（与它同批的回放、转账红包都做到了零 DDL），理由见「五、数据库初始化 › 已有库的增量升级」与 `md/数据库表解析.md` §7.7。
+- **直播回放存档（零 DDL，2026-10-19 本批交付）**：直播的分片本来就存在媒体服务器上，所以回放不需要录制、不需要转码、不需要新表——缺的只是一份**不滚动、带 `ENDLIST` 的 VOD 播放清单**。实现：Electron 上传泵在推流期间给每个 PUT 成功的分片记一份内存台账（序号/时长/字节），关播时排空队列后拼成清单 PUT 到 `{roomId}/replay/index.m3u8`，后端 `LiveReplayService` 只在 Redis 落一个入口标记并用 `LiveUrlSigner` 现签地址；前端房间页黑屏处「▶ 看回放」、hls.js 走 VOD 分支、大厅「🎬 可回看」横条 + 卡片角标 + 关播后 10 秒一次性探测。**保留期（2026-10-20 改）**：回放只留 `im.live.replay.retention-days`（默认 **1 天**），这个值同时管 Redis 入口 TTL 与媒体服务器上源文件的删除线——到期后整个房间目录（分片 / init / 各档清单 / 回放目录）由媒体侧 `electron/live-retention.js` 实删（Java 进不到媒体磁盘，删除只能在媒体面做）。机理、路径与签名口径、已知边界见 [`md/直播.md`](md/直播.md) §15 与 §10.7。
+- **聊天小功能与钱包用户间流转（2026-10-18 本批交付）**：**常用语 / 快捷回复**（`GET|PUT /api/conversation/quick-reply`，整表替换、去空去重保序，上限 20 条 / 单条 200 字，**存 Redis 不建表、也不只放 localStorage**——手机与桌面要看到同一份话术）；**会话内关键词检索的前端入口**（后端 `GET /api/message/search?conversationId=` **此前已实现**，旧文档误列为缺口，本轮只在 `ChatWindow.vue` 补搜索条与命中定位）；**用户间转账与红包**（`MsgType.TRANSFER(12)` / `RED_PACKET(13)` + `POST /api/wallet/transfer` / `/packet`，转账走单聊、红包走群聊拼手气，**零 DDL**：钱走 `im_wallet_transaction`、领取态走 Redis Hash，过期余额由账本求和退回，机理见「九、钱包」）。资金类消息只允许服务端内部产生（客户端伪造 `msgType=12/13` 直接被拒），且**不可撤回、不可转发**。
+- **消息与群体验一整批**（这些曾列在待办里、实际已交付，2026-10-18 校准路线图时逐项对代码核实）：**表情回应 Reaction**（`im_message_reaction`）、**消息编辑**（`EditMessageRequest`，仅本人 / 时限内 / 未撤回的文本）、**新消息类型**：名片 `CARD(7)` / 位置 `LOCATION(8)` / 聊天记录合并转发 `MERGED_FORWARD(9)` / 投票 `VOTE(10)`（走同一套策略处理器扩展范式）、**语音转文字与消息翻译**（`SpeechToTextSpi` / `TranslationSpi` + 配置门控优雅降级）、**群文件 / 群相册 / 群精华**（前两者是群会话按 `msgType` 的过滤视图零 DDL，精华为 `im_message_essence`）、**进群审批 / 邀请链接 / 群二维码**（`im_group_join_request` + zxing 二维码）、**群机器人 / Webhook**（`im_group_robot`，外部系统凭回调地址推消息，服务端拦截客户端伪造 `SYSTEM|ROBOT`）、**群禁言**、**置顶 / @全体 / 免打扰 / 已读回执**、**聊天记录导出**（本地 JSON 与云端 JSON/CSV，单会话上限 20000 条游标翻页）、**草稿箱**（按会话暂存，刻意不落 localStorage）、**账号注销与数据级联擦除**（`UserDataEraseSpi`）。
 
 ### 🚧 代码就绪，待接真实服务商 / 依赖服务器
 
@@ -202,39 +232,33 @@ npm run dev
 
 - **第三方授权登录**：QQ / 微信 / GitHub OAuth。
 - **语音 / 视频面试官**：基于 TRTC，覆盖移动端与电脑端。
-- **钱包**：零钱、转账等。
 - **图片审核升级成服务端真防线**：现行判定跑在发送端浏览器，绕开页面直接调上传接口即可突破；要成硬防线需服务端补一条推理链路（阈值配置与审计口径可直接复用）。
-- **直播右侧内容面板**：文章 / 视频 / 小说 / 音乐，点击切换展示。
+- **直播右侧内容面板**：文章 / 小说 / 音乐，点击切换展示（**视频板块已落地**：`im_live_video` + `/api/live/video` 分页 / 发布 / 下架 / 播放计数，大厅信息流与 `Live.vue` 已可用）。
+- **点播短视频的真多档清晰度**：直播已经有多档阶梯，`im_live_video` 却仍是一行一个原文件、上传时不转码，所以播放条只如实显示 `宽×高`、**不给假选择器**。要真多档得新增列/表存多路产物 + 上传期逐档转码 + N 倍存储与流量，而且转码只有桌面端能做（Web 上传无法起 ffmpeg），机理见 [`md/直播.md`](md/直播.md) §18.8。
+- **大会规模（>6 人）与群通话录制**：群通话一期已用 mesh 落地小房间（默认 4 人、硬顶 6，见上一条），要真正开大会需换 SFU（mediasoup / LiveKit）做混流，那不是调大上限数字就行；群通话也不落盘录制（同理得先混流）。
 - **Tauri 2 打包**：安卓端 + 重新打包 exe（现有桌面端为 Electron 方案，见「七」）。
 - **日志系统完善**：在现有 logback 分档日志（见「六」）基础上进一步增强。
 
 **🔴 关键短板（企业级 / 合规 / 移动端最该补）**
 
 - **系统级离线推送**：App 被杀时经 APNs / FCM / 个推 / 小米华为通道唤醒（现「离线消息补推」仅重连后补拉）。
-- **管理后台（Admin Console）**：用户管理 / 封禁、举报处理、内容审核队列、数据看板、系统配置（现仅有 RBAC 权限码，无独立后台 UI）。
-- **举报 + 内容审核闭环**：举报违规消息 / 用户 → 审核队列 → 人工 / 机器复审 → 处置（现仅发送时敏感词过滤）。
+- **管理后台（Admin Console）**：**一期已交**（`im-admin` + `im-admin-ui`：数据看板 / 用户管理与封禁恢复 / 举报工单队列与处置）；**二期部分已交 2026-10-19**（多角色分级四个细粒度权限点 + 后台角色分配 + 处置人可见开关，见上面「✅ 已完成」与 CHANGELOG）。**按用户决策「只改代码层」刻意未做（属新建表范畴）**：**系统配置页**（现改参数仍要动 `application.yml` 重启，不落 `im_admin_config`）、后台自身的**操作审计**（改昵称 / 禁用别的后台号仍无痕，不落 `im_admin_audit`）；仍缺：内容审核队列（机审）。
+- **举报 + 内容审核闭环**：**一期已交**（用户侧四入口 + `im_report` 待审队列 + 处置闭环 + 结论回执，见上面「✅ 已完成」）。**人工处置链已通**，缺的是机审复审那一段：`im-file` 的 `ModerationController` / `ModerationService` 只盖文件与图片，弹幕 / 群名 / 公告没有服务端模型；举报内容目前**只过敏感词遮蔽与人工**，没有第二双机器眼睛。
 - **聊天端到端加密（E2EE）**：「私密会话」信令级 E2EE（需权衡与服务端检索 / 审核的冲突）。
 - **两步验证 2FA / TOTP**：登录二次校验。
-- **账号注销 / 数据删除**：合规（GDPR / 个保法）要求的销号与数据清除。
+- **账号注销 / 数据删除**（已落地，不再列为短板）：`POST /api/user/cancel` 密码二次确认 → 匿名化并逻辑删除本人账号，并经 `UserDataEraseSpi` 级联清除各模块归属本人的数据。
 - **监控告警**：Actuator + Prometheus / Grafana 指标暴露、健康检查、慢接口告警（现仅 TraceId + 慢 SQL 日志）。
 
-**🟡 沟通与群组体验**
+**🟡 沟通与群组体验（2026-10-18 按代码实况校准：本组旧条目已全部落地，见上面「✅ 已完成」，此处只留真缺口）**
 
-- **消息表情回应（Reaction）**：对某条消息贴表情 / 点赞。
-- **消息编辑**：现只能撤回（2 分钟内），不能改。
-- **更多消息类型**：位置、名片、合并转发（聊天记录打包）、投票 / 接龙。
-- **语音消息转文字 / 消息翻译**。
-- **群文件 / 群相册 / 精华消息**：群维度的内容沉淀。
-- **进群审批 / 邀请链接 / 群二维码**：自助入群入口（现邀请是直接 `POST members`）。
-- **群机器人 / Webhook**：群内自动化通知、外部系统接入。
-- **聊天记录导出 / 迁移 / 备份**（现远程审计能导 CSV，聊天记录不能）。
-- **草稿箱 / 常用语 / 快捷回复**。
+- **接龙**：已落地（2026-10-19）。`MsgType.CHAIN(14)` + `ChainContentHandler`，**零 DDL**——主题与有序条目存 `im_message.extra`（`chainTitle`/`chainItems`/`chainClosed`），服务端 Redis 短锁 `im:msg:chain:lock:{messageId}` 串行 read-modify-write 追加，`chain-notify` 推全量快照给会话全员；`POST /api/message/{id}/chain`。边界：条目上限 200、单条正文 200 字、已截止不再接受、未做删自己那条/撤回某条。
+- **消息编辑仅限文本**：现 `EditMessageRequest` 只允许发送者改未撤回的文本消息，富文本 / 附件类不可改。
 
 **🟢 前端体验 & AI / 直播延伸**
 
-- **国际化 i18n / 深色模式 / 无障碍 a11y**（现界面为中文硬编码）。
+- **国际化 i18n / 无障碍 a11y**（现界面为中文硬编码）。**深色模式已落地**，不在此列：`stores/settings.js` 的 `themeMode`（浅色 / 深色 / 跟随系统，含 `matchMedia` 实时联动）由 `apply()` 在 `<html>` 上切 `.dark`，Element Plus 组件深色来自 `main.js` 引入的 `theme-chalk/dark/css-vars.css`，自研变量深色覆盖在 `styles/index.css` 的 `html.dark` 段。
 - **AI 未读摘要 / 智能回复建议 / AI 客服机器人**（可复用现有 DashScope 接入）。
-- **直播连麦 + 礼物打赏**（已完成：连麦走主播↔嘉宾 1:1 WebRTC P2P + 主播端 Canvas 合成 / WebAudio 混音→WebM 分片→观众 MSE 播放，合成画面为**抖音式左右分屏**（左主播、右嘉宾）并带主播「断开连麦」入口；三方视听出口已打通——观众听混音轨、主播与嘉宾各听界面层未静音的对端 `<video>`；礼物走新建虚拟积分钱包，充值为模拟支付桩）。待办：**PK（热度对比/投票，下一轮）**、**直播回放存档**、**付费 / 密码直播**、**弹幕房管与关键词屏蔽**。
+- **直播连麦 + 礼物打赏**（已完成：连麦走主播↔嘉宾 1:1 WebRTC P2P + 主播端 Canvas 合成 / WebAudio 混音→WebM 分片→观众 MSE 播放，合成画面为**抖音式左右分屏**（左主播、右嘉宾）并带主播「断开连麦」入口；三方视听出口已打通——观众听混音轨、主播与嘉宾各听界面层未静音的对端 `<video>`；礼物走新建虚拟积分钱包，充值为模拟支付桩；**弹幕房管**——主播禁言名单（5/30/60 分钟与永久）+ 自定义屏蔽词，零 DDL 存 Redis、按 anchorId 跨场次生效，机理见 `md/直播.md` §13）；**连麦 PK** 已落地（两个都在播的房间在时间窗内比**热度增量**，礼物 / 点赞 / 观众投票加权，每秒一帧 `pk` 同时扇出给两个房间、前端按 `roomId` 认领左右，零 DDL 存 Redis，机理见 `md/直播.md` §14）；**直播回放存档**已落地（见上一条与 `md/直播.md` §15）；**主播数据面板**已落地（零 DDL 纯读聚合，见 `md/直播.md` §16）。待办：**付费 / 密码直播**。
 
 ---
 
@@ -272,7 +296,7 @@ npm run dev
 
 ## 一、技术栈与版本
 
-后端版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处；前端依赖版本在 `im-ui/package.json`，桌面端在 `electron/package.json`。
+后端版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处；前端依赖版本在 `im-ui/package.json`，管理后台在 `im-admin-ui/package.json`，桌面端在 `electron/package.json`。
 
 | 类别 | 组件 | 版本 | 说明 |
 |---|---|---|---|
@@ -291,7 +315,7 @@ npm run dev
 | 前端框架 | Vue | 3.5.42 | 组合式 API + `<script setup>` 单文件组件 |
 | 前端构建 | Vite | 7.3.6 | dev server 与代理（`/api`、`/ws`、`/hls`）；插件 `@vitejs/plugin-vue` 6.0.8 |
 | 前端 UI | Element Plus | 2.14.5 | 组件库；图标集 `@element-plus/icons-vue` 2.3.2 |
-| 前端状态 | Pinia | 3.0.4 | 全局状态管理，7 个 store |
+| 前端状态 | Pinia | 3.0.4 | 全局状态管理，按域拆分的多个 store（会话 / 消息 / 好友 / 群 / 设置 / 收藏 / 举报 / 连麦 / 通话 / 群通话…） |
 | 前端路由 | Vue Router | 4.6.4 | Web 走 history，Electron 走 hash |
 | 前端 HTTP | axios | 1.20.0 | 拦截器统一注入 token、按业务 `code` 判错（失败也是 HTTP 200） |
 | 前端本地存储 | sql.js | 1.13.0 | 端侧 SQLite（WASM），消息「本地优先」缓存 |
@@ -309,20 +333,21 @@ npm run dev
 
 ### 模块结构
 
-一、业务模块（10 个，星型依赖 im-common，跨模块只走 SPI）
+一、业务模块（11 个，星型依赖 im-common，跨模块只走 SPI）
 
 | 模块            | 功能                                                         |
 | --------------- | ------------------------------------------------------------ |
 | im-user         | 用户注册 / 登录、资料、权限角色（PermissionProvider）、在线状态、验证码 |
 | im-friend       | 好友关系、好友申请、黑名单（单向阻断）                       |
 | im-conversation | 会话与成员、未读数、已读位点、会话摘要                       |
-| im-message      | 消息收发、撤回、已读 / 送达回执、离线补推、分页、幂等发号    |
+| im-message      | 消息收发、撤回、已读 / 送达回执、离线补推、分页、幂等发号、Reaction / 投票 / 精华 / **收藏**、导出 |
 | im-group        | 群组、群成员、群权限、转让 / 解散                            |
 | im-file         | 文件上传（单请求 + 分片 + 秒传 + 断点续传）、票据下载、MinIO / 本地存储 |
 | im-websocket    | 长连接、心跳、在线状态、消息推送（WsSessionManager）         |
 | im-ai           | AI 面试官：BM25 知识库检索增强 + SSE 流式对话（DashScope）   |
 | im-remote       | 远程控制服务端：会话状态机、中继、UDP 打洞反射、审计         |
-| im-live         | 直播：房间管理、弹幕 WS /ws/live、HLS 播放地址签名、心跳结算、ENDED 聊天模式 |
+| im-live         | 直播：房间管理、弹幕 WS /ws/live、HLS 播放地址签名、心跳结算、ENDED 聊天模式、弹幕房管、连麦 PK、回放存档（VOD 清单 + Redis 入口标记）、主播数据面板（零 DDL 读聚合） |
+| im-admin        | 管理后台服务端：举报受理与工单状态机（`im_report`）、后台用户管理、数据看板；**自己不 import 任何业务 Mapper**，处置与指标全部经 `ReportTargetSpi` / `AdminUserSpi` / `AdminMetricsSpi` 交回归属模块 |
 
 二、公共 / 装配模块（2 个）
 
@@ -349,9 +374,10 @@ npm run dev
     im-websocket ┤                 │
            im-ai ┤                 │
        im-remote ┤                 │
-        im-live  ┘                 │
+        im-live  ┤
+       im-admin  ┘                 │
                                    │
-              im-bootstrap ────────┴──► 依赖全部 11 个模块，负责装配启动
+              im-bootstrap ────────┴──► 依赖全部 12 个模块，负责装配启动
 ```
 
 `im-remote-agent` 不在星型图里：它是跑在被控机器上的独立进程，与 `im-remote` 只通过
@@ -374,8 +400,11 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `GroupSpi` | im-group | 群成员查询、群内禁言校验 |
 | `PushSpi` | im-websocket | 向指定用户/设备推送 WS 报文、踢下线 |
 | `FileStorageSpi` | im-file | 文件元数据登记，供消息模块组装可访问 URL |
+| `ReportTargetSpi` | im-user / im-message / im-live / im-group | 后台按 `targetType()` 找实现：`resolve` 抓证据快照 + 反查责任人，`dispose` 执行处置（**默认拒绝，只有真能改动对象状态的模块才覆写**；群聊就只实现 resolve） |
+| `AdminUserSpi` | im-user | 后台的封禁 / 恢复（im-admin 不碰 `im_user` 表） |
+| `AdminMetricsSpi` | im-user / im-message / im-live / im-websocket | 数据看板的分区指标：注入 `List` 后按 `source()` 收 Map，**没有实现就少一个分区而不是显示 0** |
 
-> 一句话总结：13 个模块 = 10 个业务模块 + im-common（公共）+ im-bootstrap（启动装配）+ im-remote-agent（独立被控端）。其中真正打进 im-server.jar 一起启动的是前 12 个；im-remote-agent 单独打包分发。
+> 一句话总结：**14 个 Maven module** = 11 个业务模块 + im-common（公共）+ im-bootstrap（启动装配）+ im-remote-agent（独立被控端）。其中真正打进 im-server.jar 一起启动的是前 13 个；im-remote-agent 单独打包分发。
 
 > 每个业务模块内部统一分层：
 > `controller` / `service`(+`impl`) / `mapper` / `entity` / `dto`(req+vo) / `convert` / `spi` / `config`。
@@ -452,6 +481,10 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `IM_DIRECT_ENABLED` | `false` | 远程控制直连（P2P）服务端总开关；开启后被控机会常开 TCP 18924 / UDP 18925，需部署方显式决定并放行端口（见「十二」） |
 | `IM_DIRECT_PUNCH_HOST` | 空 | UDP 打洞反射服务的公网可达地址；留空=放弃打洞档，只剩局域网直连与中继 |
 | `IM_DIRECT_PUNCH_PORT` | `8947` | 反射服务监听的 UDP 端口，需单独放行 UDP 入站 |
+| `IM_CALL_GROUP_ENABLED` | `true` | **群通话总开关**：关掉则聊天端群聊 header 两个入口消失、服务端拒绝建房（一对一通话不受它影响，它由 `im.call.enabled` 管） |
+| `IM_CALL_GROUP_MAX_SLOTS` | `4` | **一路群通话的人数上限（含自己）**；服务端硬夹 `[2,6]`，配 10 也只用 6——mesh 拓扑下每人要上行 `N-1` 路编码，调大这个数字不会让大会更稳，只会让视频必崩（要 >6 人得换 SFU） |
+
+> 通话与直播连麦还有一组 `IM_TURN_*` / `im.call.*` / `im.linkmic.*` 旋钮（公网 STUN/TURN 中继、振铃超时、最大时长等）**不在本表**：它们是同一套通话能力的子项，完整清单与取值口径只维护在 [`md/语音视频通话接入指南.md`](md/语音视频通话接入指南.md) §5 与 §13，避免两处各抄一份各自漂移。群通话两个新旋钮改完需重启后端。
 
 PowerShell 设置示例：
 
@@ -476,8 +509,8 @@ export MYSQL_PASSWORD=your-password
 
 | 脚本 | 作用 | 规模 | 重跑安全性 |
 |---|---|---|---|
-| `im_schema.sql` | 建库 + 建表 + 索引 + 虚拟生成列 | `im_db` 库、**22 张表**（分属 9 个模块） | ⚠️ 头部 `DROP TABLE` 会清空数据，**仅限全新库** |
-| `im_data.sql` | 灌演示种子数据 | 写入 **14 张表**，其余 8 张建好即空 | ✅ 只删自己的种子 ID 段，**可安全重跑** |
+| `im_schema.sql` | 建库 + 建表 + 索引 + 虚拟生成列 | `im_db` 库、**34 张表**（分属 10 个模块） | ⚠️ 头部 `DROP TABLE` 会清空数据，**仅限全新库** |
+| `im_data.sql` | 灌演示种子数据 | 写入 **16 张表**，其余 18 张建好即空 | ✅ 只删自己的种子 ID 段，**可安全重跑** |
 
 > ⚠️ **`im_schema.sql` 头部是 `DROP TABLE IF EXISTS` + 重建，重跑一次就会清空全库数据**。
 > 它的「幂等」指的是重复执行得到同一套表结构，不是「不会动你的数据」。
@@ -497,19 +530,22 @@ mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
 
-### 22 张表分属 9 个模块
+### 34 张表分属 10 个模块
 
 | 模块 | 表 |
 |---|---|
-| 用户权限（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` |
+| 用户权限与钱包（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` `im_user_wallet` `im_gift` `im_wallet_transaction` |
 | 好友（im-friend） | `im_friend` `im_friend_request` |
 | 会话（im-conversation） | `im_conversation` `im_conversation_member` |
-| 消息（im-message） | `im_message` `im_message_read` `im_message_delete` |
-| 群组（im-group） | `im_group` `im_group_member` |
+| 消息（im-message） | `im_message` `im_message_read` `im_message_delete` `im_message_reaction` `im_message_vote` `im_message_essence` `im_message_favorite` |
+| 群组（im-group） | `im_group` `im_group_member` `im_group_join_request` `im_group_robot` |
 | 文件（im-file） | `im_file` |
 | 远程控制（im-remote） | `im_remote_device` `im_remote_session` `im_remote_audit_log` |
 | AI 面试（im-ai） | `im_interview_session` `im_interview_message` `im_interview_event` |
-| 直播（im-live） | `im_live_room` |
+| 直播（im-live） | `im_live_room` `im_live_video` `im_gift_record` |
+| 管理后台（im-admin） | `im_report` |
+
+> 消息模块那四张 `im_message_*` 附属表都是「标记 / 互动」的载体，**唯一键按可见维度选**：Reaction / 投票 / 收藏挂人（一人一行、各人可见范围不同），精华挂消息（一群一行、全群共享）。逐表字段与选型理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §7.4 ~ §7.7。
 
 ### `im_data.sql` 灌了哪些演示数据
 
@@ -519,7 +555,7 @@ mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql
 - **1 个单聊会话**：3 条消息（seq 1~3）+ 送达/已读回执（bob 留 1 条未读，用于演示未读角标）
 - **4 场 AI 面试演示会话**（id 2301~2304）：覆盖 status 四种取值（进行中 / 正常结束 / 违规达阈值强制结束 / 未完成），含逐轮问答与违规事件流水，计数列与事件流水严格对账
 
-> 其余 **8 张表**（群组、文件、消息删除、远程三表、直播）**建好即空**，运行期由业务写入，脚本不预置任何数据。
+> 其余 **18 张表**（消息附属五表、群组四表、文件、远程三表、直播两表、钱包流水与送礼流水、举报工单）**建好即空**，运行期由业务写入，脚本不预置任何数据。
 
 > ⚠️ **PowerShell 5.1 不要用 `<` 重定向导入 SQL**：它不识别 `<`（报
 > *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
@@ -544,7 +580,20 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 ### 已有库的增量升级
 
-本项目没有引入 Flyway/Liquibase，新增列靠手工 `ALTER`。已部署的库升到当前代码需要：
+本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`（都写成幂等，重复执行不报错也不产重复数据）。已部署的库升到当前代码：
+
+| 脚本 | 引入的变更 | 不跑会怎样 |
+|---|---|---|
+| `migration_quote_message.sql` | `im_message.quote_msg_id` 列 + 索引 | 发带引用的消息报 `Unknown column 'quote_msg_id'` |
+| `migration_linkmic_gift.sql` | 虚拟积分与礼物四表（`im_user_wallet` `im_gift` `im_wallet_transaction` `im_gift_record`） | 充值 / 签到 / 送礼 / 转账 / 红包接口报缺表（连麦本身的状态走 Redis，不依赖本脚本） |
+| `migration_message_favorite.sql` | 新表 `im_message_favorite` | ⚠️ **不是「只有收藏不好用」，而是消息列表接口整片 500**——历史分页 / 离线拉取 / 消息检索 / 群相册都要走 `toViewList → attachFavorites`，那一步对新表做一次 `IN` 查询，表不存在直接抛 `SQLException` |
+| `migration_report.sql` | 新表 `im_report` | 只影响举报与后台：提交举报、工单队列、看板里的举报分区都报 `Table 'im_db.im_report' doesn't exist`；**聊天、登录、直播等其余功能不受影响**（这张表只有 im-admin 读）——所以没建表也能启动，只是举报不可用 |
+
+> ⚠️ **执行顺序**：**先跑 SQL、再启动新版后端**（旧版后端不认这张表，所以先跑 SQL 不影响正在跑的旧版，可以先备库再发版）。回滚反过来：**先把后端退回旧版、再 `DROP TABLE im_message_favorite`**；先 DROP 会让旧版后端正常、新版一启就炸列表接口。`migration_report.sql` 同理且后果轻一个量级：`im_report` 只被 im-admin 读，无论先删表还是先退后端，影响面都只到举报与后台。
+>
+> 收藏没有做成「零 DDL」（放 Redis 或塞 `extra`）是有意选定的，理由（永久数据不该挤 Redis、两种访问模式都要索引、已有同构先例）写在下述表解析 §7.7。
+
+下面这一条是早期还没有迁移脚本时的手工 `ALTER`，已部署过旧版且未跑过的库仍需补上：
 
 ```sql
 -- 远程审计新增「触发方」列（inviter 控制端 / invitee 被控端 Agent / system 服务端流程事件）
@@ -607,6 +656,7 @@ node electron/live-media-server.js     # 在仓库根目录执行；监听 0.0.0
 - 收 ffmpeg 的 `PUT /hls/{roomId}/{streamKey}/{file}` 落盘到 `electron/live-data/hls/…`（先写 `.part` 再原子 rename），观众端 `GET` 静态返回（带 CORS、Range，m3u8 不缓存）。
 - 与后端 `im.live` 默认配置对齐：`push-base-url=http://127.0.0.1:8088/hls`（本机推流）、`play-base-url=/hls`（观众经前端 vite 代理同源拉流），换网 / DHCP 换 IP 都不用改。
 - 局域网自测**不校验签名**，防盗链靠路径里不可猜的 `streamKey` 兜底；上生产必须换回 Nginx 的 `secure_link`。
+  ★ 签名**只作用于主清单 `/index.m3u8`**：hls.js 拉各档变体清单时不会带上主清单的 query，对 `\.m3u8$` 全部签名会让多档直播直接 403 黑屏（写法见 [`md/直播.md`](md/直播.md) §10.5）。
 
 > 只在**要用直播**时才需要启动它；不启动不影响聊天、好友、文件、远程控制等其它功能。完整的开播→观看自测步骤见「十四、直播」与 [`md/直播.md`](md/直播.md) §11。
 
@@ -863,6 +913,8 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | PUT | `/{id}/mute` | 消息免打扰开关（不影响未读累计） |
 | PUT | `/{id}/hide` | 隐藏 / 恢复会话（对方再发消息自动解除隐藏） |
 | DELETE | `/{id}` | 删除会话（等价隐藏本端，记录与对方列表不受影响） |
+| GET | `/quick-reply` | 我的常用语清单（按写入顺序，未配过为空数组） |
+| PUT | `/quick-reply` | **整表替换**常用语（传空数组即清空；去空去重保序，超长或超 20 条报错不静默截断；只存 Redis，零 DDL） |
 
 ### 消息 `/api/message` —— 需登录（`/forward` 另需发消息权限）
 
@@ -870,10 +922,21 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 |---|---|---|
 | POST | `/send` | 发送消息（文本 / 图片 / 语音 / 文件，`clientMsgId` 幂等） |
 | GET | `/history` | 历史消息分页 |
-| GET | `/search` | 消息内容检索 |
+| GET | `/export` | 导出会话聊天记录（txt / csv / json） |
+| GET | `/search` | 消息内容检索（`conversationId` 可选：指定则会话内检索，为空则跨我参与的全部会话；聊天窗口已接搜索条，命中行可点直接定位） |
 | GET | `/offline` | 离线消息（`PUT /offline/clear` 清除离线标记） |
 | PUT | `/{id}/recall` | 撤回消息（默认 2 分钟内，本人 / 群主 / 管理员） |
-| DELETE | `/{id}` | 删除消息（仅当前用户不可见） |
+| PUT | `/{id}/edit` | 编辑本人已发出的文本消息（时限内，全员同步并标「已编辑」） |
+| POST | `/{id}/to-text` | 语音转文字（依赖 `SpeechToTextSpi`，未接入时降级为提示） |
+| POST | `/{id}/translate` | 文本翻译（依赖 `TranslationSpi`，同上） |
+| POST | `/{id}/reaction` | 表情回应（贴 / 取消，`{emoji, remove}`；一人一消息一表情只计一次） |
+| POST | `/{id}/vote` | 投票（`{options, close}`：整体替换旧票、空集合撤回本人、`close=true` 发起人截止） |
+| GET | `/group-media` | 群文件 / 群相册（`msgType=2` 图片 / `3` 文件，仅群成员） |
+| GET | `/group-essence` | 群精华消息分页（按标记时间倒序，仅群成员） |
+| PUT | `/{id}/essence` | 设为 / 取消精华（仅群聊、仅群主与管理员；推 `essence-notify` 给全群） |
+| GET | `/favorites` | **我的收藏**（按收藏时间倒序分页；`conversationId` 为空则跨全部会话，只能看到自己的） |
+| PUT | `/{id}/favorite` | **收藏 / 取消收藏**（用户维度私人标记，单聊群聊都可收、无需权限；只推 `favorite-notify` 给本人） |
+| DELETE | `/{id}` | 删除消息（仅当前用户不可见，同时清掉本人对该消息的收藏行） |
 | DELETE | `/clear/{conversationId}` | 清空会话记录（仅当前用户） |
 | PUT | `/read` | 已读上报（写回执 + 清未读，单次 ≤ 500） |
 | POST | `/delivered` | 送达上报（点亮单勾，单次 ≤ 200） |
@@ -964,8 +1027,24 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | POST | `/linkmic/{callId}/stop` | 结束一次连麦（嘉宾下麦 / 主播下麦） |
 | GET | `/{roomId}/linkmic` | 当前在麦嘉宾列表 |
 | GET | `/{roomId}/linkmic/config` | 连麦配置（`enabled` / `maxSlots` / `iceServers`） |
+| POST | `/pk/start` | 发起连麦 PK（`{targetUserId, durationSeconds}`，**对方必须此刻也在直播**；5 次/分钟） |
+| GET | `/pk/current?roomId=` | 房间当前 PK 快照（进行中或刚结束的定格结果），无则 `null` |
+| POST | `/pk/{pkId}/vote?side=A\|B` | 观众投票站队（一人一票，改票即覆盖；10 次/分钟） |
+| POST | `/pk/{pkId}/stop` | 对阵主播提前结束（按当时热度定胜负） |
+| GET | `/moderation/mutes` | 主播房管：本场（或按 `anchorId` 跨场）禁言名单 |
+| POST | `/moderation/mute` | 禁言观众（body `{userId, minutes, roomId?}`；`minutes` 取 5/30/60，**0 或负数 = 永久**；带 `roomId` 时给那人在线连接即时推一帧提示；60 次/分钟） |
+| DELETE | `/moderation/mute/{userId}?roomId=` | 解禁（幂等：不在名单里也返回成功） |
+| GET | `/moderation/words` | 主播自定义屏蔽词列表 |
+| PUT | `/moderation/words` | 屏蔽词**整表替换**（超长 / 超量报错而非静默截断） |
+| POST | `/{roomId}/replay` | 回放上报（推流端关播后报 `{segmentCount, durationSeconds, bytes}`；服务端夹量后写 Redis 入口标记，10 次/分钟） |
+| GET | `/{roomId}/replay` | 取回放：**现签**一份 VOD 清单地址 + 时长/体积；无入口时返回 `null`（不报错） |
+| GET | `/replays?anchorId=&limit=` | 可回看场次（按关播时间倒序，`limit` 夹到 [1,20]；**不随带地址**，签名有有效期） |
+| POST | `/{roomId}/unlock` | 密码直播解锁（body `{password}`，SHA-256 比对；错回 11019，非密码房 11020；解锁后重取 detail 带 playUrl；10 次/分钟） |
+| POST | `/{roomId}/pay` | 付费直播解锁（经 WalletSpi 扣观众积分 `live_pay`；余额不足/非付费房 11021；主播本人免扣、已解锁幂等；10 次/分钟） |
 
-> 连麦协商信令走主 `/ws` 长连接（`linkmic` / `linkmic-signal`，子类型 `linkAction`：request/accept/reject/offer/answer/ice/leave）；礼物飘屏与连麦上下麦事件走 `/ws/live` 广播。
+> 连麦协商信令走主 `/ws` 长连接（`linkmic` / `linkmic-signal`，子类型 `linkAction`：request/accept/reject/offer/answer/ice/leave）；礼物飘屏、连麦上下麦（`linkmic`）与 PK 进度（`pk`，每秒一帧同时扇出给对阵两个房间）走 `/ws/live` 广播。
+>
+> 禁言名单、屏蔽词、PK 会话、**回放入口标记**（`im:live:replay:{roomId}`）与**门禁配置/解锁态**（`im:live:gate:{roomId}` / `im:live:unlock:{roomId}:{userId}`）都只存 Redis、**零 DDL**；回放的可播性不依赖 Redis（VOD 清单在媒体服务器盘上，键丢了照样能播），但**门禁靠的就是 Redis**（gate 键丢了房间自动降为公开房），详见 `md/直播.md` §13 / §14 / §15 / §17。注：回放的**入口寿命与画面寿命共用 `retention-days`（默认 1 天）**，到期后源文件由媒体侧清理任务整目录删除（`md/直播.md` §10.7），不再是一入口消失就永久占盘。
 
 ### 钱包 `/api/wallet` —— 需登录
 
@@ -974,8 +1053,25 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | GET | `/` | 我的钱包（余额 + 礼物目录，供礼簿渲染） |
 | POST | `/recharge` | 充值（`{amount}`；本轮走模拟支付桩 `MockPaymentSpi`，接真实支付以 `@Primary` 覆盖） |
 | POST | `/checkin` | 每日签到（按 `sign_last_date` 去重，赠固定积分） |
+| POST | `/transfer` | 用户间转账（`{conversationId, amount, memo}`；**仅单聊、仅好友**，扣款+入账+转账消息同一事务；返回余额与那条 `msgType=12` 的消息体，前端直接上屏） |
+| POST | `/packet` | 发红包（`{conversationId, amount, count, greeting}`；群聊拼手气、单聊恒 1 份；**先扣钱后建池**） |
+| GET | `/packet/{packetId}` | 红包详情与领取名单（状态 `unclaimed` / `claimed` / `empty` / `expired`；**会变化的东西不存消息里**，点开时现取） |
+| POST | `/packet/{packetId}/claim` | 拆红包（`HSETNX` 一人一份闸门 + `HINCRBY` 抢名额；20 次/10 秒） |
+
+> 转账与红包都是「先动钱、后发消息」：`MsgType.TRANSFER(12)` / `RED_PACKET(13)` 只允许服务端 `internal=true` 产生，客户端伪造直接拒；两类消息**发出后不能收回，也不能转发**（`MONEY_MESSAGE_FORBIDDEN(13027)`）。零 DDL：资金变动全走既有 `im_wallet_transaction`（新增 `transfer` / `packet` / `refund` 三种 `type`，**无需改表**），红包领取态在 Redis Hash `im:wallet:packet:{packetId}`，过期没人领的余额由 `RedPacketRefundTask` 按**账本求和**退回发送人（退过即归零，自动退出扫描集）。
 
 > 弹幕走独立 WS `/ws/live`（见「十、协议」）。
+
+**钱包配置**（`im.wallet.*`，逐项注释见 `application.yml`；转账与红包用独立开关，线上想收紧时可以只关这一项而保留送礼与充值）：
+
+| 配置 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| `enabled` | `IM_WALLET_ENABLED` | `true` | 钱包总开关，关掉则充值/签到/送礼/转账/红包全拒 |
+| `transfer-enabled` | `IM_WALLET_TRANSFER_ENABLED` | `true` | **用户之间转积分**的独立开关（送礼是向平台买服务，转账/红包是用户之间倒腾积分，可能被用来对倒刷量、变相赌博，风险面不同） |
+| `transfer-min` / `transfer-max` | — | `1` / `10000` | 单笔转账的下上界 |
+| `packet-max` / `packet-max-count` | — | `10000` / `20` | 单个红包总额与份数上限（夹住前端传入的 count 防刷） |
+| `packet-expire-hours` | — | `24` | 无人领的红包保留时长，到期由 `RedPacketRefundTask` 退余额；**它同时是退款扫描的判定口径**，改动会让存量在飞红包的到期时间跟着变 |
+| `checkin-bonus` / `max-gift-count` / `recharge-min` / `recharge-max` | — | `20` / `99` / `1` / `100000` | 原有四项，语义不变 |
 
 > 一个请求从前端发出到拿到响应的完整链路（Vite 代理 → `TraceIdFilter` → Sa-Token 鉴权 → Controller / Service / Mapper → 异常统一转 `Result` → axios 响应拦截器解包），以及三层架构、登录鉴权、文件上传下载、远程控制、直播等专项链路图，见 [`md/架构与请求链路图.md`](md/架构与请求链路图.md)。
 
@@ -991,7 +1087,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | **WebSocket（WS / WSS）** | 聊天实时收发、直播弹幕、远程控制信令与中继 | JSON 文本帧 + 定长头二进制帧 | TCP（TLS） | 本节 ↓ |
 | **SSE**（Server-Sent Events） | AI 面试官流式对话 `POST /api/ai/interview/chat` | `text/event-stream`，事件 `delta` / `done` / `error` | HTTP 单向长响应 | 「十三」 |
 | **HLS**（HTTP Live Streaming） | 直播**下行**拉流（观众端 hls.js / iOS 原生 `<video>`） | m3u8 清单 + fMP4 分片 | HTTP GET | 「十四」 |
-| **HTTP PUT**（WebDAV 语义） | 直播**上行**推流（ffmpeg 切片 → 媒体服务器 :8088） | init.mp4 / seg-N.m4s / index.m3u8 | HTTP PUT | 「十四」 |
+| **HTTP PUT**（WebDAV 语义） | 直播**上行**推流（ffmpeg 切片 → 媒体服务器 :8088） | 每档 `init_{档}.mp4` / `seg_{档}_{n}.m4s` / `index_{档}.m3u8` + 主清单 `index.m3u8` | HTTP PUT | 「十四」 |
 | **DXP**（自定义直连协议） | 远程桌面直连：画面 + 输入 + 文件三条流量 | `[12B 头][body]` + AES-256-GCM，UDP 档带 Go-Back-N 重传 | 局域网 TCP / UDP 打洞 / 中继 WS（三档阶梯） | 「十二」 |
 
 **两处刻意的「不用」**：
@@ -1037,6 +1133,11 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | | `message` | 新消息推送 |
 | | `delivered-notify` / `read-notify` | 把送达/已读状态推回发送方 |
 | | `recall-notify` | 撤回通知 |
+| | `edit-notify` | 发送者改了正文，推新文本给全员（气泡标「已编辑」） |
+| | `reaction-notify` | 表情回应增量（`{messageId, emoji, delta, userId}`），推给会话全员含本端 |
+| | `vote-notify` | 投票权威票数（有人投 / 改票或发起人截止），推给会话全员 |
+| | `essence-notify` | 群精华标记变更，推给全群 |
+| | `favorite-notify` | 收藏标记变更（`{messageId, conversationId, favorite}`），**只推给操作者本人**（同一账号的多端同步） |
 | | `flash-notify` | 闪照已销毁通知（`{messageId, conversationId, viewerId}`，前端只标 viewerId 本人的设备） |
 | | `notify` | 系统/业务通知（好友申请、入群等） |
 | | `kickout` | 多端登录被顶下线 |
@@ -1462,7 +1563,13 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 | `POST /api/live/{roomId}/linkmic/request` | 观众申请上麦（返回 callId） |
 | `POST /api/live/linkmic/{callId}/respond` / `…/stop` | 主播应答 / 结束一次连麦 |
 | `GET /api/live/{roomId}/linkmic` / `…/config` | 在麦嘉宾列表 / 连麦配置（enabled/maxSlots/iceServers） |
-| `WS /ws/live` | 弹幕 / 点赞 / 在线人数 / 礼物飘屏（`gift`）/ 连麦上下麦（`linkmic`）通道 |
+| `POST /api/live/pk/start` / `GET …/pk/current` / `POST …/pk/{pkId}/vote` / `…/stop` | 连麦 PK：发起（对方必须在播）/ 房间当前快照 / 观众站队 / 提前结束 |
+| `GET /api/live/moderation/mutes` / `POST …/mute` / `DELETE …/mute/{userId}` | 主播房管：禁言名单 / 禁言（`minutes` 0=永久）/ 解禁 |
+| `GET /api/live/moderation/words` / `PUT …/words` | 主播自定义屏蔽词：读取 / **整表替换** |
+| `POST /api/live/{roomId}/replay` / `GET …/replay` / `GET /api/live/replays` | 直播回放存档：推流端关播后上报统计 / 现签一份 VOD 清单地址 / 可回看场次列表（零 DDL，入口标记在 Redis，机理见 `md/直播.md` §15） |
+| `GET /api/live/anchor/stats` | 主播数据面板：只看自己的——时间窗内概览 + 逐场明细 + 金主榜 / 礼物种类榜 + 本场实时（零 DDL，机理见 `md/直播.md` §16；`?days=` 服务端夹到 [1,366]，默认 30） |
+| `POST /api/live/{roomId}/unlock` / `POST …/pay` | 付费 / 密码直播解锁：密码比对 / 经 WalletSpi 扣观众积分（零 DDL，门禁与解锁态存 Redis，机理见 `md/直播.md` §17） |
+| `WS /ws/live` | 弹幕 / 点赞 / 在线人数 / 礼物飘屏（`gift`）/ 连麦上下麦（`linkmic`）/ PK 进度（`pk`）通道 |
 
 **播放地址签名**：`md5(path + expire + secret)`，与 Nginx `secure_link_md5 "$uri$arg_expire$secret"` 逐字对应；streamKey 是能力凭证（每场随机、关播作废），绝不出现在任何列表接口里。
 
@@ -1471,6 +1578,14 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 **多屏选择**：`gdigrab -i desktop` 默认抓整个虚拟桌面（多屏会拼接错位）；桌面端开播前枚举显示器，选定后用 `-offset_x/-offset_y/-video_size` 只抓该屏。渲染端只传 `displayId`（纯量），主进程按 id 现查 bounds，避免响应式对象过 IPC 克隆失败。
 
 **连麦模式**（链路细节见 [`md/直播.md`](md/直播.md) §12）：主播↔嘉宾走 1:1 WebRTC，协商信令复用主 `/ws`。主播端把「主播画面 + 嘉宾画面」用离屏 canvas 合成成**左右分屏**（左主播、右嘉宾：1 位占满、2 位上下、3~4 位 2×2，格内 contain 等比居中 + 左下角昵称名牌），`AudioContext` 混音后经 `MediaRecorder` 出 WebM 分片 `PUT` 到同源媒体端点；观众端从 hls.js 切到 MSE 播 `webm/manifest.json`，麦位清空时服务端扇出 `linkmic active=false`，观众自动切回 HLS。主播与嘉宾本地看到的是 `Live.vue` 里与 canvas 同构的分屏 `<video>`，其中**对端那一格不静音**——那是本地能听到的唯一出口（composer 内部的 `<video>` 离屏且静音，只负责取帧；`gain → destNode` 只是录制那一路）。主播端「断开连麦」逐路发 `leave`，嘉宾「下麦」只断自己那一路。因合成与上传都在渲染层 fetch 完成，**连麦时 Web 端也能开播**（非连麦开播仍仅桌面端）。
+
+**弹幕房管**（零 DDL，机理详见 [`md/直播.md`](md/直播.md) §13）：主播可禁言观众（5 分钟 / 30 分钟 / 1 小时 / 永久）并维护自己的屏蔽词。两份状态**按 anchorId 而非 roomId 存在 Redis**（`im:live:mute:{anchorId}` Hash + `im:live:words:{anchorId}` Set）——房间一行=一场，挂房间等于每场重新点一遍黑名单。判定插在 `onDanmaku` 的「限流之后、广播之前」，顺序为禁言→房间屏蔽词→全局敏感词遮罩；**主播豁免前两项但全局遮罩仍生效**。屏蔽词拒发**不回传命中了哪个词**（否则观众二分法就能把词表量出来）；禁言判定**每次实读 Redis** 不缓存，屏蔽词走 5s 本机缓存。入口：主播侧观众昵称可点→就地弹禁言菜单，工具条「🛡 房管」开面板（禁言名单 / 屏蔽词两页签）。
+
+**连麦 PK**（零 DDL，机理详见 [`md/直播.md`](md/直播.md) §14）：两个**都在直播**的房间在时间窗内比**热度增量**（开场那一刻采一次基线，之后每拍用「当前计数 - 基线」，负数截零；直接比累计值等于奖励先开播的人）。热度 = 礼物增量 × `gift-weight` + 点赞增量 × `like-weight` + 票数 × `vote-weight`（默认 `10/1/2`，礼物占主导、免费点赞给得小）。会话与票数全在 Redis（`im:pk:session` / `im:pk:room` / `im:pk:running` / `im:pk:vote`），礼物热度沿用 `GiftServiceImpl` 早已埋的 `im:live:gift:heat`，点赞总量由 `LiveDanmakuService.flushLikes` 每 2 秒冲刷时顺手 `INCRBY` 落一份。`LivePkTask` **每秒一拍**把同一帧扇出给两个房间（帧里带 `roomA`/`roomB`，前端按自己所在 roomId 认领左右，否则进度条镜像颠倒）；倒计时在前端做锚点校准（漏帧只重算锚点、不逐帧减一秒），到 0 停表等服务端 `end` 帧。结算三种原因：`time` / `manual`（只有对阵主播能停）/ `room-ended`（任一方关播即按当时热度定格）。
+
+**付费 / 密码直播**（零 DDL，机理详见 [`md/直播.md`](md/直播.md) §17）：主播开播时可选填「房间密码」或「入场积分价」（两者都给按**密码优先**），未解锁的观众既拉不到画面、也进不了弹幕。门禁配置存 Redis JSON `im:live:gate:{roomId}`（`{mode,pwdHash,price}`）、解锁态存 `im:live:unlock:{roomId}:{userId}`，TTL 12h 随直播心跳 `touch` 续期（与 PK/房管/回放同为「Redis 存可变态」）。**真正的闸门是 `toVO()` 只对已解锁/主播本人下发 `playUrl`+`danmakuWs`**——分片 path 里带 streamKey（能力凭证）+ 签名，拿不到地址就物理上拉不到流；弹幕 WS 侧 `LiveDanmakuHandler` 再拒一道（纵深防御）。密码以 **SHA-256** 摘要存（明文绝不落 Redis）；付费只走 `WalletSpi.deduct` **扣观众积分（`live_pay`）、不给主播入账**（与礼物同口径，模拟积分不可提现），主播本人恒免扣、已解锁再点幂等。前端大厅房间卡左下角带 🔒 徽标，点进未解锁的锁房弹解锁框（错密码 / 余额不足由请求层统一提示）。**边界：回放（VOD）本期不设门禁**（replay 入口留 7 天而 unlock 键仅 12h，量级不匹配，不想让回放被免费看可关回放）；门禁只在本场直播有效，关播 `drop`、下一场需重设。
+
+**多档清晰度阶梯与观众切档**（机理、ffmpeg 参数要点与实测数据详见 [`md/直播.md`](md/直播.md) §18）：主播只选一个原画分辨率（480p / 720p / 1080p / **1440p (2K)**），推流端一条 ffmpeg 命令用 `[0:v]split=N` 把同一份源同时编成多档，`-var_stream_map "v:0,name:2k …"` + `-master_pl_name index.m3u8` 写出标准阶梯：目录下是**主清单** `index.m3u8` + 各档 `index_{档}.m3u8` / `init_{档}.mp4` / `seg_{档}_{n}.m4s`。**只向下派生**（选 720p 就只出 720P/480P）、**高于采集源物理高度的档自动砍掉**（靠 `bounds.height × scaleFactor` 算物理高度，1080p 屏放大到 2K 没有信息增量、白烧一路编码）。上传泵硬约束顺序：init → 分片 → 变体清单 → **主清单最后**（主清单先上去，观众拉变体就 404）。观众端右上角浮层选档（`hls.levels` 按高度去重→`currentLevel`，-1=ABR），单档流 / 连麦 WebM 合成流 / Safari 原生 HLS 三种情况**直接隐藏选择器**。**后端零改动**：主清单沿用 `index.m3u8` 同名，签名、接口、Redis 键、`im_live_room.resolution` 全不动；★ 代价是四档总码率≈原画 **2.01 倍**，且生产 Nginx 得改成**只签主清单**（§10.5）。
 
 **主要配置**（`im.live.*`，环境变量可覆盖，逐项注释见 `application.yml`）：
 
@@ -1481,6 +1596,17 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 | `play-base-url` | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放地址前缀（相对路径，前端同源补全） |
 | `sign-secret` | `IM_LIVE_SIGN_SECRET` | 开发用串 | 播放地址签名密钥，**生产必须替换**且与 Nginx 一致 |
 | `ended-room-visible-minutes` | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束房间在列表的可见时长（分钟），0/负数=不过滤 |
+| `danmaku-words-max-count` / `danmaku-word-max-length` | — | `50` / `20` | 单个主播屏蔽词的条数与长度上限，**超出报错不静默截断** |
+| `danmaku-words-cache-millis` | — | `5000` | 屏蔽词本机缓存时长（热路径每条弹幕都读一次 Redis 不值当；多实例最多滞后这个量） |
+| `moderation-retention-days` | — | `365` | 房管键的滑动保留期——**Redis 是唯一存储**，这就是数据的实际寿命 |
+| `danmaku-sensitive-mask` | — | `true` | 全局敏感词遮罩开关（对主播自己同样生效） |
+| `replay.enabled` | `IM_LIVE_REPLAY_ENABLED` | `true` | 回放总开关，关掉则不上报入口、取不到地址、大厅横条消失 |
+| `replay.retention-days` | `IM_LIVE_REPLAY_RETENTION_DAYS` | **`1`** | **一个值管两处**：Redis 入口键的 TTL + 媒体侧 `electron/live-retention.js` 删源文件的清理线（★ 两边必须给同一个环境变量；为什么删除不在 Java 里做、过期按「房间目录最新 mtime」整目录判、以及 cron 挂载命令，见「十四」§10.7） |
+| `replay.max-duration-hours` | — | `12` | 上报时长夹量上限，超出即推流端台账异常（不信任客户端上报） |
+| `pk.enabled` | `IM_LIVE_PK_ENABLED` | `true` | PK 总开关，关掉则 `/api/live/pk/**` 全拒（**刻意不为这一个运维旋钮再加配置接口**，前端按钮照旧显示） |
+| `pk.duration-seconds` / `pk.max-duration-seconds` | — | `300` / `900` | 默认与上限时长（不设上限就能开一场永久 PK 把两个房间的观众锁死） |
+| `pk.gift-weight` / `pk.like-weight` / `pk.vote-weight` | — | `10` / `1` / `2` | 热度三项权重，调 0 即可屏蔽那一项（如 `gift-weight:0` 变纯人气对局） |
+| `pk.session-retention-minutes` | — | `1440` | 已结束会话与票数的保留时长——**Redis 是唯一存储**，过时就这场 PK 无任何痕迹 |
 
 **自测启动**：① 建表 `im_live_room`（`sql/im_schema.sql`）；② `node electron/live-media-server.js`（8088）；③ 后端加载 `im.live` 配置；④ `npm run dev`（vite proxy 已含 `/hls`），手机与本机同 WiFi 打开控制台 `Network` 地址。完整部署、生产 Nginx 迁移与排障见 [`md/直播.md`](md/直播.md)。
 
@@ -1496,7 +1622,7 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 
 ```
 spring-boot-duomokuia/
-├── pom.xml                  父 POM：版本统一管理、13 个 module、编译插件配置
+├── pom.xml                  父 POM：版本统一管理、14 个 module、编译插件配置
 ├── README.md                本文件
 ├── sql/
 │   ├── im_schema.sql        建库建表 DDL（索引、虚拟生成列、约束）
@@ -1515,6 +1641,7 @@ spring-boot-duomokuia/
 ├── im-ai/                   AI 面试官（BM25 知识库检索 + DashScope SSE 客户端）+ 全网检索（WebSearchService）
 ├── im-remote/               远程控制服务端（会话状态机 + 双 WS 中继）
 ├── im-live/                 直播（房间生命周期 + 播放地址签名 + HLS 弹幕 WS 中继）
+├── im-admin/                管理后台服务端（举报工单状态机 + 后台用户管理 + 看板，只依赖 im-common 的 SPI）
 ├── im-bootstrap/            启动模块
 │   ├── src/main/java/.../ImApplication.java     唯一的 main 类 + 启动横幅
 │   ├── src/main/resources/application.yml       主配置（16 KB，逐项带注释）
@@ -1528,15 +1655,24 @@ spring-boot-duomokuia/
 │   ├── scripts/gen-cert.cjs 内网自签证书生成（node-forge，纯 Node 免 OpenSSL，手机真机联调远程控制用）
 │   ├── certs/               自签 HTTPS 证书产物（ca/server 的 pem+key，已 gitignore，含私钥）
 │   └── src/
-│       ├── api/             9 个接口模块
-│       ├── components/      9 个可复用组件
+│       ├── api/             接口层（按后端模块划分：user/conversation/message/group/file/live/wallet/report…）
+│       ├── components/      可复用组件（气泡、右侧面板、收藏 / 举报 / 主播数据弹窗、远程控制托盘…）
 │       ├── layout/          主框架（左侧导航 + 路由出口）
-│       ├── stores/          7 个 Pinia store
+│       ├── stores/          Pinia store（按域一份；举报那个只存字典与弹窗态）
 │       ├── router/          路由与登录守卫（Electron 用 hash 模式）
 │       ├── styles/          全局样式与 CSS 变量
 │       ├── utils/           格式化、ID 归一化、媒体地址/下载、标题、token、env（环境适配）
-│       ├── views/           10 个页面（含远程控制 Remote 与面试 Interview）
+│       ├── views/           页面（含远程控制 Remote、面试 Interview、直播 Live 等；个数随功能增长，不写死）
 │       └── ws/              WebSocket 客户端（连接管理 + 报文分发）
+├── im-admin-ui/             管理后台前端（独立工程，只在电脑浏览器用，不参 Maven 构建）
+│   ├── README.md            后台专项说明（为什么独立、端口与 CORS、登录链路、部署四事）
+│   ├── vite.config.js       dev 5273 / preview 4273，代理同 im-ui 打到 8080
+│   └── src/
+│       ├── api/             auth.js / admin.js / request.js（后台专用 axios 实例）
+│       ├── stores/          auth.js（权限闸门 system:manage 所在地）
+│       ├── components/      AvatarCell.vue（后台唯一的头像组件，blob 取图）
+│       ├── layout/          AdminLayout.vue（侧标 + 顶栏）
+│       └── views/           LoginView / DashboardView / UsersView / ReportsView
 └── electron/                Electron 桌面端（前端壳 + electron-builder，连远程后端）
     ├── main.js              主进程：窗口 / 下载处理 / 跨域 / 注入后端地址 / Agent 自启
     ├── preload.js           contextBridge 注入 window.__IM_SERVER__
@@ -1553,7 +1689,7 @@ spring-boot-duomokuia/
 
 按顺序执行，每步都有明确的通过标志：
 
-1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，13 个模块全部通过，
+1. **构建** — `mvn clean package -DskipTests` → `BUILD SUCCESS`，14 个模块全部通过，
    生成 `im-bootstrap/target/im-server.jar` 与 `im-remote-agent/target/*-jar-with-dependencies.jar`
 2. **依赖抽查** — `mvn dependency:tree` → 确认 30 个 `org.springframework.boot:*` 构件全部是 4.0.8、
    Spring Framework 一致为 7.0.9，无 Boot 3 残留；Jackson 2 只允许从 knife4j 与 minio 两条链进来
@@ -1561,8 +1697,8 @@ spring-boot-duomokuia/
 3. **建库** — 执行 `sql/im_schema.sql` 与 `sql/im_data.sql`，无报错
 4. **启动** — `java -jar im-bootstrap/target/im-server.jar` → 8080 端口起来了，
    控制台打出上述横幅，`D:/rizi1/IM/error.log` 里没有内容
-5. **文档** — 浏览器打开 http://localhost:8080/doc.html，左侧 9 个分组齐全
-   （也可以直接请 `GET /v3/api-docs/swagger-config`，返回的 `urls` 数组应当是 9 项）
+5. **文档** — 浏览器打开 http://localhost:8080/doc.html，左侧分组齐全（数量随 `@Tag` 增长，不写死；
+   本批新增 `15-举报` 与 `16-管理后台`；也可直接请 `GET /v3/api-docs/swagger-config` 看 `urls` 数组）
 6. **接口串测** — 注册 → 登录取 token → `/api/user/profile` → 搜索用户 →
    发起好友申请 → 对方登录同意 → `/api/conversation/single` → `/api/message/send` 双向收发 →
    `/api/message/history` 分页 → 撤回 → `/api/conversation/list` 看未读数 →
@@ -1571,7 +1707,7 @@ spring-boot-duomokuia/
 7. **WebSocket** — 取 ticket → 连接 → ping/pong → 双端实时收发 →
    断网重连 → 同设备二次登录触发 `kickout`
 8. **前端** — `cd im-ui; npm install; npm run dev` → 用 alice / bob
-   开两个不同浏览器，验证 10 个页面的交互闭环
+   开两个不同浏览器，验证各页面的交互闭环
 9. **远程控制** — `java -jar im-remote-agent/target/im-remote-agent-jar-with-dependencies.jar` 起 Agent →
    网页「远程」页出现绿色「本机识别码」面板 → 另一个登录账号凭识别码发起连接 →
    Agent 弹窗点同意 → 控制端看到画面；降档为仅观看后输入操作被拒
@@ -1584,7 +1720,100 @@ spring-boot-duomokuia/
 12. **直播** — `node electron/live-media-server.js`（8088）+ 后端加载 `im.live` 配置 + `npm run dev` →
     桌面端开播（多屏先选屏）→ 几秒内 `electron/live-data/hls/{roomId}/{streamKey}/` 出现 `init.mp4`/`segN.m4s`/`index.m3u8` →
     浏览器/手机（同 WiFi，`http://<本机IP>:5173`）进房出画面、弹幕连通；关播超 60 分钟后该场次从大厅列表消失
+13. **举报闭环** — 用 bob 右键举报 alice 的一条消息 → 选「诈骗」但不填描述，确认提交被拦下（该理由 `textRequired`）→
+    补上描述提交 → `im_report` 新增一行且 `evidence` 里有正文快照与可执行动作清单；bob 重复举报同一对象得到 14003，
+    举报自己的消息得到 14002（前端本就不该给这个入口，看得到说明 `!message.self` 那道判断失效了）
+14. **管理后台** — `cd im-admin-ui; npm install; npm run dev` → `http://localhost:5273` → 用 `admin` 登录；
+    非 `admin` 账号登录应停在登录页并提示「该账号没有管理后台权限」（而不是进去后满屏 1003）→
+    看板显示「数据截至」且 60s 自动刷新（强制刷新才真跑 COUNT）→ 用户页按昵称搜索（keyword **不认用户 ID**）→
+    工单页受理 → 处置（封号 / 撤回消息 / 中断直播三个动作会二次确认）→ 举报人聊天端右上角弹出一条系统通知
+    （驳回为 `info`、已处理为 `success`；被警告当事人收到 `warning`）
 
 > **桌面端（可选）**：`cd ..\electron; npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
 > 启动后还会自动后台拉起内置的被控端 Agent（回环接口 `127.0.0.1:18923/local-info` 可验证）。
+
+---
+
+## 十八、管理后台与举报闭环（im-admin / im-admin-ui）
+
+一期范围就一句话：**举报 → 工单 → 人工处置 → 结论回执**这条链跑通，另加一个看板与一个用户管理页。
+不是「完整后台」：系统配置页、机审复审、后台自身操作审计都不在本期（缺什么见「路线图 › 🔴 关键短板」）。
+
+### 1. 一张新表：`im_report`
+
+一行 = 一张工单。三个形状是刻意选定的：
+
+| 列 | 为什么这么存 |
+|---|---|
+| `evidence`（JSON 快照） | 对象事后会被删（消息撤回 / 房间关播 / 群解散），快照让「证据」不依赖原对象存在。快照里还冗余存了一份**提交那一刻可执行的动作**，后台优先按快照渲染，防止事后 SPI 能力变化把工单卡死在「谁也处置不了」 |
+| `reported_user_id` | 提交时由归属模块 SPI 反查一次并落库，而不是每次去查对象：「同一人被举报几张」这个聚合要一直算得出。反查不到就为空（系统消息 / 机器人无责任人），此时只能驳回或 `none` |
+| `status` 与 `disposition` 分两列 | `status` 是工单推进到哪一步，`disposition` 只记「真的动了对象」的动作。**驳回不写 disposition**，否则「已驳回」与「已处置但选不处理」在数据里分不清 |
+
+迁移脚本 `sql/migration_report.sql`（全新库跑 `im_schema.sql` 已含）；不跑的后果与回滚方式见「五、数据库初始化 › 已有库的增量升级」。
+
+### 2. 工单状态机（后台按钮可见性的唯一依据）
+
+```
+0 待处理 ──accept──► 1 已受理 ──handle──► 3 已处置（终态）
+   │                    │
+   └──────reject───────┴──► 2 已驳回（终态）
+```
+
+- `accept` **只接受 status=0**，且只写 `handler_id` 不写 `handle_time`（终态才写时间，否则「受理时间」与「处置时间」分不清）；
+- `reject` / `handle` 要求「未到终态」（0 或 1）；重复处置回 14006；
+- 没有超时自动关闭、没有自动升级，状态全人工推进（一期有意不做自动化，避免误伤）。
+
+### 3. 端点分两组，路径前缀就是权限边界
+
+| 组 | 端点 | 谁能调 |
+|---|---|---|
+| 用户侧 | `GET /api/report/config`、`POST /api/report`、`GET /api/report/mine` | 任何登录用户，**无 `@SaCheckPermission`** |
+| 后台侧 | `GET /api/admin/dashboard`；`GET /api/admin/user/page`、`GET /api/admin/user/{userId}`、`POST /api/admin/user/{userId}/disable`、`/enable`；`GET /api/admin/report/page`、`GET /api/admin/report/{id}`、`POST /api/admin/report/{id}/accept`、`/reject`、`/handle` | 需 `system:manage`（种子权限 107，仅 admin 角色） |
+
+聊天端**不调 `/api/admin/**` 里的任何一个**，后台也只调 `/api/report/config`（拿处置动作字典）而不调 `/api/report`——路径前缀就是那道墙，真正的把关在 service 里（举报人只取登录态、`/mine` 只查自己那部分）。`POST /api/report` 有两道闸：按用户 10 次/分钟的限流（防脚本空转）与服务端每日配额（防把队列刷满）。
+
+### 4. 处置动作与执行者
+
+| 动作 | 适用对象 | 谁执行 |
+|---|---|---|
+| `none` 不处理 | 全部 | im-admin（只改工单） |
+| `warn` 警告当事人 | 全部 | im-admin（推一条 `admin-warn` 通知，不动账号状态） |
+| `ban_user` / `unban_user` | user | im-user（`AdminUserSpi`） |
+| `recall_message` | message | im-message（`ReportTargetSpi.dispose`） |
+| `close_room` | room | im-live（同上，结束原因记 `ban`） |
+
+`group` 类型**只实现了 `resolve`**（抓群名 / 公告 / 成员数快照），没有可执行的处置：「解散群」不做成后台按钮——不可逆、且该由群主自己做。
+
+**星型约束**：im-admin 不 import 任何业务模块的 Mapper / Service，上表三个跨模块动作全部经 `im-common` 的 SPI 契约；归属模块执行失败时**原因原样回显**且工单停在原状态（动作本身幂等，可安全重试）。
+
+### 5. 看板：口径比数字重要
+
+- 指标经 `AdminMetricsSpi` 从四个模块汇聚（用户 / 消息 / 直播 / 在线连接）。**模块缺席就少一个分区**，不假装成 0；
+- `value == null` 前端一律渲染「—」而不是 0；每个数字旁的问号 tooltip 写清统计口径（如「仅今日零点起」「仅当前实例」）；
+- 轮询走 `refresh=false` 命中后端 `dashboard-cache-seconds`（默认 60s）缓存，只有人手点「强制刷新」才真跑 COUNT；响应带 `cachedAt`，页面顶部显示「数据截至」与滞后秒数；
+- 不引 echarts：趋势用 div 柱子、分布用 `el-progress`，避免首包多几百 KB。
+
+### 6. 聊天端四个入口的形状
+
+| 入口 | 对象类型 | 不给入口的条件 |
+|---|---|---|
+| 消息气泡右键 | `message`（targetId = messageId） | 自己的消息（后端 14002）、已撤回的消息 |
+| 用户资料卡 | `user`（targetId = userId） | 自己的资料页（上方 `isSelf` 分支已隔开） |
+| 直播间顶栏 | `room`（targetId = roomId） | 主播本人（责任人就是自己，会 14002） |
+| 群设置 | `group`（targetId = groupId） | 群主（责任人是群主，同样 14002） |
+
+四处共用一个弹窗（只挂 `MainLayout`）与一份字典缓存（`stores/report.js`）。弹窗里的理由列表、必填红星、描述字数上限**全部来自服务端**；
+`enabled` 拿不到配置时按「开」显示（网络抖一下四个入口同时消失看起来像功能被撤），而只有服务端明确回 `enabled=false` 才真隐去。
+
+### 7. 已知边界（诚实清单）
+
+- **两个 keyword 口径不同**：`/api/admin/user/page` 的 keyword 只认 `username / nickname / phone`，**不认用户 ID**；
+  `/api/admin/report/page` 的 keyword 是纯数字时按 `target_id / reported_user_id / reporter_id` 精确匹配。所以看板「被举报榜」
+  与用户页「未处置工单数」都跳 `reports?keyword=<userId>`，**绝不跳用户页**（跳过去搜不出东西）。
+- **`GET /api/report/mine` 已就绪但聊天端无 UI**：结论已经由 WS 推给举报人，一期不再加一个列表页；下一批如需可补。
+- **后台账号没有注册入口**：新后台账号只能由 DBA 在库里加（带 `im_user_role` 绑定），没有图形验证码也不是遗漏——
+  `AuthServiceImpl.login` 全程不校验证码（那两字段只用于发短信/发邮件前的闸门）。
+- **共用了登录态**：后台与聊天端是同一套 Sa-Token，后台 `logout` 会把聊天端也踢下线（一期接受，两个页面开在同一浏览器时得注意）。
+- **本批只做了编译与构建验证**：`mvn -q -o compile` 与两个前端工程的三次构建（`im-ui` 的 `build` 与 `build:electron`、`im-admin-ui` 的 `build`）均 EXIT=0；
+  **未做浏览器实机串测**（举报提交、看板轮询、处置二次确认这三条路径需人工跑「十七、验证清单」第 13 / 14 项）。
 

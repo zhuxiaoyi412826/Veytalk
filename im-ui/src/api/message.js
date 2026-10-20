@@ -105,6 +105,14 @@ export function voteMessage(messageId, options, close) {
 }
 
 /**
+ * 接龙：向一条接龙消息追加一个条目（text 为空时服务端回落为本人昵称）；close=true 由发起人截止。
+ * 返回含最新条目列表的消息视图（extra.chainItems）。
+ */
+export function chainMessage(messageId, text, close) {
+  return http.post(`/message/${messageId}/chain`, { text, close })
+}
+
+/**
  * 语音转文字（依赖服务端外部 ASR，未接入时降级为错误提示）。
  *
  * 仅对未撤回的语音消息可用；返回识别文本（仅展示不落库）。失败原因（未配置/不支持）
@@ -142,6 +150,24 @@ export function fetchGroupEssence(conversationId, current = 1, size = 20) {
  */
 export function markMessageEssence(messageId, essence) {
   return http.put(`/message/${messageId}/essence`, { essence })
+}
+
+/**
+ * 我的收藏列表：按收藏时间倒序分页，conversationId 为空则跨全部会话。返回 PageResult<MessageVO>。
+ */
+export function fetchFavorites({ conversationId, current = 1, size = 20 } = {}) {
+  return http.get('/message/favorites', {
+    params: { conversationId, current, size },
+    silent: true
+  })
+}
+
+/**
+ * 标记 / 取消收藏：用户维度的私人行为，单聊群聊都可收、无需管理权限。
+ * favorite=true 收藏、false 取消；返回带最新 favorite 标记的消息 VO，其余端由 favorite-notify 回执刷新。
+ */
+export function markMessageFavorite(messageId, favorite) {
+  return http.put(`/message/${messageId}/favorite`, { favorite })
 }
 
 /** 单端删除：只对自己不可见，对方与会话记录都保留 */

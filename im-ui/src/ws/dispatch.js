@@ -7,8 +7,9 @@ import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useGroupStore } from '@/stores/group'
 import { useCallStore } from '@/stores/call'
+import { useGroupcallStore } from '@/stores/groupcall'
 import { useLinkmicStore } from '@/stores/linkmic'
-import { on, connect } from './socket'
+import { on, connect, send as wsSend } from './socket'
 
 /**
  * WebSocket 下行报文到各 store 的分发。
@@ -22,6 +23,9 @@ import { on, connect } from './socket'
 /** 已安装则返回注销函数，重复调用不会重复注册 */
 let installed = null
 
+/** ElNotification 支持的四种样式；服务端给的 tone 不在这个表里就按 info 兜底 */
+const NOTIFY_TONES = ['success', 'warning', 'info', 'error']
+
 export function installWsDispatch() {
   if (installed) {
     return installed
@@ -33,6 +37,7 @@ export function installWsDispatch() {
   const friend = useFriendStore()
   const group = useGroupStore()
   const call = useCallStore()
+  const groupcall = useGroupcallStore()
   const linkmic = useLinkmicStore()
 
   const disposers = []
@@ -118,8 +123,14 @@ export function installWsDispatch() {
   // 有人投/改票或发起人截止，后端推权威票数给全员：各端投票卡片据此刷新选项条
   disposers.push(on('vote-notify', (packet) => chat.applyVote(packet.data)))
 
+  // 有人接龙或发起人截止，后端推全量条目快照给全员（含操作者其他设备）：各端接龙卡片整份替换 extra.chainItems
+  disposers.push(on('chain-notify', (packet) => chat.applyChain(packet.data)))
+
   // 群主/管理员标记或取消精华，后端推 {messageId, conversationId, essence} 给群成员：各端气泡精华标签实时增减
   disposers.push(on('essence-notify', (packet) => chat.applyEssence(packet.data)))
+
+  // 收藏只推给操作者本人（私人标记，不去打扰全群），触达的是同一账号的其他端：手机收藏、电脑气泡也跟着亮
+  disposers.push(on('favorite-notify', (packet) => chat.applyFavorite(packet.data)))
 
   // 送达 / 已读回执都推给原发送者，差别只是把状态升到哪一级
   disposers.push(on('delivered-notify', (packet) => chat.applyReceipt(packet.data && packet.data.messageIds, 2)))
@@ -137,7 +148,34 @@ export function installWsDispatch() {
   disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend, group })))
 
   // 音视频通话信令：整帧交给通话 store 的状态机裁决（invite/accept/offer/answer/ice/hangup/failed 等）
-  disposers.push(on('call-signal', (packet) => call.onSignal(packet.data)))
+  //
+  // 这里的「跨类型拦截」是必要的：1:1 通话、群通话、连麦各用一套 Redis 忙线键，
+  // 服务端互不相认（已知取舍，收敛成一个「媒体会话注册表」要跨三个模块重构）。
+  // 不拦就会两个全屏浮层叠在一起、三套本地采集抢同一个摄像头；在这一层做而不写进 store，
+  // 是因为两个 store 互引会变成循环依赖，而 dispatch 本就同时持有它们。
+  // 拒回的那一帧走对方的协议，目的是让呼叫方早点知道结果，而不是干等 45 秒振铃超时
+  disposers.push(
+    on('call-signal', (packet) => {
+      const data = packet.data
+      if (data && data.action === 'invite' && groupcall.busy) {
+        wsSend('call', { action: 'reject', callId: data.callId, reason: 'busy-group-call' })
+        return
+      }
+      call.onSignal(data)
+    })
+  )
+
+  // 群通话信令：整帧交给 groupcall store（create/invite/join/roster/member-join/member-leave/offer/answer/ice/state/end/failed）
+  disposers.push(
+    on('groupcall-signal', (packet) => {
+      const data = packet.data
+      if (data && data.action === 'invite' && call.visible) {
+        wsSend('groupcall', { action: 'reject', callId: data.callId, reason: 'busy-call' })
+        return
+      }
+      groupcall.onSignal(data)
+    })
+  )
 
   // 直播连麦信令：整帧交给连麦 store（request/accept/offer/answer/ice/leave/reject/failed，按 linkAction 裁决）
   disposers.push(on('linkmic-signal', (packet) => linkmic.onSignal(packet.data)))
@@ -189,8 +227,8 @@ export function uninstallWsDispatch() {
  * 处理 notify 帧。
  *
  * 同一个 type 下有三种形态，且区分字段并不统一：
- * 握手欢迎与好友相关用 action / bizType，群组相关用 biz。
- * 这是后端逐步演进留下的现状，前端必须两种都认，只按其中一种判断会静默漏掉另一半通知。
+ * 握手欢迎、举报回执与管理端警告用 action，好友相关用 bizType，群组相关用 biz。
+ * 这是后端逐步演进留下的现状，前端必须几种都认，只按其中一种判断会静默漏掉另一半通知。
  */
 function handleNotify(data, { conversation, friend, group }) {
   if (!data) {
@@ -226,6 +264,18 @@ function handleNotify(data, { conversation, friend, group }) {
           router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
         }
       }
+    })
+    return
+  }
+
+  // 举报的两条回执：结论推给举报人（report-result），违规警告推给当事人（admin-warn）。
+  // 两者都是纯提醒：不刷新列表也不跳路由——工单页在管理后台那边，聊天端没有可跳的目标。
+  // 样式取服务端的 tone，不让前端拿中文标题去猜（改一句文案就把通知颜色改乱了）。
+  if (data.action === 'report-result' || data.action === 'admin-warn') {
+    ElNotification({
+      title: data.title || (data.action === 'report-result' ? '举报处理结果' : '内容提醒'),
+      message: data.message || '',
+      type: NOTIFY_TONES.includes(data.tone) ? data.tone : 'info'
     })
     return
   }

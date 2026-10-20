@@ -69,6 +69,10 @@ public final class ImConstants {
     /** 内置角色编码 */
     public static final String ROLE_ADMIN = "admin";
     public static final String ROLE_USER = "user";
+    /** 审核员：只看板 + 举报处置，不给改用户也不给配角色（后台二期的最小权限示范角色） */
+    public static final String ROLE_MODERATOR = "moderator";
+    /** 运营：看板 + 用户管理 + 角色分配，但不碰举报处置 */
+    public static final String ROLE_OPERATOR = "operator";
 
     /** 权限点 */
     public static final String PERM_USER_UPDATE = "user:profile:update";
@@ -78,6 +82,19 @@ public final class ImConstants {
     public static final String PERM_GROUP_CREATE = "group:create";
     public static final String PERM_FILE_UPLOAD = "file:upload";
     public static final String PERM_SYSTEM_MANAGE = "system:manage";
+    /**
+     * 后台细粒度权限点（二期）。
+     *
+     * <p>{@code system:manage} 仍作「全量伞权限」保留：向后兼容——老后台只认这一个串。
+     * 二期把四个后台控制器从 {@code @SaCheckPermission(system:manage)} 改细到下面四个点，
+     * 于是「审核员只能处置举报、运营只能管人」这类最小权限成为可能。
+     * 代价是 admin 角色必须**同时被补齐这四个点**（见 {@code sql/im_data.sql} 种子），
+     * 否则改了控制器的权限点、原有的全权管理员反而会被新权限点拦下。
+     */
+    public static final String PERM_SYSTEM_DASHBOARD = "system:dashboard";
+    public static final String PERM_SYSTEM_USER_MANAGE = "system:user:manage";
+    public static final String PERM_SYSTEM_REPORT_HANDLE = "system:report:handle";
+    public static final String PERM_SYSTEM_ROLE_MANAGE = "system:role:manage";
 
     /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
@@ -94,11 +111,26 @@ public final class ImConstants {
      *
      * <p>充值/送礼/签到/后台调整四类，扣款侧与入账侧分布在不同模块（im-live 送礼、im-user 充值签到），
      * 类型串必须收口在这里统一引用——任何一处手打错，账本里就会出现一条归类错乱的流水。
+     *
+     * <p>{@code transfer}/{@code packet}/{@code refund} 是用户之间转移积分的三个面：
+     * 转账与发红包各产生一条负额行（付款人），收款/领取产生正额行；{@code refund} 只用于
+     * 过期红包把没人领的余额退给发送人。注意后三类的 {@code ref_id} 语义不是房间/送礼记录 ID：
+     * {@code transfer} 存「对方用户 ID」，{@code packet}/{@code refund} 存「红包 ID」——
+     * 后者是「过期退款可从账本倒推」的依据（同一个 packetId 下的行求和即为未退余额）。
      */
     public static final String WALLET_TX_RECHARGE = "recharge";
     public static final String WALLET_TX_GIFT = "gift";
     public static final String WALLET_TX_CHECKIN = "checkin";
     public static final String WALLET_TX_ADJUST = "adjust";
+    public static final String WALLET_TX_TRANSFER = "transfer";
+    public static final String WALLET_TX_PACKET = "packet";
+    public static final String WALLET_TX_PACKET_REFUND = "refund";
+    /**
+     * 付费直播入场费：{@code live_pay}。只产生一条负额行（扣观众），ref_id 存 roomId。
+     * 与 {@code gift} 同口径——模拟积分、<b>不</b>给主播入账、不可提现，仅作为「为看这场而花出去的积分」
+     * 记在观众自己的流水里。新增一个类型串无需改表（type 是自由 varchar）。
+     */
+    public static final String WALLET_TX_LIVE_PAY = "live_pay";
 
     /**
      * 敏感字段名关键词：字段名转小写后包含任一关键词，其值就不允许明文进日志。

@@ -189,6 +189,37 @@ public class RedisUtil {
         return redisTemplate.opsForHash().hasKey(key, hashKey);
     }
 
+    /**
+     * 只在 field 不存在时写入（HSETNX），返回是否占到位。
+     *
+     * <p>拿它做「一人一份」的闸门而不是 {@code hHasKey} + {@code hSet} 两步：两个命令之间
+     * 同一个用户的两次双击（两个连接或两台设备）会双双判成「没领过」，钱就多发了一份。
+     */
+    public boolean hSetIfAbsent(String key, String hashKey, String value) {
+        Boolean ok = redisTemplate.opsForHash().putIfAbsent(key, hashKey, value);
+        return Boolean.TRUE.equals(ok);
+    }
+
+    /**
+     * Hash 内单个 field 的原子加减（HINCRBY），返回运算后的值。
+     *
+     * <p>返回自增后的值而不是 void：红包领取要拿它当「我抢到的是第几个名额」用，
+     * 先 INCR 再 GET 两步之间会读到别人推进后的值，两个领取人算出同一个序号。
+     */
+    public long hIncrement(String key, String hashKey, long delta) {
+        Long value = redisTemplate.opsForHash().increment(key, hashKey, delta);
+        return value == null ? 0L : value;
+    }
+
+    /**
+     * Hash 的成员数（HLEN）。列名单只需要「有多少」时用它，
+     * 不要 {@code hGetAll(key).size()}——后者会把全部 value（可能是 JSON 串）拉回来再丢弃。
+     */
+    public long hLen(String key) {
+        Long size = redisTemplate.opsForHash().size(key);
+        return size == null ? 0L : size;
+    }
+
     /* ==================== Set ==================== */
 
     public long sAdd(String key, String... values) {

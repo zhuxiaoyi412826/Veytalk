@@ -23,6 +23,23 @@ function mediaConstraints(mediaType) {
 }
 
 /**
+ * 本环境能不能拿到麦/摄像头。
+ *
+ * 浏览器只在安全上下文（https 或 localhost/127.0.0.1）暴露 navigator.mediaDevices：
+ * 手机用 http://局域网IP 访问时它是 undefined，不预检直接调 getUserMedia 会撞一个天书一样的
+ * TypeError（navigator.mediaDevices 不存在），用户只看到「接通后就关闭」。
+ *
+ * 1:1 通话与群通话都先问这一句，所以放在引擎模块里而不是某一个 store 里。
+ */
+export function hasMediaApi() {
+  return !!(typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+}
+
+/** 拿不到媒体设备时的统一文案，两个通话场景共用一份，免得改一处漏一处 */
+export const INSECURE_HINT =
+  '当前访问地址不是 HTTPS/localhost，浏览器禁止使用麦克风/摄像头：手机请用 https://<电脑IP>:5173 访问（npm run gen:cert 生成证书）'
+
+/**
  * 创建一个通话引擎实例。一次通话对应一个实例，挂断即弃。
  *
  * @param {object} options
@@ -32,6 +49,13 @@ function mediaConstraints(mediaType) {
  * @param {(stream: MediaStream) => void} [options.onRemoteStream] 远端流就绪（挂到 <video>.srcObject）
  * @param {(stream: MediaStream) => void} [options.onLocalStream] 本地流就绪（预览小窗 + 录制取流）
  * @param {(state: string) => void} [options.onConnectionState] RTCPeerConnection 连接状态变化
+ * @param {MediaStream} [options.localStream] 外部已有的本地流。**群通话（mesh）必传**：
+ *   四人通话要开三路 RTCPeerConnection，若不共享，每一路都会各自 getUserMedia 一次——
+ *   Windows 上同一摄像头设备被重复打开并不安全（常见表现为第二路黑屏或整个设备被占用报错），
+ *   而且三路采集意味着三份编码开销。传了外部流时本实例不采集、
+ *   {@code close()} 也**不停**这些轨（谁采集谁销毁），其余 N-1 路不受影响。
+ *   附带一个语义：{@code setMuted}/{@code setCameraEnabled} 动的是共享轨，
+ *   于是一按静音就对房间里所有人同时静音——这正是群通话想要的效果，不是副作用。
  * @returns {object} 引擎句柄，见下方方法
  */
 export function createCallPeer(options = {}) {
@@ -45,7 +69,9 @@ export function createCallPeer(options = {}) {
   } = options
 
   let pc = null
-  let localStream = null
+  // 共享流由调用方注入，所有权也在调用方；自己采集的才归自己停
+  let localStream = options.localStream || null
+  const ownsStream = !options.localStream
   let screenStream = null
   // 远端 candidate 早于 remoteDescription 到达时暂存，setRemote 后冲刷
   const pendingCandidates = []
@@ -75,12 +101,14 @@ export function createCallPeer(options = {}) {
     return pc
   }
 
-  /** 采集本地音视频并挂到 pc；采集失败（无权限/无设备）时抛错，由上层提示 */
+  /** 采集本地音视频并挂到 pc；采集失败（无权限/无设备）时抛错，由上层提示。已有共享流时只挂不采 */
   async function initMedia() {
     if (closed) {
       throw new Error('通话已结束')
     }
-    localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints(mediaType))
+    if (!localStream) {
+      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints(mediaType))
+    }
     onLocalStream(localStream)
     const conn = ensurePc()
     localStream.getTracks().forEach((track) => conn.addTrack(track, localStream))
@@ -184,14 +212,17 @@ export function createCallPeer(options = {}) {
     return true
   }
 
-  /** 释放全部媒体资源：停本地轨、停共享轨、关闭 pc */
+  /** 释放媒体资源：停本地轨（仅自己采集的那些）、停共享轨、关闭 pc */
   function close() {
     if (closed) {
       return
     }
     closed = true
     if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop())
+      // 共享流的轨属于群通话本体，剩下 N-2 路还在用，误停就是「一个人挂断全房黑屏」
+      if (ownsStream) {
+        localStream.getTracks().forEach((track) => track.stop())
+      }
       localStream = null
     }
     if (screenStream) {

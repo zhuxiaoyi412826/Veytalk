@@ -44,4 +44,21 @@ public class LiveStartRequest implements Serializable {
 
     @Schema(description = "视频码率（kbps）", example = "2500")
     private Integer bitrateKbps;
+
+    /**
+     * 房间密码（可选）。非空即把本场锁成<b>密码直播</b>：观众要先输对密码才能拿到播放地址。
+     * 服务端只存其 SHA-256 摘要（见 {@code LiveGateService}），不存明文，也绝不下发到任何列表/详情响应。
+     */
+    @Schema(description = "房间密码，留空为公开房；与 price 互斥（同时给按密码优先）", example = "1234")
+    @Size(max = 32, message = "房间密码最多 32 位")
+    private String password;
+
+    /**
+     * 入场价格（可选，单位：积分）。&gt;0 即把本场锁成<b>付费直播</b>：观众扣这么多积分才可入场。
+     * 与 {@code gift} 同口径，是模拟积分、不进主播钱包不可提现；代价是本场入场费只在观众流水里留痕。
+     * 给主播本人恒免（不扣自己）。
+     */
+    @Schema(description = "入场积分价，0/留空为免费；需钱包开启，与 password 互斥", example = "50")
+    @jakarta.validation.constraints.Min(value = 0, message = "价格不能为负")
+    private Long price;
 }

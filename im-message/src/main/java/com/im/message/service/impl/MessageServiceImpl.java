@@ -9,6 +9,7 @@ import com.im.common.api.ResultCode;
 import com.im.common.config.ImProperties;
 import com.im.common.constant.ImConstants;
 import com.im.common.constant.RedisKeys;
+import com.im.common.domain.ChainItem;
 import com.im.common.domain.ConversationBriefDTO;
 import com.im.common.domain.MemberPositionDTO;
 import com.im.common.domain.MessageDTO;
@@ -51,6 +52,7 @@ import com.im.message.entity.MessageRead;
 import com.im.message.entity.MessageReaction;
 import com.im.message.entity.MessageVote;
 import com.im.message.entity.MessageEssence;
+import com.im.message.entity.MessageFavorite;
 import com.im.message.handler.MessageContentHandler;
 import com.im.message.mapper.MessageDeleteMapper;
 import com.im.message.mapper.MessageMapper;
@@ -58,6 +60,7 @@ import com.im.message.mapper.MessageReadMapper;
 import com.im.message.mapper.MessageReactionMapper;
 import com.im.message.mapper.MessageVoteMapper;
 import com.im.message.mapper.MessageEssenceMapper;
+import com.im.message.mapper.MessageFavoriteMapper;
 import com.im.message.service.MessageSequenceService;
 import com.im.message.service.MessageService;
 import jakarta.annotation.PostConstruct;
@@ -75,6 +78,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -114,12 +118,45 @@ public class MessageServiceImpl implements MessageService {
     /** 清空会话聊天记录时批量写删除记录的单批行数，避免一条超大 INSERT 撑爆 SQL 长度 */
     private static final int CLEAR_BATCH = 500;
 
+    /**
+     * 管理侧强制撤回时的文案主语：会话里要能看出这条是被平台撤的，不是发送者自己撤的。
+     * 只借 {@link MessageConvert#recallSummary} 的 who 位，不另起一句新说法，免得出现两种措辞。
+     */
+    private static final String ADMIN_RECALL_NICKNAME = "平台管理员";
+
+    /**
+     * 收藏标记批量回填的行数上限。
+     *
+     * <p>导出聊天记录时一次可能累积两万条，那种场景下「我自己收没收过」既不写进导出件、也不值得
+     * 为它拼一个两万元素的 IN 子句。超过上限就干脆不标，历史翻页 / 离线拉取这类正常页面远远碰不到。
+     */
+    private static final int FAVORITE_ATTACH_LIMIT = 500;
+
+    /**
+     * 接龙条目上限：接龙正文存在 {@code extra} 的 JSON 列里，一条超长接龙会拖大每次读取与推送的体积。
+     * 200 条足够报名 / 点单一类场景，到顶就拒绝新条目（而非静默丢尾，那比报错更坑）。
+     */
+    private static final int MAX_CHAIN_ITEMS = 200;
+
+    /** 接龙单条正文限长（字符合并计数，去毒后截断） */
+    private static final int MAX_CHAIN_ENTRY_LENGTH = 200;
+
+    /**
+     * 接龙追加锁前缀：与 {@code im:gcall:lock:} / {@code im:call:} 同一惯例（只有一处读写、
+     * 不值得提到 {@code RedisKeys}），按接龙消息 ID 串行化 read-modify-write，防并发追加互相覆盖。
+     */
+    private static final String CHAIN_LOCK_PREFIX = "im:msg:chain:lock:";
+
+    /** 接龙锁存活时间：足够覆盖一次选行重写，崩溃不释放也自行过期，不会死锁 */
+    private static final Duration CHAIN_LOCK_TTL = Duration.ofSeconds(5);
+
     private final MessageMapper messageMapper;
     private final MessageReadMapper messageReadMapper;
     private final MessageDeleteMapper messageDeleteMapper;
     private final MessageReactionMapper messageReactionMapper;
     private final MessageVoteMapper messageVoteMapper;
     private final MessageEssenceMapper messageEssenceMapper;
+    private final MessageFavoriteMapper messageFavoriteMapper;
     private final MessageSequenceService sequenceService;
     private final UserQuerySpi userQuerySpi;
     private final ConversationSpi conversationSpi;
@@ -174,9 +211,9 @@ public class MessageServiceImpl implements MessageService {
                 ResultCode.BAD_REQUEST, "发送者不能为空");
         MsgType type = MsgType.of(cmd.getMsgType());
         boolean internal = Boolean.TRUE.equals(cmd.getInternal());
-        // 系统通知与机器人消息都只能由服务端内部产生：客户端若能伪造 msgType=5/11，
-        // 就能冒充系统推送文案、或凭空造出一批没有真实账号的「机器人」身份
-        BusinessException.throwIf((type == MsgType.SYSTEM || type == MsgType.ROBOT) && !internal,
+        // 系统通知、机器人消息、转账与红包都只能由服务端内部产生：客户端若能伪造 msgType=5/11/12/13，
+        // 就能冒充系统推送文案、凭空造出没有真实账号的「机器人」身份，或发出一条根本没扣过钱的「已到账转账」
+        BusinessException.throwIf(!internal && (type == MsgType.SYSTEM || type == MsgType.ROBOT || type.isMoneyBearing()),
                 ResultCode.MESSAGE_SEND_FORBIDDEN);
 
         Long conversationId = resolveConversation(cmd);
@@ -651,6 +688,62 @@ public class MessageServiceImpl implements MessageService {
         return vo;
     }
 
+    @Override
+    public PageResult<MessageVO> pageFavorites(Long userId, Long conversationId, PageQuery query) {
+        IPage<MessageFavorite> fp = messageFavoriteMapper.pageByUser(
+                query.safeCurrent(), query.safeSize(), userId, conversationId);
+        List<MessageFavorite> rows = fp.getRecords();
+        if (rows.isEmpty()) {
+            return PageResult.of(List.of(), fp.getTotal(), fp.getCurrent(), fp.getSize());
+        }
+        List<Long> messageIds = rows.stream().map(MessageFavorite::getMessageId).toList();
+        // selectByIdIn 是按会话 + seq 升序回来的，而收藏要的是「收藏时间倒序」，且跨会话时 seq 彼此无关，
+        // 所以取回视图后按收藏时刻重排一次（页内最多几十行，内存排序）
+        Map<Long, LocalDateTime> favoritedAt = rows.stream().collect(Collectors.toMap(
+                MessageFavorite::getMessageId, MessageFavorite::getCreateTime, (older, newer) -> newer));
+        List<Message> messages = messageMapper.selectByIdIn(messageIds);
+        List<MessageVO> records = new ArrayList<>(toViewList(new ArrayList<>(messages), userId));
+        records.forEach(vo -> {
+            vo.setFavorite(Boolean.TRUE);
+            vo.setFavoritedAt(favoritedAt.get(vo.getMessageId()));
+        });
+        records.sort(Comparator.comparing(
+                (MessageVO vo) -> favoritedAt.getOrDefault(vo.getMessageId(), LocalDateTime.MIN)
+        ).reversed());
+        return PageResult.of(records, fp.getTotal(), fp.getCurrent(), fp.getSize());
+    }
+
+    @Override
+    public MessageVO markFavorite(Long userId, Long messageId, boolean favorite) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null || message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        // 只能收藏自己看得见的消息：不验成员关系的话，枚举 messageId 就能把别人私聊的消息归到自己名下展示
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        if (favorite) {
+            // 幂等：已收藏则不重复插入；真并发下唯一键 uk_user_message 是最后一道闸门
+            if (!messageFavoriteMapper.existsByMessage(userId, messageId)) {
+                MessageFavorite row = new MessageFavorite();
+                row.setUserId(userId);
+                row.setConversationId(message.getConversationId());
+                row.setMessageId(messageId);
+                try {
+                    messageFavoriteMapper.insert(row);
+                } catch (DuplicateKeyException e) {
+                    log.info("[消息收藏] 并发重复收藏，忽略: userId={}, messageId={}", userId, messageId);
+                }
+            }
+        } else {
+            messageFavoriteMapper.deleteByMessageId(userId, messageId);
+        }
+        // 只推本人：收藏是私人标记，不应当像 essence-notify 那样去打扰全群
+        afterCommit(() -> pushFavorite(userId, message.getConversationId(), messageId, favorite));
+        UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
+        MessageVO vo = MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
+        vo.setFavorite(favorite);
+        return vo;
+    }
+
     /**
      * 校验当前查看者可以浏览该群会话的内容（成员身份 + 会话为群聊）；群文件 / 群相册 / 精华面板公用。
      */
@@ -786,6 +879,8 @@ public class MessageServiceImpl implements MessageService {
         attachReactions(vos, viewerId);
         attachVotes(vos, viewerId);
         attachEssence(vos);
+        // 收藏是查看者维度的标记（与精华不同，人人各自一份），所以必须带 viewerId 取自自己的行
+        attachFavorites(vos, viewerId);
         return vos;
     }
 
@@ -880,24 +975,54 @@ public class MessageServiceImpl implements MessageService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void recall(Long messageId, Long operatorId) {
+        recallInternal(messageId, operatorId, false);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void adminRecall(Long messageId, Long adminId) {
+        recallInternal(messageId, adminId, true);
+    }
+
+    /**
+     * 撤回主体。{@code force} 只放开「时限」与「权限」两道闸，其余判断一条不少。
+     *
+     * <p>为什么不直接复用 {@link #validateRecallRight} 里的全局权限分支：那一支只认
+     * 当前 Sa-Token 登录者持有的 {@code PERM_MESSAGE_RECALL_ANY}，而举报处置带进来的
+     * {@code operatorId} 属于后台那一侧的会话，两边不在同一个登录上下文里，
+     * 硬套只会得到一句误导性的「无权限」。
+     *
+     * <p>两道即使 {@code force} 也保留的拒绝：资金类（转账已到账、红包有人已领，
+     * 撤回只把凭证抹掉）与系统通知（好友关系、群成员变更的落地依据）。
+     */
+    private void recallInternal(Long messageId, Long operatorId, boolean force) {
         Message message = messageMapper.selectById(messageId);
         BusinessException.throwIf(message == null, ResultCode.MESSAGE_NOT_FOUND);
         if (message.isRecalledNow()) {
             // 重复撤回当成功处理：多端同时点撤回或网络重试都会走到这里，报错对客户端毫无意义
             return;
         }
-        int limitSeconds = imProperties.getMessage().getRecallLimitSeconds();
-        LocalDateTime deadline = message.getSendTime().plusSeconds(limitSeconds);
-        BusinessException.throwIf(LocalDateTime.now().isAfter(deadline),
-                ResultCode.MESSAGE_RECALL_TIMEOUT);
-        validateRecallRight(message, operatorId);
+        // 资金类消息不做撤回：转账已经到账，撤回只是把收款人的收款凭证抹掉；
+        // 红包撤回则会让「已经领到的人」与「没来得及点的人」看到两种完全不同的结局
+        BusinessException.throwIf(MsgType.of(message.getMsgType()).isMoneyBearing(),
+                ResultCode.MONEY_MESSAGE_FORBIDDEN);
+        if (force) {
+            BusinessException.throwIf(message.isSystem(), ResultCode.MESSAGE_RECALL_FORBIDDEN);
+        } else {
+            int limitSeconds = imProperties.getMessage().getRecallLimitSeconds();
+            LocalDateTime deadline = message.getSendTime().plusSeconds(limitSeconds);
+            BusinessException.throwIf(LocalDateTime.now().isAfter(deadline),
+                    ResultCode.MESSAGE_RECALL_TIMEOUT);
+            validateRecallRight(message, operatorId);
+        }
 
         if (messageMapper.markRecalled(messageId, LocalDateTime.now()) == 0) {
             // 并发撤回：另一个请求已经把它标记掉了，本次同样视作成功
             log.info("[消息撤回] 已被并发撤回: messageId={}", messageId);
             return;
         }
-        String summary = MessageConvert.recallSummary(nicknameOf(message.getFromUserId()));
+        String summary = MessageConvert.recallSummary(
+                force ? ADMIN_RECALL_NICKNAME : nicknameOf(message.getFromUserId()));
         conversationSpi.onMessageRecalled(message.getConversationId(), messageId, summary);
         afterCommit(() -> pushRecall(message.getConversationId(), messageId, operatorId, summary));
     }
@@ -1041,6 +1166,124 @@ public class MessageServiceImpl implements MessageService {
         MessageVO vo = MessageConvert.toVO(message, sender, viewerId, MessageStatus.SENT, 0);
         attachVotes(List.of(vo), viewerId);
         return vo;
+    }
+
+    /**
+     * 接龙：向一条接龙消息追加一个条目，或由发起人截止。
+     *
+     * <p>故意<b>不加 {@code @Transactional}</b>：接龙的写是「读整份 extra → 改 → 整体写回」，
+     * 靠 Redis 短锁串行化。若把它包进事务，{@code updateById} 要到提交才可见，而锁在方法返回（提交前）就释放了，
+     * 等锁的下一条会读到旧 extra 并覆盖掉刚追加的那条——正是本锁要防的丢失更新。单条 updateById 自提交即可，
+     * 不需要跨语句原子性，所以让「写入可见 → 释放锁」严格同序。
+     */
+    @Override
+    public MessageVO chain(Long userId, Long messageId, String text, boolean close) {
+        Message message = messageMapper.selectById(messageId);
+        BusinessException.throwIf(message == null || message.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        BusinessException.throwIf(message.getMsgType() == null || message.getMsgType() != MsgType.CHAIN.getCode(),
+                ResultCode.MESSAGE_TYPE_UNSUPPORTED);
+        BusinessException.throwUnless(conversationSpi.isMember(message.getConversationId(), userId),
+                ResultCode.CONVERSATION_NO_PERMISSION);
+        if (close) {
+            // 只有发起人能截止（与投票同口径）
+            BusinessException.throwIf(!userId.equals(message.getFromUserId()), ResultCode.CONVERSATION_NO_PERMISSION);
+        }
+
+        String lockKey = CHAIN_LOCK_PREFIX + messageId;
+        boolean locked = acquireChainLock(lockKey);
+        // 锁内重取最新行：extra 是整体重写，预检那一份可能已被并发的接龙更新过
+        Message fresh = messageMapper.selectById(messageId);
+        BusinessException.throwIf(fresh == null || fresh.isRecalledNow(), ResultCode.MESSAGE_NOT_FOUND);
+        MessageExtra extra = fresh.getExtra() == null ? new MessageExtra() : fresh.getExtra();
+        boolean changed = false;
+        try {
+            boolean alreadyClosed = Boolean.TRUE.equals(extra.getChainClosed());
+            if (close) {
+                if (!alreadyClosed) {
+                    extra.setChainClosed(true);
+                    changed = true;
+                }
+            } else {
+                BusinessException.throwIf(alreadyClosed, ResultCode.BAD_REQUEST, "接龙已截止");
+                // 截止态检查不依赖锁；只有真要写新条目时才要求拿到锁（Redis 异常时 acquireChainLock 已退化为 true）
+                BusinessException.throwIf(!locked, ResultCode.BAD_REQUEST, "接龙更新中，请稍后重试");
+                List<ChainItem> items = extra.getChainItems() == null
+                        ? new ArrayList<>() : new ArrayList<>(extra.getChainItems());
+                BusinessException.throwIf(items.size() >= MAX_CHAIN_ITEMS,
+                        ResultCode.BAD_REQUEST, "接龙条目已达上限（" + MAX_CHAIN_ITEMS + " 条）");
+                UserBriefDTO u = userQuerySpi.getById(userId);
+                String nickname = u == null ? ""
+                        : (TextUtil.isNotBlank(u.getNickname()) ? u.getNickname() : u.getUsername());
+                String cleaned = TextUtil.sanitize(text == null ? "" : text).trim();
+                if (cleaned.length() > MAX_CHAIN_ENTRY_LENGTH) {
+                    cleaned = cleaned.substring(0, MAX_CHAIN_ENTRY_LENGTH);
+                }
+                cleaned = sensitiveWordFilter.mask(cleaned);
+                if (cleaned.isEmpty()) {
+                    cleaned = nickname.isEmpty() ? "参与接龙" : nickname;
+                }
+                items.add(ChainItem.builder()
+                        .userId(userId)
+                        .nickname(nickname)
+                        .text(cleaned)
+                        .time(LocalDateTime.now())
+                        .build());
+                extra.setChainItems(items);
+                changed = true;
+            }
+            if (changed) {
+                // 只补写 extra 一列：新建空实体带上 id + extra，updateById 的 SET 子句不碰其他列（与闪照同法）
+                Message patch = new Message();
+                patch.setId(messageId);
+                patch.setExtra(extra);
+                messageMapper.updateById(patch);
+                fresh.setExtra(extra);
+            }
+        } finally {
+            if (locked) {
+                releaseChainLock(lockKey);
+            }
+        }
+        if (changed) {
+            pushChain(fresh.getConversationId(), messageId, extra);
+        }
+        UserBriefDTO sender = userQuerySpi.getById(fresh.getFromUserId());
+        return MessageConvert.toVO(fresh, sender, userId, MessageStatus.SENT, 0);
+    }
+
+    /**
+     * 抢占接龙写锁：短自旋重试几次即可，接龙不是高频写，抢不到说明有人正在改同一条，让调用方稍后重试。
+     *
+     * <p>Redis 抛异常时返回 {@code true}（退化无锁写）：一次网络抖动不该让整个群接不了龙，
+     * 代价是极小概率覆盖一条，用户重接即可，比停摆划算。
+     */
+    private boolean acquireChainLock(String key) {
+        for (int i = 0; i < 3; i++) {
+            try {
+                if (redisUtil.setIfAbsent(key, "1", CHAIN_LOCK_TTL)) {
+                    return true;
+                }
+            } catch (Exception e) {
+                log.warn("[接龙] Redis 锁不可用，降级为无锁写: {}", e.getMessage());
+                return true;
+            }
+            try {
+                Thread.sleep(60L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return false;
+    }
+
+    private void releaseChainLock(String key) {
+        try {
+            redisUtil.delete(key);
+        } catch (Exception e) {
+            // 释放失败最多多占用到 TTL 过期，不影响数据正确性
+            log.warn("[接龙] 释放锁失败: key={}, {}", key, e.getMessage());
+        }
     }
 
     @Override
@@ -1318,6 +1561,32 @@ public class MessageServiceImpl implements MessageService {
     }
 
     /**
+     * 把一批消息中「当前查看者收藏过哪几条」一次性取回，命中的 VO 置 {@code favorite=true}。
+     *
+     * <p>与 {@link #attachEssence} 同一套做法（整页一次取行、内存比对），区别在条件多了
+     * {@code user_id}：收藏是个人标记，不能把别人收过什么也标上去。超过
+     * {@link #FAVORITE_ATTACH_LIMIT} 行直接不标（见那个常量的注释）。
+     */
+    private void attachFavorites(List<MessageVO> vos, Long viewerId) {
+        if (vos.isEmpty() || viewerId == null || vos.size() > FAVORITE_ATTACH_LIMIT) {
+            return;
+        }
+        Set<Long> ids = vos.stream()
+                .map(MessageVO::getMessageId)
+                .collect(Collectors.toSet());
+        List<MessageFavorite> rows = messageFavoriteMapper.selectByMessageIds(viewerId, ids);
+        if (rows.isEmpty()) {
+            return;
+        }
+        Set<Long> favoriteIds = rows.stream().map(MessageFavorite::getMessageId).collect(Collectors.toSet());
+        for (MessageVO vo : vos) {
+            if (favoriteIds.contains(vo.getMessageId())) {
+                vo.setFavorite(Boolean.TRUE);
+            }
+        }
+    }
+
+    /**
      * 精华变更通知：把「哪条消息、是设为还是取消」推给群成员（含操作者其他设备），各端气泡的精华标签实时增减。
      */
     private void pushEssence(Long conversationId, Long messageId, boolean essence) {
@@ -1334,6 +1603,22 @@ public class MessageServiceImpl implements MessageService {
         data.put("conversationId", conversationId);
         data.put("essence", essence);
         pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.ESSENCE_NOTIFY, data));
+    }
+
+    /**
+     * 收藏变更通知：只推给<b>操作者自己的其他设备</b>（与精华推全群不同），
+     * 各端气泡的「已收藏」标记与自己那份收藏列表据此刷新。
+     */
+    private void pushFavorite(Long userId, Long conversationId, Long messageId, boolean favorite) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("favorite", favorite);
+        pushSpi.pushToUsers(List.of(userId), null, WsPacket.of(WsMessageType.FAVORITE_NOTIFY, data));
     }
 
     /**
@@ -1393,6 +1678,29 @@ public class MessageServiceImpl implements MessageService {
         pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.FLASH_NOTIFY, data));
     }
 
+    /**
+     * 接龙变更通知：把服务端权威的<b>全量条目快照</b>推给会话全员（含操作者自己的其他设备）。
+     *
+     * <p>不推增量而推整份：接龙条目自带正文且要按序展示，整份替换 {@code extra.chainItems} 最不易错，
+     * 也天然幂等（重收一次只是把同一名单再写一遍）。
+     */
+    private void pushChain(Long conversationId, Long messageId, MessageExtra extra) {
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi == null) {
+            return;
+        }
+        List<Long> memberIds = conversationSpi.getMemberIds(conversationId);
+        if (memberIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("conversationId", conversationId);
+        data.put("chainItems", extra.getChainItems());
+        data.put("chainClosed", Boolean.TRUE.equals(extra.getChainClosed()));
+        pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.CHAIN_NOTIFY, data));
+    }
+
     @Override
     public void deleteForUser(Long userId, Long messageId) {
         Message message = messageMapper.selectById(messageId);
@@ -1413,6 +1721,8 @@ public class MessageServiceImpl implements MessageService {
         } catch (DuplicateKeyException e) {
             log.info("[消息删除] 并发重复删除，忽略: userId={}, messageId={}", userId, messageId);
         }
+        // 收藏跟着一并撤掉：消息对自己已经不可见了，留着收藏行只会是一个点不开的幽灵项（还会把列表总数抬高）
+        messageFavoriteMapper.deleteByMessageId(userId, messageId);
     }
 
     @Override
@@ -1446,6 +1756,8 @@ public class MessageServiceImpl implements MessageService {
         if (!batch.isEmpty()) {
             messageDeleteMapper.insertBatch(batch);
         }
+        // 同理：清空聊天记录后这些消息对本人都不可见了，本级联清掉本会话里的收藏行
+        messageFavoriteMapper.deleteByConversation(userId, conversationId);
         log.info("[消息删除] 清空会话聊天记录: userId={}, conversationId={}, 消息数={}",
                 userId, conversationId, messageIds.size());
     }
@@ -1662,6 +1974,10 @@ public class MessageServiceImpl implements MessageService {
         BusinessException.throwIf(origin.getExtra() != null
                         && Boolean.TRUE.equals(origin.getExtra().getFlash()),
                 ResultCode.BAD_REQUEST, "闪照不支持转发");
+        // 转账/红包不可转发：转发等于把「谁能领这个红包」扩大到原会话之外的人，
+        // 而资金是按原会话结算的，转出去的那条气泡指向的是别人已经动过的钱
+        BusinessException.throwIf(MsgType.of(origin.getMsgType()).isMoneyBearing(),
+                ResultCode.MONEY_MESSAGE_FORBIDDEN);
 
         String clientMsgId = TextUtil.isNotBlank(request.getClientMsgId())
                 ? request.getClientMsgId().trim()

@@ -112,6 +112,15 @@
               添加好友
             </el-button>
 
+            <!--
+              举报和拉黑是两件事：拉黑只挡住发给我的消息，举报是让运营去看这个人。
+              isSelf 在上面已经分叉，这里不会举报自己（后端 REPORT_SELF_FORBIDDEN 也会拒）；
+              report.enabled 是服务端开关，功能关了整按钮消失，而不是留个点了弹错的入口。
+            -->
+            <el-button v-if="report.enabled" type="warning" plain :icon="Warning" @click="reportUser">
+              举报该用户
+            </el-button>
+
             <span v-if="chatDisabledReason" class="user-profile__tip">{{ chatDisabledReason }}</span>
           </div>
         </section>
@@ -177,7 +186,8 @@ import {
   EditPen,
   Plus,
   RefreshLeft,
-  Setting
+  Setting,
+  Warning
 } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { fetchUserCard } from '@/api/user'
@@ -185,6 +195,7 @@ import { fetchFriendCard } from '@/api/friend'
 import { useAuthStore } from '@/stores/auth'
 import { useFriendStore } from '@/stores/friend'
 import { useConversationStore } from '@/stores/conversation'
+import { useReportStore } from '@/stores/report'
 import { asId, sameId } from '@/utils/id'
 import { formatDateTime, genderText } from '@/utils/format'
 
@@ -195,6 +206,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const friend = useFriendStore()
 const conversation = useConversationStore()
+const report = useReportStore()
 
 /** 路由参数一律是字符串，而后端 ID 是雪花数字，比较前必须先归一化 */
 const targetId = computed(() => asId(route.params.id))
@@ -423,6 +435,16 @@ async function removeFriend() {
   } finally {
     acting.value = ''
   }
+}
+
+/**
+ * 打开举报弹窗。title 包了账号，因为同名昵称在这个系统里很常见，
+ * 弹窗顶部那行字是给人确认「我举报的是不是这个人」用的；
+ * 真正进证据快照的是 userId，由后端回库抓。
+ */
+function reportUser() {
+  const account = card.value?.username ? `（@${card.value.username}）` : ''
+  report.openReport({ targetType: 'user', targetId: targetId.value, title: `${displayName.value}${account}` })
 }
 
 function goBack() {

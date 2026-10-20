@@ -37,8 +37,12 @@
         <span class="bubble__quote-text im-ellipsis">{{ quoteContent }}</span>
       </div>
 
-      <!-- 群精华标记：群主/管理员标为精华的消息，在气泡上方挂一个错色小标签 -->
-      <div v-if="message.essence" class="bubble__essence">★ 群精华</div>
+      <!-- 消息角标行：群精华（群主/管理员标记）与收藏（本人私有标记）可能同时存在，共用一行左右排 -->
+      <div v-if="message.essence || message.favorite" class="bubble__flags">
+        <div v-if="message.essence" class="bubble__essence">★ 群精华</div>
+        <!-- 收藏是自己给的私人书签，只在本端可见（后端按 user_id 回填），不会推给聊天对象 -->
+        <div v-if="message.favorite" class="bubble__favorite">★ 已收藏</div>
+      </div>
 
       <div class="bubble__row">
         <!-- 自己的消息：状态显示在气泡左侧 -->
@@ -217,6 +221,51 @@
             </div>
           </div>
 
+          <!-- 接龙（14）：有序条目列表，成员点「参与接龙」把自己那条追到末尾（序号=列表位置，服务端定） -->
+          <div v-else-if="msgType === 14" class="bubble__chain">
+            <div class="bubble__chain-head">
+              <span class="bubble__chain-title">{{ chainTitle }}</span>
+              <span class="bubble__chain-tag">{{ chainItems.length }} 条{{ chainClosed ? ' · 已截止' : '' }}</span>
+            </div>
+            <ol v-if="chainItems.length" class="bubble__chain-list">
+              <li v-for="(it, idx) in chainItems" :key="idx" class="bubble__chain-item">
+                <span class="bubble__chain-no">{{ idx + 1 }}.</span>
+                <span class="bubble__chain-name">{{ it.nickname || '匿名' }}</span>
+                <span class="bubble__chain-text">{{ it.text }}</span>
+              </li>
+            </ol>
+            <div v-else class="bubble__chain-empty">还没有人接龙，来当第 1 个</div>
+            <div class="bubble__chain-foot">
+              <span class="bubble__chain-spacer"></span>
+              <el-button v-if="!chainClosed" link type="primary" size="small" @click="onChainJoin">参与接龙</el-button>
+              <el-button v-if="message.self && !chainClosed" link size="small" @click="onCloseChain">结束接龙</el-button>
+            </div>
+          </div>
+
+          <!-- 转账（12）：金额与附言。即时到账，所以没有「点一下领取」这一步，只把结论写清楚 -->
+          <div v-else-if="msgType === 12" class="bubble__money">
+            <el-icon class="bubble__money-icon" :size="26"><Coin /></el-icon>
+            <div class="bubble__money-body">
+              <div class="bubble__money-amount">{{ transferAmount }} 积分</div>
+              <div class="bubble__money-memo im-ellipsis">{{ transferMemo }}</div>
+              <div class="bubble__money-hint">{{ transferHint }}</div>
+            </div>
+          </div>
+
+          <!-- 红包（13）：点开才去取领取态，气泡本身只带 packetId 这个寻址钩子 -->
+          <div
+            v-else-if="msgType === 13"
+            class="bubble__packet"
+            :class="{ 'is-opened': packetOpened }"
+            @click="onPacketClick"
+          >
+            <el-icon class="bubble__packet-icon" :size="26"><Present /></el-icon>
+            <div class="bubble__packet-body">
+              <div class="bubble__packet-greeting im-ellipsis">{{ packetGreeting }}</div>
+              <div class="bubble__packet-hint">{{ packetHint }}</div>
+            </div>
+          </div>
+
           <!-- 兜底：后端将来加了新类型而前端还没跟上时，至少把原文露出来 -->
           <div v-else class="bubble__text">{{ textContent }}</div>
 
@@ -261,7 +310,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, Coin, Present } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -291,7 +340,7 @@ const props = defineProps({
   selected: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote', 'chain', 'close-chain', 'open-packet'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -331,6 +380,33 @@ const mergedTitle = computed(() => extra.value.mergedTitle || '聊天记录')
 const mergedCount = computed(() => (Array.isArray(extra.value.mergedMessages) ? extra.value.mergedMessages.length : 0))
 function onMergedClick() {
   emit('view-merged', { title: mergedTitle.value, messages: extra.value.mergedMessages || [] })
+}
+
+/* -------------------------------- 转账 / 红包 -------------------------------- */
+// 金额与份数都是发出时定格的快照（服务端在扣款成功后写进 extra），前端不参与任何资金计算
+const transferAmount = computed(() => Number(extra.value.transferAmount || 0))
+const transferMemo = computed(() => extra.value.transferMemo || '转账给好友')
+// 付款方与收款方看到的结论不同，但都是「已到」：单聊转账没有待领取环节
+const transferHint = computed(() => {
+  if (props.message.recalled) return '已撤回'
+  return props.message.self ? `已转出给 ${extra.value.transferToNickname || '对方'}` : '已到账'
+})
+
+const packetId = computed(() => extra.value.packetId || '')
+const packetCount = computed(() => Number(extra.value.packetCount || 1))
+const packetGreeting = computed(() => extra.value.packetGreeting || '恭喜发财，大吉大利')
+// 本端是否已经点开过：只是本地视觉状态，领取结论一律以服务端返回的 status 为准
+const packetOpened = ref(false)
+const packetHint = computed(() => {
+  if (props.message.recalled) return '已撤回'
+  if (packetOpened.value) return '已查看，可再看一次'
+  return packetCount.value > 1 ? `拼手气红包 · 共 ${packetCount.value} 份` : '专属红包 · 点击拆开'
+})
+function onPacketClick() {
+  if (!packetId.value || props.message.recalled) return
+  packetOpened.value = true
+  // 把整条消息一起交给外层：详情弹窗需要「来自谁」，而 sender 在消息上而不在 packetId 里
+  emit('open-packet', { packetId: packetId.value, message: props.message })
 }
 
 /* -------------------------------- 投票 -------------------------------- */
@@ -399,6 +475,18 @@ function submitMultiVote() {
 }
 function onCloseVote() {
   emit('close-vote', props.message)
+}
+
+/* -------------------------------- 接龙 -------------------------------- */
+// 接龙的条目就住在 extra.chainItems 里（服务端 write 后整份推回），无需像投票那样另往 message 上挂一个聚合视图
+const chainTitle = computed(() => extra.value.chainTitle || '接龙')
+const chainItems = computed(() => (Array.isArray(extra.value.chainItems) ? extra.value.chainItems : []))
+const chainClosed = computed(() => extra.value.chainClosed === true)
+function onChainJoin() {
+  emit('chain', props.message)
+}
+function onCloseChain() {
+  emit('close-chain', props.message)
 }
 
 /**
@@ -744,7 +832,15 @@ async function toggleVoice() {
 /* -------------------------------- 通话记录 -------------------------------- */
 
 const callIsVideo = computed(() => extra.value.callMediaType === 'video')
-const callLabel = computed(() => (callIsVideo.value ? '视频通话' : '语音通话'))
+/**
+ * 参与人数：只有群通话会写 extra.callParticipantCount（1:1 没这个字段），
+ * 所以「有值就是群通话」，不用再另加一个类型标记。旧记录无此字段，自然回落成 1:1 文案。
+ */
+const callParticipantCount = computed(() => Number(extra.value.callParticipantCount) || 0)
+const callLabel = computed(() => {
+  const base = callIsVideo.value ? '视频通话' : '语音通话'
+  return callParticipantCount.value > 0 ? `群${base} · ${callParticipantCount.value} 人` : base
+})
 const callDurationText = computed(() => {
   const sec = Number(extra.value.duration) || 0
   return sec > 0 ? formatDuration(sec) : '未接通'
@@ -1304,9 +1400,20 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.bubble__essence {
+.bubble__flags {
+  display: flex;
+  gap: 6px;
   align-self: flex-start;
   margin-bottom: 3px;
+  width: fit-content;
+}
+
+/* 自己的消息靠右，角标行跟着右对齐（原 .bubble__essence 的 margin-left:auto 由这里统一承担） */
+.bubble--self .bubble__flags {
+  align-self: flex-end;
+}
+
+.bubble__essence {
   padding: 1px 8px;
   font-size: 11px;
   line-height: 1.5;
@@ -1317,8 +1424,15 @@ onBeforeUnmount(() => {
   width: fit-content;
 }
 
-.bubble--self .bubble__essence {
-  margin-left: auto;
+.bubble__favorite {
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #d4380d;
+  background: #fff2e8;
+  border: 1px solid #ffbb96;
+  border-radius: 10px;
+  width: fit-content;
 }
 
 .bubble__video {
@@ -1391,6 +1505,69 @@ onBeforeUnmount(() => {
 }
 
 /* 投票卡片 */
+/* 转账与红包：共用一套「资金卡片」骨架，只靠配色区分（转账偏金、红包偏红） */
+.bubble__money,
+.bubble__packet {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 240px;
+  padding: 10px 12px;
+  background: var(--im-panel, #fff);
+  border: 1px solid var(--im-border, #ebeef5);
+  border-radius: 8px;
+}
+
+.bubble__money {
+  background: linear-gradient(135deg, #fffaf0, #fff);
+}
+
+/* 红包必须点一下才去取领取态，所以它才是可点的；转账即时到账，不需要任何交互 */
+.bubble__packet {
+  background: linear-gradient(135deg, #fff1f0, #fff);
+  cursor: pointer;
+}
+
+.bubble__packet.is-opened {
+  opacity: 0.78;
+}
+
+.bubble__money-icon {
+  flex: none;
+  color: #d4a017;
+}
+
+.bubble__packet-icon {
+  flex: none;
+  color: #e6544a;
+}
+
+.bubble__money-body,
+.bubble__packet-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.bubble__money-amount,
+.bubble__packet-greeting {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__money-memo {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__money-hint,
+.bubble__packet-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--im-text-secondary, #909399);
+}
+
 .bubble__vote {
   width: 260px;
   padding: 10px 12px;
@@ -1518,5 +1695,93 @@ onBeforeUnmount(() => {
 .bubble--selecting {
   cursor: pointer;
   user-select: none;
+}
+
+/* 接龙卡片：与投票同宽同容器，内容是一条条编号行，多时内部滚动不吃掉整个聊天区高度 */
+.bubble__chain {
+  width: 260px;
+  padding: 10px 12px;
+  background: var(--im-panel, #fff);
+  border: 1px solid var(--im-border, #ebeef5);
+  border-radius: 8px;
+}
+
+.bubble__chain-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bubble__chain-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__chain-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__chain-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.bubble__chain-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.bubble__chain-no {
+  flex: none;
+  color: var(--im-primary, #409eff);
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble__chain-name {
+  flex: none;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--im-text, #303133);
+  font-weight: 500;
+}
+
+.bubble__chain-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--im-text-regular, #606266);
+  word-break: break-word;
+}
+
+.bubble__chain-empty {
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__chain-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bubble__chain-spacer {
+  flex: 1;
 }
 </style>

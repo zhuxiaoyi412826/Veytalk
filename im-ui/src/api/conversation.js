@@ -50,3 +50,20 @@ export function removeConversation(id) {
 export function fetchTotalUnread() {
   return http.get('/conversation/unread/total', { silent: true })
 }
+
+/* ============================================================================
+ * 常用语（快捷回复）
+ *
+ * 清单存服务端 Redis（按用户），不建表也不只放 localStorage：手机与桌面要看到同一份话术。
+ * 只有一个整表替换的写接口，所以面板里的增删都先在本地副本上做，点「保存」才发一次 PUT。
+ * ========================================================================== */
+
+/** 我的常用语清单（按写入顺序），没配过返回空数组 */
+export function fetchQuickReplies() {
+  return http.get('/conversation/quick-reply', { silent: true })
+}
+
+/** 整表替换：传空数组即清空，返回服务端清洗后实际生效的清单 */
+export function replaceQuickReplies(replies) {
+  return http.put('/conversation/quick-reply', { replies })
+}

@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getCallConfig } from '@/api/call'
 import { uploadFileSmart } from '@/api/file'
-import { createCallPeer } from '@/utils/webrtc'
+import { createCallPeer, hasMediaApi, INSECURE_HINT } from '@/utils/webrtc'
 import { createCallRecorder, callRecordSupported } from '@/utils/callRecorder'
 import { openRecordDir, fetchDefaultRecordDir } from '@/utils/recorder'
 import { useChatStore } from '@/stores/chat'
@@ -51,6 +51,13 @@ export const useCallStore = defineStore('call', () => {
   const recordSupported = ref(false)
   // 服务端通话开关：ensureConfig 拉到后置真，未拉到前默认不可用（避免误开入口）
   const enabled = ref(false)
+  // 群通话两个旋钮也从这里下发（同一个 /call/config，不为群通话再开一个端点）：
+  // groupcall store 读它们而不是自己再拉一次，免得两份缓存各自看到不同时刻的开关
+  const groupEnabled = ref(false)
+  const groupMaxSlots = ref(0)
+  // ICE 清单以 shallowRef 交出：群通话建 N-1 路 PeerConnection 时要读同一个数组，
+  // 而 config 是个普通变量，不具有响应式，不能直接给别的 store 用
+  const iceServers = shallowRef([])
   const localStream = shallowRef(null)
   const remoteStream = shallowRef(null)
 
@@ -85,12 +92,18 @@ export const useCallStore = defineStore('call', () => {
           iceServers: (vo && vo.iceServers) || []
         }
         enabled.value = config.enabled
+        iceServers.value = config.iceServers
+        groupEnabled.value = !!(vo && vo.groupEnabled)
+        groupMaxSlots.value = Number((vo && vo.groupMaxSlots) || 0)
         recordSupported.value = callRecordSupported()
         return config
       })
       .catch(() => {
         config = { enabled: false, iceServers: [] }
         enabled.value = false
+        iceServers.value = []
+        groupEnabled.value = false
+        groupMaxSlots.value = 0
         return config
       })
       .finally(() => {
@@ -110,16 +123,9 @@ export const useCallStore = defineStore('call', () => {
   /* ------------------------------ 媒体引擎 ------------------------------ */
 
   /**
-   * 本环境能不能拿到麦/摄像头。浏览器只在安全上下文（https 或 localhost/127.0.0.1）
-   * 暴露 navigator.mediaDevices：手机用 http://局域网IP 访问时它是 undefined，
-   * 不预检直接调 getUserMedia 会撞一个天书一样的 TypeError（navigator.mediaDevices 不存在），
-   * 用户只看到「接通后就关闭」——这正是那个 bug 的主要现场。
+   * 取流前的安全上下文预检与提示文案都在 utils/webrtc.js（hasMediaApi / INSECURE_HINT）：
+   * 1:1 通话与群通话要的是同一句解释，写两处早晚变成一个改了另一个没改。
    */
-  function hasMediaApi() {
-    return !!(typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
-  }
-
-  const INSECURE_HINT = '当前访问地址不是 HTTPS/localhost，浏览器禁止使用麦克风/摄像头：手机请用 https://<电脑IP>:5173 访问（npm run gen:cert 生成证书）'
 
   async function buildEngine() {
     engine = createCallPeer({
@@ -648,6 +654,9 @@ export const useCallStore = defineStore('call', () => {
     hint,
     recordSupported,
     enabled,
+    groupEnabled,
+    groupMaxSlots,
+    iceServers,
     localStream,
     remoteStream,
     // getters

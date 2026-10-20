@@ -67,6 +67,12 @@ public class WalletServiceImpl implements WalletService {
                 .signedToday(signedToday)
                 .rechargeMin(wallet.getRechargeMin())
                 .rechargeMax(wallet.getRechargeMax())
+                .transferEnabled(wallet.isTransferEnabled())
+                .transferMin(wallet.getTransferMin())
+                .transferMax(wallet.getTransferMax())
+                .packetMax(wallet.getPacketMax())
+                .packetMaxCount(wallet.getPacketMaxCount())
+                .packetExpireHours(wallet.getPacketExpireHours())
                 .build();
     }
 
@@ -101,6 +107,17 @@ public class WalletServiceImpl implements WalletService {
         BusinessException.throwIf(amount <= 0, ResultCode.BAD_REQUEST, "扣款额必须为正数");
         walletMapper.insertIfAbsent(userId);
         int rows = walletMapper.deduct(userId, amount);
+        BusinessException.throwIf(rows == 0, ResultCode.WALLET_BALANCE_NOT_ENOUGH);
+        writeTransaction(userId, type, -amount, refId, remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void debit(Long userId, long amount, String type, Long refId, String remark) {
+        BusinessException.throwIf(userId == null, ResultCode.BAD_REQUEST, "userId 不能为空");
+        BusinessException.throwIf(amount <= 0, ResultCode.BAD_REQUEST, "转出额必须为正数");
+        walletMapper.insertIfAbsent(userId);
+        int rows = walletMapper.debitBalance(userId, amount);
         BusinessException.throwIf(rows == 0, ResultCode.WALLET_BALANCE_NOT_ENOUGH);
         writeTransaction(userId, type, -amount, refId, remark);
     }

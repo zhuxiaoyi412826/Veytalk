@@ -226,7 +226,22 @@ public final class MessageConvert {
             // 投票：content 存的是标题，摘要加 [投票] 前缀
             case VOTE -> "[投票] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getVoteTitle())
                     ? entity.getContent() : entity.getExtra().getVoteTitle());
+            // 接龙：content 存的是主题，摘要加 [接龙] 前缀（条目多少属于可变态，不进窄窄的会话摘要）
+            case CHAIN -> "[接龙] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getChainTitle())
+                    ? entity.getContent() : entity.getExtra().getChainTitle());
+            // 转账：金额是摘要里最有信息量的一个字，附言只进气泡不进摘要（会话列表那一行很窄）
+            case TRANSFER -> "[转账] " + amountOf(entity.getExtra() == null ? null : entity.getExtra().getTransferAmount()) + " 积分";
+            // 红包：不露金额——谁先看到摘要就知道多少钱，会直接影响领不领
+            case RED_PACKET -> "[红包] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getPacketGreeting())
+                    ? "恭喜发财" : entity.getExtra().getPacketGreeting());
         };
+    }
+
+    /**
+     * 金额文本：null 按 0 处理，不让会话摘要里出现「null 积分」这种既看不懂又搜不到的字。
+     */
+    private static String amountOf(Long amount) {
+        return String.valueOf(amount == null || amount < 0 ? 0L : amount);
     }
 
     /**

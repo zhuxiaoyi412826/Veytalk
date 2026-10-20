@@ -156,14 +156,20 @@ contextBridge.exposeInMainWorld('__IM_DIRECT__', {
  * 契约：startPush/stopPush 走 invoke（主进程统一返回 {ok, data|error}，call 拆包）；
  * startPush 在 ffmpeg 成功 spawn 后即 resolve，推流中途的状态变化经 onState 事件持续推送
  * （state: starting | pushing | stopped | error，附带 encoder / error / warn 等字段）。
+ *
+ * stopPush 是「等回放定版完」才 resolve 的（排空上传队列 + PUT 一份 VOD 清单，一般百毫秒量级），
+ * 所以返回 { stopped, replay }：replay 为 {segmentCount, durationSeconds, bytes, url} 或 null
+ *（未生成/失败），前端拿它向后端上报「这一场有回放」。options.replay=false 可整体跳过。
+ * ffmpeg 意外退出时主进程也会生成一次，统计随 onState 的 stopped 事件里的 replay 字段带上来。
  */
 contextBridge.exposeInMainWorld('__IM_LIVE__', {
   isDesktop: true,
   /** 枚举本机显示器（多屏选择用）→ [{id, label, bounds, primary}] */
   listDisplays: () => call('im:live-list-displays', null),
-  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?, displayId?} → {started, encoder} */
+  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?, displayId?} → {started, encoder, tiers} */
   startPush: (params) => call('im:live-start-push', params),
-  stopPush: () => call('im:live-stop-push', null),
+  /** options: {replay?: boolean} → {stopped, replay} */
+  stopPush: (options) => call('im:live-stop-push', options || null),
   queryState: () => call('im:live-query-state', null),
   onState: (callback) => {
     ipcRenderer.on('im:live-state', (event, state) => callback(state))

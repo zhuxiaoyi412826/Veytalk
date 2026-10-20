@@ -54,3 +54,9 @@ npm run build
 添加证书
 路径  im-ui\certs\ca.pem 
 certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
+
+
+>6 人会议（SFU）：唯一真没做、也确实需要新基础设施的一项。
+现在群通话是 mesh（默认 4 人、服务端硬夹 [2,6]），不是调大数字就行——每人上行 N-1 路编码，TURN 要扛 N(N-1)/2 路。
+而 md/语音视频通话接入指南.md §13.1 当初排除 SFU 的四条理由还在：mediasoup Windows 无原生支持、LiveKit/Janus 要 Docker、npm 带原生编译的包在这套环境反复翻过车、以及会多出第四个进程要部署监控。
+现在群聊视频语音使用SFU 

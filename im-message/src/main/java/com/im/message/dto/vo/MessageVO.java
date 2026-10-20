@@ -98,4 +98,10 @@ public class MessageVO implements Serializable {
 
     @Schema(description = "是否为群精华消息（群主/管理员标记），仅群聊消息可能为 true")
     private Boolean essence;
+
+    @Schema(description = "是否被当前查看者收藏（纯个人标记，别人收藏过什么不体现在这里）")
+    private Boolean favorite;
+
+    @Schema(description = "收藏时刻；只在 /message/favorites 分页里回填（列表按它倒序），其余接口为 null，sendTime 才是消息本身的发送时间")
+    private LocalDateTime favoritedAt;
 }

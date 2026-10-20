@@ -1,0 +1,67 @@
+/**
+ * 后台全局样式。
+ *
+ * 只放「跨页面复用」的少数几条，页面专属的样式留在各自 .vue 的 scoped 块里：
+ * 一份大而全的全表 css 会让改一个内页的间距要去 css 里找是哪一条在生效。
+ */
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  /* 后台底色比聊天端浅一档灰，表格与卡片靠这层底色分开，不给每个卡片都描边 */
+  background: #f5f7fa;
+  color: #303133;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    Arial, sans-serif;
+  font-size: 14px;
+}
+
+/* 数字与时间用等宽数字，看板刷新时不会整行跳动 */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表格里超长文本的通用处理：举报的证据摘要、昵称都可能撑破单元格 */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 一行内的次要说明文字（口径提示、数据截至） */
+.muted {
+  color: #909399;
+  font-size: 12px;
+}
+
+/* 表头上方那排筛选条件 */
+.toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.toolbar .grow {
+  flex: 1;
+}
+
+/* 表格里的操作按钮排比 el-table 默认的紧凑间距再松一点，免得点错相邻按钮 */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}

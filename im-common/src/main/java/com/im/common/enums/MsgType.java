@@ -51,7 +51,28 @@ public enum MsgType {
      * {@code extra} 快照机器人名称与头像（发送者并非真实用户，故不走 {@code UserQuerySpi}）。
      * 与 {@link #SYSTEM} 一样仅允许 {@code internal=true} 的路径产生，客户端伪造直接被拒。
      */
-    ROBOT(11, "机器人");
+    ROBOT(11, "机器人"),
+    /**
+     * 转账消息：由 im-user 的转账服务在「钱已经动完」之后内部发出，{@code extra} 定格金额 / 收款人 /
+     * 附言。与 {@link #SYSTEM}、{@link #ROBOT} 一样只允许 {@code internal=true} 路径产生——
+     * 客户端若能伪造这个类型，就等于凭空造出一笔「已到账」的转账。
+     */
+    TRANSFER(12, "转账"),
+    /**
+     * 红包消息：同样只允许服务端内部产生。{@code extra} 定格总额 / 份数 / 祝福语与 {@code packetId}，
+     * 「谁领了、还剩多少」不属于消息（会一直变），由前端点开时向 {@code /api/wallet/packet/{id}} 现取。
+     */
+    RED_PACKET(13, "红包"),
+    /**
+     * 接龙消息：一条会随成员「参与接龙」不断追加条目的消息（报名 / 点单 / 报名统计）。
+     * {@code extra} 存主题 {@code chainTitle} 与有序条目列表 {@code chainItems}（每项含序号隐式=下标、
+     * 参与者 ID / 昵称快照 / 条目正文 / 时刻）与 {@code chainClosed} 截止标记。
+     *
+     * <p>与 {@link #VOTE} 的区别：投票的票数是「谁选了哪个既有选项」的聚合，走 {@code im_message_vote} 表；
+     * 接龙的条目是「每人自带正文的一行」，行数与内容都不固定，直接存进 {@code extra} 的 JSON 列，
+     * 靠服务端 read-modify-write + Redis 短锁串行化追加，<b>零新表</b>。
+     */
+    CHAIN(14, "接龙");
 
     @JsonValue
     private final int code;
@@ -72,6 +93,15 @@ public enum MsgType {
             }
         }
         throw new BusinessException(ResultCode.MESSAGE_TYPE_UNSUPPORTED);
+    }
+
+    /**
+     * 是否涉及资金（转账 / 红包）。这类消息发出后既不能撤回也不能转发：
+     * 撤回会让收款人失去收款凭证、把红包变成永远领不到的死链；转发则会把「谁能领」的范围
+     * 扩大到原会话之外的人。判定收在这个枚举里，消息侧与前端都只认这一个口径。
+     */
+    public boolean isMoneyBearing() {
+        return this == TRANSFER || this == RED_PACKET;
     }
 
     /**

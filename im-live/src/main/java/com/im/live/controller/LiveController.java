@@ -6,11 +6,16 @@ import com.im.common.api.Result;
 import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.live.dto.req.LiveStartRequest;
+import com.im.live.dto.req.LiveUnlockRequest;
 import com.im.live.dto.req.SendGiftRequest;
+import com.im.live.dto.vo.LiveAnchorStatsVO;
 import com.im.live.dto.vo.LiveRoomVO;
 import com.im.live.service.GiftService;
+import com.im.live.service.LiveAnchorStatsService;
+import com.im.live.service.LiveGateService;
 import com.im.live.service.LiveRoomService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -42,6 +47,8 @@ public class LiveController {
 
     private final LiveRoomService roomService;
     private final GiftService giftService;
+    private final LiveAnchorStatsService anchorStatsService;
+    private final LiveGateService gateService;
 
     @Operation(summary = "开播",
             description = "新建一场直播并下发推流信息：roomId / streamKey（只此一次）/ pushUrl / playUrl / heartbeatSeconds / danmakuWs")
@@ -80,6 +87,25 @@ public class LiveController {
         return Result.ok(roomService.detail(roomId));
     }
 
+    @Operation(summary = "解锁密码直播",
+            description = "密码房专用：输对密码后为当前用户种解锁标记，返回解锁后的房间详情（带 playUrl）。错密码不锁账号，靠限流拦脚本")
+    @RateLimit(count = 10, seconds = 60, dimension = RateLimit.Dimension.USER, key = "live.unlock")
+    @PostMapping("/{roomId}/unlock")
+    public Result<LiveRoomVO> unlock(@PathVariable("roomId") Long roomId,
+                                     @RequestBody @Valid LiveUnlockRequest request) {
+        gateService.unlockByPassword(roomId, SecurityUtil.getUserId(), request.getPassword());
+        return Result.ok(roomService.detail(roomId));
+    }
+
+    @Operation(summary = "付费解锁直播",
+            description = "付费房专用：扣入场积分后为当前用户种解锁标记，返回解锁后的房间详情。主播本人恒免；幂等，重进不会二次扣款")
+    @RateLimit(count = 10, seconds = 60, dimension = RateLimit.Dimension.USER, key = "live.pay")
+    @PostMapping("/{roomId}/pay")
+    public Result<LiveRoomVO> pay(@PathVariable("roomId") Long roomId) {
+        gateService.unlockByPay(roomId, SecurityUtil.getUserId());
+        return Result.ok(roomService.detail(roomId));
+    }
+
     @Operation(summary = "房间分页", description = "直播中的房间恒排最前，其次按开播时间倒序；status 留空为全部（1 直播中 2 已结束 3 已封禁）；已结束且关播超过阈值（默认 60 分钟）的房间不再返回")
     @GetMapping("/page")
     public Result<Page<LiveRoomVO>> page(@RequestParam(defaultValue = "1") long current,
@@ -102,5 +128,17 @@ public class LiveController {
                                                 @RequestBody @Valid SendGiftRequest request) {
         int count = request.getCount() == null ? 1 : request.getCount();
         return Result.ok(giftService.sendGift(SecurityUtil.getUserId(), roomId, request.getGiftId(), count));
+    }
+
+    @Operation(summary = "主播数据面板",
+            description = "只看自己的：时间窗内的概览（场次/时长/人次/峰值/礼物）、逐场明细、金主榜、礼物种类榜，"
+                    + "以及此刻正在播那场的实时数据（没在播为空）。零 DDL，全部读既有表与现有 Redis 计数。"
+                    + "两个口径限制写在前端：概览只覆盖窗口内最近 100 场；点赞与热度只活 24 小时，历史场次取不到")
+    @RateLimit(count = 30, seconds = 60, dimension = RateLimit.Dimension.USER, key = "live.stats")
+    @GetMapping("/anchor/stats")
+    public Result<LiveAnchorStatsVO> anchorStats(
+            @Parameter(description = "统计窗口天数，默认 30，服务端夹到 [1,366]")
+            @RequestParam(value = "days", required = false) Integer days) {
+        return Result.ok(anchorStatsService.stats(SecurityUtil.getUserId(), days));
     }
 }

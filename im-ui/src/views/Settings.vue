@@ -180,6 +180,20 @@
           </div>
           <el-switch v-model="autoPlay" />
         </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>直播默认清晰度</span>
+            <span class="settings__desc">进直播间时的默认档位，直播间右上角随时可改；本场没铺到的档位会置灰并自动回落</span>
+          </div>
+          <el-select v-model="liveQuality" style="width: 140px">
+            <el-option label="自动" value="auto" />
+            <el-option label="480p" value="480" />
+            <el-option label="720p" value="720" />
+            <el-option label="1080p" value="1080" />
+            <el-option label="1440p" value="1440" />
+          </el-select>
+        </div>
       </section>
 
       <!-- ==================== 三、隐私与安全 ==================== -->
@@ -472,6 +486,7 @@ const showTimestamp = setting('showTimestamp')
 const showReadReceipt = setting('showReadReceipt')
 const imagePreview = setting('imagePreview')
 const autoPlay = setting('autoPlay')
+const liveQuality = setting('liveQuality')
 const chatWatermark = setting('chatWatermark')
 const previewNoDownload = setting('previewNoDownload')
 const shareMultiDevice = setting('shareMultiDevice')

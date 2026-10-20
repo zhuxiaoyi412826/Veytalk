@@ -254,6 +254,15 @@ public class ImProperties {
         /** WebSocket 通道单用户发消息频率：超限回 error 帧（code=1010），不断连接 */
         private int wsChatCount = 60;
         private int wsChatSeconds = 60;
+        /**
+         * WebSocket 通道单用户群通话信令频率：60 秒 600 帧。
+         *
+         * <p>为什么看着这么大：trickle-ICE 把一个连接的全部候选拆成一条一帧，
+         * mesh 下每人又要建 N-1 路，一次 4 人通话的 ice 帧就能到几十上百。这个闸门防的是
+         * 脚本无限刷 Redis 读，不是防正常通话；正常通话即使按峰值算也远触不到 600。
+         */
+        private int wsGroupCallCount = 600;
+        private int wsGroupCallSeconds = 60;
     }
 
     /**
@@ -326,14 +335,16 @@ public class ImProperties {
     }
 
     /**
-     * 音视频通话（一对一 WebRTC）。
+     * 音视频通话（一对一 WebRTC，以及人数受限的群通话 mesh）。
      *
      * <p>媒体面走浏览器 / Electron 原生 WebRTC，服务端不参与媒体转发，只下发 ICE 服务器清单与
-     * 转发信令（信令复用已认证的 WebSocket 长连接，见 im-websocket 的 CallSignalingService）。
+     * 转发信令（信令复用已认证的 WebSocket 长连接，见 im-websocket 的 CallSignalingService 与
+     * GroupCallSignalingService，后者只是把「一方对一方」换成「一方对房间里其他每个人」，ICE 清单直接复用）。
      *
      * <p>内网部署下 {@link #stunUrls} 留空即可：两端同处一个局域网时，ICE 的 host 候选地址直接
      * 命中，媒体流点对点走局域网，既不经过服务器也不消耗服务器出口带宽。只有需要跨 NAT / 公网
-     * 互通时才配自建 STUN，对称 NAT 还得配 {@link Turn}（coturn）。
+     * 互通时才配自建 STUN，对称 NAT 还得配 {@link Turn}（coturn）。群通话下这句话的分量更大：
+     * 一旦两端打不通需要中继，TURN 要扛的是 {@code N(N-1)/2} 路媒体而不是 1 路。
      */
     @Data
     public static class Call {
@@ -348,8 +359,22 @@ public class ImProperties {
         private Turn turn = new Turn();
         /** 振铃超时（秒）：被叫在此时长内未接听，服务端主动下发 timeout 并结束 */
         private int ringTimeoutSeconds = 45;
-        /** 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底 */
+        /** 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底；群通话沿用同一个上限 */
         private int maxDurationSeconds = 3600;
+        /**
+         * 群通话子开关，仅在 {@link #enabled} 为真时生效（总开关一关，群通话不可能单独活着）。
+         * 分开而不合用一个开关的理由：1:1 通话是好友功能，群通话会拉到整个群的带宽与信令量，
+         * 出问题时运维需要一个「只关多人、不关单聊」的旋钮。
+         */
+        private boolean groupEnabled = true;
+        /**
+         * 群通话同时在场人数上限（含发起人），默认 4，服务端夹到 {@code [2, 6]}。
+         *
+         * <p>为什么卡这么小：群通话是 <b>mesh</b>（每两人一路 RTCPeerConnection，不经服务器转发媒体），
+         * N 人时每人上行 {@code N-1} 路。语音下 6 人还能打（单路上行约 40 kbps），
+         * 视频则每人上行 5 路、手机和家用宽带的上行先扛不住。要更大规模得换 SFU（单独立项）。
+         */
+        private int groupMaxSlots = 4;
         /**
          * 通话录制产物上传的大小上限，默认 200MB。
          * 桌面端读回本地录像文件时按此裁剪，超限即拒传（{@code CALL_RECORD_TOO_LARGE}），
@@ -435,7 +460,7 @@ public class ImProperties {
      */
     @Data
     public static class Wallet {
-        /** 钱包总开关：关掉后送礼/充值/签到入口整体拒绝（{@code WALLET_DISABLED}），前端礼簿隐藏 */
+        /** 钱包总开关：关掉后送礼/充值/签到与转账/红包入口整体拒绝（{@code WALLET_DISABLED}），前端礼簿隐藏 */
         private boolean enabled = true;
         /** 未接入真实支付时是否注册模拟支付桩（仅开发联调，生产必须 false，否则等于无限白送积分） */
         private boolean mockWhenUnconfigured = false;
@@ -447,6 +472,30 @@ public class ImProperties {
         private long rechargeMin = 1;
         /** 单笔充值积分上界 */
         private long rechargeMax = 100_000;
+
+        /**
+         * 用户之间转积分（转账与红包）总开关。
+         *
+         * <p>单独一个旋钮而不跟送礼共用 {@link #enabled}：送礼是「向平台买服务」，转账与红包是
+         * 「用户之间倒腾积分」，可能被用来对倒刷量、变相赌博，风险面不同。线上想收紧时
+         * 可以只关这一项而保留送礼与充值。
+         */
+        private boolean transferEnabled = true;
+        /** 单笔转账与单个红包共同的积分下界 */
+        private long transferMin = 1;
+        /** 单笔转账积分上界 */
+        private long transferMax = 10_000;
+        /** 单个红包总额上界（份数另由 {@link #packetMaxCount} 夹，且总额必须 ≥ 份数，保证每份至少 1 积分） */
+        private long packetMax = 10_000;
+        /** 单个红包份数上限（群聊拼手气），夹住前端传入的 count 防刷 */
+        private int packetMaxCount = 20;
+        /**
+         * 红包无人领取时的保留时长（小时），到期由 {@code RedPacketRefundTask} 把余额退回发送人。
+         *
+         * <p>这个值同时是退款扫描的判定口径（按流水的 {@code create_time} 倒推），改动会让
+         * 存量在飞红包的到期时间跟着变；它是运维旋钮而不是业务约定，不要拿它做对账依据。
+         */
+        private int packetExpireHours = 24;
     }
 
     /**

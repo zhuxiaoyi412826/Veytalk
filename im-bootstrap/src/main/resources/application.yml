@@ -309,6 +309,11 @@ im:
     # WebSocket 通道单用户发消息频率：超限回 error 帧（code=1010），不断连接
     ws-chat-count: 60
     ws-chat-seconds: 60
+    # 群通话信令单用户频率：超限同样回 error 帧。阈值比 ws-chat 宽两个量级是必要的——
+    # mesh 拓扑下 trickle-ICE 是「一个候选一帧 × N-1 路」，四个人的正常通话几十秒就能上百帧。
+    # 这道闸门只防脚本绕 REST 无限写 Redis，不指望它做精细配额
+    ws-group-call-count: 600
+    ws-group-call-seconds: 60
 
   file:
     # local | minio。默认 local，没装 MinIO 也能跑通全部功能；
@@ -416,10 +421,10 @@ im:
     send-buffer-size-bytes: 524288
 
   # ---------------------------------------------------------------------------
-  # 一对一语音视频通话（WebRTC）+ 桌面端录屏留存
+  # 一对一语音视频通话、群通话（WebRTC）+ 桌面端录屏留存
   #
-  # 信令走已有的用户 WebSocket 长连接（type=call，服务端只校验关系 + 转发 + 维护 Redis 会话态），
-  # 媒体由两端 RTCPeerConnection 直连，一个媒体字节都不经服务器。键名对应
+  # 信令走已有的用户 WebSocket 长连接（1:1 为 type=call，群通话为 type=groupcall，服务端只校验关系与群籍
+  # + 转发 + 维护 Redis 会话态），媒体由两端 RTCPeerConnection 直连，一个媒体字节都不经服务器。键名对应
   # com.im.common.config.ImProperties.Call。
   #
   # ★ 内网优先：stun-urls 留空时 ICE 的 host 候选直接命中局域网地址，两端点对点连通，
@@ -429,6 +434,8 @@ im:
   #   用本 secret 做 HMAC-SHA1 生成临时 credential，须与 coturn 的 use-auth-secret 逐字一致，
   #   realm 与之配套。secret 留空则不下发 TURN（等于只做直连）。
   # ★ 录制落盘仅桌面端（依赖 __IM_NATIVE__.record）；Web 端通话可用但不落盘。
+  # ★ 群通话是 mesh（人人两两直连），不是 SFU：服务端不搬媒体，代价是每人要上行 N-1 路，
+  #   人数上限因此锁死在小范围；真要十几人会议得引 SFU（mediasoup / LiveKit），那是单独立项。
   # ---------------------------------------------------------------------------
   call:
     # 总开关：关闭后 /api/call/config 回 enabled=false，前端通话入口整体禁用、整链路不加载
@@ -446,8 +453,13 @@ im:
       ttl-seconds: 86400
     # 振铃超时（秒）：被叫在这个时长内未接听，服务端下发 timeout 收起主叫浮层
     ring-timeout-seconds: 45
-    # 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底
+    # 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底；群通话也共用这一个上限
     max-duration-seconds: 3600
+    # 群通话开关：只关多人不关 1:1 的运维降级旋钮（总开关 enabled=false 时本项自然无效）
+    group-enabled: ${IM_CALL_GROUP_ENABLED:true}
+    # 群通话人数上限（含发起人）。服务端硬夹在 [2,6]：mesh 下每人要上行 N-1 路视频，
+    # 4 人已是「每人 3 路上行」，家用宽带的上行先扛不住；填 10 也只按 6 生效
+    group-max-slots: ${IM_CALL_GROUP_MAX_SLOTS:4}
     # 通话录制产物上传的大小上限；读回本地文件时超过即拒（CALL_RECORD_TOO_LARGE）
     record-max-size: 200MB
 
@@ -476,7 +488,7 @@ im:
   # 键名对应 com.im.common.config.ImProperties.Wallet。
   # ---------------------------------------------------------------------------
   wallet:
-    # 总开关：关闭后送礼/充值/签到入口整体拒绝（WALLET_DISABLED），前端礼簿隐藏
+    # 总开关：关闭后送礼/充值/签到/转账/红包入口整体拒绝（WALLET_DISABLED），前端礼簿隐藏
     enabled: ${IM_WALLET_ENABLED:true}
     # 未接入真实支付时是否注册模拟支付桩（仅开发联调，生产必须 false，否则等于无限白送积分）；dev profile 临时打开
     mock-when-unconfigured: ${IM_WALLET_MOCK:false}
@@ -487,6 +499,20 @@ im:
     # 单笔充值积分下/上界
     recharge-min: 1
     recharge-max: 100000
+    # 用户之间转积分（转账与红包）的独立开关：送礼是向平台买服务，转账/红包是用户之间倒腾积分，
+    # 可能被用来对倒刷量、变相赌博，风险面不同；线上想收紧时可以只关这一项而保留送礼与充值
+    transfer-enabled: ${IM_WALLET_TRANSFER_ENABLED:true}
+    # 单笔转账与单个红包共同的积分下界
+    transfer-min: 1
+    # 单笔转账积分上界
+    transfer-max: 10000
+    # 单个红包总额上界
+    packet-max: 10000
+    # 单个红包份数上限（群聊拼手气），夹住前端传入的 count 防刷
+    packet-max-count: 20
+    # 红包无人领取时的保留时长（小时），到期由 RedPacketRefundTask 把余额退回发送人；
+    # 它同时是退款扫描的判定口径（按流水 create_time 倒推），改动会让存量在飞红包的到期时间跟着变
+    packet-expire-hours: 24
 
   # ---------------------------------------------------------------------------
   # 直播连麦（观众 ↔ 主播 1:1 WebRTC）
@@ -505,6 +531,44 @@ im:
     # 单路连麦最大时长（秒），超时服务端下发 leave 兑底
     max-duration-seconds: 3600
 
+  # ---------------------------------------------------------------------------
+  # 管理后台（im-admin）：举报受理闸门与看板缓存
+  #
+  # 这一前缀只被 im-admin 自己读（AdminProperties），所以它不在 ImProperties 里：
+  # 连麦配置之所以不得不在公共层，是因为 im-websocket 要读、im-live 要写，
+  # 而举报配额与看板缓存没有这种跨模块读者。
+  #
+  # 依赖 im_report 表：没跑 sql/migration_report.sql 就直接启动，举报与后台接口会报
+  # 「Table 'im_db.im_report' doesn't exist」（聊天、登录等其余功能不受影响，因为
+  # 这张表只有 im-admin 用）。处置队列里已有工单时不要把 enabled 关掉当「下线举报功能」：
+  # 它只拦用户新提交，存量工单仍然能看能处置。
+  # ---------------------------------------------------------------------------
+  admin:
+    # 举报入口总开关：关掉后 POST /api/report 直接回 14009，前端的举报入口按
+    # GET /api/report/config 返回的开关整体隐藏（不让用户点了才报错）
+    enabled: ${IM_ADMIN_REPORT_ENABLED:true}
+    # 每人每日可提交的举报条数：防的是「对着一个人连点二十次把队列刷满」，不是防正常用户。
+    # 设 0 或负数等于不限条数（只保留 24 小时去重闸门），本地压测时可以这么干
+    daily-quota: 20
+    # 同一举报人对同一对象的去重窗口（小时）。不建表唯一键而用 Redis 是因为
+    # 唯一键会永久挡死「上次没处理、隔几天我再报一次」；Redis 数据丢了
+    # 最多放几张重复工单进队列，不会误拦正常举报
+    dedup-hours: 24
+    # 补充描述最大字数，与 im_report.reason_text varchar(500) 对齐；改大要一起改表
+    reason-text-max: 500
+    # 证据摘要最大字数：由各模块的 ReportTargetSpi 自己截断，落库前 im-admin 再夹一道兜底
+    excerpt-max: 200
+    # 看板聚合缓存秒数，0 = 不缓存（每次刷新真跑一遍 COUNT，本地调库用）。
+    # 线上别设太大：数字滞后越久，管理员越容易按旧数做处置决定；
+    # 无论取值多少，看板响应都带 cachedAt 与 staleSeconds，页面会显示「数据截至」
+    dashboard-cache-seconds: 60
+    # 处置与驳回是否必须写说明（默认 true）：封号、撤回消息、中断直播都是伤用户的动作，
+    # 不留一句理由，事后没人能回答「当时为什么动了他」
+    handle-remark-required: true
+    # 处置人是否对举报人可见（后台二期，默认 false）：打开后 /api/report/mine 每行带 handlerName，
+    # 处理结论通知也会署名处置人昵称。改的是「对外隐私口径」，关着时后台响应根本不含处置人字段
+    report-handler-visible: ${IM_ADMIN_REPORT_HANDLER_VISIBLE:false}
+
   cors:
     # 前端 vite 开发服务器与预览服务器。http 与 https 两种方案都要放行：
     # 局域网真机联调远程控制时 dev server 会自签证书走 https（页面 Origin 变
@@ -518,6 +582,17 @@ im:
       - https://127.0.0.1:5173
       - https://localhost:4173
       - https://127.0.0.1:4173
+      # 管理后台前端（im-admin-ui 新工程，vite dev 5273 / preview 4273）。
+      # 它是独立起源，不在这里放行就是「页面打得开、接口全 403 Invalid CORS request」。
+      # 上线后后台通常要换成内网域名并加访问限制，部署步骤见 im-admin-ui/README.md。
+      - http://localhost:5273
+      - http://127.0.0.1:5273
+      - http://localhost:4273
+      - http://127.0.0.1:4273
+      - https://localhost:5273
+      - https://127.0.0.1:5273
+      - https://localhost:4273
+      - https://127.0.0.1:4273
       # 局域网真机联调（手机连电脑、或电脑连手机热点）：手机用电脑的局域网 IP 打开页面，
       # 浏览器发出的 /api 请求虽然经 vite 代理转发、看着是同源，但代理的 changeOrigin
       # 只改 Host 头不改 Origin 头，而 Spring 判定 CORS 请求只看有没有 Origin 头，
@@ -752,6 +827,52 @@ im:
     # 关播后房间保留「聊天模式」的时长（分钟）：画面立即作废（观众端黑屏），弹幕连接保留继续聊天，
     # 到时巡检任务提示并断开全部连接彻底关房。封禁房不进聊天模式；配 0 或负数=关播立即全断。
     ended-chat-minutes: ${IM_LIVE_ENDED_CHAT_MINUTES:60}
+    # ↓ 弹幕房管（禁言名单 + 主播自定义屏蔽词）。两份状态只存 Redis、按 anchorId 组织（跨场次生效），
+    #   所以这里改的是「能写多少、存多久」，没有「表在哪」。机理与取舍见 md/直播.md §13。
+    # 全局敏感词遮罩开关：命中后以 * 替换后照常发出。对主播自己同样生效，平台底线不由主播豁免。
+    danmaku-sensitive-mask: true
+    # 单个主播屏蔽词的条数上限。超出直接报错（不静默截断：截断会让主播以为词已生效）
+    danmaku-words-max-count: 50
+    # 单个屏蔽词的最大长度（词不是句子，20 字已经够写一个微信号）
+    danmaku-word-max-length: 20
+    # 屏蔽词的本机缓存时长（毫秒）：每条弹幕都要比对词表，实读 Redis 不划算。
+    # 代价是本机写入即时生效、其他实例最多滞后这个量（与本模块单实例约束同源）。
+    danmaku-words-cache-millis: 5000
+    # 房管键的滑动保留期（天）：每次写入重设。**Redis 是唯一存储**，这就是名单的实际寿命；
+    # 要让「永久禁言」在 Redis 被清后仍可靠，得另建表，当前不做。
+    moderation-retention-days: 365
+    # ↓ 连麦 PK：两个正在直播的房间在一段时间窗内比热度。会话与票数全在 Redis（零 DDL），
+    #   进度靠服务端每秒经 /ws/live 广播，所以这里没有「多久拉一次」的前端旋钮。
+    pk:
+      # 总开关：关掉则 /api/live/pk/** 全拒，前端点「⚔ PK」会看到「PK 功能未开启」
+      enabled: ${IM_LIVE_PK_ENABLED:true}
+      # 默认对局时长（秒）：前端不传时长就用它
+      duration-seconds: 300
+      # 时长上限（秒）：不设上限就能开一场永久 PK，把两个房间的观众锁死
+      max-duration-seconds: 900
+      # 热度 = 期间礼物增量 × gift-weight + 点赞增量 × like-weight + 投票人数 × vote-weight。
+      # 礼物是真金白银所以占主导，点赞免费所以给得最小（否则人多的一方直接刷赢）。
+      gift-weight: 10
+      like-weight: 1
+      vote-weight: 2
+      # 已结束的会话与票数保留时长（分钟）：够面板把结果留一会儿，也防同一对人反复开同一场
+      session-retention-minutes: 1440
+    # ↓ 直播回放存档。**零 DDL、零新增媒体写入**：分片从推流那一刻起就存在媒体服务器上
+    #   （ffmpeg 的 delete_segments 清的是主播本机临时目录，服务器上的副本才是回放的内容），关播时由推流端
+    #   把它们定版成逐档 VOD 清单 + 回放主清单 PUT 到 {roomId}/replay/。
+    #   入口标记在本进程（Redis），源文件在媒体服务器磁盘上，两边靠下面同一个 retention-days 对齐；
+    #   真正的删除由媒体侧的 electron/live-retention.js 执行（自测的 live-media-server.js 已内置周期清理）。
+    #   机理与已知代价见 md/直播.md §15，保留期与清理命令见 §10.7。
+    replay:
+      # 总开关：关掉则上报/取地址两个接口全拒，开播响应里 replayEnabled=false，
+      # 推流端连 VOD 清单都不生成（不白写一份没人看的文件）
+      enabled: ${IM_LIVE_REPLAY_ENABLED:true}
+      # 回放保留期（天）：一个值管两处——Redis 入口键的 TTL，与媒体侧删源文件的清理线。
+      # ★ 改了这里就要同时把同一个环境变量 IM_LIVE_REPLAY_RETENTION_DAYS 交给媒体机（Java 进不到媒体磁盘，
+      #   删不了文件，它只能管入口）；两边不一致时安全方向是「媒体侧不短于入口」，见 §10.7
+      retention-days: ${IM_LIVE_REPLAY_RETENTION_DAYS:1}
+      # 上报时长的上限（小时）：分片数与时长都由推流端上报，服务端无中立数据源可校对，只能夹量级
+      max-duration-hours: 12
 
   # --------------------------------------------------------------------------
   # 日志落地：目录、保留天数、体积护栏与慢 SQL 阈值

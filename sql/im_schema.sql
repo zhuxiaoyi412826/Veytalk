@@ -22,6 +22,7 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_report`;
 DROP TABLE IF EXISTS `im_live_room`;
 DROP TABLE IF EXISTS `im_gift_record`;
 DROP TABLE IF EXISTS `im_wallet_transaction`;
@@ -41,6 +42,7 @@ DROP TABLE IF EXISTS `im_group_robot`;
 DROP TABLE IF EXISTS `im_group`;
 DROP TABLE IF EXISTS `im_message_reaction`;
 DROP TABLE IF EXISTS `im_message_vote`;
+DROP TABLE IF EXISTS `im_message_favorite`;
 DROP TABLE IF EXISTS `im_message_essence`;
 DROP TABLE IF EXISTS `im_message_delete`;
 DROP TABLE IF EXISTS `im_message_read`;
@@ -321,6 +323,19 @@ CREATE TABLE `im_message_essence`
     KEY `idx_conversation` (`conversation_id`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='群精华消息表（一条消息至多一行，取消即删；按会话查询群内全部精华）';
+
+CREATE TABLE `im_message_favorite`
+(
+    `id`              BIGINT   NOT NULL COMMENT '主键（雪花）',
+    `user_id`         BIGINT   NOT NULL COMMENT '收藏人 ID（收藏是用户维度私有数据，按本人聚合查询，只有本人可见）',
+    `conversation_id` BIGINT   NOT NULL COMMENT '所属会话 ID（冗余列：供「只看本会话的收藏」过滤，以及清空聊天记录处级联清理）',
+    `message_id`      BIGINT   NOT NULL COMMENT '被收藏的消息 ID',
+    `create_time`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '收藏时间（列表按此倒序）',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_user_message` (`user_id`, `message_id`),
+    KEY `idx_user_time` (`user_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='消息收藏表（一行 = 某人收藏了某条消息；同一条消息可被多人各自收藏，取消只删本人那行）';
 
 -- =====================================================================================
 --  五、群组（im-group）
@@ -695,15 +710,17 @@ CREATE TABLE `im_gift`
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='礼物目录';
 
--- 钱包账本：充值/送礼/签到/后台调整逐条流水（只增，供对账与明细页），流水表继承 AuditEntity 不带 deleted。
+-- 钱包账本：逐条流水（只增，供对账与明细页），流水表继承 AuditEntity 不带 deleted。
+-- 转账/红包不建新表：资金变动全落这张表，只是 type 多了 transfer/packet/refund 三个取值。
+-- 下面两处 COMMENT 只影响全新建库（纯注释）：存量库的列定义与索引一字未改，不需要跑 ALTER。
 CREATE TABLE `im_wallet_transaction`
 (
     `id`            BIGINT      NOT NULL COMMENT '流水 ID（雪花）',
     `user_id`       BIGINT      NOT NULL COMMENT '钱包归属用户 ID',
-    `type`          VARCHAR(16) NOT NULL COMMENT '类型：recharge 充值 / gift 送礼 / checkin 签到 / adjust 后台调整',
+    `type`          VARCHAR(16) NOT NULL COMMENT '类型：recharge 充值 / gift 送礼 / checkin 签到 / adjust 后台调整 / transfer 转账 / packet 红包 / refund 红包过期退回',
     `amount`        BIGINT      NOT NULL COMMENT '变动额（有符号，支出为负）',
     `balance_after` BIGINT      NOT NULL COMMENT '交易后余额快照',
-    `ref_id`        BIGINT               DEFAULT NULL COMMENT '关联业务 ID（如送礼记录 ID / 房间 ID）',
+    `ref_id`        BIGINT               DEFAULT NULL COMMENT '关联业务 ID（语义随 type 变：送礼存记录/房间 ID，transfer 存对方用户 ID，packet/refund 存红包 ID）',
     `remark`        VARCHAR(128)         DEFAULT NULL COMMENT '备注',
     `create_time`   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time`   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -732,3 +749,41 @@ CREATE TABLE `im_gift_record`
     KEY `idx_receiver_time` (`receiver_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='送礼流水（账本性质，只增不改）';
+
+-- =====================================================================================
+--  十二、举报工单（im-admin）
+-- =====================================================================================
+
+-- 举报工单：用户举报「用户 / 消息 / 直播间 / 群」，管理后台的待处理队列就落在这一张表上。
+-- 为什么必须建表（而不是像房管/PK/红包那样进 Redis）：举报是**用来追责的持久记录**——
+-- 举报人三天后回来看处理结果、运营事后复盘“这个主播被投诉了几次”，都不能接受
+-- “Redis Flush 就没”；而「按状态取待处理」与「按举报人查自己的记录」两种访问都要索引。
+-- 不设唯一键：同一对象可被多人各自举报（也允许同一人隔一段时间后重复举报，靠 Redis 做 24h 去重）。
+-- 不启 deleted：处置即改 status，历史全部保留。
+CREATE TABLE `im_report`
+(
+    `id`               BIGINT       NOT NULL COMMENT '举报 ID（雪花）',
+    `reporter_id`      BIGINT       NOT NULL COMMENT '举报人用户 ID',
+    `target_type`      VARCHAR(16)  NOT NULL COMMENT '被举报对象类型：user / message / room / group',
+    `target_id`        BIGINT       NOT NULL COMMENT '被举报对象 ID（按 target_type 解释）',
+    `reported_user_id` BIGINT                DEFAULT NULL COMMENT '被举报人 ID：受理时按对象反查后落库，供「同一个人被举报多少次」聚合与重复举报处置',
+    `reason_code`      VARCHAR(32)  NOT NULL COMMENT '举报理由码（枚举，口径在服务端定，前端展示走同一份字典，不让客户端自定分类）',
+    `reason_text`      VARCHAR(500)          DEFAULT NULL COMMENT '补充描述，可空；写入前按敏感词清洗与长度截断',
+    `evidence`         JSON                  DEFAULT NULL COMMENT '举报当时抓的证据快照（标题/内容摘要/所属会话/开播信息等）：被举报对象事后被删也不影响处置与追溯',
+    `status`           TINYINT      NOT NULL DEFAULT 0 COMMENT '状态：0 待处理 1 已受理 2 已驳回 3 已处置',
+    `disposition`      VARCHAR(32)           DEFAULT NULL COMMENT '处置动作：none / warn / ban_user / unban_user / recall_message / close_room，与 status 3 同时写入',
+    `handle_remark`    VARCHAR(500)          DEFAULT NULL COMMENT '处置说明：回给举报人并留档，不写就是驳回后没人知道为何',
+    `handler_id`       BIGINT                DEFAULT NULL COMMENT '处理人（管理员）用户 ID',
+    `handle_time`      DATETIME              DEFAULT NULL COMMENT '处理时间',
+    `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '举报时间',
+    `update_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 后台队列主查询：按状态取待处理并按时间倒序
+    KEY `idx_status_time` (`status`, `create_time`),
+    -- 举报人查自己那几条的进展
+    KEY `idx_reporter_time` (`reporter_id`, `create_time`),
+    -- 反查「这个对象被举报过几次」，受理时的重复判定靠它
+    KEY `idx_target` (`target_type`, `target_id`),
+    KEY `idx_reported_user` (`reported_user_id`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='举报工单（管理后台的处理队列，只改状态不删行）';

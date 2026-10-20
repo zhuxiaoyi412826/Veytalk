@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-admin</artifactId>
+    <name>im-admin</name>
+    <description>管理后台：举报工单（用户端提交 + 后台处置闭环）、用户管理、运营看板</description>
+
+    <dependencies>
+        <!--
+          只依赖 im-common，与其余业务模块同构：跨模块的三件事（查用户、按对象类型抓证据并处置、
+          取看板数字）全部经 com.im.common.spi 契约反转给归属模块实现。
+          本模块因此不 import 任何 UserMapper / MessageMapper / LiveRoomService，
+          也就不会出现「后台把业务表当自己的读」这种迟早和业务侧写冲突的暗依赖。
+        -->
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-common</artifactId>
+        </dependency>
+    </dependencies>
+</project>

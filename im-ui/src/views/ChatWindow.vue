@@ -21,6 +21,13 @@
         <el-tooltip v-if="canCall" content="视频通话" placement="bottom">
           <el-button text :icon="VideoCamera" :disabled="callBusy" @click="startCall('video')" />
         </el-tooltip>
+        <!-- 群通话入口只在群聊出现：与单聊那两个按钮并存，因为两者是不同的 store、不同的浮层 -->
+        <el-tooltip v-if="canGroupCall" content="群语音通话" placement="bottom">
+          <el-button text :icon="Microphone" :disabled="callBusy" @click="openGroupCall('audio')" />
+        </el-tooltip>
+        <el-tooltip v-if="canGroupCall" content="群视频通话" placement="bottom">
+          <el-button text :icon="VideoCamera" :disabled="callBusy" @click="openGroupCall('video')" />
+        </el-tooltip>
         <el-tooltip v-if="peerUserId" content="查看资料" placement="bottom">
           <el-button text :icon="User" @click="openProfile" />
         </el-tooltip>
@@ -44,6 +51,17 @@
         </el-tooltip>
       </div>
     </header>
+
+    <!-- 本群已有群通话在进行时的提示条。
+         数据来源是「进入这个群聊时查一次 REST」（服务端不往全群广播开了一路通话：
+         im-websocket 手上没有群成员名单，要广播就得让业务模块反向喂名单，星型约束不允许）。
+         已知边界：进群之后别人才开的通话，这条不出现，退出重进或点刷新才会再查到。 -->
+    <div v-if="groupCallBanner" class="chat-window__gcall-bar">
+      <el-icon :size="14"><Microphone /></el-icon>
+      <span class="im-ellipsis">群里正在进行{{ groupCallBanner.mediaLabel }}（{{ groupCallBanner.count }} 人）</span>
+      <el-button text size="small" type="primary" :disabled="callBusy" @click="joinGroupCall">加入</el-button>
+      <el-button text size="small" @click="groupcall.clearActive()">忽略</el-button>
+    </div>
 
     <!-- ==================== 搜索栏 ==================== -->
     <div v-if="searchVisible" class="chat-window__search">
@@ -72,6 +90,7 @@
         v-for="item in searchResults"
         :key="item.messageId"
         class="chat-window__search-item"
+        @click="onSearchResultClick(item)"
       >
         <span class="chat-window__search-sender">{{ item.fromNickname }}</span>
         <span class="chat-window__search-content" v-html="highlightSearch(item.content)"></span>
@@ -121,6 +140,9 @@
               @toggle-select="toggleSelect"
               @vote="onVote"
               @close-vote="onCloseVote"
+              @chain="onChain"
+              @close-chain="onCloseChain"
+              @open-packet="onOpenPacket"
             />
           </div>
         </template>
@@ -184,6 +206,85 @@
         <el-tooltip content="发起投票（一个主题 + 多个选项，成员可选并实时计票）" placement="top">
           <el-button text :icon="Histogram" @click="openVoteDialog" />
         </el-tooltip>
+        <el-tooltip content="发起接龙（一个主题，成员依次加入自己的一条，实时汇总）" placement="top">
+          <el-button text :icon="Operation" @click="openChainDialog" />
+        </el-tooltip>
+        <!-- 转账只给单聊：群聊里「转给会话」没有明确目标，一人转全群等于变相发红包，那条路已经有入口 -->
+        <el-tooltip v-if="!isGroup && walletState.transferEnabled" content="转账（仅单聊，即时到账）" placement="top">
+          <el-button text :icon="Coin" @click="openTransferDialog" />
+        </el-tooltip>
+        <el-tooltip v-if="walletState.transferEnabled" content="发红包（单聊对方独占一份，群聊拼手气）" placement="top">
+          <el-button text :icon="Present" @click="openPacketDialog" />
+        </el-tooltip>
+
+        <!-- 常用语：点一条就填进输入框（不自动发），「管理」里才能增删 -->
+        <el-popover
+          v-model:visible="quickVisible"
+          placement="top-start"
+          trigger="click"
+          :width="300"
+          :show-arrow="false"
+          @show="onQuickShow"
+        >
+          <template #reference>
+            <el-button text :icon="Collection" title="常用语" />
+          </template>
+          <div class="chat-window__quick">
+            <div class="chat-window__quick-head">
+              <span>常用语</span>
+              <el-button v-if="!quickEditing" text size="small" :icon="Setting" @click="startQuickEdit">
+                管理
+              </el-button>
+              <template v-else>
+                <el-button text size="small" :loading="quickSaving" @click="saveQuickList">保存</el-button>
+                <el-button text size="small" @click="cancelQuickEdit">取消</el-button>
+              </template>
+            </div>
+            <div v-if="!quickEditing" class="chat-window__quick-list im-scroll">
+              <div
+                v-for="(q, idx) in quickList"
+                :key="idx"
+                class="chat-window__quick-item"
+                title="点击填入输入框"
+                @click="useQuickReply(q)"
+              >
+                {{ q }}
+              </div>
+              <div v-if="quickLoading" class="chat-window__quick-empty">加载中…</div>
+              <div v-else-if="!quickList.length" class="chat-window__quick-empty">
+                还没有常用语，点「管理」加几句
+              </div>
+            </div>
+            <template v-else>
+              <div class="chat-window__quick-list im-scroll">
+                <div v-for="(q, idx) in quickEditList" :key="`${idx}-${q}`" class="chat-window__quick-row">
+                  <span class="chat-window__quick-text">{{ q }}</span>
+                  <el-button text size="small" :icon="DeleteIcon" @click="removeQuickItem(idx)" />
+                </div>
+                <div v-if="!quickEditList.length" class="chat-window__quick-empty">
+                  清单已空，保存后常用语就全部清掉了
+                </div>
+              </div>
+              <el-input
+                v-model="quickNew"
+                size="small"
+                :maxlength="MAX_QUICK_LENGTH"
+                placeholder="新增一条，回车确认"
+                @keyup.enter="addQuickItem"
+              />
+              <el-button
+                class="chat-window__quick-draft"
+                size="small"
+                text
+                :icon="Plus"
+                :disabled="!(draft || '').trim()"
+                @click="saveDraftAsQuick"
+              >
+                把当前输入存为常用语
+              </el-button>
+            </template>
+          </div>
+        </el-popover>
         <input ref="imageInputRef" type="file" accept="image/*" multiple class="chat-window__file-input" @change="onPicked" />
         <input ref="fileInputRef" type="file" multiple class="chat-window__file-input" @change="onPicked" />
 
@@ -513,6 +614,104 @@
       </template>
     </el-dialog>
 
+    <!-- 发起接龙：主题 + 可选的第一条（序号与昵称快照由服务端权威生成） -->
+    <el-dialog v-model="chainDialog.visible" title="发起接龙" width="440px" append-to-body>
+      <el-form label-width="72px" @submit.prevent>
+        <el-form-item label="主题">
+          <el-input v-model="chainDialog.title" placeholder="例如：周六聚餐报名接龙" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="第一条">
+          <el-input
+            v-model="chainDialog.firstEntry"
+            type="textarea"
+            :rows="2"
+            placeholder="你这一条接龙内容（可留空，发送后再点「参与接龙」补）"
+            maxlength="200"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="chainDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="chainDialog.submitting" @click="sendChain">发送</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 转账：收款人就是当前单聊的对方，金额与附言才是用户要填的 -->
+    <el-dialog v-model="transferDialog.visible" title="转账" width="400px" append-to-body>
+      <el-form label-width="64px" @submit.prevent>
+        <el-form-item label="收款人">
+          <span class="chat-window__money-peer">{{ transferDialog.peerName }}</span>
+        </el-form-item>
+        <el-form-item label="金额">
+          <el-input v-model="transferDialog.amount" type="number" :min="1" placeholder="积分" />
+          <div class="chat-window__money-tip">
+            余额 {{ walletState.balance }} 积分，单笔 {{ walletState.transferMin }} ~ {{ walletState.transferMax }}
+          </div>
+        </el-form-item>
+        <el-form-item label="附言">
+          <el-input v-model="transferDialog.memo" maxlength="60" placeholder="可空，最多 60 字" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="transferDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="transferDialog.submitting" @click="submitTransfer">确认转账</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 发红包：单聊不露份数（后端强制 1 份），群聊才需要选份数 -->
+    <el-dialog v-model="packetDialog.visible" :title="isGroup ? '发群红包' : '发专属红包'" width="420px" append-to-body>
+      <el-form label-width="64px" @submit.prevent>
+        <el-form-item label="总额">
+          <el-input v-model="packetDialog.amount" type="number" :min="1" placeholder="积分" />
+          <div class="chat-window__money-tip">
+            余额 {{ walletState.balance }} 积分，单个红包最多 {{ walletState.packetMax }}，且每份至少 1 积分
+          </div>
+        </el-form-item>
+        <el-form-item v-if="isGroup" label="份数">
+          <el-input v-model="packetDialog.count" type="number" :min="1" :max="walletState.packetMaxCount" />
+          <div class="chat-window__money-tip">最多 {{ walletState.packetMaxCount }} 份，{{ walletState.packetExpireHours }} 小时没人领自动退回</div>
+        </el-form-item>
+        <el-form-item label="祝福语">
+          <el-input v-model="packetDialog.greeting" maxlength="30" placeholder="可空，默认「恭喜发财，大吉大利」" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="packetDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="packetDialog.submitting" @click="submitPacket">发红包</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 红包详情：领取态每次都是现取，所以关闭后再开能看到最新名单 -->
+    <el-dialog v-model="packetView.visible" title="红包" width="360px" append-to-body>
+      <div v-loading="packetView.loading" class="chat-window__packet">
+        <template v-if="packetView.data">
+          <div class="chat-window__packet-greeting">{{ packetView.data.greeting || '恭喜发财，大吉大利' }}</div>
+          <div class="chat-window__packet-sub">来自 {{ packetView.senderName }} · {{ packetView.data.claimedCount }}/{{ packetView.data.totalCount }} 份</div>
+          <div class="chat-window__packet-amount">{{ packetView.data.claimedAmount }} / {{ packetView.data.totalAmount }} 积分</div>
+          <div class="chat-window__packet-state">{{ packetStateText(packetView.data.status) }}</div>
+          <div class="chat-window__packet-records">
+            <div v-for="r in packetView.data.records" :key="r.userId" class="chat-window__packet-record">
+              <span class="chat-window__packet-seq">{{ r.seq }}</span>
+              <span class="chat-window__packet-name im-ellipsis">{{ r.nickname || '用户' }}</span>
+              <span class="chat-window__packet-num">{{ r.amount }}</span>
+            </div>
+            <div v-if="!packetView.data.records.length" class="chat-window__packet-none">还没人领取</div>
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="packetView.visible = false">关闭</el-button>
+        <el-button
+          v-if="packetView.data && packetView.data.status === 'unclaimed' && !packetView.isSelf"
+          type="primary"
+          :loading="packetView.claiming"
+          @click="claimCurrentPacket"
+        >
+          拆开
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 待发图片的马赛克编辑器：保存产物就地替换托盘里的 File -->
     <ImageMosaicDialog
       v-model:visible="mosaic.visible"
@@ -546,6 +745,17 @@
       v-model="showGroupSettings"
       :group-id="groupId"
     />
+
+    <!-- 发起群通话的成员选择器：它只负责选人，发信令由 groupcall store 决定（create）；
+         通话进行中的追加邀请用的是 GroupCallOverlay 里自己的那一份实例 -->
+    <GroupCallInviteDialog
+      v-model="groupCallPickerVisible"
+      :group-id="groupId"
+      :max-slots="callStore.groupMaxSlots"
+      title="发起群通话"
+      confirm-text="呼叫"
+      @confirm="startGroupCall"
+    />
   </div>
 </template>
 
@@ -553,13 +763,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Plus, Delete as DeleteIcon } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Operation, Plus, Collection, Coin, Present, Delete as DeleteIcon } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import FileViewer from '@/components/FileViewer.vue'
 import WatermarkOverlay from '@/components/WatermarkOverlay.vue'
 import GroupSettings from '@/components/GroupSettings.vue'
+import GroupCallInviteDialog from '@/components/GroupCallInviteDialog.vue'
 import ForwardDialog from '@/components/ForwardDialog.vue'
 import MergedRecordDialog from '@/components/MergedRecordDialog.vue'
 import ImageMosaicDialog from '@/components/ImageMosaicDialog.vue'
@@ -569,9 +780,13 @@ import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useCallStore } from '@/stores/call'
+import { useGroupcallStore } from '@/stores/groupcall'
 import { useGroupStore, ROLE_ADMIN, ROLE_OWNER } from '@/stores/group'
 import { useFriendStore } from '@/stores/friend'
+import { useReportStore } from '@/stores/report'
 import { uploadFileSmart } from '@/api/file'
+import { fetchQuickReplies, replaceQuickReplies } from '@/api/conversation'
+import { fetchWallet, transfer as transferApi, sendPacket, fetchPacket, claimPacket } from '@/api/wallet'
 import { searchMessages, clearConversationMessages, flashViewMessage, toMessageText, translateMessage } from '@/api/message'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo, mediaUrlAsync, mediaForget } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
@@ -616,6 +831,7 @@ const friends = useFriendStore()
 const auth = useAuthStore()
 const groupStore = useGroupStore()
 const settings = useSettingsStore()
+const report = useReportStore()
 
 /** 是否为窄屏（移动端），用于控制工具栏显隐与输入框行数 */
 function checkMobile() {
@@ -969,6 +1185,184 @@ function onViewMerged({ title, messages: items }) {
   mergedViewer.visible = true
 }
 
+/* ---------------------------- 转账 / 红包 ---------------------------- */
+// 上下界与余额都来自 GET /wallet：前端不做第二套数字，否则会出现「能提交、被拒收」。
+// 只在真要发钱时拉一次（点开对话框），会话打开时不顺手拉：绝大多数聊天不涉及资金。
+// 转账与红包的消息都不走 chat.send：12/13 型只能由服务端在钱真正动过之后产生，所以入口直接调钱包接口。
+const walletState = reactive({
+  loaded: false,
+  transferEnabled: true,
+  balance: 0,
+  transferMin: 1,
+  transferMax: 10000,
+  packetMax: 10000,
+  packetMaxCount: 20,
+  packetExpireHours: 24
+})
+
+async function ensureWalletConfig(force = false) {
+  if (walletState.loaded && !force) {
+    return
+  }
+  try {
+    const vo = await fetchWallet()
+    if (vo) {
+      walletState.loaded = true
+      // 钱包总开关与转账开关串在一起：任一处关掉，前端就不露这两个入口
+      walletState.transferEnabled = vo.enabled !== false && vo.transferEnabled !== false
+      walletState.balance = Number(vo.balance || 0)
+      walletState.transferMin = Number(vo.transferMin ?? 1)
+      walletState.transferMax = Number(vo.transferMax ?? 10000)
+      walletState.packetMax = Number(vo.packetMax ?? 10000)
+      walletState.packetMaxCount = Number(vo.packetMaxCount ?? 20)
+      walletState.packetExpireHours = Number(vo.packetExpireHours ?? 24)
+    }
+  } catch {
+    /* 拉不到就用默认值，真正的额度校验在服务端 */
+  }
+}
+
+const transferDialog = reactive({ visible: false, peerName: '', amount: '', memo: '', submitting: false })
+const packetDialog = reactive({ visible: false, amount: '', count: 1, greeting: '', submitting: false })
+const packetView = reactive({ visible: false, loading: false, claiming: false, packetId: '', senderName: '', isSelf: false, data: null })
+
+/** 积分是整数：写了 10.9 就按 10 算，而不是静默四舍五入到 11——多给的那 1 分是用户的钱 */
+function parsePoints(raw) {
+  const n = Number(raw)
+  return Number.isFinite(n) ? Math.floor(n) : 0
+}
+
+async function openTransferDialog() {
+  await ensureWalletConfig()
+  if (!walletState.transferEnabled) {
+    ElMessage.warning('转账与红包暂未开放')
+    return
+  }
+  transferDialog.peerName = title.value
+  transferDialog.amount = ''
+  transferDialog.memo = ''
+  transferDialog.visible = true
+}
+
+async function openPacketDialog() {
+  await ensureWalletConfig()
+  if (!walletState.transferEnabled) {
+    ElMessage.warning('转账与红包暂未开放')
+    return
+  }
+  packetDialog.amount = ''
+  packetDialog.count = 1
+  packetDialog.greeting = ''
+  packetDialog.visible = true
+}
+
+async function submitTransfer() {
+  const amount = parsePoints(transferDialog.amount)
+  if (amount < walletState.transferMin || amount > walletState.transferMax) {
+    ElMessage.warning(`单次转账 ${walletState.transferMin} ~ ${walletState.transferMax} 积分`)
+    return
+  }
+  transferDialog.submitting = true
+  try {
+    const res = await transferApi({
+      conversationId: props.conversationId,
+      amount,
+      memo: (transferDialog.memo || '').trim() || undefined
+    })
+    walletState.balance = Number(res.balance || 0)
+    // 这条 12 型消息只能由服务端在扣款成功后产生，本次响应是它唯一的来源：
+    // 不就地追加，而是等 WebSocket 回放的话，关了「多端共享」那一端会完全看不见
+    if (res.message) {
+      chat.appendMessage(props.conversationId, res.message, true)
+    }
+    transferDialog.visible = false
+    ElMessage.success(`已转出 ${amount} 积分`)
+  } catch {
+    /* 余额不足 / 非好友等由服务端给准确文案，全局已 toast */
+  } finally {
+    transferDialog.submitting = false
+  }
+}
+
+async function submitPacket() {
+  const amount = parsePoints(packetDialog.amount)
+  if (amount < walletState.transferMin || amount > walletState.packetMax) {
+    ElMessage.warning(`单个红包 ${walletState.transferMin} ~ ${walletState.packetMax} 积分`)
+    return
+  }
+  const count = parsePoints(packetDialog.count) || 1
+  if (isGroup.value && amount < count) {
+    ElMessage.warning('总额不够分光：每份至少 1 积分')
+    return
+  }
+  packetDialog.submitting = true
+  try {
+    const res = await sendPacket({
+      conversationId: props.conversationId,
+      amount,
+      count: isGroup.value ? count : undefined,
+      greeting: (packetDialog.greeting || '').trim() || undefined
+    })
+    walletState.balance = Number(res.balance || 0)
+    if (res.message) {
+      chat.appendMessage(props.conversationId, res.message, true)
+    }
+    packetDialog.visible = false
+    ElMessage.success('红包已发出')
+  } catch {
+    /* 同上：额度越界、余额不足都交给服务端说清楚 */
+  } finally {
+    packetDialog.submitting = false
+  }
+}
+
+/** 点开红包气泡：先取一次领取态，再根据 status 决定能不能拆 */
+async function onOpenPacket(payload) {
+  const packetId = payload && payload.packetId
+  if (!packetId) {
+    return
+  }
+  packetView.packetId = packetId
+  packetView.senderName = (payload.message && payload.message.fromNickname) || '好友'
+  packetView.isSelf = !!(payload.message && payload.message.self)
+  packetView.data = null
+  packetView.visible = true
+  await refreshPacket()
+}
+
+async function refreshPacket() {
+  packetView.loading = true
+  try {
+    packetView.data = await fetchPacket(packetView.packetId)
+  } catch {
+    // 红包不存在（已被清理或从未存在）：留一个空弹窗比报错更让人迷惑
+    packetView.visible = false
+  } finally {
+    packetView.loading = false
+  }
+}
+
+async function claimCurrentPacket() {
+  packetView.claiming = true
+  try {
+    const res = await claimPacket(packetView.packetId)
+    walletState.balance = Number(res.balance || 0)
+    ElMessage.success(`抢到 ${res.amount} 积分`)
+    await refreshPacket()
+  } catch {
+    /* 已领过 / 被领完 / 已过期，服务端给结论，详情维持原样 */
+  } finally {
+    packetView.claiming = false
+  }
+}
+
+function packetStateText(status) {
+  if (status === 'claimed') return '你已领过这个红包'
+  if (status === 'empty') return '已被领完'
+  if (status === 'expired') return '已过期，未领的积分已退回发送人'
+  return packetView.isSelf ? '你发的红包 · 等待领取' : '手气如何，拆开看看'
+}
+
 /* ------------------------------ 投票 ------------------------------ */
 
 const TYPE_VOTE = 10
@@ -1055,13 +1449,98 @@ async function onCloseVote(message) {
   }
 }
 
+/* ------------------------------ 接龙 ------------------------------ */
+
+const TYPE_CHAIN = 14
+const chainDialog = reactive({
+  visible: false,
+  title: '',
+  firstEntry: '',
+  submitting: false
+})
+
+function openChainDialog() {
+  chainDialog.title = ''
+  chainDialog.firstEntry = ''
+  chainDialog.visible = true
+}
+
+async function sendChain() {
+  const title = (chainDialog.title || '').trim()
+  if (!title) {
+    ElMessage.warning('请填写接龙主题')
+    return
+  }
+  chainDialog.submitting = true
+  try {
+    const vo = await chat.send(props.conversationId, {
+      msgType: TYPE_CHAIN,
+      content: title,
+      extra: { chainTitle: title }
+    })
+    chainDialog.visible = false
+    // 发起人填了第一条就紧接着以自己的身份 append：序号与昵称快照一律由服务端权威生成，本端不自拼
+    const first = (chainDialog.firstEntry || '').trim()
+    if (first && vo && vo.messageId) {
+      await chat.chain(props.conversationId, vo.messageId, first, false)
+    }
+  } catch {
+    /* 发送失败已由占位气泡标红并提重发；append 失败已由全局 toast 提示 */
+  } finally {
+    chainDialog.submitting = false
+  }
+}
+
+/** 气泡里「参与接龙」：用 ElMessageBox.prompt 拿正文，交回 store 走 HTTP（序号/时刻由服务端定） */
+async function onChain(message) {
+  let value = ''
+  try {
+    const r = await ElMessageBox.prompt('填写你这一条接龙内容（留空则显示你的昵称）', '参与接龙', {
+      confirmButtonText: '接龙',
+      cancelButtonText: '取消',
+      inputPlaceholder: '例如：张三 +1',
+      inputValue: '',
+      inputValidator: (v) => (v && v.length > 200 ? '不能超过 200 字' : true)
+    })
+    value = (r.value || '').trim()
+  } catch {
+    return // 取消
+  }
+  try {
+    await chat.chain(props.conversationId, message.messageId, value, false)
+  } catch {
+    /* 服务端拒绝（已截止 / 抢锁失败等）已由全局 toast 提示 */
+  }
+}
+
+/** 发起人截止接龙 */
+async function onCloseChain(message) {
+  try {
+    await ElMessageBox.confirm('截止后不能再加入条目，确定吗？', '截止接龙', {
+      confirmButtonText: '截止',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  try {
+    await chat.chain(props.conversationId, message.messageId, '', true)
+  } catch {
+    /* 同上 */
+  }
+}
+
 /* -------------------------------- 音视频通话 -------------------------------- */
 
 const callStore = useCallStore()
+const groupcall = useGroupcallStore()
 // 单聊（peerUserId 非空）且服务端开启通话时才展示入口
 const canCall = computed(() => !!peerUserId.value && callStore.enabled)
-// 本机已在通话中（非 idle）时禁用，避免拨第二路
-const callBusy = computed(() => callStore.status !== 'idle')
+// 本机已在通话中（1:1 或群通话任一非 idle）时禁用，避免拨第二路。
+// 服务端那三套忙线键（im:call:user: / im:link:user: / im:gcall:user:）互不相认，
+// 跨类型不并发只能靠前端把入口关严实（另一个兜底在 ws/dispatch.js 的拒绝分支）
+const callBusy = computed(() => callStore.status !== 'idle' || groupcall.busy)
 
 async function startCall(type) {
   if (!peerUserId.value) {
@@ -1073,6 +1552,43 @@ async function startCall(type) {
     return
   }
   callStore.dial(peerUserId.value, type, { conversationId: props.conversationId })
+}
+
+/* ---------------------------- 群通话（多人 mesh） ---------------------------- */
+
+// 入口显隐：群聊 + 服务端开了通话 + 开了群通话。后两个字段由 onMounted 里那次
+// callStore.ensureConfig() 顺带下发（同一个 /api/call/config，不为群通话单开端点）
+const canGroupCall = computed(() => isGroup.value && callStore.enabled && callStore.groupEnabled)
+const groupCallPickerVisible = ref(false)
+const groupCallMediaType = ref('audio')
+
+/** 提示条数据：本机空闲、且查到的那路通话确实属于当前群时才出现 */
+const groupCallBanner = computed(() => {
+  const room = groupcall.roomActive
+  if (!room || !isGroup.value || !sameId(room.groupId, groupId.value)) {
+    return null
+  }
+  return { mediaLabel: room.mediaType === 'video' ? '视频通话' : '语音通话', count: room.count }
+})
+
+function openGroupCall(type) {
+  groupCallMediaType.value = type
+  groupCallPickerVisible.value = true
+}
+
+/** 选择器确认后建房：store 内部会采集一次本地流并邀首批成员（弹窗自己在 emit 后关闭） */
+async function startGroupCall(userIds) {
+  await groupcall.start(groupId.value, groupCallMediaType.value, userIds, {
+    conversationId: props.conversationId
+  })
+}
+
+function joinGroupCall() {
+  const room = groupcall.roomActive
+  if (!room) {
+    return
+  }
+  groupcall.joinActive(room.callId, room.groupId, room.mediaType)
 }
 
 /* -------------------------------- 滚动 -------------------------------- */
@@ -1244,12 +1760,16 @@ async function loadInitial() {
   }
   scrollToBottom()
   markAllRead()
+  // 从「我的收藏」等面板跨会话跳过来时，先滚到底部，再改滚到那条消息上
+  await consumeLocateTarget()
   // 群聊时拉取群详情（禁言状态与角色）与群成员列表。
   // 成员列表是 @ 提及选择器的数据源：不加载的话进群聊打 @ 只会弹出「@所有人」，
   // 单个成员一个都列不出来（此前只有打开「群设置」抽屉才会加载成员，@ 选人因此形同虚设）。
   if (isGroup.value && groupId.value) {
     groupStore.fetchDetail(groupId.value)
     groupStore.fetchMembers(groupId.value)
+    // 顺手查一次本群是否有进行中的群通话（提示条的数据源）：一次 HTTP，失败就当没有，不弹错
+    groupcall.refreshActive(groupId.value)
   }
 }
 
@@ -1354,6 +1874,110 @@ watch(draft, (value) => {
     drafts.delete(key.value)
   }
 })
+
+/* ------------------------------ 常用语（快捷回复） ------------------------------ */
+// 清单只在打开面板时拉一次，编辑全在本地副本 quickEditList 上做，点「保存」才发一次 PUT：
+// 服务端只提供了整表替换一个写接口，逐条增删反而要多打很多轮请求。
+// 关掉面板不退出编辑态：没保存的那几条不该静默丢在键盘底下，下次进来还能接着改。
+const quickVisible = ref(false)
+const quickEditing = ref(false)
+const quickList = ref([])
+const quickEditList = ref([])
+const quickNew = ref('')
+const quickLoading = ref(false)
+const quickSaving = ref(false)
+// 与服务端 QuickReplyService 里的常量一致：本地先拦一次是为了立即给反馈，不是拿它当权威
+const MAX_QUICK_ITEMS = 20
+const MAX_QUICK_LENGTH = 200
+
+async function onQuickShow() {
+  quickLoading.value = true
+  try {
+    quickList.value = (await fetchQuickReplies()) || []
+  } catch {
+    quickList.value = []
+  } finally {
+    quickLoading.value = false
+  }
+}
+
+/** 点某一条：追加到输入框末尾，不自动发送——发不发、要不要再补一句，留给用户 */
+function useQuickReply(text) {
+  if (quickEditing.value) {
+    return
+  }
+  const current = draft.value || ''
+  // 已有文本且末尾没空白时补一个空格：不然两句会粘成「好的收到」这种读起来很怪的短句
+  draft.value = current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`
+  quickVisible.value = false
+  nextTick(() => inputRef.value?.focus?.())
+}
+
+function startQuickEdit() {
+  quickEditing.value = true
+  quickEditList.value = [...quickList.value]
+  quickNew.value = ''
+}
+
+function cancelQuickEdit() {
+  quickEditing.value = false
+  quickEditList.value = []
+  quickNew.value = ''
+}
+
+function addQuickItem() {
+  const text = quickNew.value.trim()
+  if (!text) {
+    return
+  }
+  if (text.length > MAX_QUICK_LENGTH) {
+    ElMessage.warning(`单条常用语最多 ${MAX_QUICK_LENGTH} 字`)
+    return
+  }
+  if (quickEditList.value.includes(text)) {
+    ElMessage.info('这条已经在清单里了')
+    quickNew.value = ''
+    return
+  }
+  if (quickEditList.value.length >= MAX_QUICK_ITEMS) {
+    ElMessage.warning(`常用语最多 ${MAX_QUICK_ITEMS} 条，先删几条再加`)
+    return
+  }
+  quickEditList.value = [...quickEditList.value, text]
+  quickNew.value = ''
+}
+
+/** 把打到一半的话术直接存下来：这是最高频的「加常用语」场景，比让用户去面板里重打一遍顺手 */
+function saveDraftAsQuick() {
+  const text = (draft.value || '').trim()
+  if (!text) {
+    return
+  }
+  if (!quickEditing.value) {
+    startQuickEdit()
+  }
+  quickNew.value = text
+  addQuickItem()
+}
+
+function removeQuickItem(idx) {
+  quickEditList.value = quickEditList.value.filter((_, i) => i !== idx)
+}
+
+async function saveQuickList() {
+  quickSaving.value = true
+  try {
+    // 用服务端回传的清洗结果覆盖本地：去重与去空白都由它做，两边看到的就是同一份
+    const saved = await replaceQuickReplies(quickEditList.value)
+    quickList.value = saved || []
+    cancelQuickEdit()
+    ElMessage.success('常用语已保存')
+  } catch {
+    // 超限/超长由服务端给准确文案，面板维持编辑态，好让用户改完再试一次
+  } finally {
+    quickSaving.value = false
+  }
+}
 
 /* --------------------------- 待发送附件托盘 --------------------------- */
 
@@ -1694,6 +2318,20 @@ async function loadMoreSearch() {
     // request.js 已处理
   } finally {
     searchLoading.value = false
+  }
+}
+
+/** 点击会话内搜索结果：收起面板并定位到那条消息（必要时向上补拉历史） */
+async function onSearchResultClick(item) {
+  if (!item || !item.messageId) {
+    return
+  }
+  const messageId = item.messageId
+  closeSearch()
+  await chat.ensureMessageLoaded(props.conversationId, messageId)
+  await nextTick()
+  if (!flashMessage(messageId)) {
+    ElMessage.info('该消息太早或已被你删除，请向上滚动查看历史消息')
   }
 }
 
@@ -2458,6 +3096,25 @@ async function onReact({ message, emoji, remove }) {
 }
 
 /**
+ * 滚动到一条已渲染的消息上并短暂高亮；DOM 里找不到就返回 false，怎么提示交给调用方。
+ *
+ * 引用跳转与收藏定位共用这一份：两者的差异只在「要不要先补拉历史」，落到 DOM 上是同一件事。
+ */
+function flashMessage(messageId) {
+  const el = document.querySelector(`[data-msg-id="${asId(messageId)}"]`)
+  if (!el) {
+    return false
+  }
+  // 已经离开底部了，得暂停一下「贴着底就钉回底部」的观察器：
+  // 定位期间图片陆续加载完会撑高内容高度，不暂停的话刚滚过去就被拉回最新一条
+  pinSuspendUntil = Date.now() + 1500
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.add('chat-window__msg--highlight')
+  setTimeout(() => el.classList.remove('chat-window__msg--highlight'), 1600)
+  return true
+}
+
+/**
  * 点击气泡里的引用块时跳转到原消息。
  *
  * 当前列表里能找到就滚过去并短暂高亮；
@@ -2465,13 +3122,28 @@ async function onReact({ message, emoji, remove }) {
  */
 function onJumpQuote(quoteMsgId) {
   if (!quoteMsgId) return
-  const el = document.querySelector(`[data-msg-id="${asId(quoteMsgId)}"]`)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    el.classList.add('chat-window__msg--highlight')
-    setTimeout(() => el.classList.remove('chat-window__msg--highlight'), 1600)
-  } else {
+  if (!flashMessage(quoteMsgId)) {
     ElMessage.info('原消息尚未加载，请向上滚动查看历史消息')
+  }
+}
+
+/**
+ * 消费「跳转到某条消息」的待定位请求（目前唯一写入者是收藏面板）。
+ *
+ * loadInitial 已经把本地缓存 + 服务端最新一屏渲染完并钉到底部，这里再按需往上补拉；
+ * 收藏的多半是老消息，补拉封顶 10 页仍找不到就只好提示手动滚动——宁可提示，不为一条消息把会话拉穿。
+ */
+async function consumeLocateTarget() {
+  const target = chat.locateTarget
+  if (!target || !sameId(target.conversationId, props.conversationId)) {
+    return
+  }
+  // 先摘目标再干活：一次跳转只定位一次，事后手动点刷新不该又跳回去
+  chat.locateTarget = null
+  await chat.ensureMessageLoaded(props.conversationId, target.messageId)
+  await nextTick()
+  if (!flashMessage(target.messageId)) {
+    ElMessage.info('该消息太早或已被你删除，请向上滚动查看历史消息')
   }
 }
 
@@ -2490,6 +3162,17 @@ function withinRecallWindow(message) {
     return false
   }
   return Date.now() - sent <= RECALL_LIMIT_MS
+}
+
+/**
+ * 举报弹窗顶部那一行「举报对象」的摘要。
+ * 文案复用合并转发的快照摘要（mergedSummaryOf），两处语义本来就是一个东西：
+ * 「这条消息看起来是什么」。截 30 字是因为弹窗宽度只有 460px，长句子会把标题栏顶成两行。
+ */
+function reportTitleOf(message) {
+  const summary = mergedSummaryOf(message) || '（无内容）'
+  const brief = summary.length > 30 ? `${summary.slice(0, 30)}…` : summary
+  return `${message.fromNickname || '对方'}：${brief}`
 }
 
 function itemsFor(message) {
@@ -2533,6 +3216,15 @@ function itemsFor(message) {
     // 语音转文字 / 文本翻译：依赖服务端外部能力，未接入时点击会降级为一句提示（入口照常展示）
     { key: 'to-text', label: '转文字', show: Number(message.msgType) === TYPE_VOICE && !message.recalled },
     { key: 'translate', label: '翻译', show: Number(message.msgType) === 1 && !message.recalled && !!message.content },
+    // 收藏：用户维度的私人书签，单聊群聊都能收、不需要任何权限；只对自己可见，对方不知道
+    { key: 'favorite', label: message.favorite ? '取消收藏' : '收藏', show: !message.recalled },
+    {
+      key: 'report',
+      label: '举报',
+      // 只举报别人的内容：自己的消息后端按自举报拒（REPORT_SELF_FORBIDDEN），别给个点了必报错的入口；
+      // 已撤回的消息内容已经拿不到了，证据快照也没意义；report.enabled 来自服务端开关，功能关了入口一起消失
+      show: report.enabled && !message.recalled && !message.self
+    },
     // 精华：仅群主/管理员可标记，未撤回的消息才能操作；已标则文案变“取消精华”
     { key: 'essence', label: message.essence ? '取消精华' : '设为精华', show: canMarkEssence.value && !message.recalled },
     // 单端删除：只从自己的记录里移除，对方仍可见；自己发的和对方发的都能删
@@ -2608,6 +3300,18 @@ async function onMenuSelect(action) {
         }
         break
       }
+      case 'favorite':
+        await chat.markFavorite(props.conversationId, message.messageId, !message.favorite)
+        ElMessage.success(message.favorite ? '已取消收藏' : '已加入收藏')
+        break
+      case 'report':
+        // title 只是弹窗顶部给人看的一行摘要，真正的证据由后端按 messageId 回库抓快照
+        report.openReport({
+          targetType: 'message',
+          targetId: message.messageId,
+          title: reportTitleOf(message)
+        })
+        break
       case 'essence':
         await chat.markEssence(props.conversationId, message.messageId, !message.essence)
         ElMessage.success(message.essence ? '已取消精华' : '已设为精华')
@@ -2812,6 +3516,23 @@ watch(key, async () => {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+}
+
+.chat-window__gcall-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--im-primary);
+  background: var(--im-primary-light);
+  border-bottom: 1px solid var(--im-border);
+}
+
+.chat-window__gcall-bar .im-ellipsis {
+  min-width: 0;
+  flex: 1;
 }
 
 .chat-window__header {
@@ -3209,6 +3930,12 @@ watch(key, async () => {
   padding: 4px 0;
   font-size: 13px;
   border-bottom: 1px solid var(--im-border);
+  /* 整行可点：点一下收起面板并跳到那条消息 */
+  cursor: pointer;
+}
+
+.chat-window__search-item:hover {
+  background: var(--im-bg-hover, #f5f7fa);
 }
 
 .chat-window__search-item:last-child {
@@ -3462,6 +4189,154 @@ watch(key, async () => {
   text-align: center;
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* ------------------------------ 转账 / 红包 ------------------------------ */
+.chat-window__money-peer {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text);
+}
+
+/* 余额与上下界这类提示放在输入框下方：el-form-item 的内容区是 flex-wrap，给宽 100% 才会换行 */
+.chat-window__money-tip {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--im-text-secondary);
+}
+
+/* 领取态拉回前先留个高度，不然弹窗会从空的一片突然撑开 */
+.chat-window__packet {
+  min-height: 120px;
+}
+
+.chat-window__packet-greeting {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6544a;
+}
+
+.chat-window__packet-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.chat-window__packet-amount {
+  margin-top: 10px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--im-text);
+}
+
+.chat-window__packet-state {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+/* 群红包几十人，限高滚动而不是把弹窗顶到屏外 */
+.chat-window__packet-records {
+  max-height: 180px;
+  margin-top: 10px;
+  overflow-y: auto;
+  border-top: 1px solid var(--im-border, #ebeef5);
+}
+
+.chat-window__packet-record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+}
+
+.chat-window__packet-seq {
+  flex: none;
+  width: 20px;
+  font-size: 11px;
+  color: var(--im-text-secondary);
+}
+
+.chat-window__packet-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-window__packet-num {
+  flex: none;
+  font-weight: 600;
+  color: #e6544a;
+}
+
+.chat-window__packet-none {
+  padding: 12px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+/* ------------------------------ 常用语面板 ------------------------------ */
+.chat-window__quick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 限高 + 滚动：20 条常用语全列出来会把整个聊天区顶满 */
+.chat-window__quick-list {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+
+.chat-window__quick-item {
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  /* 常用语可能是一整段话，不给换行规则就会把面板撑宽 */
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-window__quick-item:hover {
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.chat-window__quick-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.chat-window__quick-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-window__quick-empty {
+  padding: 12px 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.chat-window__quick-draft {
+  width: 100%;
+  margin-top: 6px;
 }
 
 /* ------------------------------ 窄屏 ------------------------------ */

@@ -241,6 +241,19 @@
         </div>
       </div>
 
+      <!-- ==================== 举报本群 ==================== -->
+      <!--
+        举报放在退出上方，不挤进危险区：解散/退出是自己对自己群的操作，
+        举报是把问题交给运营，两者语义排在一起容易被误读为「举报后群就没了」。
+        群类型的责任人是群主（后端 ReportGroupTargetSpiImpl 取 ownerId），
+        而自举报会被后端拒（REPORT_SELF_FORBIDDEN），所以不给群主展这个入口，
+        而不是给他一个点了必弹错的按钮；群主要举报群里某条消息，用消息右键那个入口。
+      -->
+      <div v-if="report.enabled && myRole !== ROLE_OWNER" class="group-settings__section group-settings__report-zone">
+        <el-button type="warning" plain :icon="Warning" @click="onReportGroup">举报本群</el-button>
+        <span class="group-settings__report-tip">群名、公告或群内内容违规时提交，处理结论以系统通知发回。</span>
+      </div>
+
       <!-- ==================== 退出 / 解散 ==================== -->
       <div class="group-settings__section group-settings__danger-zone">
         <el-button v-if="myRole === ROLE_OWNER" type="danger" plain @click="onDismiss">
@@ -327,7 +340,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MoreFilled, Plus, Search, Document, Picture, Star, Share, Postcard, Cpu } from '@element-plus/icons-vue'
+import { MoreFilled, Plus, Search, Document, Picture, Star, Share, Postcard, Cpu, Warning } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import GroupContentDialog from '@/components/GroupContentDialog.vue'
 import GroupInviteDialog from '@/components/GroupInviteDialog.vue'
@@ -337,6 +350,7 @@ import { useGroupStore, ROLE_OWNER, ROLE_ADMIN, ROLE_MEMBER } from '@/stores/gro
 import { useFriendStore } from '@/stores/friend'
 import { useConversationStore } from '@/stores/conversation'
 import { useAuthStore } from '@/stores/auth'
+import { useReportStore } from '@/stores/report'
 import { asId, sameId } from '@/utils/id'
 
 /**
@@ -364,6 +378,7 @@ const group = useGroupStore()
 const friend = useFriendStore()
 const conversation = useConversationStore()
 const auth = useAuthStore()
+const report = useReportStore()
 
 const drawerWidth = computed(() => (typeof window !== 'undefined' && window.innerWidth < 768) ? '100%' : '380px')
 
@@ -548,6 +563,19 @@ async function saveNickname() {
 }
 
 /* ------------------------------ 退出 / 解散 ------------------------------ */
+
+/**
+ * 举报本群：targetId 用 groupId（不是 conversationId），后端 group 类型的 SPI 按群 ID 回库抓群名/公告/群主。
+ * 弹窗只挂 MainLayout 一份，这里只负责把对象交给它；GroupSettings 自身是抽屉，
+ * 不关掉也能叠上举报弹窗（el-dialog 的 append-to-body 保证层级）。
+ */
+function onReportGroup() {
+  report.openReport({
+    targetType: 'group',
+    targetId: props.groupId,
+    title: group.currentGroup?.name || '未命名群聊'
+  })
+}
 
 async function onQuit() {
   try {
@@ -823,6 +851,20 @@ watch(visible, (val) => {
 .group-settings__load-more {
   padding: 8px 0;
   text-align: center;
+}
+
+/* 举报行：按钮 + 一行说明，比单独一个居中按钮更容易让人明白举报不会删群 */
+.group-settings__report-zone {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.group-settings__report-tip {
+  color: var(--im-text-secondary, #909399);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* 危险操作区 */

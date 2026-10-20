@@ -9,9 +9,14 @@
             {{ conversation.totalUnread > 99 ? '99+' : conversation.totalUnread }} 条未读
           </span>
         </div>
-        <el-tooltip content="刷新会话列表" placement="bottom">
-          <el-button text :icon="Refresh" :loading="conversation.loading" @click="conversation.fetchList()" />
-        </el-tooltip>
+        <div class="chat-home__header-ops">
+          <el-tooltip content="我的收藏" placement="bottom">
+            <el-button text :icon="Star" @click="favoritesVisible = true" />
+          </el-tooltip>
+          <el-tooltip content="刷新会话列表" placement="bottom">
+            <el-button text :icon="Refresh" :loading="conversation.loading" @click="conversation.fetchList()" />
+          </el-tooltip>
+        </div>
       </header>
 
       <!-- 全局搜索：跨全部会话检索聊天消息 + 全网检索，与聊天窗口内的「仅当前会话」搜索区分开 -->
@@ -139,6 +144,9 @@
       :items="menuItems"
       @select="onMenuSelect"
     />
+
+    <!-- 我的收藏：跨会话的私人收藏夹，点一行跳回那条消息并高亮 -->
+    <FavoritesDialog v-model="favoritesVisible" :current-conversation-id="conversation.activeId" />
   </div>
 </template>
 
@@ -146,9 +154,10 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MuteNotification, Refresh, Search } from '@element-plus/icons-vue'
+import { MuteNotification, Refresh, Search, Star } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
+import FavoritesDialog from '@/components/FavoritesDialog.vue'
 import ChatWindow from './ChatWindow.vue'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
@@ -173,6 +182,9 @@ const conversation = useConversationStore()
 const friend = useFriendStore()
 const settings = useSettingsStore()
 const chat = useChatStore()
+
+/** 「我的收藏」面板开关 */
+const favoritesVisible = ref(false)
 
 function isActive(item) {
   return sameId(item.conversationId, conversation.activeId)
@@ -354,10 +366,11 @@ function convNameOf(item) {
   return conversation.find(item.conversationId)?.name || '会话'
 }
 
-/** 点击结果跳转到对应会话的聊天页，并收起搜索面板 */
+/** 点击结果跳转到对应会话的聊天页，并请求定位到这条消息（不传目标时 ChatWindow 会直接略过） */
 function openGlobalResult(item) {
   const id = asId(item.conversationId)
   closeGlobalSearch()
+  chat.setLocateTarget(id, item.messageId)
   router.push({ name: 'chat', params: { conversationId: id } })
 }
 
@@ -547,6 +560,13 @@ async function confirmRemove(target) {
   height: 52px;
   flex: none;
   padding: 0 8px 0 16px;
+}
+
+/* 右上角两个图标（收藏 / 刷新）靠在一起，不被 space-between 拉开 */
+.chat-home__header-ops {
+  display: flex;
+  align-items: center;
+  flex: none;
 }
 
 .chat-home__heading {

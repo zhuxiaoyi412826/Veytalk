@@ -78,6 +78,27 @@ public class LiveRoomVO implements Serializable {
     @Schema(description = "弹幕 WebSocket 地址：直播中、或已结束聊天模式未超时时返回")
     private String danmakuWs;
 
+    /**
+     * 本场是否有回放可看。不随带地址：签名地址有有效期，只能点「看回放」时现取
+     * （{@code GET /api/live/{roomId}/replay}）。直播中的房间恒为 false——那时看的是直播本身。
+     */
+    @Schema(description = "本场是否有回放（true 时前端显示「看回放」）")
+    private Boolean hasReplay;
+
     @Schema(description = "当前用户是否为该房间主播")
     private Boolean mine;
+
+    /**
+     * 门禁信息：公开房 {@code type=none}；密码/付费房给前端渲染解锁弹窗。
+     * 与 {@link #playUrl}/{@link #danmakuWs} 一致——未解锁时这两个为空，前端据此判断要不要拦一层。
+     */
+    @Schema(description = "门禁信息（none/password/paid）")
+    private LiveGateVO gate;
+
+    /**
+     * 当前用户是否已拿到本房间观看权（公开/已解锁/主播本人均为 true）。
+     * false 时 {@link #playUrl} 与 {@link #danmakuWs} 不随下发。
+     */
+    @Schema(description = "当前用户是否已解锁（true 才能拿到播放地址）")
+    private Boolean unlocked;
 }

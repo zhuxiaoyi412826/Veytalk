@@ -98,4 +98,110 @@ public class LiveProperties {
      * <p>已封禁的房间不进聊天模式：管理端强制断播应当立即生效。
      */
     private int endedChatMinutes = 60;
+
+    /**
+     * 弹幕是否套用全局敏感词遮罩（{@code SensitiveWordFilter.mask}）。
+     * 默认开：弹幕原本不过滤，是内容合规的一个缺口；遮罩而非拒发，不把观众推到别的房间去骂。
+     */
+    private boolean danmakuSensitiveMask = true;
+
+    /** 单个主播可自定的弹幕屏蔽词个数上限（词表只存 Redis，不设上限会让一个 Set 无限长） */
+    private int danmakuWordsMaxCount = 50;
+
+    /** 单个弹幕屏蔽词的最大长度（过长的句子当词用基本不会命中，白占内存） */
+    private int danmakuWordMaxLength = 20;
+
+    /**
+     * 禁言名单与屏蔽词集合的滑动保留期（天）。
+     *
+     * <p>这两份数据只存 Redis、没有对应的表，所以保留期就是它们的实际寿命：
+     * 每次读写都把整键 TTL 推后这么远（主播天天开播则名单不会老化）。
+     * 一年后不再开播的主播，名单自然消失——这比在 Redis 里养一堆永久键好。
+     */
+    private int moderationRetentionDays = 365;
+
+    /**
+     * 主播屏蔽词在本机的缓存时长（毫秒）。弹幕是高频路径，每条都 SMEMBERS 一次太贵，
+     * 而词表变更是低频事件。代价：多实例部署时其他实例最多滞后这么久（与本模块
+     * 已有的「房间连接表只在本机」同一约束）；禁言判定<b>不</b>走缓存，必须实时生效。
+     */
+    private long danmakuWordsCacheMillis = 5000L;
+
+    /**
+     * 连麦 PK（两个直播中的房间比热度）。单独嵌一层是因为它有 7 个旋钮，
+     * 平铺到 {@code im.live.*} 里会把房间生命周期配置隔成一堆。
+     *
+     * <p>热度只算「时间窗内的增量」：开场时采一次基线，之后每拍用当前累计值减基线。
+     * 不减基线的话，主播先自己刷了十分钟热度再拉人 PK，对方一进来就输了。
+     */
+    @Data
+    public static class Pk {
+
+        /**
+         * 总开关：关掉则 {@code /api/live/pk/**} 直接拒。前端不为这一个运维旋钮再加一个
+         * 配置接口——按钮照旧显示，点下去拿到「PK 功能未开启」的提示即可。
+         */
+        private boolean enabled = true;
+
+        /** 默认对局时长（秒），抖音式的一轮 PK 量级；前端不传时长就用它 */
+        private int durationSeconds = 300;
+
+        /** 时长上限（秒）：不设上限可以让主播开一场永久 PK，把两个房间的观众锁死 */
+        private int maxDurationSeconds = 900;
+
+        /**
+         * 礼物权重（每 1 积分折多少热度）。礼物是真金白银，占主导；
+         * 调成 0 就变成纯人气（点赞 + 投票）对局。
+         */
+        private int giftWeight = 10;
+
+        /**
+         * 点赞权重。免费行为所以给得小：百人房间每人每 2 秒一次能刷出 50/秒，
+         * 而一个 100 积分的礼物是 1000 热度，刷赞不能直接赢下对局。
+         */
+        private int likeWeight = 1;
+
+        /** 一票折多少热度（人头鼓励，不能盖过礼物） */
+        private int voteWeight = 2;
+
+        /** 已结束（或提前取消）的 PK 会话与票数的保留时长（分钟），供面板回看与防同一对人反复刷票 */
+        private int sessionRetentionMinutes = 1440;
+    }
+
+    private Pk pk = new Pk();
+
+    /**
+     * 直播回放存档。<b>零 DDL</b>：分片本体一直存在媒体服务器上（推流时就已经落盘，不为本功能新增
+     * 一次写入），Redis 里只有「这一场有回放」的展示元数据。
+     *
+     * <p>{@code retentionDays} 是回放的<b>统一保留期</b>：它既是 Redis 入口标记的 TTL，也是媒体侧
+     * 删源文件的口径——真正的删除不在本进程做（控制面不碰媒体文件），而是由 {@code electron/live-retention.js}
+     * 在媒体服务器那台机器上按同一保留期周期清理（自测的 live-media-server.js 已内置）。
+     * 两边读同一个环境变量 {@code IM_LIVE_REPLAY_RETENTION_DAYS}：只改了本进程的 yml、没把同一个值交给
+     * 媒体机，两边就会飘（要么入口先没、要么盘上多留几天，机理与命令见 md/直播.md §10.7）。
+     */
+    @Data
+    public static class Replay {
+
+        /**
+         * 总开关：关掉后上报接口拒写、前端 stopPush 也不会去生成 VOD 清单
+         * （开播响应里带 {@code replayEnabled}，推流端据此决定要不要做定版）。
+         */
+        private boolean enabled = true;
+
+        /**
+         * 回放保留期（天）：同一个值管两件事——Redis 入口键的 TTL，以及媒体侧源文件的清理线。
+         * 默认 1 天：一天的旧直播基本没人看，而一场 2 小时四档直播在盘上是 8~10GB 量级。
+         * 下限 1 天（{@code Math.max} 夹住），配成 0 也一样——那样入口和画面同一天消失，直播一关就没回放。
+         */
+        private int retentionDays = 1;
+
+        /**
+         * 上报时长的上限（小时）：分片数与时长都是推流端上报的，服务端无中立数据源可校对，
+         * 只能夹一个量级。超出按时长上限取值（不拒写）——一个跳了边的统计不值得丢掉整场入口。
+         */
+        private int maxDurationHours = 12;
+    }
+
+    private Replay replay = new Replay();
 }

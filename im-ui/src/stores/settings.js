@@ -48,6 +48,12 @@ const DEFAULTS = {
   showReadReceipt: true,
   imagePreview: true,
   autoPlay: true,
+  /**
+   * 直播/回放的默认清晰度：'auto' 交回 hls.js 按带宽自适应，否则锁定到对应高度的那一档。
+   * 推流端一场会同时编出 1440p/1080p/720p/480p 几路真码流，存高度而不是存档位序号
+   * （序号在不同场次之间不保证一致）。本场没这一档时播放器自动回落，选项也会置灰标「本场无」。
+   */
+  liveQuality: 'auto',
   // ---------- 隐私与安全 ----------
   /** 聊天窗口全局水印：开启后在当前账号的聊天区叠加账号信息，防截图（仅本机生效） */
   chatWatermark: false,

@@ -41,3 +41,41 @@ export function checkin() {
 export function sendGift(roomId, giftId, count = 1) {
   return http.post(`/live/${roomId}/gift`, { giftId, count })
 }
+
+/**
+ * 单聊转账（即时到账）：收款人由后端从会话反查，前端不传 toUserId。
+ *
+ * 返回的是「新余额 + 那条已经落库的转账消息」：转账消息属于内部类型，客户端不能自己 POST 发出去，
+ * 这次调用就是它唯一的产生点，所以拿到结果要就地 appendMessage 上屏，而不是干等 WebSocket 回放。
+ * @param {{ conversationId: string|number, amount: number, memo?: string }} payload
+ * @returns {Promise<{ balance: number, message: object }>}
+ */
+export function transfer(payload) {
+  return http.post('/wallet/transfer', payload)
+}
+
+/**
+ * 发红包：单聊后端强制 1 份，群聊 count 会被夹到 packetMaxCount。
+ * @param {{ conversationId: string|number, amount: number, count?: number, greeting?: string }} payload
+ * @returns {Promise<{ balance: number, message: object }>}
+ */
+export function sendPacket(payload) {
+  return http.post('/wallet/packet', payload)
+}
+
+/**
+ * 红包详情与领取明细：点开气泡时现取，领取态在 Redis、钱在账本，所以这里只读。
+ * @param {string|number} packetId
+ */
+export function fetchPacket(packetId) {
+  return http.get(`/wallet/packet/${packetId}`, { silent: true })
+}
+
+/**
+ * 抢红包。
+ * @param {string|number} packetId
+ * @returns {Promise<{ amount: number, balance: number, claimedCount: number, totalCount: number }>}
+ */
+export function claimPacket(packetId) {
+  return http.post(`/wallet/packet/${packetId}/claim`)
+}
