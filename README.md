@@ -26,7 +26,7 @@
 - **离线消息补推**（`im_message` 本身当持久队列，重连/上线补拉）
 - **幂等三重设防**（Redis 标记 + 唯一键 + 回查）、断网本地待发送队列重提交
 - 消息历史分页、本地优先（端侧 SQLite/sql.js 缓存，本地凑得出整页就零请求）
-- **消息互动与沉淀**：表情回应 Reaction、投票 / 接龙（`MsgType.CHAIN(14)`，零 DDL，条目存 `im_message.extra.chainItems`）、群精华、常用语快捷回复、聊天记录导出、**我的收藏**（用户维度的私人书签，`im_message_favorite` + 「我的收藏」面板，可跨会话筛选并一键跳回原消息定位高亮）
+- **消息互动与沉淀**：表情回应 Reaction（悬停气泡浮出快捷表情，已贴的高亮、再点即撕，末尾「+」开完整表情面板；触屏无 hover 故常显）、投票 / 接龙（`MsgType.CHAIN(14)`，零 DDL，条目存 `im_message.extra.chainItems`）、群精华、常用语快捷回复、聊天记录导出、**我的收藏**（用户维度的私人书签，`im_message_favorite` + 「我的收藏」面板，可跨会话筛选并一键跳回原消息定位高亮）
 
 **社交关系（im-friend）**
 
@@ -78,10 +78,12 @@
 
 - **举报闭环一期**：聊天端四个入口（消息右键 / 用户资料卡 / 直播间 / 群设置）共用一个**字典驱动**的弹窗（理由、必填标记、字数上限全从 `GET /api/report/config` 取，前端不复制一份码表）→ 提交即由各归属模块的 `ReportTargetSpi` 抓**证据快照**落 `im_report`（对象事后被删、关播都不影响处理）→ 后台工单队列可受理 / 驳回 / 处置 → 结论经 `/ws` 的 `NOTIFY` 帧推回举报人
 - **处置执行者分界**：`NONE` / `WARN` 由 im-admin 自己完成，`BAN_USER` → im-user、`RECALL_MESSAGE` → im-message、`CLOSE_ROOM` → im-live 经 SPI 交出去，**im-admin 不 import 任何业务模块的 Mapper / Service**（星型约束）
-- **管理后台前端**：独立工程 `im-admin-ui`（登录 + 数据看板 + 用户管理 + 举报队列 + 角色管理）。二期把「拿到就是全量」的单一 `system:manage` 拆成四个细粒度权限点（看板 / 用户管理 / 举报处置 / 角色分配），菜单与路由按 `auth.can()` 逐屏显隐；登录闸门改为「持有伞权限或任意一个细粒度点即可进门」，低权限角色（审核员 / 运营）不再被挡在登录页外
+- **管理后台前端**：独立工程 `im-admin-ui`（登录 + 数据看板 + 用户管理 + 举报队列 + 角色管理 + 视频管理 + 直播管理 + 监控告警 + 日志管理）。二期把「拿到就是全量」的单一 `system:manage` 拆成四个细粒度权限点（看板 / 用户管理 / 举报处置 / 角色分配），菜单与路由按 `auth.can()` 逐屏显隐；登录闸门改为「持有伞权限或任意一个细粒度点即可进门」，低权限角色（审核员 / 运营）不再被挡在登录页外
 - **多角色分级与角色分配（二期）**：三个控制器从伞权限 `system:manage` 细化到各自的点（`system:manage` 保留作向后兼容的伞权限，admin 种子里补齐四个新点）；新角色分配经 `AdminUserSpi.setUserRoles`（整体替换 + 三条护栏：拒改自己 / 拒摘最后一个可用管理员 / 拒未知角色，改完 `evictCache` 即时生效），im-admin 不碰 `im_user_role`（星型约束）
 - **处置人可见（二期、默认关）**：`im.admin.report-handler-visible` 静态开关，打开后 `GET /api/report/mine` 每行带 `handlerName`、处理结论通知也署名处置人昵称；关着时后台响应根本不含处置人字段（沿用一期隐私口径）
 - **数据看板**：平台数字与各模块指标经 `AdminMetricsSpi` 汇聚；**取不到的指标显示「—」而不是 0**，模块缺席就少一个分区，页面同时显示「数据截至」与滞后秒数
+- **三期四页（视频管理 / 直播管理 / 监控告警 / 日志管理，2026-10-21 本批交付）**：四个新权限点 `system:video:manage`（112）/ `system:live:manage`（113）/ `system:monitor`（114）/ `system:log`（115）。视频页做下架（带事由进审计日志）/ 恢复 / 逻辑删除（需敲「删除」二次确认）；直播页只有「看」与「掐」——强制关播复用举报处置同一条 ban 路径，封禁是终态无解封接口，响应绝不外泄 streamKey；监控页读进程内 MeterRegistry（与 Prometheus 抓的同一本账）+ actuator 健康聚合；日志页七个逻辑档只尾读不下载、只认白名单 key 不传路径。跨模块取数经新建 `AdminVideoSpi` / `AdminLiveSpi`（im-live 实现，星型约束不变）
+- **监控告警基础设施（三期）**：`spring-boot-starter-actuator` + `micrometer-registry-prometheus` 落在 im-admin（指标与暴露只服务于后台侧，不污染 im-bootstrap 依赖面）；management 独立端口 8081 且默认只绑 127.0.0.1，只暴露 health/info/prometheus/metrics；慢接口拦截器三通道（WARN 日志进新建的 SLOW-API 日志档 + 内存环形缓冲供监控页 + Prometheus counter `im.slow.request.total` 供告警规则），阈值 `im.admin.slow-request-millis` 默认 1000ms。部署与告警规则样例见 `md/监控告警部署指南.md`
 - 举报可整体关闭（`im.admin.enabled: false`），关闭后聊天端四个入口一起隐藏；配额与去重见「十八、管理后台与举报闭环」
 
 **公共基础设施（im-common / im-bootstrap）**
@@ -137,6 +139,7 @@ npm run dev
 | [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md) | 四端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron，另加第五个入口管理后台 `im-admin-ui`）+ 端侧 IndexedDB·本地 SQLite·服务端 L1 Caffeine + L2 Redis + L3 MySQL 全链路 |
 | [`md/直播.md`](md/直播.md) | 直播选型对比与 HLS 推 / 拉流细节、Nginx 生产配置 |
 | [`md/图片内容审核接入指南.md`](md/图片内容审核接入指南.md) | 图片 NSFW 审核：为何把推理放前端、阈值调法、审计日志、血腥 / 暴力模型的投放与三个坑 |
+| [`md/监控告警部署指南.md`](md/监控告警部署指南.md) | 三期监控：Actuator/Prometheus 端点保护、Prometheus 抓取与告警规则样例、Grafana 接入、慢接口阈值 |
 | [`md/手机真机调试HTTPS配置指南.md`](md/手机真机调试HTTPS配置指南.md) | 手机真机联调远程控制的自签证书配置 |
 | [`im-ui/README.md`](im-ui/README.md) | 聊天端前端工程详细说明 |
 | [`im-admin-ui/README.md`](im-admin-ui/README.md) | 管理后台前端工程说明（端口与 CORS、登录链路、部署四事） |
@@ -235,14 +238,14 @@ npm run dev
 - **图片审核升级成服务端真防线**：现行判定跑在发送端浏览器，绕开页面直接调上传接口即可突破；要成硬防线需服务端补一条推理链路（阈值配置与审计口径可直接复用）。
 - **直播右侧内容面板**：文章 / 小说 / 音乐，点击切换展示（**视频板块已落地**：`im_live_video` + `/api/live/video` 分页 / 发布 / 下架 / 播放计数，大厅信息流与 `Live.vue` 已可用）。
 - **点播短视频的真多档清晰度**：直播已经有多档阶梯，`im_live_video` 却仍是一行一个原文件、上传时不转码，所以播放条只如实显示 `宽×高`、**不给假选择器**。要真多档得新增列/表存多路产物 + 上传期逐档转码 + N 倍存储与流量，而且转码只有桌面端能做（Web 上传无法起 ffmpeg），机理见 [`md/直播.md`](md/直播.md) §18.8。
-- **大会规模（>6 人）与群通话录制**：群通话一期已用 mesh 落地小房间（默认 4 人、硬顶 6，见上一条），要真正开大会需换 SFU（mediasoup / LiveKit）做混流，那不是调大上限数字就行；群通话也不落盘录制（同理得先混流）。
+- **大会规模（>6 人）与群通话录制**：群通话一期已用 mesh 落地小房间（默认 4 人、硬顶 6，见上一条），要真正开大会需换 SFU（mediasoup / LiveKit）做混流，那不是调大上限数字就行；群通话也不落盘录制（同理得先混流）。**SFU 化已完成选型与分阶段方案（定在 LiveKit：官方 Windows 二进制、单机不需 Docker/Redis），但仍是计划文档、未开工**：[`md/SFU群通话改造计划.md`](md/SFU群通话改造计划.md)。
 - **Tauri 2 打包**：安卓端 + 重新打包 exe（现有桌面端为 Electron 方案，见「七」）。
 - **日志系统完善**：在现有 logback 分档日志（见「六」）基础上进一步增强。
 
 **🔴 关键短板（企业级 / 合规 / 移动端最该补）**
 
 - **系统级离线推送**：App 被杀时经 APNs / FCM / 个推 / 小米华为通道唤醒（现「离线消息补推」仅重连后补拉）。
-- **管理后台（Admin Console）**：**一期已交**（`im-admin` + `im-admin-ui`：数据看板 / 用户管理与封禁恢复 / 举报工单队列与处置）；**二期部分已交 2026-10-19**（多角色分级四个细粒度权限点 + 后台角色分配 + 处置人可见开关，见上面「✅ 已完成」与 CHANGELOG）。**按用户决策「只改代码层」刻意未做（属新建表范畴）**：**系统配置页**（现改参数仍要动 `application.yml` 重启，不落 `im_admin_config`）、后台自身的**操作审计**（改昵称 / 禁用别的后台号仍无痕，不落 `im_admin_audit`）；仍缺：内容审核队列（机审）。
+- **管理后台（Admin Console）**：**一期已交**（`im-admin` + `im-admin-ui`：数据看板 / 用户管理与封禁恢复 / 举报工单队列与处置）；**二期部分已交 2026-10-19**（多角色分级四个细粒度权限点 + 后台角色分配 + 处置人可见开关，见上面「✅ 已完成」与 CHANGELOG）；**三期已交 2026-10-21**（视频管理 / 直播管理 / 监控告警含 Actuator+Prometheus+慢接口告警 / 日志管理）。**按用户决策「只改代码层」刻意未做（属新建表范畴）**：**系统配置页**（现改参数仍要动 `application.yml` 重启，不落 `im_admin_config`）、后台自身的**操作审计**（改昵称 / 禁用别的后台号仍无痕，不落 `im_admin_audit`）；仍缺：内容审核队列（机审）、日志与监控数据的持久化历史（现监控页是即时快照、日志页只读当前档，历史曲线归 Prometheus/Grafana）。
 - **举报 + 内容审核闭环**：**一期已交**（用户侧四入口 + `im_report` 待审队列 + 处置闭环 + 结论回执，见上面「✅ 已完成」）。**人工处置链已通**，缺的是机审复审那一段：`im-file` 的 `ModerationController` / `ModerationService` 只盖文件与图片，弹幕 / 群名 / 公告没有服务端模型；举报内容目前**只过敏感词遮蔽与人工**，没有第二双机器眼睛。
 - **聊天端到端加密（E2EE）**：「私密会话」信令级 E2EE（需权衡与服务端检索 / 审核的冲突）。
 - **两步验证 2FA / TOTP**：登录二次校验。
@@ -473,8 +476,8 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
 | `IM_LIVE_ENABLED` | `true` | 直播总开关；关掉则开播/观看接口与 `/ws/live` 弹幕端点全部拒绝服务 |
-| `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放基址（相对路径，前端按访问源补全）；生产换成 Nginx 播放口地址 |
-| `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg `-method PUT` 推流基址（本机推流，回环恒定） |
+| `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放基址（相对路径，前端按访问源补全：Web 同源、Electron 取「后端 host + 8088」）；生产换成 Nginx 播放口绝对地址 |
+| `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg `-method PUT` 推流基址（写回环的前提是「推流端与媒体服务器同机」；桌面端装在另一台机器时，前端 `remapPushUrl()` 会把回环 host 换成后端 host，也可以直接在这里配成绝对地址） |
 | `IM_LIVE_SIGN_SECRET` | `im-live-dev-secret-change-me` | 播放地址签名密钥，须与 Nginx `secure_link_md5` 逐字一致，**生产必须替换** |
 | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束直播间在大厅列表的可见时长（分钟）；关播超过它就不再显示，配 `0` 或负数=不过滤 |
 | `IM_LIVE_ENDED_CHAT_MINUTES` | `60` | 关播后聊天室保留时长（分钟，ENDED 聊天模式）；配 `0` 或负数=关播立即全断 |
@@ -549,8 +552,8 @@ mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql
 
 ### `im_data.sql` 灌了哪些演示数据
 
-- **3 个账号**（密码统一 `123456`）：`admin`（超管，持全部权限点）/ `alice`（userId 1001）/ `bob`（userId 1002）
-- **2 个角色 + 7 个权限点 + 12 条角色权限绑定**（admin 全量；user 除「撤回任意消息」「系统管理」外）
+- **3 个账号**（密码统一 `123456`）：`admin`（超管，持全部权限点；`user_id=1000`、绑 `admin` 角色）/ `alice`（userId 1001）/ `bob`（userId 1002）
+- **4 个角色 + 11 个权限点 + 21 条角色权限绑定**（admin 全量 11 点；user 除「撤回任意消息」「系统管理」外 5 点；moderator 2 点；operator 3 点）；另有 4 条用户角色绑定（admin、alice、bob 及两个后台示范角色挂载）
 - **alice ↔ bob 一对好友**（双向 2 行）+ 1 条已同意的历史申请
 - **1 个单聊会话**：3 条消息（seq 1~3）+ 送达/已读回执（bob 留 1 条未读，用于演示未读角标）
 - **4 场 AI 面试演示会话**（id 2301~2304）：覆盖 status 四种取值（进行中 / 正常结束 / 违规达阈值强制结束 / 未完成），含逐轮问答与违规事件流水，计数列与事件流水严格对账
@@ -580,7 +583,7 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 ### 已有库的增量升级
 
-本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`（都写成幂等，重复执行不报错也不产重复数据）。已部署的库升到当前代码：
+本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
 
 | 脚本 | 引入的变更 | 不跑会怎样 |
 |---|---|---|
@@ -588,6 +591,8 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 | `migration_linkmic_gift.sql` | 虚拟积分与礼物四表（`im_user_wallet` `im_gift` `im_wallet_transaction` `im_gift_record`） | 充值 / 签到 / 送礼 / 转账 / 红包接口报缺表（连麦本身的状态走 Redis，不依赖本脚本） |
 | `migration_message_favorite.sql` | 新表 `im_message_favorite` | ⚠️ **不是「只有收藏不好用」，而是消息列表接口整片 500**——历史分页 / 离线拉取 / 消息检索 / 群相册都要走 `toViewList → attachFavorites`，那一步对新表做一次 `IN` 查询，表不存在直接抛 `SQLException` |
 | `migration_report.sql` | 新表 `im_report` | 只影响举报与后台：提交举报、工单队列、看板里的举报分区都报 `Table 'im_db.im_report' doesn't exist`；**聊天、登录、直播等其余功能不受影响**（这张表只有 im-admin 读）——所以没建表也能启动，只是举报不可用 |
+| `migration_missing_tables.sql` | **对账补丁**：一次补齐 `im_message_reaction` / `im_message_vote` / `im_message_essence` / `im_message_favorite` / `im_group_join_request` / `im_group_robot` / `im_report` 七张表，与 `im_group` 的 `invite_code` + `join_approval` 两列一索引 | ⚠️ 同样**不是「只有这几个功能不好用」**：表情回应 / 投票 / 群精华都挂在 `toViewList` 的末尾，缺任意一张表就会把历史分页 / 离线拉取 / 消息检索 / 群相册一起打成 1007；而 `im_group` 缺 `invite_code` 列会让**所有群查询**报 `Unknown column`（MyBatis-Plus 按实体列生成 SELECT 清单）。这几项当初只更新了全量 `im_schema.sql`、没留增量脚本，而全量那份开头是一串 `DROP TABLE`（跑它等于清库），所以补了这个汇总包。**跑过它之后就不要再去跑上面 `migration_message_favorite.sql` / `migration_report.sql`** |
+| `migration_admin_phase2.sql` | **数据补丁**：补后台二期的四个权限点（`im_permission` 108~111）、给 admin 角色绑定它们（`im_role_permission` 6008~6011），并补上 `moderator` / `operator` 两个示范角色与它们的授权行 | 后台存成一期权限数据的库上，admin 登录会**提示成功却处处 1003**：后端四个控制器已细化到 `system:dashboard` 等四个点，而 Sa-Token 里 `system:manage` 是精确串不是通配，匹配不上；前端却仍认伞权限（它比后端宽），所以菜单四项全部可见、点进去全部被拦。★ 补完**必须清一次 Redis 权限缓存**（`im:auth:perm:{userId}` / `im:auth:role:{userId}`，TTL 30 分钟且登录动作不刷新）—— 退登重登不管用，只能 `redis-cli DEL` 或等 TTL），否则看起来像「补了没生效」；不必重启后端。另注意这个症状可能叠加 `migration_missing_tables.sql` 的缺口（库里也没 `im_report`），那种情形下工单屏补完权限仍会报表不存在 |
 
 > ⚠️ **执行顺序**：**先跑 SQL、再启动新版后端**（旧版后端不认这张表，所以先跑 SQL 不影响正在跑的旧版，可以先备库再发版）。回滚反过来：**先把后端退回旧版、再 `DROP TABLE im_message_favorite`**；先 DROP 会让旧版后端正常、新版一启就炸列表接口。`migration_report.sql` 同理且后果轻一个量级：`im_report` 只被 im-admin 读，无论先删表还是先退后端，影响面都只到举报与后台。
 >
@@ -654,7 +659,9 @@ node electron/live-media-server.js     # 在仓库根目录执行；监听 0.0.0
 ```
 
 - 收 ffmpeg 的 `PUT /hls/{roomId}/{streamKey}/{file}` 落盘到 `electron/live-data/hls/…`（先写 `.part` 再原子 rename），观众端 `GET` 静态返回（带 CORS、Range，m3u8 不缓存）。
-- 与后端 `im.live` 默认配置对齐：`push-base-url=http://127.0.0.1:8088/hls`（本机推流）、`play-base-url=/hls`（观众经前端 vite 代理同源拉流），换网 / DHCP 换 IP 都不用改。
+- 与后端 `im.live` 默认配置对齐：`push-base-url=http://127.0.0.1:8088/hls`（本机推流）、`play-base-url=/hls`（观众经前端 vite 代理同源拉流）。
+  ★ 这两个默认值只适用于「客户端与媒体服务器同机」的自测拓扑：桌面端装在另一台机器上时，它们会被前端的
+  `livePlayBase()` / `remapPushUrl()` 校正成后端所在机器的 host（旧版本写死 `127.0.0.1`，跨机直播必挂，见 [`md/已踩坑.md`](md/已踩坑.md) 第 20 条）。
 - 局域网自测**不校验签名**，防盗链靠路径里不可猜的 `streamKey` 兜底；上生产必须换回 Nginx 的 `secure_link`。
   ★ 签名**只作用于主清单 `/index.m3u8`**：hls.js 拉各档变体清单时不会带上主清单的 query，对 `\.m3u8$` 全部签名会让多档直播直接 403 黑屏（写法见 [`md/直播.md`](md/直播.md) §10.5）。
 
@@ -782,7 +789,11 @@ cd ..\electron; npm install; npm run build
 # 产物：electron\release\IM通讯 Setup 1.0.0.exe（约 160MB，含内置裁剪 JRE 与被控端 Agent）
 ```
 
-> ⚠️ 分发前先改 `electron/main.js` 的 `SERVER_BASE` 为实际后端地址。
+> ⚠️ **后端地址不必在打包前写死**：桌面端改为运行期三层回落（`electron/server-config.js`）——
+> `userData/server-config.json` > 环境变量 `IM_SERVER_BASE` > 内置默认 `http://localhost:8080`。
+> 装好后若连不上后端，登录页右下角的「开发调试」入口可填地址并点「测试连接」验证，
+> 保存后页面自动重载生效（登录后的设置页「后端地址」行是同一个弹窗），**不必重打安装包**。
+> 内置默认值也是 `localhost` 的原因：开发机本机起后端时零配置可用（历史行为不变）。
 > 安装包经 `extraResources` 内置 `im-remote-agent` 的 fat jar 与 jlink 裁剪 JRE，桌面端启动时
 > 自动后台拉起被控端 Agent（双击 `resources\启动被控端.bat` 亦可），被控机**无需安装任何 Java**；
 > 见 [`md/打包/Electron打包指南.md`](md/打包/Electron打包指南.md) 十二节。
@@ -1575,6 +1586,8 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 
 **IP 免配**（自测痛点根治）：`push-base-url=http://127.0.0.1:8088/hls`（本机推流，回环恒定）+ `play-base-url=/hls`（相对路径，前端 `livePlayBase()` 按访问源补全 + vite `proxy['/hls']→8088` 同源转发）——换网 / DHCP 换 IP 都不用改配置，且播放与页面同源、复用 dev server 证书，不触发 mixed content。
 
+★ 这套默认值隐含一个前提：**媒体服务器与客户端同一台机器**。桌面端装在另一台机器上时，回环地址指向的是“客户端自己”，跨机直播会全挂（而登录/互动/礼物/点播走注入的后端绝对地址，于是症状只能是“只有直播坏”）。现在 `env.js` 不再写死 `127.0.0.1`：`livePlayBase()` 从注入的后端 host 推导媒体 host（`<scheme>//<backendHost>:8088`，拿不到才回落本机），`remapPushUrl()` 只把 pushUrl 的**回环** host 换成同一个媒体 host（已是绝对域名/局域网地址则不插手），path 与 query 逐字保留。归因过程见 [`md/已踩坑.md`](md/已踩坑.md) 第 20 条。
+
 **多屏选择**：`gdigrab -i desktop` 默认抓整个虚拟桌面（多屏会拼接错位）；桌面端开播前枚举显示器，选定后用 `-offset_x/-offset_y/-video_size` 只抓该屏。渲染端只传 `displayId`（纯量），主进程按 id 现查 bounds，避免响应式对象过 IPC 克隆失败。
 
 **连麦模式**（链路细节见 [`md/直播.md`](md/直播.md) §12）：主播↔嘉宾走 1:1 WebRTC，协商信令复用主 `/ws`。主播端把「主播画面 + 嘉宾画面」用离屏 canvas 合成成**左右分屏**（左主播、右嘉宾：1 位占满、2 位上下、3~4 位 2×2，格内 contain 等比居中 + 左下角昵称名牌），`AudioContext` 混音后经 `MediaRecorder` 出 WebM 分片 `PUT` 到同源媒体端点；观众端从 hls.js 切到 MSE 播 `webm/manifest.json`，麦位清空时服务端扇出 `linkmic active=false`，观众自动切回 HLS。主播与嘉宾本地看到的是 `Live.vue` 里与 canvas 同构的分屏 `<video>`，其中**对端那一格不静音**——那是本地能听到的唯一出口（composer 内部的 `<video>` 离屏且静音，只负责取帧；`gain → destNode` 只是录制那一路）。主播端「断开连麦」逐路发 `leave`，嘉宾「下麦」只断自己那一路。因合成与上传都在渲染层 fetch 完成，**连麦时 Web 端也能开播**（非连麦开播仍仅桌面端）。
@@ -1592,8 +1605,8 @@ Bing 在国内可直连、结果页结构近年稳定。配置项（`im.ai.web-s
 | 配置 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
 | `enabled` | `IM_LIVE_ENABLED` | `true` | 总开关，关掉则开播/观看/弹幕全部拒绝 |
-| `push-base-url` | `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg PUT 目标前缀（本机推流） |
-| `play-base-url` | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放地址前缀（相对路径，前端同源补全） |
+| `push-base-url` | `IM_LIVE_PUSH_BASE_URL` | `http://127.0.0.1:8088/hls` | ffmpeg PUT 目标前缀（回环只对“推流端与媒体服务器同机”成立；跨机桌面端由 `remapPushUrl()` 校正 host，或直接配成绝对地址） |
+| `play-base-url` | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放地址前缀（相对路径，前端按环境补 host：Web 同源、Electron 取后端 host + 8088） |
 | `sign-secret` | `IM_LIVE_SIGN_SECRET` | 开发用串 | 播放地址签名密钥，**生产必须替换**且与 Nginx 一致 |
 | `ended-room-visible-minutes` | `IM_LIVE_ENDED_ROOM_VISIBLE_MINUTES` | `60` | 已结束房间在列表的可见时长（分钟），0/负数=不过滤 |
 | `danmaku-words-max-count` / `danmaku-word-max-length` | — | `50` / `20` | 单个主播屏蔽词的条数与长度上限，**超出报错不静默截断** |
@@ -1768,9 +1781,12 @@ spring-boot-duomokuia/
 | 组 | 端点 | 谁能调 |
 |---|---|---|
 | 用户侧 | `GET /api/report/config`、`POST /api/report`、`GET /api/report/mine` | 任何登录用户，**无 `@SaCheckPermission`** |
-| 后台侧 | `GET /api/admin/dashboard`；`GET /api/admin/user/page`、`GET /api/admin/user/{userId}`、`POST /api/admin/user/{userId}/disable`、`/enable`；`GET /api/admin/report/page`、`GET /api/admin/report/{id}`、`POST /api/admin/report/{id}/accept`、`/reject`、`/handle` | 需 `system:manage`（种子权限 107，仅 admin 角色） |
+| 后台侧 | `GET /api/admin/dashboard`；`GET /api/admin/user/page`、`GET /api/admin/user/{userId}`、`POST /api/admin/user/{userId}/disable`、`/enable`；`GET /api/admin/report/page`、`GET /api/admin/report/{id}`、`POST /api/admin/report/{id}/accept`、`/reject`、`/handle`；`GET /api/admin/role/list`、`GET`/`PUT /api/admin/role/user/{userId}` | 二期按屏分四个点：看板 `system:dashboard`（108）、用户 `system:user:manage`（109）、工单 `system:report:handle`（110）、角色 `system:role:manage`（111）；种子数据里只有 admin（role 1）全持，`system:manage`（107）保留作向后兼容的伞权限但**不再被任何控制器引用**（Sa-Token 里它是精确串不是通配，拿着它匹配不上任何细化后的点） |
+| 后台侧（三期） | `GET /api/admin/video/page`、`POST /api/admin/video/{id}/offline`、`/online`、`DELETE /api/admin/video/{id}`；`GET /api/admin/live/page`、`GET /api/admin/live/{roomId}`、`POST /api/admin/live/{roomId}/stop`；`GET /api/admin/monitor/overview`、`/slow`；`GET /api/admin/log/files`、`GET /api/admin/log/content` | 按屏再分四个点：视频 `system:video:manage`（112）、直播 `system:live:manage`（113）、监控 `system:monitor`（114）、日志 `system:log`（115）。`system:log` 单独设点而不并入监控：日志原文可能含手机号、审核命中记录等敏感内容，能看指标曲线的人不必能看日志正文 |
 
 聊天端**不调 `/api/admin/**` 里的任何一个**，后台也只调 `/api/report/config`（拿处置动作字典）而不调 `/api/report`——路径前缀就是那道墙，真正的把关在 service 里（举报人只取登录态、`/mine` 只查自己那部分）。`POST /api/report` 有两道闸：按用户 10 次/分钟的限流（防脚本空转）与服务端每日配额（防把队列刷满）。
+
+三期另有一条机器通道不在 `/api` 里：actuator 走独立 management 端口（`MANAGEMENT_PORT` 默认 8081）且默认只绑 `127.0.0.1`，只暴露 health/info/prometheus/metrics，`show-details: never`；它不被 Sa-Token 覆盖（拦截器只拦 `/api/**`），靠端口与绑卡保护——浏览器里的后台页面拿不到它，监控页是经 MeterRegistry 读同一本账。细节见 `md/监控告警部署指南.md`。
 
 ### 4. 处置动作与执行者
 
@@ -1813,6 +1829,14 @@ spring-boot-duomokuia/
 - **`GET /api/report/mine` 已就绪但聊天端无 UI**：结论已经由 WS 推给举报人，一期不再加一个列表页；下一批如需可补。
 - **后台账号没有注册入口**：新后台账号只能由 DBA 在库里加（带 `im_user_role` 绑定），没有图形验证码也不是遗漏——
   `AuthServiceImpl.login` 全程不校验证码（那两字段只用于发短信/发邮件前的闸门）。
+- **后台权限点有“前端比后端宽”的口径差，存量库升级得补数据 + 清缓存**：后端控制器只认细粒度点（`system:dashboard` 等），
+  而 `im-admin-ui` 的 `hasAdminPermission()` / `can()` 还额外放行伞权限 `system:manage`。库里若只有 `system:manage`（一期种子就是这种），
+  admin 就会「提示登录成功、四个菜单全部可见、点进去全部 1003」。修法是跑 `sql/migration_admin_phase2.sql`（全 `INSERT IGNORE`、可重跑），
+  三期同理：库里停在二期数据时老页面正常、四个新页面全 1003，修法是再跑 `sql/migration_admin_phase3.sql`（112~115 + admin 绑定 6012~6015）；
+  跑完**必须删掉 `im:auth:perm:{userId}` / `im:auth:role:{userId}`** —— `PermissionProviderImpl` 把权限码按用户缓存 30 分钟，
+  **且登录动作不会刷新它**（`logout` 只做 `StpUtil.logout()`、不碰这两个键，而回源只在「未命中」时发生，所以「退出再登录」不管用 ——
+  已实测：补完数据后再登一次仍回旧 7 个权限串，`redis-cli DEL` 掉两个键后立即回 11 个、四个端点从 1003 变 200；
+  只有走后台「角色分配」保存才会 `evictCache`），不删就看起来像「补了没生效」；不必重启后端。
 - **共用了登录态**：后台与聊天端是同一套 Sa-Token，后台 `logout` 会把聊天端也踢下线（一期接受，两个页面开在同一浏览器时得注意）。
 - **本批只做了编译与构建验证**：`mvn -q -o compile` 与两个前端工程的三次构建（`im-ui` 的 `build` 与 `build:electron`、`im-admin-ui` 的 `build`）均 EXIT=0；
   **未做浏览器实机串测**（举报提交、看板轮询、处置二次确认这三条路径需人工跑「十七、验证清单」第 13 / 14 项）。

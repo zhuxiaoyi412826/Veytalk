@@ -95,6 +95,20 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_USER_MANAGE = "system:user:manage";
     public static final String PERM_SYSTEM_REPORT_HANDLE = "system:report:handle";
     public static final String PERM_SYSTEM_ROLE_MANAGE = "system:role:manage";
+    /**
+     * 后台权限点（三期）：视频管理 / 直播管理 / 监控告警 / 日志管理。
+     *
+     * <p>与二期同一规矩：每个后台控制器只认自己的精确串，伞权限 {@code system:manage}
+     * 不参与判定；admin 角色必须同步补齐这四个点（见 {@code sql/migration_admin_phase3.sql}），
+     * 否则新控制器上线即把老管理员拦在门外。
+     *
+     * <p>{@code system:log} 单独设点而不并进 {@code system:monitor}：日志文件里可能含
+     * 手机号、审核命中等敏感内容，能看指标的人不必能看日志原文。
+     */
+    public static final String PERM_SYSTEM_VIDEO_MANAGE = "system:video:manage";
+    public static final String PERM_SYSTEM_LIVE_MANAGE = "system:live:manage";
+    public static final String PERM_SYSTEM_MONITOR = "system:monitor";
+    public static final String PERM_SYSTEM_LOG = "system:log";
 
     /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。

@@ -146,8 +146,11 @@ npm run build
 # 产物在 im-ui/dist/ 目录
 ```
 
-> **重要**：生产环境的 API 地址需要指向实际后端地址。  
-> 修改 `im-ui/src/api/request.js` 中的 `baseURL`，或使用环境变量。
+> **重要**：生产环境的 API 地址需要指向实际后端地址。
+> ★ 但**不是改 `request.js` 的 `baseURL`**：本仓库已把地址解析收敛到 `im-ui/src/utils/env.js`
+> （`apiBaseURL()` / `wsBaseURL()`），改 `request.js` 会绕过环境判断把 Web 部署也弄坏。
+> Electron 桌面端更不必改源码：地址是运行期三层回落（`electron/server-config.js`），
+> 装好后在登录页「开发调试」里改即可，见 `Electron打包指南.md`。
 
 ##### 2. 创建 Electron 项目
 
@@ -562,7 +565,10 @@ const wsHost = isNative ? '你的服务器IP:8080' : location.host
 const wsUrl = `${wsProtocol}//${wsHost}/ws?ticket=${ticket}`
 ```
 
-> **提示**：建议将后端地址提取为配置文件 `src/config.js`，方便统一管理。
+> **提示**：本仓库已经将地址解析提到 `im-ui/src/utils/env.js`（不是 `src/config.js`），
+> 上面的 `isNative` 判断应加在那里而非写在 `request.js` / `socket.js` 里：
+> `isElectron()` 已存在，加一个原生壳分支后 `apiBaseURL()` / `wsBaseURL()` 会自动传到两边调用方。
+> 桌面端（Electron）已不需要改代码：走运行期配置与登录页的「开发调试」入口。
 
 #### 5. 同步前端资源到 Android 项目
 

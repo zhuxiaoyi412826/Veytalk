@@ -9,7 +9,9 @@ import { resetRedirectFlag } from '@/api/request'
  * <b>system:manage</b> 是二期之前的伞权限，仍保留作向后兼容：持有它的人（admin）能进所有屏。
  * 二期把四个控制器拆到细粒度点后，一个审核员可能只持有 system:dashboard + system:report:handle
  * 而<b>没有</b>伞权限——所以「能不能进后台」不能再只认 system:manage，得认下面这一组。
- * 这些串是<b>唯一</b>一份：im-admin 那四个 Controller 类上的 {@code @SaCheckPermission(...)} 才是真正的门，
+ * 三期又加了四个点（视频/直播/监控/日志）：只持有新点的人也该让他进后台，
+ * 而不是登录时就报「没有管理后台权限」。
+ * 这些串是<b>唯一</b>一份：im-admin 那些 Controller 类上的 {@code @SaCheckPermission(...)} 才是真正的门，
  * 前端拿它只做「要不要显示某个菜单 / 要不要放行某个路由」这件事，藏掉按钮从来不是安全边界。
  */
 const PERM_SYSTEM_MANAGE = 'system:manage'
@@ -17,7 +19,11 @@ const ADMIN_PERMS = [
   'system:dashboard',
   'system:user:manage',
   'system:report:handle',
-  'system:role:manage'
+  'system:role:manage',
+  'system:video:manage',
+  'system:live:manage',
+  'system:monitor',
+  'system:log'
 ]
 
 function permissionList(userInfo) {

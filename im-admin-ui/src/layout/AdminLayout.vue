@@ -22,6 +22,22 @@
           <el-icon><Lock /></el-icon>
           <span>角色管理</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:video:manage')" index="videos" :route="{ name: 'videos' }">
+          <el-icon><VideoCamera /></el-icon>
+          <span>视频管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:live:manage')" index="lives" :route="{ name: 'lives' }">
+          <el-icon><VideoPlay /></el-icon>
+          <span>直播管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:monitor')" index="monitor" :route="{ name: 'monitor' }">
+          <el-icon><Odometer /></el-icon>
+          <span>监控告警</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:log')" index="logs" :route="{ name: 'logs' }">
+          <el-icon><Document /></el-icon>
+          <span>日志管理</span>
+        </el-menu-item>
       </el-menu>
       <p class="muted side-note">
         一期没有待办角标：新工单数只有登录后进看板才拿得到，为一个小红点在每个页面轮询
@@ -60,7 +76,7 @@ import { useAuthStore } from '@/stores/auth'
  * 身份与权限已由路由守卫确认过（拿到 /auth/me 且至少持有一个后台权限点），
  * 这里直接读 store 就行，不再兜一层「没登录怎么办」——真走到那一步早就被守卫弹回登录页了。
  *
- * 菜单用 <code>auth.can(...)</code> 逐条判权限。四个点一个都没有的人进不了后台（守卫拦下），
+ * 菜单用 <code>auth.can(...)</code> 逐条判权限。所有权限点一个都没有的人进不了后台（守卫拦下），
  * 所以这里不存在「整条菜单都是空的」那种中间态；真出现了就只能说明种子数据里角色被改坏了。
  */
 const auth = useAuthStore()

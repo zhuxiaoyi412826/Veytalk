@@ -112,3 +112,57 @@ export function reportStatusTag(status) {
       return 'info'
   }
 }
+
+/** 字节数 → 人话大小（视频文件与日志文件都读这个），取不到显示「—」而不是 0 B */
+export function formatBytes(value) {
+  if (value === null || value === undefined || value === '') {
+    return EMPTY_TEXT
+  }
+  const num = Number(value)
+  if (!Number.isFinite(num)) {
+    return String(value)
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = num
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  // B 与 KB 级保留整数就够，MB 往上才需要小数
+  return `${unit <= 1 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`
+}
+
+/** 秒 → 「3:05」/「1:02:03」，视频时长用；空值同样走「—」口径 */
+export function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '') {
+    return EMPTY_TEXT
+  }
+  const total = Math.max(Math.floor(Number(seconds) || 0), 0)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m)
+  return h > 0 ? `${h}:${mm}:${String(s).padStart(2, '0')}` : `${mm}:${String(s).padStart(2, '0')}`
+}
+
+/** 秒 → 「2 天 3 小时」「15 分 40 秒」这类说法，监控页的运行时长用 */
+export function formatUptime(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '') {
+    return EMPTY_TEXT
+  }
+  const total = Math.max(Math.floor(Number(seconds) || 0), 0)
+  if (total < 60) {
+    return `${total} 秒`
+  }
+  const days = Math.floor(total / 86400)
+  const hours = Math.floor((total % 86400) / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (days > 0) {
+    return `${days} 天 ${hours} 小时`
+  }
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分`
+  }
+  return `${minutes} 分 ${total % 60} 秒`
+}

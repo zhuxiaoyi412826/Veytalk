@@ -62,7 +62,7 @@ import { guardImage } from '@/utils/nsfw'
 import { formatConvTime } from '@/utils/format'
 import { mediaUrl, readVideoMetadata } from '@/utils/media'
 import { getToken } from '@/utils/token'
-import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
+import { wsBaseURL, isElectron, livePlayBase, remapPushUrl } from '@/utils/env'
 import { useAuthStore } from '@/stores/auth'
 import { useLinkmicStore } from '@/stores/linkmic'
 import { useReportStore } from '@/stores/report'
@@ -550,7 +550,9 @@ async function submitStart() {
     })
     pushInfo.roomId = String(info.roomId)
     pushInfo.streamKey = info.streamKey
-    pushInfo.pushUrl = info.pushUrl
+    // 后端默认把 pushUrl 配成 127.0.0.1（推流端与媒体服务器同机的自测拓扑），
+    // 桌面端装在另一台机器时要校正成媒体面 host，否则 ffmpeg 把分片 PUT 到自己本机 → 开不了播
+    pushInfo.pushUrl = remapPushUrl(info.pushUrl)
     pushInfo.heartbeatSeconds = info.heartbeatSeconds || 15
     // 后端没开的功能不值得推流端白写一份文件：旧后端不返这个字段，按「开」处理
     pushInfo.replayEnabled = info.replayEnabled !== false

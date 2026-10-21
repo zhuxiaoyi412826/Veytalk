@@ -182,6 +182,47 @@ server:
     max-swallow-size: 110MB
 
 # ==============================================================================
+# Actuator 监控端点（三期）
+#
+# 关键决策：management 走<b>独立端口且只绑 127.0.0.1</b>。
+#   1. 为什么不复用 8080：/actuator/** 不在 Sa-Token 的拦截范围（它只拦 /api/**），
+#      直接在主端口暴露 metrics/prometheus 等于向公网开源整个服务的运行情报
+#      （接口耗时分布、连接池水位、JVM 参数、健康检查里的磁盘余量）。
+#      换一条路「用 Sa-Token 拦 /actuator」也行，但 Prometheus 拉取要配 token、
+#      容器健康检查也要带凭证，运维成本比「绑死本地回环」高且更容易出错。
+#   2. 只绑 127.0.0.1：同机的 Prometheus / 存活探针走 localhost 拿得到；
+#      远程 Prometheus 部署在别机上时，要么加 SSH 隧道/frps，要么把 address 改成
+#      内网地址并自行加防火墙白名单——那个决策留给真实拓扑，不在通用默认值里替人做。
+#   3. 只暴露 4 个端点：health（探针）、info（版本）、prometheus（抓取）、metrics（排障时手查）；
+#      env/configprops/heapdump/loggers 这类能泄配置、能改运行态的端点全部不暴露。
+#   4. 后台监控页（/api/admin/monitor/**，Sa-Token 鉴权）不经过这里：它在应用内直接读
+#      MeterRegistry 与 HealthEndpoint bean，与抓取通道同源同值，不存在两本账。
+# 部署 Prometheus/Grafana/Alertmanager 见 md/监控告警部署指南.md。
+# ==============================================================================
+management:
+  server:
+    port: ${MANAGEMENT_PORT:8081}
+    address: ${MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      # 探针只需要 UP/DOWN；组件明细（含数据源名、磁盘余量）只在 metrics 端点的
+      # health 指标里给数值，文本详情不回公网。详情需求走后台监控页（有鉴权）
+      show-details: never
+  metrics:
+    tags:
+      # 每个指标都带上的公共标签，多实例部署时用它区分来源
+      application: ${spring.application.name}
+  health:
+    db:
+      enabled: true
+    redis:
+      enabled: true
+
+# ==============================================================================
 # MyBatis-Plus
 # ==============================================================================
 mybatis-plus:
@@ -568,6 +609,15 @@ im:
     # 处置人是否对举报人可见（后台二期，默认 false）：打开后 /api/report/mine 每行带 handlerName，
     # 处理结论通知也会署名处置人昵称。改的是「对外隐私口径」，关着时后台响应根本不含处置人字段
     report-handler-visible: ${IM_ADMIN_REPORT_HANDLER_VISIBLE:false}
+    # 慢接口阈值（毫秒，三期）：/api/** 端到端耗时超过它就进环形缓冲、写 SLOW-API 告警日志、
+    # 给 Prometheus 计数。与 im.log.slow-sql-millis 是两层不同的旋钮（那个量单条 SQL）；
+    # 设 0 或负数关掉慢接口拦截，actuator 指标不受影响
+    slow-request-millis: ${IM_ADMIN_SLOW_REQUEST_MILLIS:1000}
+    # 监控页「最近慢接口」环形缓冲条数；内存里只留最近这些，更早的靠日志文件回溯
+    slow-request-history: 200
+    # 日志管理页单次 tail 行数上限（三期）：文件最大 50MB，只允许尾读；
+    # 后台不提供日志下载端点（那是一条把含手机号的文件外带出境的路）
+    log-tail-max-lines: 2000
 
   cors:
     # 前端 vite 开发服务器与预览服务器。http 与 https 两种方案都要放行：

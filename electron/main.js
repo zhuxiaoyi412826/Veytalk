@@ -7,6 +7,7 @@ const { setupLocalDb } = require('./localdb')
 const { setupDirectBridge, closeDirectLink } = require('./direct')
 const { setupRecorder, closeRecording } = require('./recorder')
 const { setupLiveBridge, closeLivePush } = require('./live')
+const { setupServerConfig, resolve: resolveServerBase } = require('./server-config')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -15,12 +16,16 @@ const { setupLiveBridge, closeLivePush } = require('./live')
  * 前端必须拿到后端的绝对地址才能发请求。这个值经 preload 用 additionalArguments
  * 注入到渲染进程的 window.__IM_SERVER__.baseUrl，前端 utils/env.js 据此拼 /api 与 ws。
  *
- * ★ 打包分发前，把它改成你实际部署后端的地址，例如 'http://192.168.1.10:8080'
- *   或 'https://im.example.com'。改完重新 npm run build 即可，前端代码无需改动。
+ * ★ 地址现在不再烤死在本文件里，而是运行期三层回落（见 server-config.js）：
+ *   userData/server-config.json → 环境变量 IM_SERVER_BASE → 内置默认 http://localhost:8080。
+ *   登录页的「开发调试」入口与设置页的「后端地址」行改的就是第一层，
+ *   所以分发给别人之后换后端不必重打包；内置默认值保留是为了开发机本机起后端时零配置可用。
  */
-const SERVER_BASE = 'http://localhost:8080'
 
 function createWindow() {
+  // 启动时解析一次，作为 additionalArguments 的兜底值；页面加载时的实时值由 preload
+  // 走 im:server-resolve 同步通道现取（additionalArguments 是建窗口时定死的，reload 不会刷新它）
+  const server = resolveServerBase()
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -37,7 +42,7 @@ function createWindow() {
       // 若后端已正确配置 CORS，可改回 true 获得更严格的安全边界。
       webSecurity: false,
       // 把后端地址透传给 preload，再由 contextBridge 暴露给渲染进程
-      additionalArguments: [`--server-base=${SERVER_BASE}`]
+      additionalArguments: [`--server-base=${server.baseUrl}`]
     }
   })
 
@@ -336,6 +341,8 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+  // 先注册地址解析通道，后建窗口：preload 在页面脚本之前就要能 sendSync 拿到地址
+  setupServerConfig(ipcMain)
   setupDownload()
   setupVideoCompress()
   setupLocalDb()

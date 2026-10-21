@@ -378,6 +378,20 @@
           </div>
         </div>
 
+        <!-- 后端地址（仅桌面端）：登录页那个「开发调试」入口的同一套弹窗，登录后也要能改——
+             换环境（测试机 → 正式机）往往是登进去之后才想到的事。
+             放在那三行「需桌面版」占位之前，是因为这一项在桌面版是**真能用**的。 -->
+        <div v-if="canServerDebug" class="settings__row">
+          <div class="settings__label">
+            <span>后端地址 <el-tag size="small" :type="serverTagType" effect="plain">{{ serverSourceText }}</el-tag></span>
+            <span class="settings__desc">桌面端从本地文件加载页面，没有同源代理，HTTP 与 WebSocket 都发往这里；保存后页面自动重载生效，不必重启程序（Web 部署走同源，无此项）</span>
+          </div>
+          <div class="settings__bg">
+            <span class="settings__desc">{{ serverBaseText }}</span>
+            <el-button :icon="Tools" @click="serverDebugVisible = true">修改 / 测试连接</el-button>
+          </div>
+        </div>
+
         <!-- 桌面端专属：当前为纯 Web，无法落地，保留入口但禁用并标注 -->
         <div class="settings__row">
           <div class="settings__label">
@@ -428,6 +442,8 @@
         <el-button :icon="RefreshLeft" @click="onReset">恢复默认设置</el-button>
       </div>
     </div>
+
+    <ServerDebugDialog v-model="serverDebugVisible" />
   </div>
 </template>
 
@@ -435,7 +451,9 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, User, DeleteFilled } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, Tools, User, DeleteFilled } from '@element-plus/icons-vue'
+import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
+import { canDebug, sourceLabel, sourceTagType } from '@/utils/servercfg'
 import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
@@ -449,6 +467,19 @@ import { fetchSensitiveFilter, setSensitiveFilter, exportConversationMessages } 
 import { cancelAccount } from '@/api/user'
 
 defineOptions({ name: 'Settings' })
+
+/* ------------------------------ 后端地址（仅桌面端） ------------------------------ */
+
+// 直接读主进程注入的那份（preload 每次页面加载都现取），不额外发 IPC：
+// 这一行要显的就是「当前页面实际在用哪个地址」，注入值本身就是权威
+const injectedServer = (typeof window !== 'undefined' && window.__IM_SERVER__) || { baseUrl: '', source: '' }
+const serverDebugVisible = ref(false)
+const canServerDebug = computed(() =>
+  canDebug(typeof window !== 'undefined' && window.__IM_NATIVE__ ? window.__IM_NATIVE__.server : null)
+)
+const serverBaseText = computed(() => injectedServer.baseUrl || '未注入（老安装包或 Web 部署）')
+const serverSourceText = computed(() => sourceLabel(injectedServer.source))
+const serverTagType = computed(() => sourceTagType(injectedServer.source))
 
 const router = useRouter()
 const settings = useSettingsStore()

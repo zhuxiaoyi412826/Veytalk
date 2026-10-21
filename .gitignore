@@ -25,6 +25,11 @@ im-ui/dist-ssr/
 # 管理后台前端（独立工程，不参与 Maven）：依赖已被上面的 node_modules/ 覆盖，
 # 这里只补构建产物；package-lock.json 是要提交的，别一并忽略
 im-admin-ui/dist/
+# 官网前端（im-website，端口 5373）：构建产物 + 下载区大文件不进仓库
+# （*.exe 已被上方全局规则兜住，这里补 zip / apk；部署时手动投放或跑 fetch-downloads.ps1）
+im-website/dist/
+im-website/public/downloads/*.zip
+im-website/public/downloads/*.apk
 .npm/
 .pnpm-store/
 *.local

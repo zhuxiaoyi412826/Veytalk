@@ -146,6 +146,12 @@
         <el-link type="primary" :underline="false" @click="openRegister">注册</el-link>
         <span class="login__tip-sep">|</span>
         <el-link type="primary" :underline="false" @click="openReset">忘记密码</el-link>
+        <!-- 桌面端专属：后端地址不对的时候，这里是唯一的自救入口，所以必须挂在登录页
+             而不是设置页（后端不通就登不进去，永远进不到设置页）。Web 部署同源，不显。 -->
+        <template v-if="canServerDebug">
+          <span class="login__tip-sep">|</span>
+          <el-link type="info" :underline="false" @click="serverDebugVisible = true">开发调试</el-link>
+        </template>
       </p>
     </div>
 
@@ -266,15 +272,22 @@
         <el-button type="primary" :loading="resetting" @click="submitReset">重置密码</el-button>
       </template>
     </el-dialog>
+
+    <!-- ==================== 后端地址（开发调试，仅桌面端） ====================
+         读写全走主进程 IPC，不发任何 HTTP 请求——这正是要修「请求发不出去」的那个场景，
+         弹窗自己不能依赖那条路。 -->
+    <ServerDebugDialog v-model="serverDebugVisible" />
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Iphone, Key, Lock, Message, User } from '@element-plus/icons-vue'
 import CaptchaImage from '@/components/CaptchaImage.vue'
+import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
+import { canDebug } from '@/utils/servercfg'
 import {
   fetchCaptchaImage,
   sendSmsCode as sendSmsCodeApi,
@@ -293,6 +306,15 @@ const auth = useAuthStore()
 
 const tab = ref('account')
 const submitting = ref(false)
+
+/* ------------------------------ 后端地址（仅桌面端） ------------------------------ */
+
+const serverDebugVisible = ref(false)
+// 判定交给纯函数：没有主进程配置桥（Web 部署 / 老安装包）就整条不显，
+// 给一个点了只能报「不支持」的入口比没有入口更糟
+const canServerDebug = computed(() =>
+  canDebug(typeof window !== 'undefined' && window.__IM_NATIVE__ ? window.__IM_NATIVE__.server : null)
+)
 
 /* ------------------------------ 图形验证码 ------------------------------ */
 

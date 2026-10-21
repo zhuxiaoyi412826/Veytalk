@@ -1,18 +1,31 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 /**
- * 把主进程透传的后端地址暴露给渲染进程。
+ * 把主进程解析的后端地址暴露给渲染进程。
  *
  * main.js 通过 webPreferences.additionalArguments 传入 --server-base=xxx，
  * 这里从 process.argv 取出，用 contextBridge 挂到 window.__IM_SERVER__。
  * 注入发生在页面任何脚本执行之前，前端 utils/env.js 读它拼出 /api 与 ws 绝对地址；
  * 浏览器 Web 部署没有 preload，window.__IM_SERVER__ 不存在，前端自动回落到同源相对路径。
+ *
+ * ★ 但 argv 只能代表「建窗口那一刻」的值：用户在登录页改完后端地址只是 reload 页面，
+ * 窗口对象并没有重建，additionalArguments 不会变。所以这里优先走同步通道
+ * im:server-resolve 现取（每次页面加载都会跑一次 preload，拿到的就是最新解析结果），
+ * argv 只当兜底（ipc 意外不可用时至少开发机还能按内置默认跑）。
  */
 const FLAG = '--server-base='
 const arg = process.argv.find((a) => a.startsWith(FLAG))
-const baseUrl = arg ? decodeURIComponent(arg.slice(FLAG.length)) : ''
+let baseUrl = arg ? decodeURIComponent(arg.slice(FLAG.length)) : ''
+let source = 'argv'
+try {
+  const res = ipcRenderer.sendSync('im:server-resolve')
+  if (res && res.ok && res.data && res.data.baseUrl) {
+    baseUrl = res.data.baseUrl
+    source = res.data.source
+  }
+} catch { /* 主进程未注册时回落到 argv 值 */ }
 
-contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl })
+contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl, source })
 
 /**
  * 桌面端原生能力桥。目前只用于调用主进程的本机 ffmpeg（GPU 硬件编码）压缩视频。
@@ -35,6 +48,24 @@ async function call(channel, payload) {
 
 contextBridge.exposeInMainWorld('__IM_NATIVE__', {
   isDesktop: true,
+  /**
+   * 后端地址的运行期配置桥（登录页「开发调试」与设置页「后端地址」行用它）。
+   * 地址来自主进程的 server-config.js，渲染进程不自己存一份：连不上后端时
+   * 这个弹窗是唯一出路，它必须不依赖任何网络请求就能读写。
+   * set/reset 只落盘，生效靠前端 reload 页面（preload 会重新取一次）。
+   */
+  server: {
+    /** → { baseUrl, source, builtIn, env, configPath, hasConfig } */
+    get: () => call('im:server-get', null),
+    /** 只校验规整不落盘 → { baseUrl }；前端拿它统一口径后再去探连接，避免两处各写一份规则 */
+    normalize: (baseUrl) => call('im:server-normalize', { baseUrl }),
+    /** 写入配置（主进程会校验并规整）→ { baseUrl, source:'file', configPath } */
+    set: (baseUrl) => call('im:server-set', { baseUrl }),
+    /** 删除配置文件，回落到环境变量或内置默认 → { baseUrl, source } */
+    reset: () => call('im:server-reset', null),
+    /** 在资源管理器里定位配置文件（没生成过则打开它所在目录） */
+    reveal: () => call('im:server-reveal', null)
+  },
   /**
    * 窗口内容防截图：true 时主进程对窗口置 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)，
    * 截屏/录屏里变黑块，肉眼正常可见。拆闪照预览期间开、关掉预览即关。

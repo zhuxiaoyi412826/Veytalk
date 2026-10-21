@@ -290,18 +290,41 @@
           :key="r.emoji"
           class="bubble__reaction"
           :class="{ 'is-self': r.self }"
+          :title="r.self ? '取消我的回应' : '贴上同款表情'"
           @click.stop="toggleReaction(r)"
         >{{ r.emoji }} <b>{{ r.count }}</b></span>
       </div>
 
-      <!-- 悬停浮现的快捷回应栏（仅可回应时）：纯 CSS hover，桌面端主用 -->
-      <div v-if="canReact" class="bubble__quick">
+      <!-- 悬停浮现的快捷回应栏：纯 CSS hover，桌面端主用。
+           多选模式下整条让位给勾选 —— 点气泡即切换选中，留着回应入口只会误触；
+           触屏没得 hover，靠下面的 @media (hover: none) 常显，否则手机上根本贴不了表情 -->
+      <div v-if="canReact && !selectable" class="bubble__quick">
         <span
           v-for="e in quickEmojis"
           :key="e"
           class="bubble__quick-emoji"
+          :class="{ 'is-active': reactedSelf.includes(e) }"
+          :title="reactedSelf.includes(e) ? '取消回应' : '用 ' + e + ' 回应'"
           @click.stop="pickReaction(e)"
         >{{ e }}</span>
+        <!-- 快捷栏只摊最常用的几个，其余走这个面板。复用输入框那套 EmojiPicker
+             而不是另列一份表情字典：两处各自维护迟早对不上。
+             ★ 面板内容必须用 v-if 拦住：el-popover 默认 persistent，会把 140 个表情
+             先渲染出来，一个长会话上百个气泡就是上万个 DOM 节点 -->
+        <el-popover
+          v-model:visible="moreVisible"
+          placement="top-start"
+          trigger="click"
+          :width="360"
+          :show-arrow="false"
+        >
+          <template #reference>
+            <span class="bubble__quick-more" title="更多表情">
+              <el-icon><Plus /></el-icon>
+            </span>
+          </template>
+          <EmojiPicker v-if="moreVisible" hint="点击表情贴到这条消息上" @select="onPickMore" />
+        </el-popover>
       </div>
     </div>
   </div>
@@ -310,8 +333,9 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, Coin, Present } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, Coin, Present, Plus } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
+import EmojiPicker from './EmojiPicker.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -517,11 +541,15 @@ const flashViewed = computed(() => isFlash.value && extra.value.flashViewed === 
 
 /* -------------------------------- 表情回应 -------------------------------- */
 
-/** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴 */
+/** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴、再点取消 */
 const quickEmojis = ['👍', '❤️', '😄', '😢', '🎉', '🔥']
 /** 已撤回与系统消息不提供回应入口 */
 const canReact = computed(() => !props.message.recalled && !isSystem.value && !!props.message.messageId)
 const reactions = computed(() => (Array.isArray(props.message.reactions) ? props.message.reactions : []))
+/** 我已经贴过哪几个表情（服务端聚合结果里的 self）：快捷栏据此高亮，并决定下一次点击是贴还是撕 */
+const reactedSelf = computed(() => reactions.value.filter((r) => r.self === true).map((r) => r.emoji))
+/** 「更多表情」面板开关 */
+const moreVisible = ref(false)
 
 /** 点已有表情 chip：自己贴过的再点为取消，否则追加同款 */
 function toggleReaction(item) {
@@ -531,12 +559,23 @@ function toggleReaction(item) {
   emit('react', { message: props.message, emoji: item.emoji, remove: item.self === true })
 }
 
-/** 从快捷栏选一个表情贴上 */
+/**
+ * 从快捷栏选一个表情。
+ *
+ * 已贴过的再点一次是取消而不是重复贴：服务端对 (消息, 人, 表情) 有唯一键，
+ * 再 POST 一次只会幂等命中、计数不变，用户看着就是「点了没反应」。
+ */
 function pickReaction(emoji) {
   if (!canReact.value) {
     return
   }
-  emit('react', { message: props.message, emoji, remove: false })
+  emit('react', { message: props.message, emoji, remove: reactedSelf.value.includes(emoji) })
+}
+
+/** 从「更多表情」面板选完就收面板：它浮在气泡上方，不收会挡住下一步操作 */
+function onPickMore(emoji) {
+  moreVisible.value = false
+  pickReaction(emoji)
 }
 
 /**
@@ -1186,6 +1225,38 @@ onBeforeUnmount(() => {
 
 .bubble__quick-emoji:hover {
   background: var(--el-fill-color-light, #f0f2f5);
+}
+
+/* 自己已经贴过的在快捷栏里也标出来：不然只有下方 chip 能看出“我已经表过态” */
+.bubble__quick-emoji.is-active {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  box-shadow: inset 0 0 0 1px var(--el-color-primary, #409eff);
+}
+
+/* 「更多表情」入口：图标不是文本字符，行高对不齐，靠 flex 居中拉到与旁边表情同高 */
+.bubble__quick-more {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 5px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bubble__quick-more:hover {
+  background: var(--el-fill-color-light, #f0f2f5);
+  color: var(--im-text, #303133);
+}
+
+/* 触屏没得 hover，快捷栏一直隐着就是“这个功能根本没有”：这类设备上常显 */
+@media (hover: none) {
+  .bubble__quick {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .bubble__text {

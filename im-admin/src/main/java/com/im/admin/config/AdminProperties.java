@@ -76,4 +76,25 @@ public class AdminProperties {
      * 重启生效；之所以宁可麻烦一点，是因为它改的是「对外的隐私口径」，不该让谁都能在后台随手拨。
      */
     private boolean reportHandlerVisible = false;
+
+    /* ==================== 监控告警与日志管理（三期） ==================== */
+
+    /**
+     * 慢接口阈值（毫秒）：{@code /api/**} 里耗时超过这个值的请求会被记进环形缓冲并写
+     * {@code com.im.slowapi} 告警日志（落 {@code SLOW-API/slow-api.log}）。
+     * <=0 表示关掉慢接口拦截（监控页仍看 actuator 指标，只是没有最近慢接口列表）。
+     *
+     * <p>与 {@code im.log.slow-sql-millis} 是两层不同的旋钮：那个量单条 SQL，这个量整个请求；
+     * 一个接口慢可能是 N 条各自不超 SQL 阈值的查询叠出来的，两边都有才能定位。
+     */
+    private long slowRequestMillis = 1000;
+
+    /** 慢接口环形缓冲条数：只留最近这些条给监控页，更早的靠日志文件回溯 */
+    private int slowRequestHistory = 200;
+
+    /**
+     * 日志管理页单次 tail 的行数上限。文件最大 50MB，整读会先把后台自己拖死，
+     * 所以只给尾读；需要全文时走服务器本地文件，后台不做下载端点（多一条把日志外带的路径）。
+     */
+    private int logTailMaxLines = 2000;
 }

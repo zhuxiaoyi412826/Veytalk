@@ -1,9 +1,10 @@
 import http from './request'
 
 /**
- * 管理后台的接口封装：看板、用户管理、举报工单。
+ * 管理后台的接口封装：看板、用户管理、举报工单、角色分配，以及三期的
+ * 视频管理 / 直播管理 / 监控告警 / 日志管理。
  *
- * 形状严格对齐 im-admin 的四个 Controller，一处不改：
+ * 形状对齐 im-admin 的各 Controller，一处不改：
  *  - /api/admin/dashboard      GET，refresh 为 query 参数
  *  - /api/admin/user/page      GET，入参 keyword / status / current / size
  *  - /api/admin/user/{id}      GET
@@ -15,6 +16,17 @@ import http from './request'
  *  - /api/admin/report/{id}/reject   POST，body { remark }
  *  - /api/admin/report/{id}/handle   POST，body { action, remark }
  *  - /api/report/config        GET，字典（后台侧同样能读，不为后台另开一份）
+ *
+ * 三期新增（同样一处不改）：
+ *  - /api/admin/video/page     GET，入参 keyword / status / uploaderId / current / size
+ *  - /api/admin/video/{id}/offline  POST，reason 是 @RequestParam（与 disable 同一口径）
+ *  - /api/admin/video/{id}/online   POST，无 body
+ *  - /api/admin/video/{id}          DELETE，无 body
+ *  - /api/admin/live/page    GET，入参 keyword / status / anchorId / current / size
+ *  - /api/admin/live/{roomId}       GET
+ *  - /api/admin/live/{roomId}/stop  POST，无 body（原因服务端固定为 ban）
+ *  - /api/admin/monitor/overview    GET；/api/admin/monitor/slow  GET
+ *  - /api/admin/log/files           GET；/api/admin/log/content  GET，key / tail / keyword
  *
  * disable 的 reason 用 params 而不是 data 传：后端没写 @RequestBody，
  * 发一个 JSON body 过去它会当成「reason 为空」而打回「请填写禁用事由」，
@@ -89,4 +101,69 @@ export function fetchUserRoles(userId) {
  */
 export function assignUserRoles(userId, roleIds) {
   return http.put(`/admin/role/user/${userId}`, { roleIds })
+}
+
+/* ==================== 视频管理（三期） ==================== */
+
+/** 视频列表：含已下架（status=2），删除后的行整体隐身；固定按发布时间倒序 */
+export function fetchVideoPage(params) {
+  return http.get('/admin/video/page', { params })
+}
+
+/** 下架视频：reason 走 query 参数进服务端审计日志，与 disableUser 同一口径 */
+export function offlineVideo(id, reason) {
+  return http.post(`/admin/video/${id}/offline`, null, { params: { reason } })
+}
+
+/** 恢复上架，幂等 */
+export function onlineVideo(id) {
+  return http.post(`/admin/video/${id}/online`)
+}
+
+/** 逻辑删除，不可自助恢复——前端必须二次确认 */
+export function deleteVideo(id) {
+  return http.delete(`/admin/video/${id}`)
+}
+
+/* ==================== 直播管理（三期） ==================== */
+
+/** 场次列表：含全部历史与已封禁场次；直播中恒排最前，响应绝不含 streamKey */
+export function fetchLivePage(params) {
+  return http.get('/admin/live/page', { params })
+}
+
+export function fetchLiveDetail(roomId) {
+  return http.get(`/admin/live/${roomId}`)
+}
+
+/**
+ * 强制关播（ban）：终态，没有解封接口。对已结束的场次幂等跳过，
+ * 响应带回处置后的最新档案，前端就地刷那一行。
+ */
+export function stopLive(roomId) {
+  return http.post(`/admin/live/${roomId}/stop`)
+}
+
+/* ==================== 监控告警（三期） ==================== */
+
+/** 监控总览：JVM/HTTP/连接池/健康/慢接口一屏取数，取不到的指标为 null（显示「—」） */
+export function fetchMonitorOverview() {
+  return http.get('/admin/monitor/overview')
+}
+
+/** 只回慢接口分组，比整屏总览便宜，供想高频刷新的场景 */
+export function fetchMonitorSlow() {
+  return http.get('/admin/monitor/slow')
+}
+
+/* ==================== 日志管理（三期） ==================== */
+
+/** 七个逻辑档的存在性、大小与最后修改时间；前端只认 key，永远不传路径 */
+export function fetchLogFiles() {
+  return http.get('/admin/log/files')
+}
+
+/** 尾读日志：tail 行服务端夹上限，关键词只在尾读窗口内过滤（不是全文件搜索） */
+export function fetchLogContent(key, tail, keyword) {
+  return http.get('/admin/log/content', { params: { key, tail, keyword: keyword || undefined } })
 }

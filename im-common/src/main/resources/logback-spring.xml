@@ -13,11 +13,12 @@
   warn.log                     只有 WARN
   error.log                    只有 ERROR
   SQL/slow-sql.log             只有慢 SQL（执行耗时 > im.log.slow-sql-millis，默认 100ms）
+  SLOW-API/slow-api.log        只有慢接口（请求端到端耗时 > im.admin.slow-request-millis，默认 1000ms）
   MODERATION/moderation.log    只有图片内容审核命中上报（谁、哪张图、哪一类多少分）
 
-  当天写入的文件名不带日期（上面这六个就是你在目录里直接看到的那几个），跨天后旧内容
+  当天写入的文件名不带日期（上面这七个就是你在目录里直接看到的那几个），跨天后旧内容
   才滚成带日期的归档：info-yyyy-MM-dd.N.log / warn-… / error-… / SQL/slow-sql-… /
-  MODERATION/moderation-…，活动文件同时被重新创建为空。
+  SLOW-API/slow-api-… / MODERATION/moderation-…，活动文件同时被重新创建为空。
 
   级别隔离用 LevelFilter 且 onMismatch=DENY，不是 ThresholdFilter：后者是「及以上」，
   那样 error 会同时出现在 warn 和 error 三个文件里，就失去分档的意义了。所以每条日志
@@ -222,6 +223,28 @@
         </encoder>
     </appender>
 
+    <!-- ==================== SLOW-API/slow-api-*.log：慢接口单独一档（三期） ==================== -->
+    <!--
+      只由 com.im.slowapi 这一个 logger 写入（慢接口拦截器在 im-admin，日志通道却在公共层：
+      与慢 SQL 同一个理由——排障时谁也不想在一堆业务 INFO 里 grep 耗时）。
+      与 SQL/MODERATION 两档同一规矩：当天固定文件名、跨天滚序号、不压 .gz、按敏感对待
+      （记录了谁在什么时候请求了哪个路径，路径本身可能含会话 ID 等信息）。
+    -->
+    <appender name="SLOW_API_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/SLOW-API/slow-api.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/SLOW-API/slow-api-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
     <!-- ==================== 异步包装 ==================== -->
     <!--
       discardingThreshold=0 关掉 AsyncAppender「队列剩 20% 时先丢 INFO/DEBUG/WARN」的默认行为，
@@ -272,6 +295,14 @@
         <discardingThreshold>0</discardingThreshold>
         <neverBlock>false</neverBlock>
         <appender-ref ref="SQL_FILE"/>
+    </appender>
+
+    <!-- 慢接口与慢 SQL 同格：故障现场宁可阻塞一下也不能丢 -->
+    <appender name="ASYNC_SLOW_API" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="SLOW_API_FILE"/>
     </appender>
 
     <!-- neverBlock=false：审计条目量极小（只有命中才写一条），宁可阻塞一下也不能丢追责现场 -->
@@ -326,6 +357,22 @@
     <springProfile name="!dev">
         <logger name="com.im.moderation" level="INFO" additivity="false">
             <appender-ref ref="ASYNC_MODERATION"/>
+        </logger>
+    </springProfile>
+
+    <!--
+      慢接口告警通道（三期）。与慢 SQL 完全同一套规矩：additivity=false 防一份现场落三个文件，
+      级别钉在 WARN（拦截器只用 warn 打）。dev 额外进控制台，本地压测时直接盯屏。
+    -->
+    <springProfile name="dev">
+        <logger name="com.im.slowapi" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_SLOW_API"/>
+            <appender-ref ref="ASYNC_CONSOLE"/>
+        </logger>
+    </springProfile>
+    <springProfile name="!dev">
+        <logger name="com.im.slowapi" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_SLOW_API"/>
         </logger>
     </springProfile>
 

@@ -24,7 +24,7 @@
         {{ emoji }}
       </button>
     </div>
-    <div class="emoji-picker__preview im-ellipsis">{{ preview || '点击表情插入输入框' }}</div>
+    <div class="emoji-picker__preview im-ellipsis">{{ preview || hint }}</div>
   </div>
 </template>
 
@@ -39,7 +39,15 @@ import { computed, ref } from 'vue'
  *
  * 表情用 Unicode 字符而不是图片雪碧图：后端存的就是文本，
  * 换图片就得额外维护一套 [微笑] 到图片的映射，而消息搜索、会话摘要全都要跟着特殊处理。
+ *
+ * 两个使用方：聊天输入框（插入正文）与气泡上的表情回应面板（贴到消息上），
+ * 所以底部那行提示做成 prop —— 回应场景里写「插入输入框」会把人带偏。
  */
+defineProps({
+  /** 未悬停任何表情时底部显示的引导文案 */
+  hint: { type: String, default: '点击表情插入输入框' }
+})
+
 const emit = defineEmits(['select'])
 
 const groups = [

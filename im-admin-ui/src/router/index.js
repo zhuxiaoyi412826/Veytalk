@@ -10,8 +10,8 @@ import { getToken } from '@/utils/token'
  * 守卫里确实需要 auth store，用的是<b>函数内动态 import</b>——模块求值阶段不存在这条边，
  * 循环就组不起来。
  *
- * 三个内页都是懒加载：登录后首屏只要看板那一个 chunk，
- * 用户管理和工单队列的代码等点到菜单再下。
+ * 内页全部懒加载：登录后首屏只要看板那一个 chunk，
+ * 其余页面的代码等点到菜单再下。
  */
 const routes = [
   {
@@ -48,10 +48,34 @@ const routes = [
         name: 'roles',
         component: () => import('@/views/RolesView.vue'),
         meta: { title: '角色管理', perm: 'system:role:manage' }
+      },
+      {
+        path: 'videos',
+        name: 'videos',
+        component: () => import('@/views/VideosView.vue'),
+        meta: { title: '视频管理', perm: 'system:video:manage' }
+      },
+      {
+        path: 'lives',
+        name: 'lives',
+        component: () => import('@/views/LivesView.vue'),
+        meta: { title: '直播管理', perm: 'system:live:manage' }
+      },
+      {
+        path: 'monitor',
+        name: 'monitor',
+        component: () => import('@/views/MonitorView.vue'),
+        meta: { title: '监控告警', perm: 'system:monitor' }
+      },
+      {
+        path: 'logs',
+        name: 'logs',
+        component: () => import('@/views/LogsView.vue'),
+        meta: { title: '日志管理', perm: 'system:log' }
       }
     ]
   },
-  // 手输错地址一律回看板：后台只有三个页面，给一个 404 空壳不如把人送回有数字的地方
+  // 手输错地址一律回看板：给一个 404 空壳不如把人送回有数字的地方
   { path: '/:pathMatch(.*)*', redirect: { name: 'dashboard' } }
 ]
 
@@ -81,11 +105,11 @@ router.beforeEach(async (to) => {
     auth.teardown()
     return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
   }
-  // 进了后台不代表能看每一屏：二期按细粒度权限点逐路由放行。
+  // 进了后台不代表能看每一屏：二三期按细粒度权限点逐路由放行。
   // 缺这一屏权限时送回他能访问的第一屏（而不是弹回登录页——他确实是合法的后台用户，只是不该看到这一页）。
   // 没有 meta.perm 的路由（如根路径 redirect）不拦。
   if (to.meta.perm && !auth.can(to.meta.perm)) {
-    const fallback = ['dashboard', 'reports', 'users', 'roles'].find((name) => {
+    const fallback = ['dashboard', 'reports', 'users', 'roles', 'videos', 'lives', 'monitor', 'logs'].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)
     })

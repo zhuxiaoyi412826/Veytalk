@@ -3,14 +3,14 @@
 3.Tauri2 打包安卓 重新打包exe
 4.移动端 电脑端 TRTC 语音面试官 视频面试官
 
-4. 账号认证体系
+5. 账号认证体系
 - 登录方式：账号密码登录、邮箱登录、手机验证码登录 第三方授权登录。 
 - 已完成：密码找回（手机短信 / 邮箱双通道，reset 场景与登录场景的验证码在 Redis 里隔离，
   重置后踢掉全部登录态）。短信下发走可插拔的 SmsSender，当前是 MockSmsSender（只写日志），
   接真实服务商时新增一个实现 + 改 IM_SMS_PROVIDER 即可。
 - 待开发：第三方授权登录（QQ / 微信 / GitHub OAuth）。
 
-5. AI-RAG（已完成：左侧控制栏「面试」入口 → 后端 Java 全栈面试页面）
+6. AI-RAG（已完成：左侧控制栏「面试」入口 → 后端 Java 全栈面试页面）
 规则：
 1. 你只能基于知识库内容提问，不要凭空增加需求；可以深挖候选人给出方案里的漏洞。
 2. 面试采用循序渐进方式：先让候选人做整体架构设计，然后分模块深挖，每次只提1个问题，不要一次性抛出一堆问题。
@@ -21,42 +21,8 @@
 7. 面试流程：
     阶段1：
     阶段2：
-    
+    阶段3：
 8. 面试结束后，可以对候选人整体方案打分并总结。
 
-10. 增加语音视频通话功能，桌面端实现录屏和保存通话功能（已完成一期：仅一对一 WebRTC 语音视频通话，信令复用用户 WebSocket 长连接、媒体内网直连不经服务器；通话记录复用 im_message 新增 MsgType.CALL、录音文件复用 im_file 新增 call_record，零新表零新依赖；桌面端录制合成音视频落盘 + 上传留存 + 气泡回放，Web 端通话可用但不落盘；跨公网需自建 STUN/coturn TURN。详见 md/语音视频通话接入指南.md）
-    群通话 / 多方会议【已完成 2026-10-19，一期用 mesh 不用 SFU】：每两人一路 P2P、服务端只搬 SDP/ICE（新帧类型 groupcall / groupcall-signal，仍复用主 /ws），媒体一个字节不进 Spring Boot 进程；花名册只存 Redis 四键 im:gcall:*（带 TTL 自回收），**零 DDL，存量库无需跑任何 SQL**；本地只采一次 getUserMedia、N-1 路共用同一路流；协商方向恒定「后进房者对每个先到者发 offer」；默认 4 人、服务端硬夹 [2,6]；通话记录仍复用 MsgType.CALL，只发起人落一条、多一个 extra.callParticipantCount。代价与边界写在指南 §13：每人上行 N-1 路、TURN 要扛 N(N-1)/2 路、与 1:1 通话和直播连麦的忙线键是三套（跨类型不并发靠前端拦）、中途开的通话看不到提示条（发现走 REST 不广播）、不落盘录制（mesh 要混流）。真待办：>6 人大会需换 SFU（mediasoup / LiveKit，Windows 无原生支持）。**未做浏览器多端真机联调**。
-还是有一些问题 怎么接通后就关闭了，如何设置两步手机和这个电脑同在一个局域网内    买个usb无线网卡  进行本地测试
 
 
-
-
-
-
-
-【以下清单 2026-10-18 按代码实况逐项校准过，2026-10-19 追加「管理后台一期 + 举报闭环」；标【已完成】的只是历史草稿，真实待办以 README「路线图 / Roadmap」为准】
-「离线消息补推」只是重连后补拉	缺，移动端刚需（App 被杀时经 APNs/FCM/个推/小米华为通道唤醒；现 PushSpi 只到 WebSocket，不在线即静默）
-聊天端到端加密（E2EE）	缺，需权衡与检索/审核的冲突
-账号注销 / 数据删除	【已完成】POST /api/user/cancel（密码二次确认）+ UserDataEraseSpi 级联擦除各模块
-消息表情回应（Reaction）：对某条消息贴表情/点赞	【已完成】im_message_reaction
-消息编辑：现在只能撤回（2 分钟内），不能改。	【已完成】仅本人/时限内/未撤回的文本可改，附件类仍不可
-更多消息类型：位置、名片、合并转发（聊天记录打包）、投票/接龙。	【已完成】MsgType CARD(7)/LOCATION(8)/MERGED_FORWARD(9)/VOTE(10)/CHAIN(14)；接龙零 DDL，条目存 im_message.extra.chainItems，服务端 Redis 短锁串行追加
-语音消息转文字、消息翻译。	【已完成】SpeechToTextSpi / TranslationSpi，桩 + 配置门控优雅降级（真实厂商待接）
-群文件 / 群相册 / 精华消息：群维度的内容沉淀。	【已完成】文件/相册是群会话按 msgType 的过滤视图（零 DDL），精华建 im_message_essence
-消息收藏（私人书签、跨会话回看）	【已完成 2026-10-19】原清单里没有这一条，是本轮新加并做完的：im_message_favorite（与 im_message_essence 同构，唯一键 user_id+message_id，多人各收各的）+ GET /api/message/favorites、PUT /api/message/{id}/favorite + favorite-notify（只推本人）+「我的收藏」面板与跨会话跳转定位。本项没做零 DDL（收藏属没有寿命的用户数据，不该挤 Redis；且倒序分页与整页批量判定两种访问都要索引），理由见 md/数据库表解析.md 7.7。⚠ 存量库必须先跑 sql/migration_message_favorite.sql 再启新版后端，否则消息列表接口整片 500
-进群审批 / 邀请链接 / 群二维码。	【已完成】im_group_join_request + zxing 二维码 + 邀请链接
-群机器人 / Webhook：群内自动化通知、外部系统接入。	【已完成】im_group_robot，凭回调地址推消息，服务端拦截客户端伪造 SYSTEM/ROBOT
-聊天记录导出 / 迁移 / 备份。	【已完成】本地 JSON + 云端 JSON/CSV（单会话上限 20000 条游标翻页）
-【新增缺口】群通话 / 多方会议（>6 人需 SFU）。群通话与接龙均已落地：群通话 2026-10-19 一期用 mesh 小房间（非 SFU，上限默认 4 人硬顶 6，见上面第 10 条）；接龙 2026-10-19 完成（MsgType.CHAIN(14)，零 DDL，见上面「更多消息类型」行）。剩下真需要新基础设施的只有 >6 人大会（SFU）。（本批 2026-10-18 已完成：常用语 / 快捷回复 GET|PUT /api/conversation/quick-reply、只存 Redis 不建表；会话内消息按关键词检索——后端 /api/message/search 此前已实现、旧文档误列为缺口，本轮只补了聊天窗口搜索条入口；钱包用户间转账 / 红包 MsgType TRANSFER(12)/RED_PACKET(13)，零 DDL，钱走既有 im_wallet_transaction 新增 transfer/packet/refund 三种 type、领取态走 Redis Hash）
-直播连麦 / 礼物打赏 / 弹幕房管与关键词屏蔽 / 连麦 PK / 直播回放存档 / 主播数据面板 / 付费与密码直播【均已完成 2026-10-19】。
-付费/密码直播（零 DDL 2026-10-19）：主播开播可选设「房间密码」或「入场积分价」，未解锁观众拉不到画面、进不了弹幕。门禁配置存 Redis JSON im:live:gate:{roomId}（{mode,pwdHash,price}）、解锁态存 im:live:unlock:{roomId}:{userId}，TTL 12h 随直播心跳 touch 续期；真闸门是 toVO 只对已解锁/主播下发 playUrl+danmakuWs（分片 path 带 streamKey+签名，没地址就拉不到流），弹幕 WS 侧再拒一道。付费只扣观众积分（live_pay）、不给主播入账，与礼物同口径；密码 SHA-256 摘要、明文不落 Redis；密码与价同时给按密码优先。端点 POST /api/live/{roomId}/unlock 与 /pay。已知边界：回放（VOD）本期不设门禁（replay 入口留 retention-days（默认 1 天）、unlock 仅 12h，量级不匹配，不想让回放被免费看可关回放）；门禁只在本场直播有效，关播 drop、下一场重设。机理见 md/直播.md §17。
-主播数据面板：GET /api/live/anchor/stats，零 DDL——只读 im_live_room（每场一行的定格值）+ im_gift_record（两个现成索引刚好对上按场次/按主播两种聚合）+ 现有 Redis 计数，不建汇总表、不改送礼链路；新增的既有类方法只一个 LiveDanmakuService.peekStats（只读不清，不能复用 drainStats，否则刷一次页面就把峰值抹掉）。三个口径限制直接印在面板脚注：礼物是虚拟积分且不进主播钱包不可提现；点赞只存 24 小时故历史场次没有、弹幕条数服务端从来没存量；不含 PK 战绩（要历史得建表）。概览只覆盖窗口内最近 100 场，被截断时前端显式警告。机理见 md/直播.md §16。
-（已完成连麦 + 礼物/钱包，PK 与房管同批补上：连麦走主播↔嘉宾 1:1 WebRTC P2P（信令复用主 /ws 的 linkmic/linkmic-signal，复用 buildIceServers 下发 ICE，两方无需 SFU）；观众看到的流由主播端 Canvas 合成（无人时主播铺满，有人连麦时按左主播、右嘉宾的左右分屏，格内 contain 等比居中 + 昵称名牌）、WebAudio 混多路音（新建的 AudioContext 必须 await resume，否则录出的 WebM 有音轨但全无声），经 canvas.captureStream+MediaRecorder 产 WebM 分片 fetch PUT 上传，观众端新增 MSE/WebM 播放器（webmPlayer.js）滚动 appendBuffer——非连麦直播仍走 ffmpeg→HLS→hls.js 不变；礼物新建虚拟积分体系四张表（im_user_wallet/im_gift/im_gift_record/im_wallet_transaction），充值为模拟支付桩（PaymentSpi+MockPaymentSpi，@ConditionalOnProperty 门控，接真实支付以 @Primary 覆盖）+ 每日签到赠送，本轮不接真实货币。零新增 npm 依赖。PK（热度对比/投票）已于 2026-10-18 落地：两个都在播的房间比时间窗内的热度增量（礼物+点赞+投票按权重相加，开场采基线、之后只算增量），会话与票数只存 Redis 不建表，LivePkTask 每秒把同一帧扇出给两个房间，观众投票站队；弹幕房管（主播禁言名单 + 自定义屏蔽词）同批完成，也只在 Redis。两项机理分别见 md/直播.md §13 与 §14。直播回放存档于 2026-10-19 落地（零 DDL）：直播分片本来就始终 PUT 在媒体服务器上（当时服务器只收不删），缺的只是一份不滚动、带 ENDLIST 的 VOD 清单，所以回放不需要录制/转码/建表——electron/live.js 的上传泵给每个 PUT 成功的分片记内存台账，关播时排空队列后拼清单 PUT 到 {roomId}/replay/index.m3u8，后端只在 Redis 落一个入口标记 im:live:replay:{roomId}（TTL = retention-days，默认 1 天）并用 LiveUrlSigner 现签地址；前端房间页「▶ 看回放」+ hls.js 进 VOD 分支 + 大厅「🎬 可回看」横条与 GET /api/live/replays。已知边界：连麦合成画面不进回放；★ 保留期与清理（2026-10-20 补）：回放只留 retention-days（默认 1 天），同一个值既是 Redis 入口 TTL、也是媒体侧删源文件的线——真正的删除不在 Java 里做（控制面进不到媒体磁盘，且后端只有 segmentCount、列不出文件名），而由媒体面的 electron/live-retention.js 按「房间目录最新 mtime」整目录清理（自测替身已内置周期调用，生产用 cron，命令见 md/直播.md §10.7）；不挂这个任务就仍是「入口消失但分片永久占盘」。硬编回落重开的那场只覆盖重开之后的部分、主进程中途挂掉丢台账那一场出不来。机理见 md/直播.md §15。详见 md/直播.md 连麦合成与 MSE 播放章节、README.md 直播/钱包接口表）
-
-
-
-监控告警	缺：Actuator + Prometheus/Grafana 指标暴露、健康检查、慢接口告警；现在只有 TraceId + 慢 SQL 日志
-管理后台一期 + 举报闭环	【已完成 2026-10-19】新建 im-admin（第 11 个业务模块，**唯一一张新表 `im_report`**）与独立前端工程 `im-admin-ui`（登录 / 数据看板 / 用户管理与封禁恢复 / 举报工单队列）。聊天端四个入口（消息右键 / 用户资料卡 / 直播间 / 群设置）共用一个**字典驱动**弹窗（理由、必填标记、字数上限全从 `GET /api/report/config` 取，前端不复制一份码表）→ `POST /api/report` 提交那一刻由各归属模块的 `ReportTargetSpi` 反查责任人并抓**证据快照**落 `evidence` JSON 列（对象事后被撤回/关播/解散也能处理）→ 后台工单队列可受理 / 驳回 / 处置 → 结论经 `/ws` 的 `NOTIFY` 帧（`action=report-result`，带 `tone` 字段选通知样式）推回举报人。**处置执行者分界**：`NONE`/`WARN` 由 im-admin 自己完成，`BAN_USER`→im-user、`RECALL_MESSAGE`→im-message、`CLOSE_ROOM`→im-live 经 SPI 交出去，**im-admin 不 import 任何业务 Mapper**（星型约束不破）；群聊只实现 resolve，无可执行处置。**入口显隐与后端拒绝条件严格同源**：自举报回 14002，所以自己的消息 / 主播自己的房间 / 群主自己的群都不给入口（而不是给一个点了必弹错的按钮）。本项**没做零 DDL**（举报要活过 TTL 与重启，且「这个人被投诉过几次」是要分页的聚合，四类查法各自要一个联合索引），理由见 md/数据库表解析.md §14。
-管理后台（Admin Console）二期	【部分已完成 2026-10-19，一期见上一条】本轮按用户决策「只改代码层、不新建任何表」做了三项：**多角色分级**（`ImConstants` 加 `system:dashboard`/`system:user:manage`/`system:report:handle`/`system:role:manage` 四个细粒度权限点 + moderator/operator 两个示范角色，三个控制器从伞权限 `system:manage` 细化到各自那一个点；`system:manage` 保留为向后兼容的伞权限，admin 种子里必须补齐 108~111 否则反被拦）、**后台角色分配**（`AdminUserSpi` 扩 `listRoles`/`listUserRoleIds`/`setUserRoles`，新建 `AdminRoleController`+`AdminRoleService`，三条护栏：拒改自己/拒摘最后一个可用管理员/拒未知角色，改完 `evictCache` 即时生效；im-admin-ui 加 `RolesView` 只读角色目录 + `UsersView`「配角色」弹框 + 菜单/路由按 `auth.can()` 显隐）、**处置人可见**（`im.admin.report-handler-visible` 静态开关默认关，打开后 `ReportVO` 才带 `handlerName`、通知文案也署名）。**故意未做（属新建表范畴）**：系统配置页（举报开关/配额仍改 `application.yml`+重启，不落 `im_admin_config`）、后台操作审计（改昵称/禁用别的后台号仍无痕，不落 `im_admin_audit`）。仍缺：机审复审（与举报闭环同条）。存量库升级先跑 `sql/migration_admin_phase2.sql`（纯 DML、幂等）再重启后端；机理见 README「管理后台」章节与 CHANGELOG Unreleased。
-举报 + 内容审核闭环	【人工处置链已通 2026-10-19】缺的是**机审复审**那一段：`im-file` 的 `ModerationController` / `ModerationService` 只盖文件与图片，弹幕 / 群名 / 公告没有服务端模型；举报内容目前**只过敏感词遮蔽与人工**，没有第二双机器眼睛。另：`GET /api/report/mine` 端点已就绪但聊天端无 UI（结论已经由 WS 推给举报人，列表只多不少一个刷新入口）。
-【新增缺口】两步验证 2FA / TOTP；国际化 i18n / 无障碍 a11y（界面为中文硬编码）。（深色模式已完成：stores/settings.js 的 themeMode 切 html.dark，EP 深色来自 theme-chalk/dark/css-vars.css）
