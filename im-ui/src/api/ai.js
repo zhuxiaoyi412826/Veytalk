@@ -183,3 +183,51 @@ export function interviewLeaveBeacon(sessionId, events = [], endReason = null) {
     keepalive: true
   })).catch(() => {})
 }
+
+/**
+ * 语音转文字（按住说话 / 电话面试的收音都走这里）。
+ *
+ * 入参是 utils/audioRec.js 编码的 16k 单声道 WAV Blob；用 fetch 不用 axios：
+ * FormData 的 multipart boundary 交给浏览器自己填，鉴权头与主管线同一套。
+ * 后端把失败收敛成 Result JSON，这里统一抛 Error 给调用方显示 msg。
+ */
+export async function transcribeAudio(blob) {
+  const form = new FormData()
+  form.append('file', blob, 'speech.wav')
+  const response = await fetch(`${apiBaseURL()}/ai/interview/asr`, {
+    method: 'POST',
+    headers: { [getTokenName()]: getToken() || '' },
+    body: form
+  })
+  const body = await response.json().catch(() => ({}))
+  if (body.code !== 200) {
+    throw new Error(body.message || `语音转写失败（${body.code ?? response.status}）`)
+  }
+  return body.data?.text ?? ''
+}
+
+/**
+ * 文字合成朗读（神经音色）：返回 audio/wav Blob，系统音色不经这里。
+ *
+ * 同样手工 fetch：成功体是二进制、失败体是 Result JSON，axios 的拦截器
+ * 认不出这种双形态；与 streamInterviewChat 的「按 Content-Type 分流」同一套路。
+ */
+export async function synthesizeSpeech(text) {
+  const response = await fetch(`${apiBaseURL()}/ai/interview/tts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      [getTokenName()]: getToken() || ''
+    },
+    body: JSON.stringify({ text })
+  })
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.message || `语音合成失败（${body.code ?? response.status}）`)
+  }
+  if (!response.ok) {
+    throw new Error(`语音合成异常（HTTP ${response.status}）`)
+  }
+  return await response.blob()
+}

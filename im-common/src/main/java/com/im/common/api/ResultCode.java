@@ -123,6 +123,10 @@ public enum ResultCode {
     AI_INTERVIEW_NOT_FOUND(10001, "面试会话不存在或已过期"),
     AI_INTERVIEW_FORBIDDEN(10002, "无权访问该面试会话"),
     AI_INTERVIEW_ENDED(10003, "面试已结束，不能再上报该会话的数据"),
+    /* 语音链路三码：配置缺失与调用失败分开，前端据此决定是「置灰入口」还是「提示重试」 */
+    AI_AUDIO_DISABLED(10004, "语音服务未启用，请配置 ALI_BABA_API_KEY 后重启服务"),
+    AI_ASR_FAILED(10005, "语音转文字失败，请重试"),
+    AI_TTS_FAILED(10006, "语音合成失败，请重试或切换系统音色"),
 
     /* ==================== 11xxx 直播 ==================== */
     LIVE_DISABLED(11001, "直播功能未开启"),

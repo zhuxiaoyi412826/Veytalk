@@ -8,7 +8,7 @@
       </div>
       <div class="interview__meta">
         <span v-if="status.dirExists === false" class="interview__warn">知识库目录不存在</span>
-        <span v-else>知识库 {{ status.fileCount ?? 0 }} 个文件 / {{ status.chunkCount ?? 0 }} 个片段</span>
+        <span v-else class="interview__meta-info">知识库 {{ status.fileCount ?? 0 }} 个文件 / {{ status.chunkCount ?? 0 }} 个片段</span>
         <span v-if="status.apiKeyConfigured === false" class="interview__warn">API Key 未配置</span>
         <span v-if="proctor.enabled" class="interview__meta-sep">|</span>
         <el-tag v-if="proctor.enabled && sessionId" :type="violationTag" size="small" effect="plain">
@@ -25,6 +25,23 @@
         <el-button v-else-if="proctor.enabled && sessionId" size="small" text @click="toggleFullscreen">
           退出全屏
         </el-button>
+        <el-tooltip
+          :disabled="audioAvailable"
+          content="语音服务未启用：服务端配置 ALI_BABA_API_KEY 并重启后可用"
+          placement="bottom"
+        >
+          <span>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :disabled="!audioAvailable || finished || streaming"
+              @click="openCall"
+            >
+              📞 电话面试
+            </el-button>
+          </span>
+        </el-tooltip>
         <el-button size="small" :disabled="!started || finished || streaming" @click="finish">
           结束面试
         </el-button>
@@ -81,23 +98,48 @@
         :placeholder="finished ? '本次面试已结束，可点「重新开始面试」再来一场' : '输入你的回答，Enter 发送，Shift+Enter 换行'"
         @keydown.enter.exact.prevent="onSendKey"
       />
+      <div class="interview__footer-side">
+        <VoiceSendBar
+          :disabled="voiceBarDisabled"
+          :disabled-hint="voiceBarHint"
+          @text="onVoiceText"
+        />
+        <el-checkbox v-model="autoSendVoice" size="small" class="interview__autosend">转完即发</el-checkbox>
+      </div>
       <el-button
         v-if="!streaming"
         type="primary"
-        :disabled="!draft.trim() || !started || finished"
+        :disabled="!draft.trim() || finished"
         @click="onSendKey"
       >
         发送
       </el-button>
       <el-button v-else type="danger" plain @click="stop">停止</el-button>
     </footer>
+
+    <CallPanel
+      v-if="callVisible"
+      :phase="callPhase"
+      :captions="callCaptions"
+      :duration-text="callDuration"
+      :muted="callMuted"
+      :engine="callEngine"
+      :sys-available="ttsSysAvailable"
+      @toggle-mute="toggleCallMute"
+      @interrupt="interruptCall"
+      @hangup="hangupCall"
+      @minimize="minimizeCall"
+      @switch-engine="switchCallEngine"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Microphone, User } from '@element-plus/icons-vue'
+import CallPanel from '@/components/interview/CallPanel.vue'
+import VoiceSendBar from '@/components/interview/VoiceSendBar.vue'
 import {
   endInterviewSession,
   fetchInterviewStatus,
@@ -105,8 +147,12 @@ import {
   reportInterviewEvents,
   saveInterviewTurn,
   startInterviewSession,
-  streamInterviewChat
+  streamInterviewChat,
+  transcribeAudio
 } from '@/api/ai'
+import { createMicSource, encodeWav16k } from '@/utils/audioRec'
+import { createEnergyVad } from '@/utils/vad'
+import { canSystemSpeak, createSpeech, loadEngine, saveEngine } from '@/utils/speech'
 
 defineOptions({ name: 'Interview' })
 
@@ -121,6 +167,63 @@ const streaming = ref(false)
 const status = ref({})
 const listEl = ref(null)
 let abortController = null
+
+/* ---------- 语音输入（按住说话）状态 ---------- */
+/**
+ * 「转完即发」：默认开。
+ *
+ * 之前默认关，松手后文字只进草稿不发送，而触屏上输入框没获得焦点、光标也不闪，
+ * 用户看到的就是「说了半天什么也没发出去」。按住说完就提交才是微信的手感，
+ * 想先改字的人可以手动关掉这一项（偏好存 localStorage，下次还是自己习惯的那个）。
+ */
+const AUTO_SEND_KEY = 'im.interview.autoSendVoice'
+const autoSendVoice = ref(localStorage.getItem(AUTO_SEND_KEY) !== '0')
+watch(autoSendVoice, (value) => localStorage.setItem(AUTO_SEND_KEY, value ? '1' : '0'))
+/** 服务端语音能力：/status 回的 audio.enabled，false 时两个语音入口都置灰 */
+const audioAvailable = computed(() => !!status.value.audio?.enabled)
+const voiceBarDisabled = computed(
+  // 不再把 !started 算进来：未开场时录音只是往草稿里填字，与输入框同性质，
+  // 拦着它只会换来触屏上「按住没反应」的困惑（发送环节仍有 onSendKey 把关）
+  () => !audioAvailable.value || streaming.value || finished.value
+)
+const voiceBarHint = computed(() => {
+  if (!audioAvailable.value) {
+    return '语音服务未启用：服务端配置 ALI_BABA_API_KEY 并重启后可用'
+  }
+  if (streaming.value) {
+    return '面试官正在说话，稍后再录'
+  }
+  if (finished.value) {
+    return '本次面试已结束，可点「重新开始面试」再来一场'
+  }
+  return ''
+})
+
+/** 转写文本的去向：勾了「转完即发」直接提交，否则进草稿可编辑 */
+function onVoiceText(text) {
+  if (!autoSendVoice.value) {
+    fillDraft(text)
+    // 不发送是本地的选择，但得说一句：否则只剩输入框里多了一行字，用户以为失败了
+    ElMessage.success('已转成文字，可编辑后点发送')
+    return
+  }
+  if (!started.value) {
+    // 未开场时不能替用户跳过「开始面试」：首轮必须由面试官先出题
+    fillDraft(text)
+    ElMessage.info('请先点击「开始面试」，由面试官先开场提问')
+    return
+  }
+  if (streaming.value || finished.value) {
+    fillDraft(text)
+    ElMessage.info(streaming.value ? '面试官正在说话，回答已存进输入框' : '本次面试已结束，回答已存进输入框')
+    return
+  }
+  send(text)
+}
+
+function fillDraft(text) {
+  draft.value = draft.value ? `${draft.value}\n${text}` : text
+}
 
 /* ---------- 监考状态 ---------- */
 /** 审计会话 ID：null 表示当前没有进行中的面试 */
@@ -198,6 +301,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   abortController?.abort()
+  closeCall()
   detachProctor()
   flushEvents(true)
 })
@@ -229,8 +333,14 @@ function buildHistory() {
 
 function onSendKey() {
   const text = draft.value.trim()
-  // 未开始时不允许直接发：首轮必须走「开始面试」让面试官先开场
-  if (!text || streaming.value || !started.value) {
+  if (!text || streaming.value) {
+    return
+  }
+  // 未开始时不允许直接发：首轮必须走「开始面试」让面试官先开场。
+  // 以前靠 disabled 按钮静默拦，触屏上既无 tooltip 也无点击事件，用户只看到「按了没反应」；
+  // 现在按钮可点，点下去把原因说出来。
+  if (!started.value) {
+    ElMessage.info('请先点击「开始面试」，由面试官先开场提问')
     return
   }
   draft.value = ''
@@ -240,6 +350,7 @@ function onSendKey() {
 /**
  * 发送一轮对话。text 为空表示「开始面试」——历史为空数组，
  * 后端会让面试官直接输出阶段 1 的开场问题。
+ * 返回本轮面试官的最终文本（电话模式要用它朗读；失败/被停返回 null 或部分内容）。
  */
 async function send(text) {
   if (streaming.value || finished.value) {
@@ -290,6 +401,7 @@ async function send(text) {
     questionAt = Date.now()
     scrollToBottom()
   }
+  return aiMessage.content.trim() || null
 }
 
 function stop() {
@@ -629,6 +741,275 @@ async function toggleFullscreen() {
   }
 }
 
+/* ==================== 电话面试（免提环路） ==================== */
+/**
+ * 半双工状态机挂在本页，CallPanel 只做展示与事件上抛：
+ *   listening --VAD 断句--> thinking（ASR + /chat SSE）--> speaking（朗读）--onEnd--> listening
+ * v1 不做 barge-in（自动打断）：朗读期间不收麦，要打断点手动按钮。
+ * callToken 用于挂断/最小化后作废所有在途异步链，防迟到的回调
+ * 把已结束的通话复活。
+ */
+const callVisible = ref(false)
+const callPhase = ref('connecting')
+const callMuted = ref(false)
+const callDuration = ref('00:00')
+const callEngine = ref('system')
+const ttsSysAvailable = ref(true)
+let callMic = null
+let callVad = null
+let callTimer = null
+let callStartedAt = 0
+let callToken = 0
+
+/** 字幕只展示最近两句：通话时靠听，不靠滚屏读稿 */
+const callCaptions = computed(() =>
+  messages.value
+    .filter((item) => item.role !== 'error')
+    .slice(-2)
+    .map((item) => ({ role: item.role, content: item.content }))
+)
+
+const speechCtl = createSpeech({
+  engine: loadEngine(),
+  onEnd: () => resumeAfterSpeech(),
+  onError: (error) => {
+    ElMessage.error(error?.message || '播报失败')
+    resumeAfterSpeech()
+  }
+})
+
+function formatDuration(ms) {
+  const total = Math.floor(ms / 1000)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const p = (n) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`
+}
+
+function resumeAfterSpeech() {
+  if (!callVisible.value || finished.value || streaming.value) {
+    return
+  }
+  if (callMuted.value) {
+    callPhase.value = 'muted'
+    return
+  }
+  callListening()
+}
+
+function stopCallMic() {
+  if (callVad) {
+    callVad.abort()
+    callVad = null
+  }
+  if (callMic) {
+    callMic.stop()
+    callMic = null
+  }
+}
+
+/** 只在 listening 态开麦 + VAD；断句即关麦，形成半双工 */
+async function callListening() {
+  if (!callVisible.value || finished.value || callMic || callMuted.value) {
+    return
+  }
+  callPhase.value = 'listening'
+  const token = callToken
+  try {
+    const mic = await createMicSource({
+      onFrame: (frame, rate) => {
+        if (callVad && callPhase.value === 'listening') {
+          callVad.feed(frame, rate)
+        }
+      }
+    })
+    if (token !== callToken || !callVisible.value || callMuted.value) {
+      mic.stop() // 权限弹窗磨蹭期间状态已变，开好的轨道当场关掉
+      return
+    }
+    callMic = mic
+  } catch {
+    ElMessage.error('无法访问麦克风，请检查浏览器权限，或改用文字回答')
+    closeCall()
+    return
+  }
+  callVad = createEnergyVad({
+    onSegment: (segment) => onCallSegment(segment, token)
+  })
+}
+
+function onCallSegment(segment, token) {
+  if (token !== callToken || !callVisible.value || callPhase.value !== 'listening') {
+    return
+  }
+  stopCallMic() // 断句先关麦：等 ASR 与候答案期间不收自己的声音
+  callPhase.value = 'thinking'
+  transcribeAudio(encodeWav16k([segment.samples], segment.sampleRate))
+    .then((text) => {
+      if (token !== callToken || !callVisible.value) {
+        return
+      }
+      const answer = (text || '').trim()
+      if (!answer) {
+        ElMessage.warning('没听清，请再说一次')
+        resumeAfterSpeech()
+        return
+      }
+      runCallRound(() => send(answer), token)
+    })
+    .catch((error) => {
+      if (token !== callToken || !callVisible.value) {
+        return
+      }
+      ElMessage.error(error?.message || '语音转写失败')
+      resumeAfterSpeech()
+    })
+}
+
+/** 一轮完整通话：thinking → send（SSE）→ speaking（朗读 onEnd 自动回 listening） */
+async function runCallRound(task, token) {
+  stopCallMic()
+  callPhase.value = 'thinking'
+  const answer = await task()
+  if (token !== callToken || !callVisible.value || finished.value) {
+    return
+  }
+  if (answer) {
+    callPhase.value = 'speaking'
+    speechCtl.speak(answer)
+  } else {
+    resumeAfterSpeech()
+  }
+}
+
+function onCallVisibility() {
+  // 切后台在手机基本等于断麦断播，通话无法保证质量：按收尾处理（监考逻辑不经这里，一行没动）
+  if (document.visibilityState === 'hidden' && callVisible.value) {
+    const hadSession = !!sessionId.value && !finished.value
+    closeCall()
+    if (hadSession) {
+      closeSession('close')
+    }
+  }
+}
+
+function onCallBackKey() {
+  // 返回键/左滑 = 最小化回文字模式，会话不断
+  if (callVisible.value) {
+    closeCall()
+  }
+}
+
+async function openCall() {
+  if (!audioAvailable.value || callVisible.value) {
+    return
+  }
+  ttsSysAvailable.value = canSystemSpeak()
+  callEngine.value = loadEngine()
+  if (callEngine.value === 'system' && !ttsSysAvailable.value) {
+    callEngine.value = 'remote' // 个别国产壳没有中文音色，自动回退神经音色
+  }
+  speechCtl.setEngine(callEngine.value)
+  callVisible.value = true
+  callMuted.value = false
+  callPhase.value = 'connecting'
+  callStartedAt = Date.now()
+  callDuration.value = '00:00'
+  callTimer = setInterval(() => {
+    callDuration.value = formatDuration(Date.now() - callStartedAt)
+  }, 1000)
+  document.addEventListener('visibilitychange', onCallVisibility)
+  window.addEventListener('popstate', onCallBackKey)
+  window.addEventListener('hashchange', onCallBackKey)
+
+  const token = ++callToken
+  if (!started.value) {
+    // 还没开场：面试官先出第一题并朗读（复用主管线的空历史语义）
+    await runCallRound(() => send(''), token)
+    return
+  }
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'ai' && last.content) {
+    // 屏幕上是没答的题：进入时先朗读一遍，让候选人知道在答哪一题
+    callPhase.value = 'speaking'
+    speechCtl.speak(last.content)
+  } else {
+    callListening()
+  }
+}
+
+function closeCall() {
+  if (!callVisible.value) {
+    return
+  }
+  callToken += 1 // 在途异步链全部作废
+  if (callTimer) {
+    clearInterval(callTimer)
+    callTimer = null
+  }
+  speechCtl.stop()
+  stopCallMic()
+  callVisible.value = false
+  callMuted.value = false
+  callPhase.value = 'connecting'
+  document.removeEventListener('visibilitychange', onCallVisibility)
+  window.removeEventListener('popstate', onCallBackKey)
+  window.removeEventListener('hashchange', onCallBackKey)
+}
+
+function minimizeCall() {
+  closeCall() // 只回文字模式继续答题，会话不断
+}
+
+function toggleCallMute() {
+  callMuted.value = !callMuted.value
+  if (callMuted.value) {
+    stopCallMic()
+    if (callPhase.value === 'listening') {
+      callPhase.value = 'muted'
+    }
+  } else if (callPhase.value === 'muted') {
+    callListening()
+  }
+}
+
+function interruptCall() {
+  if (callPhase.value !== 'speaking') {
+    return
+  }
+  speechCtl.stop() // stop 不触发 onEnd，这里手动回收听
+  resumeAfterSpeech()
+}
+
+function hangupCall() {
+  closeCall()
+  if (started.value && !finished.value) {
+    // 挂断 = 既有收尾流程：让面试官出总结并关会话
+    finish()
+  }
+}
+
+function switchCallEngine(engine) {
+  if (engine === callEngine.value) {
+    return
+  }
+  if (engine === 'system' && !canSystemSpeak()) {
+    ElMessage.warning('浏览器没有可用的中文音色，请用神经音色')
+    return
+  }
+  callEngine.value = engine
+  saveEngine(engine)
+  speechCtl.setEngine(engine)
+}
+
+// 面试被结束（强制/总结收尾）→ 通话环路必须跟着下台
+watch(finished, (ended) => {
+  if (ended && callVisible.value) {
+    closeCall()
+  }
+})
+
 function scrollToBottom() {
   nextTick(() => {
     if (listEl.value) {
@@ -669,7 +1050,8 @@ function scrollToBottom() {
 .interview__meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap; /* 窄屏下开关/按钮/计数自然换行，不再挤成一团溢出 */
+  gap: 8px 12px;
   font-size: 12px;
   color: #909399;
 }
@@ -817,16 +1199,71 @@ function scrollToBottom() {
   flex: 1;
 }
 
-/* 窄屏：气泡放宽、头部信息换行 */
+/* 语音按钮与自动发送开关同一列摆放，不抢输入框宽度 */
+.interview__footer-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.interview__autosend {
+  height: auto;
+  font-weight: 400;
+}
+
+.interview__autosend :deep(.el-checkbox__label) {
+  font-size: 12px;
+  color: #909399;
+}
+
+/* 窄屏：头部收纳成两行、页脚换成微信式两层（第一行输入+发送，第二行整宽按住说话） */
 @media (max-width: 768px) {
   .interview__header {
     flex-direction: column;
     align-items: flex-start;
     gap: 6px;
+    padding: 10px 12px;
+  }
+
+  /* 知识库文件/片段计数是桌面调试信息，手机上只保留告警，减少杂乱 */
+  .interview__meta-info {
+    display: none;
+  }
+
+  .interview__body {
+    padding: 12px;
   }
 
   .interview__bubble {
     max-width: 86%;
+  }
+
+  .interview__footer {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .interview__footer .el-textarea {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 语音条整宽放第二行，「转完即发」靠右；order 保证 DOM 里的发送按钮留在第一行 */
+  .interview__footer-side {
+    order: 3;
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .interview__footer-side .voice-bar {
+    flex: 1;
+    justify-content: center;
   }
 }
 </style>

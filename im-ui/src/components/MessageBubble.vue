@@ -9,7 +9,11 @@
     class="bubble"
     :class="{ 'bubble--self': message.self, 'bubble--selecting': selectable }"
     @click.capture="onBubbleClick"
-    @contextmenu.prevent="emit('menu', $event)"
+    @contextmenu.prevent="onContextMenu"
+    @touchstart.passive="onTouchStart"
+    @touchmove.passive="onTouchMove"
+    @touchend.passive="onTouchEnd"
+    @touchcancel.passive="onTouchEnd"
   >
     <span v-if="selectable" class="bubble__check" :class="{ 'is-checked': selected }">
       <el-icon v-if="selected"><Select /></el-icon>
@@ -119,17 +123,25 @@
             </div>
           </div>
 
-          <!-- 语音 -->
-          <div
-            v-else-if="msgType === 4"
-            class="bubble__voice"
-            :class="{ 'bubble__voice--playing': playing }"
-            :style="{ width: voiceWidth }"
-            @click="toggleVoice"
-          >
-            <el-icon :size="16"><component :is="playing ? VideoPause : VideoPlay" /></el-icon>
-            <span class="bubble__voice-duration">{{ voiceDuration }}</span>
-          </div>
+          <!-- 语音：语音条 + 转文字结果。微信那份手感靠「文字贴在条子下面」，
+               不是弹框——所以这里用 template 包住两块，不能插到 v-else-if 链中间 -->
+          <template v-else-if="msgType === 4">
+            <div
+              class="bubble__voice"
+              :class="{ 'bubble__voice--playing': playing }"
+              :style="{ width: voiceWidth }"
+              @click="toggleVoice"
+            >
+              <el-icon :size="16"><component :is="playing ? VideoPause : VideoPlay" /></el-icon>
+              <span class="bubble__voice-duration">{{ voiceDuration }}</span>
+            </div>
+            <div v-if="transcript" class="bubble__transcript">
+              <div v-show="transcriptOpen" class="bubble__transcript-text">{{ transcript }}</div>
+              <button class="bubble__transcript-toggle" @click.stop="toggleTranscript">
+                {{ transcriptOpen ? '收起文字' : '展开文字' }}
+              </button>
+            </div>
+          </template>
 
           <!-- 通话记录：类型图标 + 时长；已录制则可回放 -->
           <div v-else-if="msgType === 6" class="bubble__call">
@@ -868,6 +880,90 @@ async function toggleVoice() {
   }
 }
 
+/* --------------------------- 转文字结果（本端查看） --------------------------- */
+
+/**
+ * 长按→「转文字」得回的文本：由父组件 ChatWindow 写回 message.transcript。
+ * 不落库也不同步给对方——谁转的谁看，与微信一致；切会话重进气泡就消失。
+ * 收不收起也记在消息对象上：同一个气泡重进时不该忘记刚才被自己收起来过，
+ * 而且父组件要在「重复点转文字」时把它重新展开。
+ */
+const transcript = computed(() => props.message.transcript || '')
+const transcriptOpen = computed(() => props.message.transcriptHidden !== true)
+
+function toggleTranscript() {
+  props.message.transcriptHidden = !transcriptOpen.value
+}
+
+/* ---------------------------- 移动端长按唤菜单 ---------------------------- */
+
+/** 长按判定时长与允许的手指微动：太短会在正常点按时误弹菜单，太松则列表一滑就断 */
+const LONG_PRESS_MS = 500
+const LONG_PRESS_SLOP = 12
+let longPressTimer = null
+let longPressAnchor = null
+/**
+ * Android Chrome 长按之后会补发一次 contextmenu：菜单已经被长按开过了，
+ * 不去重就会看到菜单在同一个位置闪两下。
+ */
+let menuOpenedAt = 0
+
+function onTouchStart(event) {
+  // 多选模式下点气泡是勾选，不该再叠一层菜单；多指（缩放）也不算长按
+  if (props.selectable || event.touches.length !== 1) {
+    return
+  }
+  const touch = event.touches[0]
+  // 先清理上一轮的计时与锚点，再落下新的锚点（顺序反了会把刚记下的起点抹掉）
+  clearLongPress()
+  longPressAnchor = { x: touch.clientX, y: touch.clientY }
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null
+    if (!longPressAnchor) {
+      return
+    }
+    menuOpenedAt = Date.now()
+    // 与右键菜单同一个出口：父组件只认 clientX/clientY，这里造一个等价的事件体
+    emit('menu', { clientX: longPressAnchor.x, clientY: longPressAnchor.y })
+  }, LONG_PRESS_MS)
+}
+
+function onTouchMove(event) {
+  if (!longPressTimer || !longPressAnchor) {
+    return
+  }
+  const touch = event.touches[0]
+  if (!touch) {
+    return
+  }
+  // 在滑消息列表，不是长按：立即放弃，否则每滑一下都弹菜单
+  if (Math.abs(touch.clientX - longPressAnchor.x) > LONG_PRESS_SLOP
+    || Math.abs(touch.clientY - longPressAnchor.y) > LONG_PRESS_SLOP) {
+    clearLongPress()
+  }
+}
+
+function onTouchEnd() {
+  clearLongPress()
+}
+
+function clearLongPress() {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+  longPressAnchor = null
+}
+
+function onContextMenu(event) {
+  if (Date.now() - menuOpenedAt < 800) {
+    return
+  }
+  emit('menu', event)
+}
+
+onBeforeUnmount(clearLongPress)
+
 /* -------------------------------- 通话记录 -------------------------------- */
 
 const callIsVideo = computed(() => extra.value.callMediaType === 'video')
@@ -941,6 +1037,9 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 8px;
   padding: 6px 16px;
+
+  /* 长按菜单由自己实现：不留系统那套长按弹字/翻译气泡，否则两个菜单会打架 */
+  -webkit-touch-callout: none;
 }
 
 .bubble--self {
@@ -1381,6 +1480,45 @@ onBeforeUnmount(() => {
 .bubble__voice-duration {
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* 转文字结果：贴在语音条下面，与微信一致。自己一行小面板，不抢气泡的圆角风格 */
+.bubble__transcript {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+  max-width: 260px;
+}
+
+/* 自己发的气泡靠右，里面的文字块与「收起」也要跟着靠右 */
+.bubble--self .bubble__transcript {
+  align-items: flex-end;
+  margin-left: auto;
+}
+
+.bubble__transcript-text {
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--im-text-primary, #303133);
+  background: var(--im-panel);
+  border: 1px solid var(--im-border);
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.bubble__transcript-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  cursor: pointer;
 }
 
 /* 通话记录：图标 + 类型 + 时长；若留有录制则附带回放入口 */

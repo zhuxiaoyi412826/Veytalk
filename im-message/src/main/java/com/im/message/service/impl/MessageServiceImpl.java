@@ -565,7 +565,10 @@ public class MessageServiceImpl implements MessageService {
             throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_UNAVAILABLE);
         }
         MessageExtra extra = message.getExtra();
-        String text = spi.toText(extra == null ? null : extra.getFileUrl(),
+        // 优先按 fileId 识别：实现方能直接走 FileStorageSpi 读字节，不必拿受控地址再发一次
+        // 带登录态的 http 回环请求（预签名地址还有时效，取到可能已过期）
+        String text = spi.toText(extra == null ? null : extra.getFileId(),
+                extra == null ? null : extra.getFileUrl(),
                 extra == null ? null : extra.getDuration());
         if (TextUtil.isBlank(text)) {
             throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_UNAVAILABLE);

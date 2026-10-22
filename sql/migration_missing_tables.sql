@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS `im_message_reaction`
     `id`          BIGINT      NOT NULL COMMENT '主键（雪花）',
     `message_id`  BIGINT      NOT NULL COMMENT '被回应的消息 ID',
     `user_id`     BIGINT      NOT NULL COMMENT '回应者 ID',
-    `emoji`       VARCHAR(32) NOT NULL COMMENT '表情字符，如 👍 ❤️ 😄',
+    `emoji`       VARCHAR(32) NOT NULL COMMENT '表情字符（emoji，如点赞/红心/笑脸）',
     `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '回应时间',
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_msg_user_emoji` (`message_id`, `user_id`, `emoji`),

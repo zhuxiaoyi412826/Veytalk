@@ -60,6 +60,13 @@ export const useCallStore = defineStore('call', () => {
   const iceServers = shallowRef([])
   const localStream = shallowRef(null)
   const remoteStream = shallowRef(null)
+  /**
+   * 浮层是否收起成可拖动的悬浮小窗。
+   * 放 store 而不是组件局部态：小窗与浮层是两个组件（都挂 MainLayout），得共享这一个开关；
+   * 而浮层最小化时用的是 opacity 抹掉而不是卸载——视频元素一卸载 srcObject 就得重挂，
+   * 语音通话还会连带把声音出口搞断，所以宁可让画面常驻、只是看不见。
+   */
+  const minimized = ref(false)
 
   /* ------------------------------ 非响应式内部态 ------------------------------ */
   let engine = null
@@ -71,6 +78,8 @@ export const useCallStore = defineStore('call', () => {
   let recordedFilePath = ''
   let config = null // { enabled, iceServers }
   let configLoading = null
+  // 最后一次 ICE 诊断文本：hint 会随挂断一起被 reset，但用户往往是挂断后才想起截图
+  let lastIceDiag = ''
 
   const isActive = computed(() => status.value === 'active')
   const visible = computed(() => status.value !== 'idle' && status.value !== 'ended')
@@ -99,12 +108,18 @@ export const useCallStore = defineStore('call', () => {
         return config
       })
       .catch(() => {
-        config = { enabled: false, iceServers: [] }
+        // ★ 关键：请求失败不能缓存成「关闭」。config 一旦被写成 {enabled:false} 这个真值，
+        // 第 82 行的 `if (config && !force)` 会让之后每次 ensureConfig 都提前返回、永不再请求——
+        // 而 store 是全局单例，于是「页面加载那一刻后端恰好在重启/网络抖一下」就把通话入口
+        // 永久藏掉，直到用户手动刷新整页（正是「按钮不见了」的成因）。
+        // 这里把 config 留空、只临时置灰 enabled，下次进入会话（onMounted 再调 ensureConfig）会自动重试，
+        // 后端恢复后入口即自愈。只有后端明确回 enabled=false 的成功响应才缓存关闭态（见上面 then）。
+        config = null
         enabled.value = false
         iceServers.value = []
         groupEnabled.value = false
         groupMaxSlots.value = 0
-        return config
+        return null
       })
       .finally(() => {
         configLoading = null
@@ -145,17 +160,25 @@ export const useCallStore = defineStore('call', () => {
           if (status.value === 'active') {
             hint.value = ''
           }
+          // 连通时也只把现场进 console：下次换网络拓扑（USB 共享 / 热点 / 路由器）时，
+          // 能对比出上一次走通的是哪个候选对，而不是「好了但不知道为什么好」
+          dlog('[call] ICE 明细', engine && engine.iceDetail())
           startTimer()
         } else if (state === 'failed') {
-          // ICE 彻底失败（同网段但防火墙拦了 UDP、两端不同网段等）：不自动收口的话
+          // ICE 彻底失败（同网段但防火墙拦了 UDP、两端不同网段、mDNS 解不开等）：不自动收口的话
           // 本端卡在一个无声无像的浮层里，对端也不知道你挂了 —— 给 5s 重连窗口，
           // 没救回来就主动挂断（hangup 会同时通知对端 teardown）
-          hint.value = 'P2P 连接失败：确认两端在同一局域网，且电脑防火墙未拦截 UDP'
+          reportIceFailure()
           clearFailTimer()
           failTimer = setTimeout(() => {
             failTimer = null
             if (status.value === 'active') {
-              ElMessage.error('通话无法建立，已挂断（检查同网段 / 防火墙 UDP）')
+              ElMessage({
+                type: 'error',
+                message: `通话无法建立，已挂断。${lastIceDiag || ''}`,
+                duration: 20000,
+                showClose: true
+              })
               hangup()
             }
           }, 5000)
@@ -163,6 +186,31 @@ export const useCallStore = defineStore('call', () => {
       }
     })
     await engine.initMedia()
+  }
+
+  /**
+   * 把 ICE 失败的原因摊开给人看。
+   *
+   * 以前只有一句「P2P 连接失败：确认两端在同一局域网，且电脑防火墙未拦截 UDP」，
+   * 而这句话把三种互不相干的成因（入站 UDP 被拦 / 两端不同网段 / mDNS 候选解析不了）
+   * 压成了一个，用户只能一遍遍重拨。现在直接把两端候选统计与选通结果写在浮层上，
+   * 手机也能截图，一眼能定位到具体是哪一类。
+   */
+  async function reportIceFailure() {
+    if (!engine) {
+      hint.value = 'P2P 连接失败'
+      return
+    }
+    lastIceDiag = engine.iceSummary()
+    hint.value = `P2P 连接失败：${lastIceDiag}`
+    dlog('[call] ICE 明细', engine.iceDetail())
+    const selected = await engine.selectedPairText()
+    if (selected) {
+      lastIceDiag = `${lastIceDiag} · ${selected}`
+      if (status.value === 'active') {
+        hint.value = `P2P 连接失败：${lastIceDiag}`
+      }
+    }
   }
 
   /* ------------------------------ 计时 ------------------------------ */
@@ -629,8 +677,18 @@ export const useCallStore = defineStore('call', () => {
     cameraOff.value = false
     sharing.value = false
     recording.value = false
+    minimized.value = false
     localStream.value = null
     remoteStream.value = null
+  }
+
+  /** 收起成悬浮小窗 / 从小窗回到通话界面（小窗那边只调 restore） */
+  function minimize() {
+    minimized.value = true
+  }
+
+  function restore() {
+    minimized.value = false
   }
 
   /** 在资源管理器打开录制目录（浮层「查看录像」用） */
@@ -659,6 +717,7 @@ export const useCallStore = defineStore('call', () => {
     iceServers,
     localStream,
     remoteStream,
+    minimized,
     // getters
     isActive,
     visible,
@@ -669,6 +728,8 @@ export const useCallStore = defineStore('call', () => {
     reject,
     cancel,
     hangup,
+    minimize,
+    restore,
     toggleMute,
     toggleCamera,
     toggleScreen,

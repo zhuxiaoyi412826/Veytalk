@@ -2,22 +2,30 @@ package com.im.ai.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.im.ai.dto.req.InterviewChatRequest;
+import com.im.ai.dto.req.InterviewTtsRequest;
+import com.im.ai.service.AudioService;
 import com.im.ai.service.InterviewAuditService;
 import com.im.ai.service.InterviewService;
 import com.im.common.api.Result;
+import com.im.common.api.ResultCode;
+import com.im.common.exception.BusinessException;
 import com.im.common.security.ratelimit.RateLimit;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.Map;
 
 /**
@@ -40,6 +48,7 @@ public class InterviewController {
 
     private final InterviewService interviewService;
     private final InterviewAuditService auditService;
+    private final AudioService audioService;
 
     @Operation(summary = "面试对话（SSE 流式）",
             description = "请求体携带完整对话历史（空数组=开始新面试）；响应为 text/event-stream，"
@@ -63,5 +72,38 @@ public class InterviewController {
         // 分两个请求就会多一种「状态拿到了、策略还没到」的中间态
         status.put("proctor", auditService.proctorView());
         return Result.ok(status);
+    }
+
+    @Operation(summary = "语音转文字（ASR）",
+            description = "multipart 上传 16k 单声道 WAV（前端 utils/audioRec.js 自编码），返回 {text}；"
+                    + "转写文本进普通消息流，后续问答仍走 /chat SSE")
+    @RateLimit(count = 30, seconds = 60, dimension = RateLimit.Dimension.USER, key = "ai.interview.asr")
+    @PostMapping("/asr")
+    public Result<Map<String, String>> asr(@RequestPart("file") MultipartFile file) {
+        String contentType = file.getContentType();
+        if (contentType == null || !contentType.startsWith("audio/")) {
+            throw new BusinessException(ResultCode.AI_ASR_FAILED.getCode(), "只接受音频文件（16k 单声道 WAV）");
+        }
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (IOException e) {
+            throw new BusinessException(ResultCode.AI_ASR_FAILED.getCode(), "读取上传音频失败，请重试");
+        }
+        return Result.ok(Map.of("text", audioService.transcribe(bytes)));
+    }
+
+    @Operation(summary = "文字合成朗读（TTS）",
+            description = "返回 audio/wav 字节流（神经音色，阿里云 omni 聚合后整段下发）；"
+                    + "前端不选神经音色时用浏览器 speechSynthesis，不经这个接口")
+    @RateLimit(count = 30, seconds = 60, dimension = RateLimit.Dimension.USER, key = "ai.interview.tts")
+    @PostMapping(value = "/tts", produces = "audio/wav")
+    public ResponseEntity<byte[]> tts(@RequestBody @Valid InterviewTtsRequest request) {
+        byte[] wav = audioService.synthesize(request.getText());
+        // 语音片段短周期重复拉取（同一段回答切音色重听），给了缓存反而会让新文本命中旧音频
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("audio/wav"))
+                .header("Cache-Control", "no-store")
+                .body(wav);
     }
 }

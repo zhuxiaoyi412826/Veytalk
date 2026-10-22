@@ -157,6 +157,12 @@ spring:
           model: ${AI_MODEL_NAME:qwen-flash}
           temperature: 0.7
           timeout: 60s
+      # 面试语音链路（按住说话转文字 / 电话面试神经音色朗读）：同 key 同端点，只换模型。
+      # 未配 key 时语音入口自动置灰降级文字+系统音色，不影响其余功能（消费方 AiProperties.audio）。
+      audio:
+        asr-model: ${AI_ASR_MODEL_NAME:qwen3-asr-flash}
+        tts-model: ${AI_TTS_MODEL_NAME:qwen3-omni-flash}
+        tts-voice: ${AI_TTS_VOICE:Tina}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -507,16 +513,22 @@ im:
   # ---------------------------------------------------------------------------
   # 智能能力：语音转文字 / 消息翻译
   #
-  # 两者都依赖外部厂商（ASR / 机器翻译），本项目不内置真实链路，改为「配置门控 + 优雅降级」：
-  # 键名对应 com.im.common.config.ImProperties.Intelligence。无真实厂商 bean 时，点击入口
+  # 两者都依赖外部服务，统一「配置门控 + 优雅降级」：键名对应
+  # com.im.common.config.ImProperties.Intelligence。没有可用厂商 bean 时，点击入口
   # 直接回一句降级提示（MESSAGE_TO_TEXT_UNAVAILABLE / MESSAGE_TRANSLATE_UNAVAILABLE），
-  # 不冒充真实结果。接真实厂商时提供一个 @Primary 的 SpeechToTextSpi / TranslationSpi 实现即自动覆盖。
+  # 不冒充真实结果。
+  #
+  # ASR 已接真链路：im-ai 的 DashScopeSpeechToTextSpi（@Primary）复用面试「按住说话」
+  # 同一把 ALI_BABA_API_KEY 与 spring.ai.openai.audio.asr-model（默认 qwen3-asr-flash），
+  # 按 fileId 直读存储字节，聊天语音消息因此也能转文字。没配 key 时自动降级回提示。
+  # 翻译仍未接厂商：接的时候提供一个 @Primary 的 TranslationSpi 实现即自动覆盖内置桩。
   # ---------------------------------------------------------------------------
   intelligence:
     # 能力总开关：关闭后前端隐藏「转文字 / 翻译」入口，服务端也直接拒绝（不查 SPI）
     enabled: ${IM_INTELLIGENCE_ENABLED:true}
-    # 无真实厂商时用内置桩返回带「模拟」前缀的占位文本，仅为跑通开发联调全链路；
+    # 没有任何可用厂商时用内置桩返回带「模拟」前缀的占位文本，仅为跑通开发联调全链路；
     # 生产必须 false（否则会把假转写/假翻译当成真内容展示）。dev profile 会临时打开。
+    # 注：ASR 侧的真实现标了 @Primary，本开关打开时真链路优先，桩只兜翻译。
     mock-when-unconfigured: false
     # 翻译默认目标语言（前端未指定 lang 时兑底），Bilibili 风格 ISO 代码
     default-target-lang: en-US

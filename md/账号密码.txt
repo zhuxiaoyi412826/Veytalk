@@ -1,6 +1,0 @@
-admin            123456
-alice            123456
-bob              123456
-zhuxiaoyi        412826
-zhuxiaoyizxy     412826
-zhuxiaoyi1       412826

@@ -6,7 +6,7 @@
 
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.8-brightgreen) ![JDK](https://img.shields.io/badge/JDK-21-orange) ![Vue](https://img.shields.io/badge/Vue-3.5.42-4FC08D) ![MySQL](https://img.shields.io/badge/MySQL-8.x-4479A1) ![Redis](https://img.shields.io/badge/Redis-5%2B-DC382D) [![License](https://img.shields.io/badge/License-Apache%202.0-blue)](LICENSE)
 
-**工程形态**：后端 **14 个 Maven module**（根 `pom.xml`），其中 13 个 repackage 成单 jar（`im-bootstrap/target/im-server.jar`）；被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上、不打进后端；前端是**两个独立工程**——聊天端 `im-ui`（Web / 桌面 / 手机浏览器）与管理后台 `im-admin-ui`（只在电脑浏览器用），都通过 Vite 代理与后端通信、不参与 Maven 构建。
+**工程形态**：后端 **14 个 Maven module**（根 `pom.xml`），其中 13 个 repackage 成单 jar（`im-bootstrap/target/im-server.jar`）；被控端 Agent（`im-remote-agent`）是独立 fat jar，跑在被控机器上、不打进后端；前端是**三个独立工程**——聊天端 `im-ui`（Web / 桌面 / 手机浏览器）、管理后台 `im-admin-ui`（只在电脑浏览器用）与官网 `im-website`（纯静态产品展示与下载站，无后端接口依赖），都不参与 Maven 构建，前两个通过 Vite 代理与后端通信。
 
 ---
 
@@ -58,7 +58,8 @@
 
 **AI 能力（im-ai）**
 
-- **AI 面试官**：本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式对话
+- **AI 面试官**：本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式对话；语音输入（按住说话转写）与**电话面试**（qwen3-asr-flash 识别 + qwen3-omni-flash 朗读，半双工免提连续对话，手机端适配）
+- **聊天语音消息 + 长按转文字**：单聊 / 群聊输入区可切「语音」模式按住说话，松手即发语音消息；长按（或右键）语音气泡→「转文字」，结果像微信一样内联贴在语音条下方。ASR 与面试页共用同一个 `qwen3-asr-flash`（`DashScopeSpeechToTextSpi` 按 fileId 直读存储字节），未配 key 时降级为一句提示
 - **全网检索**：消息搜索框的「网络」分组（见「十三」）
 - 对接阿里云百炼 DashScope（OpenAI 兼容协议），按轮检索、内存索引热更新
 
@@ -143,6 +144,7 @@ npm run dev
 | [`md/手机真机调试HTTPS配置指南.md`](md/手机真机调试HTTPS配置指南.md) | 手机真机联调远程控制的自签证书配置 |
 | [`im-ui/README.md`](im-ui/README.md) | 聊天端前端工程详细说明 |
 | [`im-admin-ui/README.md`](im-admin-ui/README.md) | 管理后台前端工程说明（端口与 CORS、登录链路、部署四事） |
+| [`im-website/README.md`](im-website/README.md) | 官网前端工程说明（端口 5373、下载产物投放与 fetch-downloads 脚本） |
 | `http://localhost:8080/doc.html` | Knife4j 聚合接口文档（入参 / 出参、在线调试；分组按 `@Tag` 增长，不写死个数） |
 | [`md/CHANGELOG.md`](md/CHANGELOG.md) | 版本变更记录 |
 
@@ -165,6 +167,7 @@ npm run dev
 - **后端**：整体打包 `mvn clean package -DskipTests`，产物 `im-bootstrap/target/im-server.jar`。改过跨模块代码（如 `im-common`）后若要用 `spring-boot:run` 跑，**必须先 `mvn install` 到本地仓库 `~/.m2`**，否则会**静默**跑旧 jar——`spring-boot:run` 只编译 `im-bootstrap` 一个模块、跨模块依赖从 `~/.m2` 解析（命令与原因见「六、启动后端」「十五、已知坑」）。
 - **前端**：`cd im-ui; npm install; npm run dev`（开发，5173）/ `npm run build`（生产，产物 `im-ui/dist`）/ `npm run build:electron`（桌面端）；`npm run dev:lan` 局域网模式，`npm run gen:cert` 生成手机真机联调用的自签证书。
 - **管理后台前端**：`cd im-admin-ui; npm install; npm run dev`（开发，5273）/ `npm run build`（产物 `im-admin-ui/dist`）。它是独立工程与 `im-ui` 不共用依赖与构建，登录态却共用同一套 Sa-Token；端口与背后的 CORS 白名单绑死，改一处要改三处（见 `im-admin-ui/README.md`）。
+- **官网**：`cd im-website; npm install; npm run dev`（开发，5373）/ `npm run build`（产物 `im-website/dist`，纯静态可投任意服务器）。无后端依赖；下载区的三个安装包由 `npm run fetch:downloads` 从 `electron/release` 收集改名（见 `im-website/README.md`）。
 
 ### 测试
 
@@ -204,7 +207,8 @@ npm run dev
 
 - **账号认证**：账号密码 / 邮箱 / 手机验证码登录；密码找回（手机短信 + 邮箱双通道，reset 与登录场景的验证码在 Redis 里隔离、重置后踢掉全部登录态）。
 - **短信下发可插拔**：验证码下发走 `SmsSender` 抽象，默认 `MockSmsSender`（只写日志）。
-- **AI 面试官**：左侧「面试」入口 → Java 全栈面试，本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式、循序渐进按轮追问、面试会话审计（见「十三」）。
+- **AI 面试官**：左侧「面试」入口 → Java 全栈面试，本地知识库 BM25 检索增强（RAG）+ SSE 逐 token 流式、循序渐进按轮追问、面试会话审计（见「十三」）；输入框旁「🎙 按住说话」转写进草稿可再编辑（默认「转完即发」，松手即提交，偏好存 localStorage），「📞 电话面试」进全屏免提通话（VAD 断句自动送、面试官朗读、静音/打断/挂断，系统/神经双音色）。
+- **聊天发语音与转文字**：单聊 / 群聊工具栏点「语音」切到按住说话模式（与微信同构，桌面端同样可用），上滑取消、松开即发，录音时长写进气泡；长按（手机端）或右键（桌面）语音气泡选「转文字」，文字展开在语音条下方、可收起，只在本端可见（不落库、不推给对方）。群禁言与无上传权限时不出现录音条，会说明原因。
 - **好友备注**：改其他用户在自己这里的显示名，留空即清除、回退对方昵称（`PUT /api/friend/{friendId}/remark`）。
 - **图片内容闸门三件套**：图内文字 OCR 敏感词（tesseract.js 全离线识别、服务端遮蔽后存 `extra.ocrText`）、**色情 NSFW 识别**（nsfwjs + TensorFlow.js 本机推理，命中即拒发 + 审计留痕，聊天图 / 头像 / 直播封面同源同闸）、**闪照 + 马赛克**（阅后即焚 + 纯前端打码）。
   - **闪照语义：每人各看一次、互不影响**（仅单聊）：`im_message.extra.flashViewedBy` 存已消费查看的用户名单，`flashViewed` 是下发前按查看者现算的瞬态位（名单含自己即已销毁），**发送端自己看一眼不会吃掉接收端那一次**；只有会话**全员**都看过才触发销毁。销毁 = `im_file` 记录**逻辑删**（`@TableLogic` 置 `deleted=1`，应用层 `download` / 直链均取不到字节），**不物理删存储字节**（秒传共享 `objectKey`，删字节会误伤他人同内容文件），无 DDL。需重启后端生效。
@@ -229,12 +233,12 @@ npm run dev
 - **真实短信服务商**：新增一个 `SmsSender` 实现、切换生效 provider 即可（当前 Mock 只写日志）。
 - **事务邮箱**：真实邮件发信通道（有了服务器再开发）。
 - **腾讯防水墙**：人机验证。
-- **腾讯 TRTC**：音视频实时通信底座（下面的语音 / 视频面试官依赖它；一对一通话已用原生 WebRTC 落地，不依赖 TRTC）。
+- **腾讯 TRTC**：音视频实时通信底座（下面的视频面试官依赖它；一对一通话已用原生 WebRTC 落地，不依赖 TRTC；面试电话模式用 ASR+TTS 半双工，同样不依赖 TRTC）。
 
 ### 📋 规划中
 
 - **第三方授权登录**：QQ / 微信 / GitHub OAuth。
-- **语音 / 视频面试官**：基于 TRTC，覆盖移动端与电脑端。
+- **视频面试官（基于 TRTC 实时音视频）**：🚧 待开发，覆盖移动端与电脑端。**语音部分已以另一种形态落地**：「📞 电话面试」是 ASR（qwen3-asr-flash）+ TTS（qwen3-omni-flash）的半双工免提连续对话，不是 TRTC 实时音视频、无面试视频，两者别混为一谈。
 - **图片审核升级成服务端真防线**：现行判定跑在发送端浏览器，绕开页面直接调上传接口即可突破；要成硬防线需服务端补一条推理链路（阈值配置与审计口径可直接复用）。
 - **直播右侧内容面板**：文章 / 小说 / 音乐，点击切换展示（**视频板块已落地**：`im_live_video` + `/api/live/video` 分页 / 发布 / 下架 / 播放计数，大厅信息流与 `Live.vue` 已可用）。
 - **点播短视频的真多档清晰度**：直播已经有多档阶梯，`im_live_video` 却仍是一行一个原文件、上传时不转码，所以播放条只如实显示 `宽×高`、**不给假选择器**。要真多档得新增列/表存多路产物 + 上传期逐档转码 + N 倍存储与流量，而且转码只有桌面端能做（Web 上传无法起 ffmpeg），机理见 [`md/直播.md`](md/直播.md) §18.8。
@@ -299,7 +303,7 @@ npm run dev
 
 ## 一、技术栈与版本
 
-后端版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处；前端依赖版本在 `im-ui/package.json`，管理后台在 `im-admin-ui/package.json`，桌面端在 `electron/package.json`。
+后端版本全部锁定在根 `pom.xml` 的 `<properties>` 里，升级只需改一处；前端依赖版本在 `im-ui/package.json`，管理后台在 `im-admin-ui/package.json`，官网在 `im-website/package.json`，桌面端在 `electron/package.json`。
 
 | 类别 | 组件 | 版本 | 说明 |
 |---|---|---|---|
@@ -474,6 +478,9 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `IM_LOG_HOME` | `D:/rizi1/IM` | 日志目录，见「六、启动后端 → 日志输出与目录」；Linux 下必须覆盖成对应路径（如 `/data/logs/im`） |
 | `ALI_BABA_API_KEY` | 空 | AI 面试官的百炼（DashScope）API Key；未设置时仅面试功能不可用，其余功能照常 |
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
+| `AI_ASR_MODEL_NAME` | `qwen3-asr-flash` | 面试语音转写（ASR）模型名，与主管线同 key 不同模型 |
+| `AI_TTS_MODEL_NAME` | `qwen3-omni-flash` | 面试电话模式朗读（TTS）模型名；神经音色按输出 token 计费 |
+| `AI_TTS_VOICE` | `Tina` | 神经音色名（omni 支持的 voice）；系统音色档不经这里 |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
 | `IM_LIVE_ENABLED` | `true` | 直播总开关；关掉则开播/观看接口与 `/ws/live` 弹幕端点全部拒绝服务 |
 | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放基址（相对路径，前端按访问源补全：Web 同源、Electron 取「后端 host + 8088」）；生产换成 Nginx 播放口绝对地址 |
@@ -747,6 +754,29 @@ Windows 防火墙方面，首次运行 `node.exe` 与 `java.exe` 时弹窗点了
 > USB 共享网络下这个 IP 由手机分配，**重插 USB 或手机重启后可能变化**，届时以 Vite 控制台
 > 打印的 `Network` 行为准。
 
+#### 手机与电脑通话报「P2P 连接失败」：浏览器入站 UDP 没被放行
+
+页面能打开、信令能到、振铃与接听都正常，但一通上就报 P2P 失败 —— 这不是链路坏了，而是
+**上面那句「防火墙已放行」只对 `node.exe` 与 `java.exe` 成立，对浏览器不成立**：WebRTC 的媒体与
+ICE 探活走 UDP，端口由浏览器随机取用，而 Windows 防火墙里 `msedge.exe` / `chrome.exe` 默认只有
+一条 `Microsoft Edge (mDNS-In)`（UDP 5353）入站放行规则，媒体端口的入站包全被默默丢掉。
+于是典型现场很具欺骗性：**电脑拨手机能通（本端先发包，回包被当作已有会话的响应放行），
+手机拨电脑不通（手机发的 ICE 探活对电脑是「非请求入站」）**。以管理员执行一次即可（两个浏览器都加）：
+
+```powershell
+New-NetFirewallRule -DisplayName "IM WebRTC media (Edge)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Profile Any
+New-NetFirewallRule -DisplayName "IM WebRTC media (Chrome)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files\Google\Chrome\Application\chrome.exe" -Profile Any
+```
+
+另一类常见原因是**两端其实不在同一网段**：电脑插两张网卡（或一张是有线上网、一张是手机 USB 共享）时，
+两个网段之间没有路由，host 候选互相不可达（本项目 `im.call.stun-urls` 默认为空，只做局域网直连，
+没有公网候选兼顶）。把手机和电脑放到同一个路由器 Wi-Fi / 同一台手机热点下再试。
+
+到底属于哪一种不用猜：通话浮层上的失败提示已经带上一行 ICE 诊断（本端/对端候选数与类型、
+是否 `.local` mDNS 名、`connectionState` 轨迹、最终选通的候选对），两端各截一张图就能定位。
+采集与排版在 `im-ui/src/utils/webrtc.js`（`iceSummary` / `iceDetail` / `selectedPairText`）与
+`stores/call.js`（`reportIceFailure`），完整现场另进 console（开 `dlog` 时）。
+
 #### 手机真机联调远程控制：需要 HTTPS
 
 用手机浏览器以 `http://<电脑IP>:5173` 访问时，**远程控制会报「当前环境不支持 WebCrypto」**——
@@ -938,7 +968,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | GET | `/offline` | 离线消息（`PUT /offline/clear` 清除离线标记） |
 | PUT | `/{id}/recall` | 撤回消息（默认 2 分钟内，本人 / 群主 / 管理员） |
 | PUT | `/{id}/edit` | 编辑本人已发出的文本消息（时限内，全员同步并标「已编辑」） |
-| POST | `/{id}/to-text` | 语音转文字（依赖 `SpeechToTextSpi`，未接入时降级为提示） |
+| POST | `/{id}/to-text` | 语音转文字（`SpeechToTextSpi` → im-ai 的 `DashScopeSpeechToTextSpi`，按 fileId 直读存储字节走百炼 `qwen3-asr-flash`；未配 key 时降级为提示） |
 | POST | `/{id}/translate` | 文本翻译（依赖 `TranslationSpi`，同上） |
 | POST | `/{id}/reaction` | 表情回应（贴 / 取消，`{emoji, remove}`；一人一消息一表情只计一次） |
 | POST | `/{id}/vote` | 投票（`{options, close}`：整体替换旧票、空集合撤回本人、`close=true` 发起人截止） |
@@ -998,6 +1028,8 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | 方法 | 路径 | 功能 |
 |---|---|---|
 | POST | `/chat` | 面试对话（SSE 流式，事件 `delta` / `done` / `error`；限流 20 次/分钟） |
+| POST | `/asr` | 语音转文字（multipart `file`，16k 单声道 WAV ≤4MB；限流 30 次/分钟） |
+| POST | `/tts` | 文字合成朗读（JSON `{text}` ≤800 字；直接返回 `audio/wav` 字节流；限流 30 次/分钟） |
 | GET | `/status` | 面试官状态（知识库概况 + 监考 `proctor` 策略） |
 | POST | `/session/start`·`/turn`·`/events`·`/session/end` | 面试会话：建会话 / 落一轮问答 / 批量上报监考事件 / 结束 |
 | GET | `/session/page` | 我的面试记录分页 |
@@ -1686,6 +1718,12 @@ spring-boot-duomokuia/
 │       ├── components/      AvatarCell.vue（后台唯一的头像组件，blob 取图）
 │       ├── layout/          AdminLayout.vue（侧标 + 顶栏）
 │       └── views/           LoginView / DashboardView / UsersView / ReportsView
+├── im-website/              官网前端（独立工程，纯静态展示站，无后端接口，不参 Maven 构建）
+│   ├── README.md            端口 5373、下载产物投放约定
+│   ├── vite.config.js       dev 5373 / preview 4373（与 5173/5273 同序列，均 strictPort）
+│   ├── scripts/fetch-downloads.ps1  从 electron/release 收集安装包/免安装版到 public/downloads
+│   └── src/
+│       └── App.vue          单页全部内容（特性/下载/链接数组集中维护）
 └── electron/                Electron 桌面端（前端壳 + electron-builder，连远程后端）
     ├── main.js              主进程：窗口 / 下载处理 / 跨域 / 注入后端地址 / Agent 自启
     ├── preload.js           contextBridge 注入 window.__IM_SERVER__
@@ -1741,6 +1779,18 @@ spring-boot-duomokuia/
     看板显示「数据截至」且 60s 自动刷新（强制刷新才真跑 COUNT）→ 用户页按昵称搜索（keyword **不认用户 ID**）→
     工单页受理 → 处置（封号 / 撤回消息 / 中断直播三个动作会二次确认）→ 举报人聊天端右上角弹出一条系统通知
     （驳回为 `info`、已处理为 `success`；被警告当事人收到 `warning`）
+15. **官网** — `cd im-website; npm install; npm run dev` → `http://localhost:5373` → 应看到产品介绍、8 张特性卡、
+    三张下载卡（Windows 安装版 / 免安装版 / Android）与 GitHub / 文档 / Releases 三个链接；下载直链要先把产物投放到
+    `public/downloads/`（`npm run fetch:downloads` 自动从 `electron/release` 收集改名），未投放时直链 404 属预期
+16. **面试语音 / 电话模式** — 配了 `ALI_BABA_API_KEY` 重启后端后 `/api/ai/interview/status` 应回 `audio` 段且 `enabled=true` →
+    面试页「🎙 按住说话」说一段松手应出可编辑的转写草稿（勾「转完即发」则直接提交）→
+    「📞 电话面试」进全屏浮层，完整走一轮「问→答→朗读→再问」（停顿 ≥850ms 自动断句送出），静音 / 打断播报 / 挂断按钮生效，
+    音色切两档都能出声（系统无中文音色应自动回退神经并标注）→ 挂断后面试官出总结、切后台自动停音频环路收尾。
+    无 key 时两语音入口置灰带 tooltip 属预期
+17. **聊天语音消息 / 长按转文字** — 手机浏览器进单聊 → 点工具栏「语音」→ 按住说话（屏内浮层出秒数、上滑变红取消）→
+    松手列表出现语音条、时长合理、能播放 → 长按该气泡菜单弹出 → 点「转文字」文字展开在语音条下方（可收起），
+    F12 看到 `POST /api/message/{id}/to-text` 回 `code=200` 且是真转写文本（未配 key 时回明确降级文案，不应是 1007）→
+    群聊被禁言时点「语音」应给出原因而不是没反应；面试页松手应直接发出（关掉「转完即发」后则是填草稿 + 一条提示）
 
 > **桌面端（可选）**：`cd ..\electron; npm install; npm run build` 生成 `release\IM通讯 Setup 1.0.0.exe`；双击 `win-unpacked\IM通讯.exe`
 > 启动后还会自动后台拉起内置的被控端 Agent（回环接口 `127.0.0.1:18923/local-info` 可验证）。

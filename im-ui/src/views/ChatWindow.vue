@@ -175,6 +175,14 @@
     <!-- ==================== 输入区 ==================== -->
     <footer v-show="!selectMode" class="chat-window__input">
       <div class="chat-window__toolbar">
+        <!-- 键盘 / 语音切换：与微信同构，语音模式下输入框换成「按住说话」。
+             用文字而不是图标：图标库里没有合适的键盘图标，而「语音/键盘」在手机上比猜图标快 -->
+        <el-tooltip v-if="canVoice" :content="voiceMode ? '改用键盘输入' : '改用语音输入（按住说话，松开发送，上滑取消）'" placement="top">
+          <el-button text size="small" class="chat-window__mode-toggle" @click="toggleVoiceMode">
+            {{ voiceMode ? '键盘' : '语音' }}
+          </el-button>
+        </el-tooltip>
+
         <el-popover
           v-model:visible="emojiVisible"
           placement="top-start"
@@ -402,6 +410,7 @@
 
       <el-input
         ref="inputRef"
+        v-show="!talkActive"
         v-model="draft"
         type="textarea"
         :rows="isMobile ? 1 : 3"
@@ -411,6 +420,17 @@
         :disabled="isMuted"
         :placeholder="inputPlaceholder"
         @keydown.enter="onEnter"
+      />
+
+      <!-- 语音模式：输不进去字，改为按住说话。上传中置 busy，免得连按发出一串语音 -->
+      <HoldTalkButton
+        v-if="talkActive"
+        class="chat-window__talk"
+        label="按住说话"
+        :busy="uploading"
+        busy-label="发送中…"
+        @result="onTalkResult"
+        @state="onTalkState"
       />
 
       <!-- @ 提及选择器 -->
@@ -458,6 +478,13 @@
       <el-icon :size="30"><FolderOpened /></el-icon>
       <span>松开即可添加到「{{ title }}」的待发送</span>
       <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_PENDING_FILES }} 个（也可以 Ctrl+V 粘贴）</span>
+    </div>
+
+    <!-- 录音遮罩：手指盖住了下边的按钮，上滑取消要变红、时长要能看见，所以在窗口中部再给一份 -->
+    <div v-if="talkActive && talkState !== 'idle'" class="chat-window__talk-mask" :class="{ 'is-cancel': talkState === 'cancel' }">
+      <el-icon :size="30"><Microphone /></el-icon>
+      <span class="chat-window__talk-seconds">{{ talkState === 'cancel' ? '松开手指，取消发送' : `${talkSeconds}″` }}</span>
+      <span class="chat-window__talk-tip">{{ talkState === 'cancel' ? '手指滑回下方可继续录音' : '松开发送 · 上滑取消' }}</span>
     </div>
 
     <ContextMenu
@@ -765,6 +792,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Operation, Plus, Collection, Coin, Present, Delete as DeleteIcon } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
+import HoldTalkButton from '@/components/HoldTalkButton.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import FileViewer from '@/components/FileViewer.vue'
@@ -1874,6 +1902,48 @@ watch(draft, (value) => {
     drafts.delete(key.value)
   }
 })
+
+/* ------------------------------ 语音输入（按住说话） ------------------------------ */
+
+/**
+ * 输入区在「键盘」与「语音」之间切换，与微信同一套手势：语音模式下输入框换成按住说话条。
+ * 不需要跟会话切换做复位——ChatHome 用 :key 让本组件重新挂载，跟 draft 一个道理。
+ */
+const voiceMode = ref(false)
+/** 录音态与已录秒数：只给遮罩层读数用，不接也不影响发送 */
+const talkState = ref('idle')
+const talkSeconds = ref(0)
+
+/**
+ * 能不能发语音：录音产物要当文件上传（file:upload），被禁言时也不该给一个发送入口。
+ * 与图片/文件按钮同源，不给点了必然失败的入口。
+ */
+const canVoice = computed(() => canUpload.value && !isMuted.value)
+const talkActive = computed(() => voiceMode.value && canVoice.value)
+
+function toggleVoiceMode() {
+  if (!canVoice.value) {
+    ElMessage.info(isMuted.value ? '你已被禁言，发不了语音' : '当前账号没有上传文件的权限')
+    return
+  }
+  voiceMode.value = !voiceMode.value
+}
+
+function onTalkState(name, seconds) {
+  talkState.value = name
+  talkSeconds.value = seconds || 0
+}
+
+/**
+ * 录好的 WAV 直接交给现成的附件发送链路：包成 File 后 kindOf 按 audio/ 命中 'voice'，
+ * 消息类型、bizType=chat_voice、时长读取、占位气泡与失败重发全部无需改动。
+ */
+function onTalkResult({ blob }) {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  uploadAndSend(new File([blob], `语音_${stamp}.wav`, { type: 'audio/wav' }))
+}
 
 /* ------------------------------ 常用语（快捷回复） ------------------------------ */
 // 清单只在打开面板时拉一次，编辑全在本地副本 quickEditList 上做，点「保存」才发一次 PUT：
@@ -3282,10 +3352,17 @@ async function onMenuSelect(action) {
         })
         break
       case 'to-text': {
-        // 接口 silent：服务端未配置外部 ASR 会回一句降级文案，这里捕获后本地弹出
+        // 微信那个手感：结果贴在语音条下面，不弹框。只写在本地消息对象上（extra 不变、
+        // 不推送），所以只本端可见、切会话重进就没了——转写是“我看一下”，不是发布一条新消息。
+        // 接口 silent：服务端未配置外部 ASR 会回一句降级文案，这里捕获后弹提示
+        if (message.transcript) {
+          // 已经转过就不白花一次模型调用，把被收起的文字重新展开就行
+          message.transcriptHidden = false
+          break
+        }
         try {
           const text = await toMessageText(message.messageId)
-          await ElMessageBox.alert(text, '语音转文字（仅供参考）', { confirmButtonText: '关闭', customClass: 'chat-window__ocr-box' })
+          message.transcript = text
         } catch (e) {
           ElMessage.error(e?.message || '转文字失败，请稍后重试')
         }
@@ -3470,11 +3547,13 @@ onMounted(async () => {
     contentObserver.observe(contentRef.value)
     contentObserver.observe(scrollRef.value)
   }
-  await loadInitial()
   // 通话入口的显隐依赖 callStore.enabled，而它只有 ensureConfig() 拉到配置后才置真；
   // 不在此预热，canCall 永远为假 → 单聊头部两个通话按钮根本不渲染（点不到也就永不触发 ensureConfig 的死循环）。
-  // 不 await：这是一次独立 HTTP，失败或慢都不该挡住消息加载；结果在 store 里缓存，只发一次。
+  // ★ 必须放在 loadInitial 之前且不被其 await 串联：loadInitial 里 loadHistory 一旦抛错（如缺表回 1007「系统繁忙」），
+  //   后面的代码整段不执行，通话预热就被历史加载失败连带掐死、按钮永久消失（与历史接口本无依赖关系）。
+  //   不 await：这是一次独立 HTTP，失败或慢都不该挡住消息加载；结果在 store 里缓存，只发一次。
   callStore.ensureConfig()
+  await loadInitial()
 })
 
 onBeforeUnmount(() => {
@@ -3871,6 +3950,51 @@ watch(key, async () => {
   /* 必须穿透：不写 pointer-events:none，遮罩自己会变成新的 dragenter/dragleave 源，
      提示条会一闪一闪，且鼠标落在遮罩上时反而接不到下面元素的 drop */
   pointer-events: none;
+}
+
+/* 语音模式下的「按住说话」：把输入框那一行占满，与微信一致 */
+.chat-window__talk {
+  width: 100%;
+  min-height: 40px;
+  flex: 1;
+  font-size: 15px;
+}
+
+/* 键盘/语音切换：与旁边的图标按钮同高，不抻高工具栏 */
+.chat-window__mode-toggle {
+  min-height: 32px;
+  font-size: 13px;
+}
+
+/* 录音遮罩：与拖拽遮罩同理——纯展示，不能把手势抢走（pointer-events:none） */
+.chat-window__talk-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+/* 上滑取消：整块转红，不看按钮也能知道松手会发生什么 */
+.chat-window__talk-mask.is-cancel {
+  background: rgba(245, 108, 108, 0.75);
+}
+
+.chat-window__talk-seconds {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.chat-window__talk-tip {
+  font-size: 13px;
+  opacity: 0.9;
 }
 
 .chat-window__drop-sub {

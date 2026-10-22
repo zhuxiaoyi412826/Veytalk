@@ -67,6 +67,12 @@
     <CallOverlay />
 
     <!--
+      通话悬浮小窗：浮层点「最小化」后由它接管（可拖动、点一下回到浮层）。
+      两者靠 store 的 minimized 交接，浮层只是被 v-show 藏起来，两路流与声音出口一直在跑。
+    -->
+    <CallFloatWindow />
+
+    <!--
       群通话浮层：同理挂在布局而不是聊天页——mesh 的 N-1 路 PeerConnection 存在 store 里，
       路由切换不会把它们拆掉；两个浮层 z-index 相同（都在同一层级），但前端已拦住了
       同时开 1:1 与群通话（见 ws/dispatch.js 的跨类型拦截），正常情况下不会叠在一起。
@@ -88,6 +94,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ChatDotRound, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import CallOverlay from '@/components/CallOverlay.vue'
+import CallFloatWindow from '@/components/CallFloatWindow.vue'
 import GroupCallOverlay from '@/components/GroupCallOverlay.vue'
 import ReportDialog from '@/components/ReportDialog.vue'
 import { useAuthStore } from '@/stores/auth'

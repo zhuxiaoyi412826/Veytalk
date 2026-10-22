@@ -117,7 +117,7 @@ im-ui/
     ├── layout/MainLayout.vue 左侧竖向导航（消息 / 好友 / 申请 / 我的）+ 连接状态
     ├── views/                7 个页面，见下表
     ├── components/           UserAvatar、MessageBubble、EmojiPicker、ContextMenu、
-    │                         CaptchaImage、Pagination
+    │                         HoldTalkButton、CaptchaImage、Pagination
     ├── utils/                format（时间/大小/性别/脱敏）、id（雪花 ID 归一化）、
     │                         media（受控地址 → blob）、token、title
     └── styles/index.css      CSS 变量与全局滚动条样式
@@ -128,13 +128,34 @@ im-ui/
 | 路由 | 组件 | 说明 |
 | --- | --- | --- |
 | `/login` | `Login.vue` | 登录 / 短信登录 / 注册，三个 Tab |
-| `/chat/:conversationId?` | `ChatHome.vue` + `ChatWindow.vue` | 会话列表 + 聊天窗口；附件三个入口（选 / 拖 / 粘）都先进「待发送托盘」，图片可点缩略图放大，点发送才串行上传；首页搜索框双路并行（本地全部会话消息 + 全网检索结果分节展示）；会话右键菜单可置顶/免打扰/已读/加入或移出黑名单（仅单聊且对方是好友）/删除；`:conversationId` 可选，刷新与复制链接都能落回同一会话 |
+| `/chat/:conversationId?` | `ChatHome.vue` + `ChatWindow.vue` | 会话列表 + 聊天窗口；附件三个入口（选 / 拖 / 粘）都先进「待发送托盘」，图片可点缩略图放大，点发送才串行上传；工具栏可切「语音」模式按住说话发语音消息（上滑取消、屏内浮层显秒数）；首页搜索框双路并行（本地全部会话消息 + 全网检索结果分节展示）；会话右键菜单可置顶/免打扰/已读/加入或移出黑名单（仅单聊且对方是好友）/删除；`:conversationId` 可选，刷新与复制链接都能落回同一会话 |
 | `/friends` | `FriendList.vue` | 好友列表，按分组展示，支持搜索、备注、分组、拉黑、删除；「黑名单」弹窗集中管理：可看已拉黑名单、逐行「移除黑名单」，也可点「添加黑名单」多选好友批量拉黑 |
 | `/friends/requests` | `FriendRequest.vue` | 搜索用户发起申请、收到的申请（同意/拒绝）、我发出的申请 |
 | `/profile` | `Profile.vue` | 个人中心：头像上传、资料编辑、修改密码、退出登录 |
 | `/user/:id` | `UserProfile.vue` | 他人资料卡片：资料、在线状态、发起聊天、加好友、备注、加入/移出黑名单、删除 |
 
-`ChatHome` 被 `<keep-alive>` 缓存，切换页面回来时会话列表与滚动位置都还在。
+`ChatHome` 被 `<keep-alive>` 缓存，切换页面回来时会话列表与滚动位置都还在。但每个会话的
+`ChatWindow` 靠 `:key="conversation.activeId"` 重挂载，所以草稿与「语音/键盘」输入模式不会拖到别的会话。
+
+### 语音工具与组件
+
+面试页的电话面试 = 既有文字主管线（`/chat` SSE）两侧各挂一个转换器（后端 `/asr` 转写、`/tts` 朗读），
+会话、入库、监考逻辑一行没动；服务端未配 key 时 `/status` 的 `audio.enabled=false`，两入口置灰。
+聊天侧的「按住说话发语音」与长按转文字复用同一套录音器与同一个后端 ASR 模型（不走 `/asr`，
+而是当附件上传后由 `POST /api/message/{id}/to-text` 识别）。
+
+| 文件 | 职责 |
+| --- | --- |
+| `utils/audioRec.js` | 麦克风采集与 WAV 编码：`createMicSource`（AudioWorklet 优先、退 ScriptProcessor）、`encodeWav16k`（自写 44 字节头，16k/mono/16bit，不赌 MediaRecorder 容器差异）、`createSpeechRecorder`（按住说话启停，含「等权限期间松手当场关轨」竞态保护） |
+| `utils/vad.js` | 能量门限 VAD：30ms 网格 RMS、底噪 EMA 自适应阈值、连续 3 帧起音、尾静音 ≥850ms 断句、过短丢弃 / 60s 强切；零模型依赖，嘈杂环境请改用按住说话 |
+| `utils/speech.js` | TTS 双引擎抽象：`system`（speechSynthesis，长文 ~200 字分句防 Chrome 吞字）/ `remote`（POST `/tts` 拿 wav 播放），speak/stop/onEnd 同形；偏好存 localStorage 键 `im-interview-tts-engine`（默认 system） |
+| `components/HoldTalkButton.vue` | **通用「按住说话」原子件**（面试与聊天共用）：pointerdown 起录、`setPointerCapture`、上滑 80px 进 cancel 态、<300ms 防误触、60s 自动收尾，emit `result({blob, durationMs})` / `state(name, seconds)` / `too-short` / `mic-denied`。不可用时**不用原生 disabled**（触屏吞事件，弹不出 tooltip），而是照常响应并 `ElMessage.info(disabledHint)`，置灰走 `--off` class |
+| `components/interview/VoiceSendBar.vue` | `HoldTalkButton` 的薄封装（只多一步：blob → `POST /asr` 转写，成功 `emit('text')`、「识别中…」态） |
+| `components/interview/CallPanel.vue` | 电话面试全屏浮层（纯展示）：最近两句字幕 / 计时 / 静音 / 打断播报 / 挂断 / 音色切换，竖屏 safe-area、按钮 ≥44px |
+
+半双工状态机（`listening →(VAD 断句发 /asr)→ thinking(/chat SSE)→ speaking(朗读)→ listening`）
+实现在 `Interview.vue`：断句先关麦再发 ASR（不收自己的声音），v1 不做 barge-in 自动打断，
+朗读中要打断点面板按钮；挂断=既有 `finish()` 总结流程，返回键/切后台各自按最小化与收尾处理。
 
 ---
 

@@ -48,6 +48,7 @@ public class InterviewService {
     private final AiProperties modelProperties;
     private final KnowledgeBaseService knowledgeBaseService;
     private final DashScopeChatClient chatClient;
+    private final AudioService audioService;
     private final JsonUtil jsonUtil;
 
     /** 推流线程池：每个 SSE 请求一条虚拟线程，阻塞读上游不心疼 */
@@ -102,6 +103,12 @@ public class InterviewService {
         status.put("enabled", aiProperties.isEnabled());
         status.put("apiKeyConfigured", modelProperties.getApiKey() != null && !modelProperties.getApiKey().isBlank());
         status.put("model", modelProperties.getChat().getOptions().getModel());
+        // 语音能力概况：前端据此点亮/置灰「按住说话」与「电话面试」，不另开接口同状态一条路径
+        Map<String, Object> audio = new HashMap<>();
+        audio.put("enabled", aiProperties.isEnabled() && audioService.available());
+        audio.put("asrModel", modelProperties.getAudio().getAsrModel());
+        audio.put("ttsModel", modelProperties.getAudio().getTtsModel());
+        status.put("audio", audio);
         return status;
     }
 

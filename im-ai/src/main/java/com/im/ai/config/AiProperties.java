@@ -31,6 +31,9 @@ public class AiProperties {
 
     private Chat chat = new Chat();
 
+    /** 语音链路（面试「按住说话」ASR 与「电话面试」TTS），同 baseUrl 同 apiKey，只是换模型 */
+    private Audio audio = new Audio();
+
     @Data
     public static class Chat {
         private Options options = new Options();
@@ -44,5 +47,27 @@ public class AiProperties {
         private Double temperature = 0.7;
         /** 单次流式响应的读超时（从发起请求到收到响应头/首个分片） */
         private Duration timeout = Duration.ofSeconds(60);
+    }
+
+    /**
+     * 语音模型参数。
+     *
+     * <p>两个能力都是百炼 compatible-mode 上的现成模型，复用同一个 API Key：
+     * ASR 走 qwen3-asr-flash（chat/completions 携带 input_audio，可非流式）；
+     * TTS 走 omni 系列（modalities 要 text+audio，强制流式，后端聚合分片后整段返回）。
+     * 模型名可换而不改代码，与 chat 那个同理。
+     */
+    @Data
+    public static class Audio {
+        /** 语音转文字模型（输入 16k 单声道 WAV 的 base64，输出纯文本） */
+        private String asrModel = "qwen3-asr-flash";
+        /** 语音合成模型（omni 系列，输出 base64 wav 分片） */
+        private String ttsModel = "qwen3-omni-flash";
+        /** 神经音色的说话人名（随 ttsModel 的型号而变，换模型时到这个模型的音色列表里选） */
+        private String ttsVoice = "Tina";
+        /** ASR 单次转写超时（非流式，一问一答） */
+        private Duration asrTimeout = Duration.ofSeconds(30);
+        /** TTS 聚合超时（流式收完全部音频分片的总时长上限） */
+        private Duration ttsTimeout = Duration.ofSeconds(60);
     }
 }
