@@ -39,7 +39,8 @@
 
       <!-- ==================== 通话中 ==================== -->
       <div v-else class="call-overlay__stage">
-        <!-- 主画面（位置）：电脑上默认放对方、可互换；手机固定放自己。
+        <!-- 主画面（位置）：两端默认都放自己（自己的画面通常与屏幕同朝向，不会出大黑边），可点小窗互换。
+             手机端在 @media 里改成 object-fit: cover，保证互换前后都是满屏无黑边的同一种格式。
              语音通话时它静默隐藏但仍存在——那是承接对端声音的出口；
              muted 跟着 swapped 走，保证对方的声音永远能播、自己的声音永远不回灌 -->
         <video
@@ -58,7 +59,7 @@
           <div class="call-overlay__timer">{{ elapsedText }}</div>
         </div>
 
-        <!-- 右上角画中画（位置）：两端都能点一下与主画面互换；放大/缩小圆钮只给电脑端 -->
+        <!-- 右上角画中画（位置）：两端点一下都与主画面互换；放大/缩小圆钮只给电脑端 -->
         <div
           v-if="isVideo"
           class="call-overlay__pip call-overlay__pip--clickable"
@@ -167,8 +168,14 @@ import { formatDuration } from '@/utils/format'
  * 语音通话没有画面，但仍需要一个未静音的 <video>（隐藏）承接对端音频轨播放声音；
  * 视频通话则把它放大铺满，本端画面作右上角画中画。
  *
- * 画面布局两端同一套（用户最后定的格式）：默认中间＝对方、右上角＝我自己，点右上角小窗两者互换。
- * 端差异只剩一处：小窗的放大/缩小圆钮只在电脑端给，手机靠最小化悬浮窗。语音通话不参与互换（见 swappedView）。
+ * 画面布局（用户拿截图逐轮定稿）：
+ * - 两端同一套：中间铺满一格 + 右上角画中画，**默认都是中间＝我自己、右上＝对方**（他原话：
+ *   「我需要显示的是第一张图片的格式，而不是第二张，在电脑端」），点右上角小窗两者互换。
+ * - **手机端主画面用 object-fit: cover 铺满**：不管中间是自己还是对方，永远满屏、无上下黑边
+ *   （他要的「显示格式不变」）。电脑端保持 contain（自己的横屏流在横屏窗口本来就铺满，
+ *   而把对方的竖屏流 cover 到横屏会只剩下半张脸，比黑边更糟）。
+ * - 缩放圆钮只给电脑端；手机端只留最小化悬浮窗。
+ * 语音通话不参与互换（见 swappedView）。
  */
 const call = useCallStore()
 const auth = useAuthStore()
@@ -180,15 +187,21 @@ const pipVideoRef = ref(null)
 /** 画中画尺寸：默认缩小，点右下角按钮放大 / 缩回（仅电脑端有这颗按钮） */
 const pipExpanded = ref(false)
 /**
- * 是否电脑端（主指针是鼠标）。现在只用来决定给不给小窗的放大/缩小圆钮——
- * 手机上那个圆钮按不准也没意义（小窗本来就占屏宽一半），用户要求手机只留最小化悬浮窗。
+ * 是否电脑端（主指针是鼠标）。现在只管一件事：
+ * 给不给小窗的放大/缩小圆钮（手机不给，只留最小化悬浮窗）。
+ * 默认布局与能不能互换都不再看它——两端完全一样。
  */
 const isDesktop =
   typeof window === 'undefined' || !window.matchMedia ? true : window.matchMedia('(pointer: fine)').matches
 /**
- * 位置互换：false = 中间对方 + 右上我；true = 反过来。两端默认都是 false，都能点小窗互换。
+ * 位置互换：false = 中间对方 + 右上我；true = 反过来。
+ *
+ * ★ 两端初值都是 true（中间＝我自己、右上＝对方）——用户先拿手机截图说只要第一张那种，
+ * 本轮又拿电脑截图补了一句「我需要显示的是第一张图片的格式（中间我的画面、右上对方），
+ * 而不是第二张（中间对方、右上我），在电脑端」，所以不再按 `isDesktop` 分端。
+ * 点小窗仍可互换；上一轮他补的「显示格式不变」靠手机端主画面 cover 实现（见 @media）。
  */
-const swapped = ref(false)
+const swapped = ref(true)
 
 const isVideo = computed(() => call.mediaType === 'video')
 /**
@@ -209,6 +222,7 @@ const peerName = computed(
 const peerAvatar = computed(() => (peer.value && peer.value.avatar) || '')
 
 function onPipClick() {
+  // 两端都能换：上一轮把手机端禁掉是误读需求（他要的是换了之后显示格式也别变，不是不让换）
   swapped.value = !swapped.value
 }
 
@@ -241,11 +255,11 @@ watch([() => call.remoteStream, () => call.localStream, isPending, swappedView],
   immediate: true
 })
 
-// 每通新通话回到默认：中间对方 + 右上我 + 小窗缩小（上一通手动改的不带进下一通）
+// 每通新通话都回到默认：中间＝自己、右上＝对方；小窗都是缩小态
 watch(
   () => call.callId,
   () => {
-    swapped.value = false
+    swapped.value = true
     pipExpanded.value = false
   }
 )
@@ -382,7 +396,7 @@ watch(
   transition: width 0.18s ease, height 0.18s ease;
 }
 
-/* 整块小窗都是点击区（两端都是：点一下与主画面互换） */
+/* 只有真能点（电脑端）才给手型，否则手机上看着可点其实没反应 */
 .call-overlay__pip--clickable {
   cursor: pointer;
 }
@@ -565,6 +579,13 @@ watch(
 /* ------------------------- 手机窄屏 ------------------------- */
 /* 必须放在所有基础规则之后：同特异度下后写的规则赢，写在前面会被上面的基础值盖掉 */
 @media (max-width: 640px) {
+  /* 主画面改成裁满：用户要的是「怎么点都是第一张那种满屏格式」。
+     contain 下横屏流（电脑摄像头）放在竖屏里就是中间一条 + 上下大黑边，正是他不要的第二张。
+     代价是横屏流会被裁掉左右只剩中间约四分之一宽（看着像放大），这是满屏的必然取舍。 */
+  .call-overlay__main {
+    object-fit: cover;
+  }
+
   .call-overlay__pip {
     top: 12px;
     right: 12px;
