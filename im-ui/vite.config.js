@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import legacy from '@vitejs/plugin-legacy'
 import forge from 'node-forge'
 
 const configDir = dirname(fileURLToPath(import.meta.url))
@@ -85,8 +86,20 @@ export default defineConfig(({ mode, command }) => {
   // Electron 桌面端从 file:// 加载，必须用相对路径 ./ 才能定位到 assets；Web 部署仍用根路径 /
   // （配合 history 路由，避免深层刷新时相对路径错乱）。Electron 打包走 `vite build --mode electron`
   // （见 package.json 的 build:electron），与 Web 构建互不影响。
-  base: mode === 'electron' ? './' : '/',
-  plugins: [vue()],
+  // Tauri 同理：自定义协议 tauri://localhost 下绝对 base 会解析到协议根之外，打包走 --mode tauri。
+  base: (mode === 'electron' || mode === 'tauri') ? './' : '/',
+  plugins: [
+    vue(),
+    // 安卓壳兼容旧系统 WebView（如 vivo 安卓 11 出厂内核 Chrome 8x）：
+    // legacy 插件额外产出一份「转译到 Chrome 80 + core-js 自动 polyfill」的旧内核包，
+    // 由 <script nomodule> 自动回落加载；新内核设备仍走原现代包（type="module"），
+    // 功能、体积、行为零影响——只是增强，不是降级。只作用于 capacitor 构建模式。
+    mode === 'capacitor' && legacy({
+      targets: ['Chrome >= 80'],
+      modernPolyfills: true,
+      renderLegacyChunks: true
+    })
+  ].filter(Boolean),
   resolve: {
     alias: {
       // 与后端多模块的观感保持一致：@ 指向 src

@@ -7,6 +7,17 @@
         <p class="login__subtitle">单聊 · 消息回执 · 多端同步</p>
       </div>
 
+      <!-- 原生壳（exe/APK）专属：后端地址运行时覆盖，热点换 IP 时改这里即可，无需重打包 -->
+      <div v-if="showServerConfig" style="display:flex; gap:8px; margin-bottom:10px">
+        <el-input
+          v-model="serverUrl"
+          size="small"
+          placeholder="服务器地址，如 http://192.168.17.18:8080（留空=打包默认）"
+          clearable
+        />
+        <el-button size="small" @click="saveServerUrl">保存</el-button>
+      </div>
+
       <el-tabs v-model="tab" class="login__tabs" stretch>
         <!-- ==================== 账号登录（无需验证码） ==================== -->
         <el-tab-pane label="账号登录" name="account">
@@ -284,8 +295,25 @@ import {
   resetPassword as resetPasswordApi
 } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
+import { isNativeShell } from '@/utils/env'
 
 defineOptions({ name: 'Login' })
+
+// 原生壳（Tauri exe / Capacitor APK）下显示「服务器地址」输入框：
+// 存 localStorage.IM_SERVER_URL_OVERRIDE，env.js 的 serverBase() 每次请求实时读取，保存后立即生效
+const showServerConfig = isNativeShell()
+const serverUrl = ref(
+  (typeof localStorage !== 'undefined' && localStorage.getItem('IM_SERVER_URL_OVERRIDE')) || ''
+)
+function saveServerUrl() {
+  const v = serverUrl.value.trim().replace(/\/+$/, '')
+  if (v) {
+    localStorage.setItem('IM_SERVER_URL_OVERRIDE', v)
+  } else {
+    localStorage.removeItem('IM_SERVER_URL_OVERRIDE')
+  }
+  ElMessage.success(v ? `服务器地址已切换为 ${v}，立即生效` : '已恢复打包默认地址')
+}
 
 const route = useRoute()
 const router = useRouter()

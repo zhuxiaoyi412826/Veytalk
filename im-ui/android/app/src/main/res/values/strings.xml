@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">IM通讯</string>
+    <string name="title_activity_main">IM通讯</string>
+    <string name="package_name">com.im.app</string>
+    <string name="custom_url_scheme">com.im.app</string>
+</resources>
