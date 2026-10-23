@@ -112,14 +112,16 @@ im-ui/
     │   └── index.js          signOut()：跨 store 的统一登出清理
     ├── ws/
     │   ├── socket.js         连接、30 秒心跳、指数退避重连、事件订阅
-    │   └── dispatch.js       把推送帧分发给对应 store
+    │   └── dispatch.js       把推送帧分发给对应 store，并把新消息接给 utils/notify 提醒（见第 5 节）
     ├── router/index.js       路由表 + 登录守卫
     ├── layout/MainLayout.vue 左侧竖向导航（消息 / 好友 / 申请 / 我的）+ 连接状态
     ├── views/                7 个页面，见下表
     ├── components/           UserAvatar、MessageBubble、EmojiPicker、ContextMenu、
     │                         HoldTalkButton、CaptchaImage、Pagination
     ├── utils/                format（时间/大小/性别/脱敏）、id（雪花 ID 归一化）、
-    │                         media（受控地址 → blob）、token、title
+    │                         media（受控地址 → blob）、token、
+    │                         title（标签页标题未读前缀）、favicon（图标角标）、
+    │                         notify（提示音 + 系统通知 + 节流聚合，见第 5 节）、env
     └── styles/index.css      CSS 变量与全局滚动条样式
 ```
 
@@ -159,7 +161,47 @@ im-ui/
 
 ---
 
-## 5. 与后端的几条约定
+## 5. 消息提醒（切后台 / 断线 / 离线）
+
+一句话：**推送这条路只有「实时连接」一个入口，没有 Service Worker 与厂商推送**，所以这一节同时说明能做什么、以及为什么手机浏览器关掉页面就是收不到。
+
+### 三路输入
+
+| 场景 | 走哪条 | 提醒形式 |
+| --- | --- | --- |
+| 连接正常，新消息实时到 | `dispatch.js` 的 `on('message')` → `notifyIncoming()` | 单条通知（含发送者昵称与摘要）+ 提示音 |
+| 断线重连后补拉离线消息 | `pullOffline()` 拿到一批 → `notifyOfflineBatch()` | **只汇成一条**「离线期间收到 N 条新消息（M 条@我）」，不逐条弹 |
+| 实时连接掉了、重连之前 | 每 15 秒 `GET /conversation/unread/total` → `notifySystem()` | 未读变多了才补一条，**不拉正文也不推已读位点**（人不在页面里，推了就是错的信息） |
+
+轮询只在 `willReconnect` 为真时启动：登出与被顶下线时继续探，只会把 401 刷成一排。
+
+### 四个出口
+
+`notify.js` 里一次提醒会同时试四条路，按环境能走几条走几条：
+
+1. **提示音**：Web Audio 现合成两个正弦包络（不引音频文件）。浏览器自动播放策略下上下文以 `suspended` 创建，拿不到 `running` 就不出声——「试听」按钮走 `previewChime()`，它先 `await resume()` 再放，并返回到底响没响。
+2. **系统通知**：桌面壳存在就交给主进程（`window.__IM_NATIVE__.notify` → `ipc` → Electron `Notification`），**不受浏览器授权约束**；纯浏览器才用 `new Notification()`，需要用户先授权。
+3. **标签页标题前缀** `(3)` + **favicon 角标**（`title.js` / `favicon.js`，canvas 现画，底色跟主题色）。
+4. **任务栏 / Dock**：桌面壳 `__IM_NATIVE__.badge` → Windows `setOverlayIcon` + `flashFrame`，macOS `app.setBadgeCount`。
+
+标题、图标、任务栏这三处角标都由 `conversation.applyTotalUnread()` 这一个入口驱动；`markRead()` 开头会 `clearConversationNotification()`，人进到这个会话就把后台那条通知收掉。
+
+### 免打扰与 @ 的优先级
+
+会话免打扰优先于本机提醒，**但被 @ 会打破它** —— 与后端 `MessageExtra.hasMention()` 同口径（`atAll === true` 或 `atUserIds` 命中自己）。比对雪花 ID 必须用 `utils/id.js` 的 `sameId()`，JSON 里它可能是字符串，`includes` 会失真。
+
+开关在「设置 → 消息提醒」：`notifyEnabled`（总开关）/ `notifySound` / `notifyDesktop` / `notifyUnreadPoll`，全部只落本机 `localStorage`，与会话级 `muted` 是两个层面。同一会话 **4 秒内只提醒一次**，多出来的条数攒进同一条文案；通知 8 秒自动收。页面回到前台时挂着的通知会被清掉。
+
+### 已知限制（不是 bug）
+
+- **手机浏览器无解**：没有后台常驻通道，页面一关（尤其 iOS Safari）定时器就冻、连接就断，什么提醒都不会有。要稳定接收只能用桌面客户端，或做 App 厂商推送（未开工）。
+- **非安全上下文没有通知 API**：`http://局域网IP` 下浏览器直接屏蔽 `Notification`，`notifyCapability()` 返回 `unsupported`，自动降级为「提示音 + 标题与图标角标」。
+- **刷新 / 关页面后一切归零**：没有 Service Worker 就没有离线推送，重连后靠 `pullOffline` 补拉并汇成一条提醒。
+- **桌面端「切后台收不到」的根因是 Chromium 后台节流**，不是推送代码写错：窗口一隐藏，定时器被压到约 1 次/分钟 → 心跳发不出去 → 服务端 90 秒无心跳踢会话。修复在 `electron/main.js` 的 `backgroundThrottling: false`，并配合托盘常驻（关窗口是 `hide()` 不是退进程）与主进程原生通知。
+
+---
+
+## 6. 与后端的几条约定
 
 这几处是踩过坑之后固化下来的，改代码前请先读一遍：
 
@@ -199,7 +241,7 @@ im-ui/
 
 ---
 
-## 6. 常见问题
+## 7. 常见问题
 
 **页面能打开但所有请求都失败 / 提示「无法连接服务器」**
 后端没启动，或者没跑在 8080。先确认 `http://localhost:8080/doc.html` 能打开。

@@ -196,7 +196,67 @@
         </div>
       </section>
 
-      <!-- ==================== 三、隐私与安全 ==================== -->
+      <!-- ==================== 三、消息提醒 ==================== -->
+      <section class="settings__card">
+        <div class="settings__card-title">消息提醒</div>
+        <div class="settings__notice">
+          这一组只管这台设备要不要提醒，与单个会话的「免打扰」是两个层面（免打扰优先，但被 @ 我会打破它）。
+          桌面客户端的系统通知由主进程弹，不受浏览器授权约束；纯浏览器需要用户先授权，而且
+          http://局域网IP 这类非安全上下文里浏览器根本不给权限，这时自动降级为「提示音 + 标签页标题与图标角标」。
+          ★ 手机浏览器没有后台常驻通道，页面一关就收不到提醒，这条限制绕不过去（要稳定接收得用桌面客户端或 App 推送）。
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>消息提醒</span>
+            <span class="settings__desc">总开关：关掉后不出声也不弹通知，未读角标照常更新</span>
+          </div>
+          <el-switch v-model="notifyEnabled" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>提示音</span>
+            <span class="settings__desc">新消息到一声短提示，由浏览器现合成，不加载音频文件</span>
+          </div>
+          <el-switch v-model="notifySound" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>试听一声</span>
+            <span class="settings__desc">没声音通常是浏览器自动播放策略拦住了（本页还没点过），再点一次试试</span>
+          </div>
+          <el-button size="small" @click="onTestChime">试听</el-button>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>系统桌面通知</span>
+            <span class="settings__desc">页面在后台/最小化时弹一条系统通知，点击直接跳到那个会话</span>
+          </div>
+          <el-switch v-model="notifyDesktop" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>通知权限</span>
+            <span class="settings__desc">{{ notifyPermissionText }}</span>
+          </div>
+          <el-button v-if="canAskNotifyPermission" size="small" @click="onAskNotifyPermission">允许通知</el-button>
+          <el-tag v-else size="small" :type="notifyPermissionTag" effect="plain">{{ notifyPermissionLabel }}</el-tag>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>断线时轮询未读数</span>
+            <span class="settings__desc">实时连接断开后每 15 秒只问一次未读总数（不拉正文），多出来了补一条提醒</span>
+          </div>
+          <el-switch v-model="notifyUnreadPoll" />
+        </div>
+      </section>
+
+      <!-- ==================== 四、隐私与安全 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">隐私与安全</div>
 
@@ -225,7 +285,7 @@
         </div>
       </section>
 
-      <!-- ==================== 四、远程控制录屏审计 ==================== -->
+      <!-- ==================== 五、远程控制录屏审计 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">远程控制录屏审计</div>
         <div class="settings__notice">
@@ -280,7 +340,7 @@
         </div>
       </section>
 
-      <!-- ==================== 五、本地缓存 ==================== -->
+      <!-- ==================== 六、本地缓存 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">本地缓存</div>
         <div class="settings__notice">
@@ -336,7 +396,7 @@
         </div>
       </section>
 
-      <!-- ==================== 六、高级设置 ==================== -->
+      <!-- ==================== 七、高级设置 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">高级设置</div>
 
@@ -418,7 +478,7 @@
         </div>
       </section>
 
-      <!-- ==================== 七、账号 ==================== -->
+      <!-- ==================== 八、账号 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">账号</div>
         <div class="settings__row">
@@ -465,6 +525,7 @@ import { openFilePicker } from '@/utils/picker'
 import { fetchDefaultRecordDir, openRecordDir, pickRecordDir, recordSupported } from '@/utils/recorder'
 import { fetchSensitiveFilter, setSensitiveFilter, exportConversationMessages } from '@/api/message'
 import { cancelAccount } from '@/api/user'
+import { notifyCapability, requestNotifyPermission, previewChime } from '@/utils/notify'
 
 defineOptions({ name: 'Settings' })
 
@@ -527,6 +588,75 @@ const remoteRecordEnabled = setting('remoteRecordEnabled')
 const remoteRecordDir = setting('remoteRecordDir')
 const remoteRecordAudit = setting('remoteRecordAudit')
 const debugLog = setting('debugLog')
+const notifyEnabled = setting('notifyEnabled')
+const notifySound = setting('notifySound')
+const notifyDesktop = setting('notifyDesktop')
+const notifyUnreadPoll = setting('notifyUnreadPoll')
+
+/* ------------------------------ 消息提醒 ------------------------------ */
+
+/**
+ * 通知权限态，同步取一次就够（notifyCapability 是纯读，不弹任何东西）。
+ * 'desktop' 桌面壳主进程直弹 / 'prompt' | 'granted' | 'denied' 浏览器三态 / 'unsupported' 环境不支持。
+ */
+const notifyPerm = ref(notifyCapability())
+
+/** 只有 prompt 才该给「允许通知」按钮：granted 没必要再点，denied 时浏览器已不再理会网页的请求 */
+const canAskNotifyPermission = computed(() => notifyPerm.value === 'prompt')
+
+const NOTIFY_PERM_LABEL = {
+  desktop: '桌面端原生',
+  granted: '已授权',
+  prompt: '未申请',
+  denied: '已拒绝',
+  unsupported: '不支持'
+}
+
+const notifyPermissionLabel = computed(() => NOTIFY_PERM_LABEL[notifyPerm.value] || notifyPerm.value)
+
+const notifyPermissionTag = computed(() => {
+  if (notifyPerm.value === 'granted' || notifyPerm.value === 'desktop') {
+    return 'success'
+  }
+  if (notifyPerm.value === 'denied') {
+    return 'danger'
+  }
+  if (notifyPerm.value === 'unsupported') {
+    return 'info'
+  }
+  return 'warning'
+})
+
+const NOTIFY_PERM_TEXT = {
+  desktop: '系统通知由桌面客户端的主进程直弹，不受浏览器授权约束，这一项无需设置',
+  granted: '已授权：页面切后台 / 最小化时新消息仍会弹到系统通知中心',
+  prompt: '浏览器要用户亲自点一下才放行；未放行时只降级为提示音 + 标题与图标角标',
+  denied: '本地址的通知权限已被浏览器记为拒绝，再点也不会弹问；要放开得去地址栏左侧的站点设置里手动改',
+  unsupported: '非安全上下文（如 http://局域网IP）下浏览器直接屏蔽了通知 API；仍会出提示音与标签页角标'
+}
+
+const notifyPermissionText = computed(() => NOTIFY_PERM_TEXT[notifyPerm.value] || '无法判定当前环境的通知能力')
+
+async function onTestChime() {
+  const audible = await previewChime('message')
+  if (!audible) {
+    ElMessage.warning('浏览器把声音拦在了自动播放策略里，再点一次「试听」试试')
+  }
+}
+
+async function onAskNotifyPermission() {
+  const result = await requestNotifyPermission()
+  notifyPerm.value = result
+  if (result === 'granted') {
+    ElMessage.success('已授权，后台收到新消息会弹系统通知')
+    // 授权完就响一声：让用户当场确认「声音 + 通知」这两条路都通了
+    previewChime('system')
+  } else if (result === 'denied') {
+    ElMessage.warning('浏览器拒绝了通知请求，需到地址栏左侧的站点设置里手动放开')
+  } else {
+    ElMessage.info('当前环境弹不了系统通知，会继续用提示音与标签页角标提醒')
+  }
+}
 
 /* ------------------------------ 远程控制录屏审计（仅桌面端） ------------------------------ */
 

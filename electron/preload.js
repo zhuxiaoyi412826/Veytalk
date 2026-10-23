@@ -28,8 +28,10 @@ try {
 contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl, source })
 
 /**
- * 桌面端原生能力桥。目前只用于调用主进程的本机 ffmpeg（GPU 硬件编码）压缩视频。
- * 浏览器 Web 部署没有 preload，window.__IM_NATIVE__ 不存在，前端据此走「不压缩、直传原片」。
+ * 桌面端原生能力桥。用于调用主进程的本机 ffmpeg（GPU 硬件编码）压缩视频、
+ * 本地库/媒体缓存、录屏审计，以及下面的系统通知与任务栏角标。
+ * 浏览器 Web 部署没有 preload，window.__IM_NATIVE__ 不存在，前端据此走降级路径
+ *（通知退到 Web Notification、角标只剩标题与 favicon）。
  */
 let compressSeq = 0
 
@@ -72,6 +74,24 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
    * 浏览器 Web 端没有这个桥，window.__IM_NATIVE__ 不存在，防截图仅桌面端生效。
    */
   setContentProtection: (enabled) => call('im:set-content-protection', { enabled }),
+  /**
+   * 弹一条系统通知。桌面壳加载的是 file:// 页面，拿不到 Web Notification 权限，
+   * 真通知只能由主进程弹（见 main.js 的 setupNotify）。
+   * payload: { title, body, tag, silent }。
+   *
+   * 刻意用 send 而不是 invoke：提醒是发完就返的事件，主进程弹失败已经自己记了日志，
+   * 渲染侧不需要为一个 rejected Promise 多搭一层 catch（也不该因为弹不出通知而阻断上屏）。
+   */
+  notify: (payload) => ipcRenderer.send('im:notify', payload),
+  /** 未读总数变了：macOS 设 Dock 角标，Windows 叠任务栏小图 + 未读时闪烁，Linux 无对应能力 */
+  badge: (count) => ipcRenderer.send('im:badge', { count }),
+  /**
+   * 系统通知被点击。通知是主进程弹的，渲染侧只能从主进程拿到回调，
+   * 参数是当初 notify 里那个 tag（一个会话 id），前端据此跳到对应会话。
+   */
+  onClicked: (callback) => {
+    ipcRenderer.on('im:notify-click', (event, tag) => callback(tag))
+  },
   /**
    * 取 File 的真实磁盘路径。Electron 32+ 移除了 File.path，必须在 preload 里用 webUtils 取；
    * 主进程拿到路径后能让 ffmpeg 直接流式读写磁盘，不必把大视频读进内存。

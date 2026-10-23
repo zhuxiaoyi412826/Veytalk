@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { setDebugEnabled } from '@/utils/logger'
+import { refreshFavicon } from '@/utils/favicon'
 
 /**
  * 全局界面设置。
@@ -48,6 +49,18 @@ const DEFAULTS = {
   showReadReceipt: true,
   imagePreview: true,
   autoPlay: true,
+  /**
+   * ↓ 消息提醒（仅本机生效，与「会话免打扰」是两个层面：这里管的是这台设备要不要提醒，
+   * 免打扰管的是单个会话）。四项默认全开：切后台收不到提醒才是用户最先撞上的问题。
+   */
+  /** 提醒总开关：关掉后不出声也不弹通知，未读角标照常更新 */
+  notifyEnabled: true,
+  /** 提示音（Web Audio 现合成，不引音频文件） */
+  notifySound: true,
+  /** 页面在后台/最小化时弹系统桌面通知（浏览器需要授权，http 局域网地址下会被拒并自动降级为声音+角标） */
+  notifyDesktop: true,
+  /** 实时连接断开时，每隔一会儿轮一次未读总数兜底（这时长连接收不到推送，只能自己问） */
+  notifyUnreadPoll: true,
   /**
    * 直播/回放的默认清晰度：'auto' 交回 hls.js 按带宽自适应，否则锁定到对应高度的那一档。
    * 推流端一场会同时编出 1440p/1080p/720p/480p 几路真码流，存高度而不是存档位序号
@@ -234,6 +247,8 @@ export const useSettingsStore = defineStore('settings', {
       root.style.setProperty('--im-bubble-radius', this.bubbleStyle === 'simple' ? '2px' : '8px')
 
       setDebugEnabled(this.debugLog)
+      // 标签页图标的角标底色跟主题色走，换色后要按当前未读数重画一次
+      refreshFavicon()
     },
 
     /**

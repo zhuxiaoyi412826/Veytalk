@@ -3,13 +3,20 @@ import router from '@/router'
 import { asId, sameId } from '@/utils/id'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
-import { useConversationStore } from '@/stores/conversation'
+import { useSettingsStore } from '@/stores/settings'
 import { useFriendStore } from '@/stores/friend'
 import { useGroupStore } from '@/stores/group'
 import { useCallStore } from '@/stores/call'
 import { useGroupcallStore } from '@/stores/groupcall'
 import { useLinkmicStore } from '@/stores/linkmic'
 import { on, connect, send as wsSend } from './socket'
+import { summarize, useConversationStore } from '@/stores/conversation'
+import {
+  notifyIncoming,
+  notifyOfflineBatch,
+  notifySystem,
+  setOpenConversationHandler
+} from '@/utils/notify'
 
 /**
  * WebSocket 下行报文到各 store 的分发。
@@ -26,6 +33,20 @@ let installed = null
 /** ElNotification 支持的四种样式；服务端给的 tone 不在这个表里就按 info 兜底 */
 const NOTIFY_TONES = ['success', 'warning', 'info', 'error']
 
+/**
+ * 断线期间的未读数轮询间隔。
+ *
+ * WS 掉了不等于站点挂了：后端重启、代理断连、笔记本休眠醒来这些场景下，
+ * HTTP 接口一直是通的，只有推送断了。不兜这一层，用户就只能靠刷新页面发现新消息。
+ * 15 秒比心跳长一个量级但短于退避上限，标签页在后台时浏览器会自己把定时器压到分钟级，
+ * 不必我们再做可见性判断。
+ */
+const OFFLINE_POLL_MS = 15000
+
+let offlinePollTimer = null
+/** 上一次轮询到的未读总数：拿它做差才能知道「断线这段时间又来了几条」 */
+let offlineBaselineUnread = null
+
 export function installWsDispatch() {
   if (installed) {
     return installed
@@ -40,10 +61,19 @@ export function installWsDispatch() {
   const groupcall = useGroupcallStore()
   const linkmic = useLinkmicStore()
 
+  // 点系统通知要跳到对应会话。notify 那层不认识 router（它也不该认识），
+  // 跳转在这里接回来；重复 install 会覆盖上一个回调，不会叠加
+  setOpenConversationHandler((conversationId) => {
+    router.push({ name: 'chat', params: { conversationId } }).catch(() => {
+      // 已经在该会话的路由上：push 会被 vue-router 以 NavigationDuplicated reject，属正常
+    })
+  })
+
   const disposers = []
 
   disposers.push(
     on('open', ({ reconnected }) => {
+      stopOfflineUnreadPoll()
       // 连上就是「网络可用」的最强信号：先重提交离线待发送队列（内部空队列时几乎零成本），
       // 断网期间攒下的消息按入队顺序补发，clientMsgId 幂等保证不会重复入库
       chat.flushPending()
@@ -58,6 +88,9 @@ export function installWsDispatch() {
         .then((list) => {
           if (list && list.length > 0) {
             conversation.fetchList()
+            // 这批消息是静默上屏的（走 appendMessage，不经 message 帧），用户切回来只看得到
+            // 气泡多了几条、什么声音都没有 —— 汇成一条通知，而不是逐条弹
+            notifyOfflineBatch(list, { info: (item) => conversationInfo(conversation, item, auth.userId) })
           } else {
             conversation.refreshTotalUnread()
           }
@@ -82,6 +115,18 @@ export function installWsDispatch() {
         sameId(dto.conversationId, conversation.activeId) && document.visibilityState === 'visible'
 
       conversation.applyIncoming(dto, viewing)
+
+      // 提醒判定全部交给 notify 那一层（前台静默 / 后台补通知 / 免打扰 / 节流都在里面），
+      // 这里只负责把「哪来的、叫什么、正文摘要、是否点名」四件事说清楚
+      const info = conversationInfo(conversation, dto, auth.userId)
+      notifyIncoming({
+        conversationId: dto.conversationId,
+        name: info.name,
+        summary: notifyBody(dto),
+        muted: info.muted,
+        important: info.important,
+        viewing
+      })
 
       // 送达回执与是否在看无关：消息已经到端了
       chat.reportDelivered([dto.messageId])
@@ -207,12 +252,23 @@ export function installWsDispatch() {
     })
   )
 
+  disposers.push(
+    on('close', ({ willReconnect }) => {
+      // 只有「会重连」才轮询：登出与被踢时继续探只会把 401 刷成一排
+      if (willReconnect) {
+        startOfflineUnreadPoll(conversation)
+      }
+    })
+  )
+
   // 刷新页面后没有走过登录流程，token 在 localStorage 里而连接还没建立
   connect()
 
   installed = () => {
     disposers.forEach((dispose) => dispose())
     installed = null
+    stopOfflineUnreadPoll()
+    setOpenConversationHandler(null)
   }
   return installed
 }
@@ -221,6 +277,96 @@ export function uninstallWsDispatch() {
   if (installed) {
     installed()
   }
+}
+
+/**
+ * WS 断线期间的未读兜底轮询。
+ *
+ * 刻意只拉 `/unread/total` 一个数：不拉正文（离线消息得靠重连后的 pullOffline 一次性补齐，
+ * 轮询里逐次拉历史会和那条路撞车）、不推已读位点（人在离线状态里读不到东西，推了反而是错的信息）。
+ * 数量变大时补一条系统通知，因为光有角标在后台标签页上根本看不见。
+ */
+function startOfflineUnreadPoll(conversation) {
+  if (offlinePollTimer) {
+    return
+  }
+  if (useSettingsStore().notifyUnreadPoll === false) {
+    return
+  }
+  offlineBaselineUnread = conversation.totalUnread || 0
+  offlinePollTimer = setInterval(async () => {
+    // 轮询期间用户可能把它关了：下一跳就收掉，不让一个标着「已关闭」的开关还在背后台发请求
+    if (useSettingsStore().notifyUnreadPoll === false) {
+      stopOfflineUnreadPoll()
+      return
+    }
+    try {
+      const before = offlineBaselineUnread || 0
+      await conversation.refreshTotalUnread()
+      const after = conversation.totalUnread || 0
+      offlineBaselineUnread = after
+      if (after > before) {
+        notifySystem(`有 ${after - before} 条新消息`, '连接已中断，消息可能不完整，请回到页面刷新', {
+          tag: 'offline-poll'
+        })
+      }
+    } catch {
+      // 站点整体不可达时这里会一直失败：不提示、不重试控制，重连那一路由 socket 自己管
+    }
+  }, OFFLINE_POLL_MS)
+}
+
+function stopOfflineUnreadPoll() {
+  if (offlinePollTimer) {
+    clearInterval(offlinePollTimer)
+    offlinePollTimer = null
+  }
+  offlineBaselineUnread = null
+}
+
+/**
+ * 一条消息对应的会话展示信息：名字 + 是否免打扰 + 有没有点名找我。
+ * 同时服务「实时推送」与「离线补拉」两路，所以不取到本地列表里找不到就算了：
+ * 新会话（对方刚通过好友申请）本地还没建列表，拿发送者昵称兜底总比只写「新消息」好。
+ */
+function conversationInfo(conversation, dto, me) {
+  const target = conversation.find(dto && dto.conversationId)
+  return {
+    name:
+      (target && target.name) ||
+      (dto && dto.fromNickname) ||
+      '新消息',
+    muted: !!(target && target.muted),
+    important: mentionMe(dto, me)
+  }
+}
+
+/**
+ * 是否点名提醒了我：与后端 MessageExtra.hasMention() 同口径（@全体，或 atUserIds 里有我）。
+ * atUserIds 是雪花 ID，JSON 过来可能是字符串，所以用 sameId 比大小而不是 includes。
+ */
+function mentionMe(dto, me) {
+  const extra = dto && dto.extra
+  if (!extra) {
+    return false
+  }
+  if (extra.atAll) {
+    return true
+  }
+  return Array.isArray(extra.atUserIds) && extra.atUserIds.some((id) => sameId(id, me))
+}
+
+/**
+ * 通知正文：群聊带上谁说的，单聊不带（标题已经是那个人了）。
+ * 附件类走 summarize 转成「[图片]」这种占位 —— 把文件 ID 抄进通知正文是最刺眼的穿帮。
+ */
+function notifyBody(dto) {
+  const text = summarize(dto)
+  const isGroup = Number(dto.conversationType) === 2 || Number(dto.msgType) === 5
+  if (isGroup && dto.fromNickname) {
+    return `${dto.fromNickname}: ${text}`
+  }
+  return text
 }
 
 /**
@@ -248,6 +394,10 @@ function handleNotify(data, { conversation, friend, group }) {
       // 点击通知直接跳到申请页，比让用户自己找入口省事
       onClick: () => router.push({ name: 'friend-requests' })
     })
+    notifySystem('新的好友申请', `${data.fromNickname || '有人'} 请求加你为好友`, {
+      tag: 'friend-request',
+      onOpen: () => router.push({ name: 'friend-requests' })
+    })
     return
   }
 
@@ -265,6 +415,14 @@ function handleNotify(data, { conversation, friend, group }) {
         }
       }
     })
+    notifySystem('好友申请已通过', `${data.nickname || '对方'} 已同意你的好友申请`, {
+      tag: 'friend-accepted',
+      onOpen: () => {
+        if (data.conversationId) {
+          router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
+        }
+      }
+    })
     return
   }
 
@@ -272,11 +430,13 @@ function handleNotify(data, { conversation, friend, group }) {
   // 两者都是纯提醒：不刷新列表也不跳路由——工单页在管理后台那边，聊天端没有可跳的目标。
   // 样式取服务端的 tone，不让前端拿中文标题去猜（改一句文案就把通知颜色改乱了）。
   if (data.action === 'report-result' || data.action === 'admin-warn') {
+    const title = data.title || (data.action === 'report-result' ? '举报处理结果' : '内容提醒')
     ElNotification({
-      title: data.title || (data.action === 'report-result' ? '举报处理结果' : '内容提醒'),
+      title,
       message: data.message || '',
       type: NOTIFY_TONES.includes(data.tone) ? data.tone : 'info'
     })
+    notifySystem(title, data.message || '', { tag: data.action })
     return
   }
 
@@ -308,6 +468,9 @@ function handleGroupJoinNotify(data, group) {
       message: `${data.nickname || '有人'} 申请加入群聊，请前往群设置审批`,
       type: 'info'
     })
+    notifySystem('新的入群申请', `${data.nickname || '有人'} 申请加入群聊，请前往群设置审批`, {
+      tag: 'join-request'
+    })
     return
   }
   if (action === 'join-approved') {
@@ -321,13 +484,25 @@ function handleGroupJoinNotify(data, group) {
         }
       }
     })
+    notifySystem('入群申请已通过', `你已加入群聊${data.groupName ? `「${data.groupName}」` : ''}`, {
+      tag: 'join-approved',
+      onOpen: () => {
+        if (data.conversationId) {
+          router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
+        }
+      }
+    })
     return
   }
   if (action === 'join-rejected') {
+    const message = data.groupName
+      ? '管理员未通过你加入「' + data.groupName + '」的申请'
+      : '管理员未通过你的入群申请'
     ElNotification({
       title: '入群申请被拒绝',
-      message: data.groupName ? `管理员未通过你加入「${data.groupName}」的申请` : '管理员未通过你的入群申请',
+      message,
       type: 'warning'
     })
+    notifySystem('入群申请被拒绝', message, { tag: 'join-rejected' })
   }
 }
