@@ -1,22 +1,37 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 /**
- * 把主进程透传的后端地址暴露给渲染进程。
+ * 把主进程解析的后端地址暴露给渲染进程。
  *
  * main.js 通过 webPreferences.additionalArguments 传入 --server-base=xxx，
  * 这里从 process.argv 取出，用 contextBridge 挂到 window.__IM_SERVER__。
  * 注入发生在页面任何脚本执行之前，前端 utils/env.js 读它拼出 /api 与 ws 绝对地址；
  * 浏览器 Web 部署没有 preload，window.__IM_SERVER__ 不存在，前端自动回落到同源相对路径。
+ *
+ * ★ 但 argv 只能代表「建窗口那一刻」的值：用户在登录页改完后端地址只是 reload 页面，
+ * 窗口对象并没有重建，additionalArguments 不会变。所以这里优先走同步通道
+ * im:server-resolve 现取（每次页面加载都会跑一次 preload，拿到的就是最新解析结果），
+ * argv 只当兜底（ipc 意外不可用时至少开发机还能按内置默认跑）。
  */
 const FLAG = '--server-base='
 const arg = process.argv.find((a) => a.startsWith(FLAG))
-const baseUrl = arg ? decodeURIComponent(arg.slice(FLAG.length)) : ''
+let baseUrl = arg ? decodeURIComponent(arg.slice(FLAG.length)) : ''
+let source = 'argv'
+try {
+  const res = ipcRenderer.sendSync('im:server-resolve')
+  if (res && res.ok && res.data && res.data.baseUrl) {
+    baseUrl = res.data.baseUrl
+    source = res.data.source
+  }
+} catch { /* 主进程未注册时回落到 argv 值 */ }
 
-contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl })
+contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl, source })
 
 /**
- * 桌面端原生能力桥。目前只用于调用主进程的本机 ffmpeg（GPU 硬件编码）压缩视频。
- * 浏览器 Web 部署没有 preload，window.__IM_NATIVE__ 不存在，前端据此走「不压缩、直传原片」。
+ * 桌面端原生能力桥。用于调用主进程的本机 ffmpeg（GPU 硬件编码）压缩视频、
+ * 本地库/媒体缓存、录屏审计，以及下面的系统通知与任务栏角标。
+ * 浏览器 Web 部署没有 preload，window.__IM_NATIVE__ 不存在，前端据此走降级路径
+ *（通知退到 Web Notification、角标只剩标题与 favicon）。
  */
 let compressSeq = 0
 
@@ -36,11 +51,47 @@ async function call(channel, payload) {
 contextBridge.exposeInMainWorld('__IM_NATIVE__', {
   isDesktop: true,
   /**
+   * 后端地址的运行期配置桥（登录页「开发调试」与设置页「后端地址」行用它）。
+   * 地址来自主进程的 server-config.js，渲染进程不自己存一份：连不上后端时
+   * 这个弹窗是唯一出路，它必须不依赖任何网络请求就能读写。
+   * set/reset 只落盘，生效靠前端 reload 页面（preload 会重新取一次）。
+   */
+  server: {
+    /** → { baseUrl, source, builtIn, env, configPath, hasConfig } */
+    get: () => call('im:server-get', null),
+    /** 只校验规整不落盘 → { baseUrl }；前端拿它统一口径后再去探连接，避免两处各写一份规则 */
+    normalize: (baseUrl) => call('im:server-normalize', { baseUrl }),
+    /** 写入配置（主进程会校验并规整）→ { baseUrl, source:'file', configPath } */
+    set: (baseUrl) => call('im:server-set', { baseUrl }),
+    /** 删除配置文件，回落到环境变量或内置默认 → { baseUrl, source } */
+    reset: () => call('im:server-reset', null),
+    /** 在资源管理器里定位配置文件（没生成过则打开它所在目录） */
+    reveal: () => call('im:server-reveal', null)
+  },
+  /**
    * 窗口内容防截图：true 时主进程对窗口置 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)，
    * 截屏/录屏里变黑块，肉眼正常可见。拆闪照预览期间开、关掉预览即关。
    * 浏览器 Web 端没有这个桥，window.__IM_NATIVE__ 不存在，防截图仅桌面端生效。
    */
   setContentProtection: (enabled) => call('im:set-content-protection', { enabled }),
+  /**
+   * 弹一条系统通知。桌面壳加载的是 file:// 页面，拿不到 Web Notification 权限，
+   * 真通知只能由主进程弹（见 main.js 的 setupNotify）。
+   * payload: { title, body, tag, silent }。
+   *
+   * 刻意用 send 而不是 invoke：提醒是发完就返的事件，主进程弹失败已经自己记了日志，
+   * 渲染侧不需要为一个 rejected Promise 多搭一层 catch（也不该因为弹不出通知而阻断上屏）。
+   */
+  notify: (payload) => ipcRenderer.send('im:notify', payload),
+  /** 未读总数变了：macOS 设 Dock 角标，Windows 叠任务栏小图 + 未读时闪烁，Linux 无对应能力 */
+  badge: (count) => ipcRenderer.send('im:badge', { count }),
+  /**
+   * 系统通知被点击。通知是主进程弹的，渲染侧只能从主进程拿到回调，
+   * 参数是当初 notify 里那个 tag（一个会话 id），前端据此跳到对应会话。
+   */
+  onClicked: (callback) => {
+    ipcRenderer.on('im:notify-click', (event, tag) => callback(tag))
+  },
   /**
    * 取 File 的真实磁盘路径。Electron 32+ 移除了 File.path，必须在 preload 里用 webUtils 取；
    * 主进程拿到路径后能让 ffmpeg 直接流式读写磁盘，不必把大视频读进内存。
@@ -156,14 +207,20 @@ contextBridge.exposeInMainWorld('__IM_DIRECT__', {
  * 契约：startPush/stopPush 走 invoke（主进程统一返回 {ok, data|error}，call 拆包）；
  * startPush 在 ffmpeg 成功 spawn 后即 resolve，推流中途的状态变化经 onState 事件持续推送
  * （state: starting | pushing | stopped | error，附带 encoder / error / warn 等字段）。
+ *
+ * stopPush 是「等回放定版完」才 resolve 的（排空上传队列 + PUT 一份 VOD 清单，一般百毫秒量级），
+ * 所以返回 { stopped, replay }：replay 为 {segmentCount, durationSeconds, bytes, url} 或 null
+ *（未生成/失败），前端拿它向后端上报「这一场有回放」。options.replay=false 可整体跳过。
+ * ffmpeg 意外退出时主进程也会生成一次，统计随 onState 的 stopped 事件里的 replay 字段带上来。
  */
 contextBridge.exposeInMainWorld('__IM_LIVE__', {
   isDesktop: true,
   /** 枚举本机显示器（多屏选择用）→ [{id, label, bounds, primary}] */
   listDisplays: () => call('im:live-list-displays', null),
-  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?, displayId?} → {started, encoder} */
+  /** params: {pushUrl, sourceType, resolution, bitrateKbps, deviceName?, displayId?} → {started, encoder, tiers} */
   startPush: (params) => call('im:live-start-push', params),
-  stopPush: () => call('im:live-stop-push', null),
+  /** options: {replay?: boolean} → {stopped, replay} */
+  stopPush: (options) => call('im:live-stop-push', options || null),
   queryState: () => call('im:live-query-state', null),
   onState: (callback) => {
     ipcRenderer.on('im:live-state', (event, state) => callback(state))

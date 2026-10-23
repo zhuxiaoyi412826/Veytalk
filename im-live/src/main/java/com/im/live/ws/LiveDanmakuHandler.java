@@ -6,6 +6,9 @@ import com.im.common.util.JsonUtil;
 import com.im.live.config.LiveProperties;
 import com.im.live.entity.LiveRoom;
 import com.im.live.service.LiveDanmakuService;
+import com.im.live.service.LiveGateService;
+import com.im.live.service.LiveModerationService;
+import com.im.live.service.LivePkService;
 import com.im.live.service.LiveRoomService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,9 +40,17 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
     private static final String ATTR_NICKNAME = "im.live.nickname";
     private static final String ATTR_AVATAR = "im.live.avatar";
     private static final String ATTR_ANCHOR = "im.live.anchor";
+    /**
+     * 主播用户 ID：房管（禁言/屏蔽词）按主播维度存，每条弹幕的判定都要用它。
+     * 与 anchor 标记一样在进房那一刻从房间实体取一次——一场直播里主播不会换人。
+     */
+    private static final String ATTR_ANCHOR_ID = "im.live.anchorId";
 
     private final LiveDanmakuService danmakuService;
     private final LiveRoomService roomService;
+    private final LiveModerationService moderationService;
+    private final LiveGateService gateService;
+    private final LivePkService pkService;
     private final UserQuerySpi userQuerySpi;
     private final LiveProperties properties;
     private final JsonUtil jsonUtil;
@@ -60,8 +71,17 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
             return;
         }
         boolean anchor = room.managedBy(userId);
+        // 门禁纵深防御：未解锁且非主播的人不该靠手拼 /ws/live URL 绕过 REST 进来潜水
+        // （正常路径下他的 danmakuWs 本就为空、连不上；防看不靠这里，靠 playUrl 不下发）
+        if (!anchor && gateService.isLockedFor(roomId, userId)) {
+            danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_SYSTEM, "content",
+                    "该直播需解锁后才能进入"));
+            closeQuietly(session);
+            return;
+        }
         UserBriefDTO user = userQuerySpi.getById(userId);
         session.getAttributes().put(ATTR_ANCHOR, anchor);
+        session.getAttributes().put(ATTR_ANCHOR_ID, room.getAnchorId());
         session.getAttributes().put(ATTR_NICKNAME, user == null ? "观众" : safeName(user));
         session.getAttributes().put(ATTR_AVATAR, user == null ? "" : nullToEmpty(user.getAvatar()));
 
@@ -76,6 +96,13 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
             danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_ENDED, "content",
                     roomService.endReasonText(room.getEndReason())));
         }
+        // 已被该主播禁言的人进房先给一句明确的「只能潜水」，省掉他发第一条才被拒的困惑
+        if (!anchor && moderationService.isMuted(room.getAnchorId(), userId)) {
+            danmakuService.sendTo(session, danmakuService.frame(LiveDanmakuService.TYPE_SYSTEM, "content",
+                    "你已被主播禁言，本场只能观看"));
+        }
+        // 本房正有 PK 时补一帧当前态：不然晚来的观众只看到中缝一条线，不知道它在比什么
+        pkService.sendCurrent(session, roomId);
         log.debug("弹幕进房: roomId={}, userId={}, anchor={}, online={}, ended={}", roomId, userId, anchor, online, !room.isLiving());
     }
 
@@ -120,7 +147,15 @@ public class LiveDanmakuHandler extends TextWebSocketHandler {
         String nickname = (String) session.getAttributes().get(ATTR_NICKNAME);
         String avatar = (String) session.getAttributes().get(ATTR_AVATAR);
         boolean anchor = Boolean.TRUE.equals(session.getAttributes().get(ATTR_ANCHOR));
-        danmakuService.broadcastDanmaku(roomId, userId, nickname, avatar, anchor, content);
+        Long anchorId = (Long) session.getAttributes().get(ATTR_ANCHOR_ID);
+        // 房管判定排在限流之后、广播之前：被禁的人不该占用限流配额，也不该有一次广播被发出去
+        LiveModerationService.Decision decision = moderationService.inspect(anchorId, userId, content, anchor);
+        if (decision.blocked()) {
+            danmakuService.sendTo(session,
+                    danmakuService.frame(LiveDanmakuService.TYPE_ERROR, "content", decision.rejectReason()));
+            return;
+        }
+        danmakuService.broadcastDanmaku(roomId, userId, nickname, avatar, anchor, decision.content());
     }
 
     private void onLike(WebSocketSession session, Long roomId, Map<String, Object> frame) {

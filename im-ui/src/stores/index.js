@@ -2,6 +2,7 @@ import { useAuthStore } from './auth'
 import { useChatStore } from './chat'
 import { useConversationStore } from './conversation'
 import { useFriendStore } from './friend'
+import { useReportStore } from './report'
 
 /**
  * 退出登录的完整流程。
@@ -21,4 +22,6 @@ export async function signOut() {
   useChatStore().reset()
   useConversationStore().reset()
   useFriendStore().reset()
+  // 举报字典与开关也是按账号拿的状态，并且弹窗可能正开着：不清的话换账号会短暂看到上一个人的字典
+  useReportStore().reset()
 }

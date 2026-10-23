@@ -5,6 +5,7 @@ import com.im.live.dto.req.LiveStartRequest;
 import com.im.live.dto.vo.LiveRoomVO;
 import com.im.live.entity.LiveRoom;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -61,6 +62,16 @@ public interface LiveRoomService {
 
     /** 我最近的一场直播（直播中优先），用于「我的直播」面板恢复现场；一场都没开过返回 {@code null} */
     LiveRoomVO mine();
+
+    /**
+     * 最近的可回看场次（按关播时间倒序），用于大厅的回放入口：回放的入口标记只活
+     * {@code im.live.replay.retention-days}（默认 1 天），而大厅对「已结束房间」的可见窗口
+     * 只有 {@code ended-room-visible-minutes}（默认 60 分钟），两者不同量级，所以另开一份列表。
+     *
+     * @param anchorId 为空表示不限主播（大厅全局列表）；非空即「这个主播的可回看场次」
+     * @param limit    期望条数，服务端夹到 {@code [1, 20]}
+     */
+    List<LiveRoomVO> recentReplays(Long anchorId, int limit);
 
     /** 巡检：把心跳超时的房间关播、清理聊天模式到期的聊天室，并冲刷点赞合并计数 */
     void expireTimeouts();

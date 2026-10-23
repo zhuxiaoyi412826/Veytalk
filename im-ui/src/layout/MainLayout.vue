@@ -65,6 +65,26 @@
 
     <!-- 全局通话浮层：与 useCallStore 联动，切会话/翻页都不打断通话 -->
     <CallOverlay />
+
+    <!--
+      通话悬浮小窗：浮层点「最小化」后由它接管（可拖动、点一下回到浮层）。
+      两者靠 store 的 minimized 交接：浮层只是用 opacity 抹掉（不卸载，卸载会把声音出口搞断），两路流一直在跑。
+    -->
+    <CallFloatWindow />
+
+    <!--
+      群通话浮层：同理挂在布局而不是聊天页——mesh 的 N-1 路 PeerConnection 存在 store 里，
+      路由切换不会把它们拆掉；两个浮层 z-index 相同（都在同一层级），但前端已拦住了
+      同时开 1:1 与群通话（见 ws/dispatch.js 的跨类型拦截），正常情况下不会叠在一起。
+    -->
+    <GroupCallOverlay />
+
+    <!--
+      举报弹窗：全站只挂这一份。入口有四个（消息右键、用户资料卡、直播间、群设置），
+      各引一个组件会让「同时开着两个举报窗」成为可能；
+      它们统一调 report.openReport({ targetType, targetId, title })，由 store 驱动这一个实例。
+    -->
+    <ReportDialog />
   </div>
 </template>
 
@@ -74,10 +94,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { ChatDotRound, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import CallOverlay from '@/components/CallOverlay.vue'
+import CallFloatWindow from '@/components/CallFloatWindow.vue'
+import GroupCallOverlay from '@/components/GroupCallOverlay.vue'
+import ReportDialog from '@/components/ReportDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useChatStore } from '@/stores/chat'
+import { useReportStore } from '@/stores/report'
 import { installWsDispatch, uninstallWsDispatch } from '@/ws/dispatch'
 import { socketState } from '@/ws/socket'
 
@@ -89,6 +113,7 @@ const auth = useAuthStore()
 const conversation = useConversationStore()
 const friend = useFriendStore()
 const chat = useChatStore()
+const report = useReportStore()
 
 /**
  * 导航项。
@@ -148,7 +173,9 @@ async function bootstrap() {
     friend.fetchFriends(),
     friend.refreshPendingCount(),
     // 离线消息在这里拉一次：WS 的 open 分发只在「重连」时拉，首次登录不会触发
-    chat.pullOffline()
+    chat.pullOffline(),
+    // 举报字典与开关：四个入口都靠它决定显不显示，取一次比每处各取一次好
+    report.ensureConfig()
   ]
   if (!auth.resolved) {
     tasks.push(auth.loadCurrentUser())

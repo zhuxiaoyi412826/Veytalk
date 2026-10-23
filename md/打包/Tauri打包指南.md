@@ -35,7 +35,7 @@
 | 渲染内核 | 自带 Chromium（版本可控、三端一致） | **系统 WebView2**（Win10/11 自带，随系统更新） |
 | 工具链 | 纯 Node，**不编译原生代码** | **需要 Rust + MSVC C++ 生成工具链** |
 | 主进程语言 | JavaScript（Node） | **Rust**（能力靠 crate，不能直接 `require`） |
-| 后端地址注入 | `main.js` 的 `SERVER_BASE` → preload `contextBridge` | 编译期 Vite 环境变量 / Rust `initialization_script` |
+| 后端地址注入 | 运行期三层回落（`server-config.js`：userData 配置文件 > 环境变量 `IM_SERVER_BASE` > 内置默认）+ preload `contextBridge` | 编译期 Vite 环境变量 / Rust `initialization_script`（若要同等能力得自己做外部配置） |
 | getUserMedia 安全上下文 | `file://` 非安全上下文，靠自签证书/额外处理 | 自定义协议 `tauri://` 注册为 secure，**天然安全上下文** ✅ |
 | getDisplayMedia（屏幕共享） | Electron 自实现选择器，**可用** | **依赖 WebView2，Windows 上选择器缺失/受限** ⚠️ |
 | 离线/弱网镜像 | `ELECTRON_BUILDER_BINARIES_MIRROR` + `NODE_TLS=0` | `rsproxy` cargo 镜像 + `CARGO_HTTP_CHECK_REVOKE=false` |
@@ -179,7 +179,12 @@ im-ui/
 
 本仓库已有 `utils/env.js` 的**同源/Electron 双分支**逻辑：`isElectron()` 判 UA、`serverBase()` 读
 `window.__IM_SERVER__.baseUrl`（preload 注入）。**Tauri 里没有 preload，UA 也不含 `Electron`**，
-所以要让 `env.js` 认得 Tauri，并给它一条**编译期**后端地址来源（对齐 Electron 文档说的「编译期 SERVER_BASE」思路）。
+所以要让 `env.js` 认得 Tauri，并给它一条后端地址来源。
+
+> Electron 侧已不再是「编译期写死一个常量」，而是运行期三层回落（见
+> `electron/server-config.js`）；Tauri 没有 preload，要么用编译期环境变量，
+> 要么在 Rust 侧读同一个 `server-config.json` 并通过 `initialization_script` 注入——
+> 只要最终仍往 `window.__IM_SERVER__` 上填 `{ baseUrl, source }`，前端 `env.js` 与那个调试弹窗就能直接复用。
 
 ### 5.1 用 Vite 环境变量提供后端地址（编译期注入，最省事）
 
@@ -224,22 +229,36 @@ function serverBase() {
 ```
 
 然后把文件里其余 `isElectron()` 判断**统一改成 `isNativeShell()`**：
-`apiBaseURL()` / `mediaBaseURL()` / `wsBaseURL()` / `webhookBase()` / `livePlayBase()`。
+`apiBaseURL()` / `mediaBaseURL()` / `wsBaseURL()` / `webhookBase()` / `livePlayBase()` / `remapPushUrl()`。
 这些函数体不变，只是判定条件放宽到「Electron 或 Tauri」。这样：
 
 - Web 部署：`__IM_SERVER__` 无、非 Tauri → `serverBase()` 空 → 全部走同源，**零影响**；
 - Electron：仍走 preload 注入，**零影响**；
 - Tauri：走 `VITE_IM_SERVER_URL` → 绝对地址连远程后端。
 
-> `livePlayBase()` 特别说明：Electron 分支里它返回 `http://127.0.0.1:8088`（本机流媒体）。
-> Tauri 同理——非连麦直播仍需要能连到媒体服务器。改法：
+> `livePlayBase()` 特别说明：它已经不再是「Electron 分支直接返回 `http://127.0.0.1:8088`」，而是
+> 「从注入的后端地址取 host 拼 `:8088`，取不到才回落本机」——写死回环在桌面端装到另一台机器时，
+> 观众会去自己机器上要流（归因见 `md/已踩坑.md` 第 20 条）。
+> Tauri 没有 preload 注入，`serverBase()` 读的是 `VITE_IM_SERVER_URL`，同一套推导直接可用；要指到别的机器就显式配
+> `VITE_IM_MEDIA_BASE`。改法：
 > ```js
 > export function livePlayBase() {
->   if (isTauri()) return import.meta.env.VITE_IM_MEDIA_BASE || 'http://127.0.0.1:8088'
->   return isElectron() ? 'http://127.0.0.1:8088' : ''
+>   if (!isNativeShell()) return ''
+>   const media = import.meta.env.VITE_IM_MEDIA_BASE
+>   if (media) return media.replace(/\/+$/, '')
+>   const base = serverBase()
+>   if (base) {
+>     try {
+>       const u = new URL(base)
+>       if (u.hostname) return `${u.protocol}//${u.hostname}:${LIVE_MEDIA_PORT}`
+>     } catch { /* 脏地址回落本机 */ }
+>   }
+>   return `http://127.0.0.1:${LIVE_MEDIA_PORT}`
 > }
 > ```
-> 并在 `.env.tauri` 配 `VITE_IM_MEDIA_BASE=http://<流媒体服务器>:8088`。**连麦合成流依赖 getDisplayMedia，见第十节限制**。
+> 并在 `.env.tauri` 配 `VITE_IM_MEDIA_BASE=http://<流媒体服务器>:8088`（不配就跟着后端 host 走）。
+> 新添的 `remapPushUrl()` 同理把判定条件改成 `isNativeShell()`（它只换 pushUrl 的回环 host，绝对地址原样返回）。
+> **连麦合成流依赖 getDisplayMedia，见第十节限制**。
 
 ### 5.3 路由：桌面壳用 hash 模式
 

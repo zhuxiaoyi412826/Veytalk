@@ -21,8 +21,18 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import Hls from 'hls.js'
 import { createWebmPlayer, webmPlayerSupported } from '@/utils/webmPlayer'
 import {
+  QUALITY_MODE,
+  dedupeTiers,
+  buildQualityChoices,
+  resolveQualityChoice,
+  qualitySummary,
+  pickPlayerMode
+} from '@/utils/quality'
+import {
   fetchLivePage,
   fetchLiveRoom,
+  unlockLiveRoom,
+  payLiveRoom,
   fetchMyLive,
   liveHeartbeat,
   startLive,
@@ -32,21 +42,39 @@ import {
   createVideo,
   deleteVideo,
   reportVideoPlay,
-  fetchLinkmicList
+  fetchLinkmicList,
+  fetchMuteList,
+  muteUser,
+  unmuteUser,
+  fetchBlockWords,
+  replaceBlockWords,
+  startPk,
+  votePk,
+  stopPk,
+  fetchCurrentPk,
+  reportReplay,
+  fetchReplay,
+  fetchReplayRooms
 } from '@/api/live'
 import { uploadFileSmart } from '@/api/file'
 import { fetchWallet, recharge, checkin, sendGift } from '@/api/wallet'
 import { guardImage } from '@/utils/nsfw'
+import { formatConvTime } from '@/utils/format'
 import { mediaUrl, readVideoMetadata } from '@/utils/media'
 import { getToken } from '@/utils/token'
-import { wsBaseURL, isElectron, livePlayBase } from '@/utils/env'
+import { wsBaseURL, isElectron, livePlayBase, remapPushUrl } from '@/utils/env'
 import { useAuthStore } from '@/stores/auth'
 import { useLinkmicStore } from '@/stores/linkmic'
+import { useReportStore } from '@/stores/report'
+import { useSettingsStore } from '@/stores/settings'
 import UserAvatar from '@/components/UserAvatar.vue'
+import AnchorStatsDialog from '@/components/AnchorStatsDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const report = useReportStore()
+const settings = useSettingsStore()
 
 /* ---------- 房间状态文案 ---------- */
 const STATUS_TEXT = { 1: '直播中', 2: '已结束', 3: '已封禁' }
@@ -82,6 +110,26 @@ function onFilterStatus(status) {
   listQuery.status = status
   listQuery.current = 1
   loadRooms()
+}
+
+/* ==================== 大厅：可回看场次 ==================== */
+/**
+ * 大厅那条「可看回放」横条。为什么要单独一份列表：回放的入口标记能活 retention-days
+ * （默认 1 天），而大厅对「已结束房间」只展示 1 小时（ended-room-visible-minutes），不进这一条就等于
+ * 「关播一小时后回放再没人找得到」。卡片不直接带地址，点了才进房现签。
+ */
+const replays = ref([])
+
+async function loadReplays() {
+  try {
+    replays.value = (await fetchReplayRooms({ limit: 12 })) || []
+  } catch {
+    replays.value = []
+  }
+}
+
+function openReplayRoom(item) {
+  router.push({ name: 'live-room', params: { roomId: String(item.id) }, query: { replay: '1' } })
 }
 
 /* ==================== 顶层双板块：视频 / 直播 ==================== */
@@ -122,6 +170,18 @@ function openVideo(v) {
 function closePlayer() {
   playingVideo.value = null
 }
+/**
+ * 播放区那一行元数据，末尾拼上真实分辨率。
+ * 点播视频是「一行一个原文件」（上传时不转码），没有多档可切，所以这里只报数不给选择器——
+ * 前端放大像素那种「假 2K」只会变糊，与直播那种真多档不是一回事。
+ */
+const playingVideoMeta = computed(() => {
+  const v = playingVideo.value
+  if (!v) return ''
+  const parts = [v.uploaderName, fmtDuration(v.duration), `${v.playCount || 0} 次播放`]
+  if (v.width && v.height) parts.push(`${v.width}×${v.height}`)
+  return parts.filter(Boolean).join(' · ')
+})
 // blob 地址到位后再驱动播放：mediaUrl 异步，src 还是空时 autoplay 不会重试
 watch(playSrc, (src) => {
   if (src && playerEl.value) {
@@ -364,6 +424,23 @@ function enterRoom(id) {
   router.push({ name: 'live-room', params: { roomId: String(id) } })
 }
 
+/* ==================== 主播数据面板 ==================== */
+const statsDialog = ref(false)
+
+/**
+ * 面板里点「进房」/「看回放」：先收面板再跳，否则路由变了对话框还浮在上面。
+ * 面板是跨场次的列表，点的不是当前房间，所以走与卡片同一个 router 目标。
+ */
+function openStatsRoom(roomId) {
+  statsDialog.value = false
+  enterRoom(roomId)
+}
+
+function openStatsReplay(roomId) {
+  statsDialog.value = false
+  router.push({ name: 'live-room', params: { roomId: String(roomId) }, query: { replay: '1' } })
+}
+
 /* ==================== 开播面板 ==================== */
 const startDialog = ref(false)
 const starting = ref(false)
@@ -373,10 +450,40 @@ const startForm = reactive({
   sourceType: 'screen',
   resolution: '720p',
   bitrateKbps: 2500,
-  displayId: null
+  displayId: null,
+  // 门禁：password 非空即密码房；price>0 即付费房（两者都给按密码优先）。都留空为公开房
+  password: '',
+  price: ''
 })
 /** 本机显示器列表（多屏选择用）；单屏或浏览器端为空，不显示选择项 */
 const displays = ref([])
+
+/**
+ * 原画档位 → 建议码率 / 码率上限（kbps）。
+ * 上限只约束原画那一路（阶梯向下的几档按比例派生），所以 2K 要放宽到 16000。
+ */
+const RESOLUTION_DEFAULT_BITRATE = { '480p': 900, '720p': 2500, '1080p': 4000, '1440p': 8000 }
+const RESOLUTION_MAX_BITRATE = { '480p': 2000, '720p': 4000, '1080p': 8000, '1440p': 16000 }
+const bitrateMax = computed(() => RESOLUTION_MAX_BITRATE[startForm.resolution] || 8000)
+
+// 换原画就顺手把码率拨到该档的建议值：两者本来强相关，留着一个跟分辨率不匹配的码率
+// （1440p + 800k 那种）只会让观众看到一屏马赛克。拨完仍可手动改
+watch(() => startForm.resolution, (r) => {
+  const def = RESOLUTION_DEFAULT_BITRATE[r]
+  if (def && startForm.bitrateKbps !== def) {
+    startForm.bitrateKbps = Math.min(def, RESOLUTION_MAX_BITRATE[r] || def)
+  }
+})
+
+/** 开播面板里的阶梯预告：原画向下派生，实际比采集源高的档会被主进程砍掉，所以只能说「最多」有哪几档 */
+const ladderHint = computed(() => {
+  const order = ['1440p', '1080p', '720p', '480p']
+  const idx = order.indexOf(startForm.resolution)
+  return order.slice(idx < 0 ? 1 : idx).join(' / ')
+})
+
+/** 本场实际已铺开的档位（主进程上报），主播面板里给主播看 */
+const pushTiers = ref([])
 
 /** 桌面端原生推流桥（preload 注入）；浏览器下为空，开播按钮据此禁用 */
 const liveBridge = computed(() => (isElectron() ? window.__IM_LIVE__ : null))
@@ -384,9 +491,14 @@ const canBroadcast = computed(() => !!liveBridge.value && typeof liveBridge.valu
 
 /** 我正在直播中的房间（用于开播后切到主播面板 / 刷新后恢复现场） */
 const myLiving = ref(null)
-const pushInfo = reactive({ roomId: '', streamKey: '', pushUrl: '', heartbeatSeconds: 15 })
+const pushInfo = reactive({ roomId: '', streamKey: '', pushUrl: '', heartbeatSeconds: 15, replayEnabled: true })
 const pushState = ref('idle') // idle | starting | pushing | stopped | error
 const pushError = ref('')
+/**
+ * 主进程上报过的回放定版结果（来自主动 stopPush 之外的路径：ffmpeg 自己崩掉时
+ * 前端不会再走 stopPush，只能从 stopped 事件里拿到）。endBroadcast 上报后清空。
+ */
+const lastReplay = ref(null)
 let heartbeatTimer = null
 
 async function loadMyLive() {
@@ -406,6 +518,8 @@ async function openStartDialog() {
   startForm.title = ''
   startForm.notice = ''
   startForm.displayId = null
+  startForm.password = ''
+  startForm.price = ''
   // 多屏时让用户选抓哪块屏；拉取失败/单屏都不影响开播（display 缺省=整个虚拟桌面）
   displays.value = []
   try {
@@ -430,18 +544,25 @@ async function submitStart() {
       notice: startForm.notice.trim() || undefined,
       sourceType: startForm.sourceType,
       resolution: startForm.resolution,
-      bitrateKbps: Number(startForm.bitrateKbps) || 2500
+      bitrateKbps: Number(startForm.bitrateKbps) || 2500,
+      password: startForm.password.trim() || undefined,
+      price: Number(startForm.price) > 0 ? Number(startForm.price) : undefined
     })
     pushInfo.roomId = String(info.roomId)
     pushInfo.streamKey = info.streamKey
-    pushInfo.pushUrl = info.pushUrl
+    // 后端默认把 pushUrl 配成 127.0.0.1（推流端与媒体服务器同机的自测拓扑），
+    // 桌面端装在另一台机器时要校正成媒体面 host，否则 ffmpeg 把分片 PUT 到自己本机 → 开不了播
+    pushInfo.pushUrl = remapPushUrl(info.pushUrl)
     pushInfo.heartbeatSeconds = info.heartbeatSeconds || 15
+    // 后端没开的功能不值得推流端白写一份文件：旧后端不返这个字段，按「开」处理
+    pushInfo.replayEnabled = info.replayEnabled !== false
+    lastReplay.value = null
     startDialog.value = false
 
     // 2) 媒体面：让主进程拉起 ffmpeg 切 HLS 并 PUT 到 pushUrl
     pushState.value = 'starting'
     pushError.value = ''
-    await liveBridge.value.startPush({
+    const res = await liveBridge.value.startPush({
       pushUrl: pushInfo.pushUrl,
       sourceType: startForm.sourceType,
       resolution: startForm.resolution,
@@ -450,6 +571,8 @@ async function submitStart() {
       // 直接过 IPC 会触发「An object could not be cloned」。主进程按 id 用 screen.getAllDisplays() 查 bounds。
       displayId: startForm.displayId ?? null
     })
+    // 主进程按采集源真实高度把放大了也没用的档砍掉了，拿到实际铺开的档位才能知道主播选的 1440p 有没有真出去
+    pushTiers.value = Array.isArray(res?.tiers) ? res.tiers : []
 
     myLiving.value = { id: pushInfo.roomId, title: startForm.title.trim(), status: 1 }
     startHeartbeat()
@@ -506,14 +629,23 @@ function stopHeartbeat() {
 /** 结束直播。callStop=true 时才回调后端关播（心跳判定已关房的情况下不必再关一次） */
 async function endBroadcast(callStop = true) {
   stopHeartbeat()
+  let replay = null
   if (liveBridge.value && typeof liveBridge.value.stopPush === 'function') {
     try {
-      await liveBridge.value.stopPush()
+      // stopPush 会等主进程「排空上传队列 + PUT 一份 VOD 清单」才回来（百毫秒量级）
+      const res = await liveBridge.value.stopPush({ replay: pushInfo.replayEnabled !== false })
+      replay = res && res.replay
     } catch {
       // 停推失败无副作用
     }
   }
+  // ffmpeg 意外退出走的是事件上报（那会儿 active 已被清，stopPush 拿不到东西）
+  if (!replay) {
+    replay = lastReplay.value
+  }
+  lastReplay.value = null
   pushState.value = 'stopped'
+  pushTiers.value = []
   const id = pushInfo.roomId
   pushInfo.roomId = ''
   pushInfo.streamKey = ''
@@ -526,6 +658,18 @@ async function endBroadcast(callStop = true) {
     } catch {
       // request.js 已提示
     }
+  }
+  // 回放上报：清单已经由主进程 PUT 到媒体服务器，这一步只告诉后端「这一场有回放可看」。
+  // 失败就静默（request 层 silent）：没有入口不影响直播本身，也不该弹一个干扰关播的错
+  if (id && replay && replay.segmentCount > 0) {
+    reportReplay(id, {
+      segmentCount: replay.segmentCount,
+      durationSeconds: replay.durationSeconds,
+      bytes: replay.bytes
+    })
+      // 报成功就刷一下大厅那条横条：主播关播后当场就能看到自己的回放
+      .then(() => loadReplays())
+      .catch(() => {})
   }
   // 回到大厅并刷新
   if (roomId.value) {
@@ -547,6 +691,10 @@ async function confirmEndBroadcast() {
 /* ==================== 直播间：播放器 + 弹幕 ==================== */
 const room = ref(null)
 const roomLoading = ref(false)
+// 门禁解锁弹窗：观众进密码/付费房且未解锁时弹。gateBusy 防重复提交（尤其付费房防双扣）
+const gateDialog = ref(false)
+const gateBusy = ref(false)
+const gatePassword = ref('')
 const videoEl = ref(null)
 const danmakuList = ref([])
 const danmakuText = ref('')
@@ -555,6 +703,13 @@ const likeCount = ref(0)
 const wsStatus = ref('idle') // idle | connecting | open | closed
 /** 直播已结束但聊天室保留（ENDED 聊天模式）：画面黑屏、弹幕仍可发 */
 const streamEnded = ref(false)
+/**
+ * 回放态：按下「看回放」且真的拿到签名地址才为 true。
+ * replayInfo 不挂在 room 上——签名地址有有效期，每次点都要现取一份。
+ */
+const replayOn = ref(false)
+const replayInfo = ref(null)
+const replayBusy = ref(false)
 let hls = null
 let danmakuWs = null
 let pingTimer = null
@@ -562,8 +717,39 @@ let pingTimer = null
 let webmPlayer = null
 // 当前播放器形态：'' | 'hls' | 'webm'，避免重复重建
 const playerMode = ref('')
+/**
+ * 本场流实际铺开的档位（由 hls.js 的 levels 去重而来），只用来判定「哪几档可以点」。
+ * ★ 选择器不再因为档位少而整体隐藏：四个选项（自动/480p/720p/1080p/1440p）恒定出现，
+ *   本场没有的那几档置灰并写明原因（本场最高 720p / 连麦合成流 / 本浏览器不支持切档）。
+ *   整体藏掉会让人误以为「这个直播间压根不能切」，给一个点了没反应的假选项更糟——
+ *   灰掉 + 一句原因才是既统一又属实的做法。
+ */
+const qualityTiers = ref([])
+/** 当前播放器形态（QUALITY_MODE 之一，'' 表示还没起播放器）：决定这四档能不能真切 */
+const qualitySource = ref('')
+/** 四个固定选项 + 各自的可点性与原因 */
+const qualityChoices = computed(() => buildQualityChoices(qualityTiers.value, qualitySource.value))
+/** 选择器旁的一句话说明：本场到底出了哪几档 */
+const qualitySummaryText = computed(() => qualitySummary(qualityTiers.value, qualitySource.value))
+/** 实际生效的选择器值：'auto' 或档位高度字符串（'1440'/'1080'/'720'/'480'） */
+const qualityValue = ref('auto')
+/** 已下发给 hls.js 的期望档位：直播清单每秒重读一次，不记录就会反复重设 currentLevel 打断 ABR */
+let qualityPushed = null
 
 const isAnchor = computed(() => !!room.value && room.value.mine)
+
+/**
+ * 举报本场直播：room 类型的责任人是主播（后端 ReportRoomTargetSpiImpl 取 anchorId），
+ * 主播举报自己的房间就是自举报，后端会拒，因此入口只在观众侧给。
+ * targetId 用路由上的房间 ID（字符串形式的雪花 ID，后端 Jackson 能直接转 Long）。
+ */
+function onReportRoom() {
+  report.openReport({
+    targetType: 'room',
+    targetId: roomId.value,
+    title: room.value?.title || `直播 #${roomId.value}`
+  })
+}
 
 /* ==================== 钱包与礼物（直播间内） ==================== */
 // 余额/目录经 /api/wallet 拉取；送礼是 REST + 服务端经 /ws/live 广播 gift 帧，本端飘屏统一由广播驱动（含自己），
@@ -852,8 +1038,21 @@ async function openRoom(id) {
   try {
     const vo = await fetchLiveRoom(id)
     room.value = vo
-    // 已结束且聊天模式也超时（后端不再下发 danmakuWs）：只提示并黑屏
-    if (!vo || (vo.status !== 1 && !vo.danmakuWs)) {
+    // 换房先离场：上一次点的回放不能留在新房间的画面上（顺带把播放器一起收掉）
+    closeReplay()
+    // 门禁未解锁排在「已结束」判断之前：锁着的房间后端不下发 playUrl/danmakuWs，
+    // 走解锁弹窗而不是当成「已结束」黑屏。保留房间外壳（标题/封面），只不拉播放器、不连弹幕。
+    if (vo && vo.gate && vo.gate.type !== 'none' && vo.unlocked === false && !vo.mine) {
+      closeDanmaku()
+      danmakuList.value = []
+      streamEnded.value = false
+      onlineCount.value = vo.onlineCount || 0
+      gatePassword.value = ''
+      gateDialog.value = true
+      return
+    }
+    // 已结束、聊天模式也超时（后端不再下发 danmakuWs）、且没有回放：只提示并黑屏
+    if (!vo || (vo.status !== 1 && !vo.danmakuWs && !vo.hasReplay)) {
       ElMessage.info('该直播已结束')
       teardownRoom()
       return
@@ -862,6 +1061,8 @@ async function openRoom(id) {
     danmakuList.value = []
     floatingGifts.value = []
     giftRank.value = []
+    // 切房间时先拆掉上场的 PK 面板：roomId 变了，那一帧的「我方/对方」认领也跟着失效
+    teardownPk()
     // 已结束但处于聊天模式（status=2 且带 danmakuWs）：不起播放器（黑屏），只接聊天室
     streamEnded.value = vo.status !== 1
     await nextTick()
@@ -875,15 +1076,189 @@ async function openRoom(id) {
     await setupLinkmic(vo)
     // 进房即处于连麦（观众从在麦列表补齐）：从默认 hls 切到 webm 合成流
     ensurePlayerMode()
+    // PK 兜底：进房补帧要等 WS 连上，这之间先拿一次快照，免得比到一半的房间看着像没在比
+    if (!pk.value) {
+      const pkVo = await fetchCurrentPk(roomId.value)
+      if (pkVo && !pk.value) {
+        applyPk(pkVo)
+      }
+    }
+    // 从大厅「可回看」横条点进来的（query 带了 replay=1）：进房直接起回放，不让用户再点一次
+    if (route.query.replay === '1' && vo.status !== 1 && vo.hasReplay) {
+      await openReplay()
+    }
   } catch {
     room.value = null
     streamEnded.value = false
+    closeReplay()
   } finally {
     roomLoading.value = false
   }
 }
 
-function setupPlayer(playUrl) {
+/**
+ * 提交解锁：密码房走 /unlock，付费房走 /pay。成功后重走一遍进房流程（再取一次 detail，这次带 playUrl）。
+ *
+ * <p>错误（错密码 11019 / 非对应房类型 / 余额不足）由请求层统一弹提示，这里不重复。
+ * gateBusy 锁住整个提交，防付费房双击二次扣款（后端也已做幂等，两道相叠）。
+ */
+async function submitGateUnlock() {
+  if (!room.value || gateBusy.value) {
+    return
+  }
+  const id = room.value.id
+  const paid = room.value.gate && room.value.gate.type === 'paid'
+  if (!paid && !gatePassword.value.trim()) {
+    ElMessage.warning('请输入房间密码')
+    return
+  }
+  gateBusy.value = true
+  try {
+    if (paid) {
+      await payLiveRoom(id)
+    } else {
+      await unlockLiveRoom(id, gatePassword.value.trim())
+    }
+    gateDialog.value = false
+    // 解锁成功后 openRoom 重取详情：这次 unlocked=true、后端下发 playUrl/danmakuWs，正常起播
+    await openRoom(id)
+  } catch {
+    // 失败保持弹窗，让用户重输/换价重试；请求层已提示具体原因
+  } finally {
+    gateBusy.value = false
+  }
+}
+
+/** 暂不解锁：收弹窗并回大厅（房间外壳无播放能力，停在这里也没意义） */
+function gateCancel() {
+  gateDialog.value = false
+  router.push({ name: 'live' })
+}
+
+/** 回放顶条上那一行摘要：时长 / 体积 / 分片数 */
+const replayMetaText = computed(() => {
+  const r = replayInfo.value
+  if (!r) {
+    return ''
+  }
+  const sec = Number(r.durationSeconds) || 0
+  const mb = (Number(r.bytes) || 0) / 1024 / 1024
+  const size = mb >= 1 ? `${mb.toFixed(1)} MB` : '不足 1 MB'
+  return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒 · ${size} · ${r.segmentCount || 0} 片`
+})
+
+/**
+ * 看点播回放：每次点都现取一份签名地址（同直播地址那样会过期，不能缓存），拿到后按 VOD 起播放器。
+ * 取回空说明入口标记已经到期（im.live.replay.retention-days），顺手抹掉本房间的
+ * hasReplay，免得留一个点了没反应的按钮。清单里的分片地址不带签名，取到清单就取得了目录。
+ */
+async function openReplay() {
+  if (!room.value || replayBusy.value) {
+    return
+  }
+  replayBusy.value = true
+  try {
+    const vo = await fetchReplay(room.value.id)
+    if (!vo || !vo.playUrl) {
+      ElMessage.info('回放已过期')
+      room.value.hasReplay = false
+      return
+    }
+    replayInfo.value = vo
+    replayOn.value = true
+    await nextTick()
+    setupPlayer(vo.playUrl, { vod: true })
+  } catch {
+    // request.js 已提示；回到黑屏态，聊天室照旧
+    replayOn.value = false
+  } finally {
+    replayBusy.value = false
+  }
+}
+
+/** 退出回放：停掉播放器回到「已结束」黑屏态，聊天室不受影响 */
+function closeReplay() {
+  replayOn.value = false
+  replayInfo.value = null
+  destroyPlayer()
+}
+
+/**
+ * 关播瞬间还留在房间里的观众：入口标记是主播端「stopLive 之后」才上报的（前面还要等主进程
+ * 排空上传队列并 PUT 一份 VOD 清单），所以收到 ended 帧那一刻它必定还不存在。延后探一次，
+ * 探到了就把按钮挂上来，观众不必为了看回放退出去再进。只探一次，不做轮询。
+ */
+let replayProbeTimer = null
+function probeReplay(id) {
+  clearTimeout(replayProbeTimer)
+  if (!id) {
+    return
+  }
+  replayProbeTimer = setTimeout(async () => {
+    // 期间可能已退房/换房：房间不对就别把上一场的回放挂到新房间上
+    if (!room.value || String(room.value.id) !== String(id) || room.value.hasReplay) {
+      return
+    }
+    try {
+      const vo = await fetchReplay(id)
+      if (vo && vo.playUrl && room.value && String(room.value.id) === String(id)) {
+        room.value.hasReplay = true
+      }
+    } catch {
+      // 探不到不提示：这一步本来就是锦上添花
+    }
+  }, 10000)
+}
+
+/** 上一次档位集的特征串：用它识别「新档刚上线」，那种情况下之前落不了地的偏好要重新试一次 */
+let qualityTiersSig = ''
+
+/**
+ * 清单解析/刷新后重算档位表，并把偏好从头下发一次（新档上线时，之前落不了地的偏好可能现在能了）。
+ * @param {string} mode 本端播放器形态，只有 QUALITY_MODE.MSE 才真的能锁档
+ */
+function syncQualityLevels(inst, mode) {
+  qualitySource.value = mode
+  const tiers = dedupeTiers(inst && inst.levels)
+  qualityTiers.value = tiers
+  // 档位集变了（开播头几秒逐档补齐、或主清单补上 RESOLUTION）就强制重下发一次；
+  // 否则 applyQuality 会因为「偏好没改过」直接早退，观众锁的 1080p 永远停在自动上
+  const sig = `${mode}:${tiers.map((t) => t.height).join(',')}`
+  applyQuality(inst, buildQualityChoices(tiers, mode), sig !== qualityTiersSig)
+  qualityTiersSig = sig
+}
+
+/**
+ * 下发清晰度偏好。本场没那一档（主播只推到 720p）或本形态压根切不了档时回落自动：
+ * 锁到一个不存在的 level 序号会让 hls.js 无流可拉，宁可走 ABR 也别黑屏。
+ */
+function applyQuality(inst, choices, force) {
+  const want = String(settings.liveQuality || 'auto')
+  if (!force && want === qualityPushed) return
+  qualityPushed = want
+  const { choice } = resolveQualityChoice(choices, want)
+  try {
+    // -1 就是交回 hls.js 的自适应；给具体 index 则是锁档（hls.js 在下一个分片边界切换）
+    if (inst) inst.currentLevel = choice ? choice.index : -1
+  } catch {
+    /* 实例刚被 destroyPlayer 掉 */
+  }
+  // 落不了地就把显示值拨回自动：别让选择器停在一个灰着的选项上冒充已生效
+  qualityValue.value = choice ? want : 'auto'
+}
+
+/** 观众在选择器里改档：存成默认偏好（下次进任何直播间都按它），并立刻作用于当前流 */
+function onQualityChange(val) {
+  settings.update({ liveQuality: String(val) })
+  applyQuality(hls, qualityChoices.value, true)
+}
+
+/**
+ * 起 HLS 播放器。opts.vod 为真时按点播处理：关低延迟、不做「等首片」重试
+ * （回放清单是关播时定版落盘的，进得来就一定读得到），网络错直接提示。
+ */
+function setupPlayer(playUrl, opts = {}) {
+  const isVod = !!opts.vod
   destroyPlayer()
   const video = videoEl.value
   if (!video || !playUrl) {
@@ -893,31 +1268,52 @@ function setupPlayer(playUrl) {
   // playUrl 后端下发：自测是相对路径（/hls/...，走前端同源代理），生产可能是绝对 CDN 地址。
   // 相对路径按环境补 host：Web 用同源（空串），Electron 用本机流媒体绝对地址（见 env.js livePlayBase）
   const src = /^https?:\/\//i.test(playUrl) ? playUrl : livePlayBase() + playUrl
-  // iOS/Safari 原生支持 HLS，直接喂 src；其余走 hls.js（MSE）
-  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  // ★ 先试 hls.js（MSE），只有它不支持才退回原生 HLS（判断口径与理由见 utils/quality.js 的 pickPlayerMode）。
+  // 先判 canPlayType 的旧写法会让「能切档的浏览器」被推进没有档位 API 的原生分支（选项全标「不支持」）
+  const mode = pickPlayerMode({
+    mse: Hls.isSupported(),
+    native: !!video.canPlayType('application/vnd.apple.mpegurl')
+  })
+  if (mode === QUALITY_MODE.NATIVE) {
+    // 走到这里基本只剩 iOS（没 MSE）：能播但拿不到 levels、也设不了 currentLevel，四档全置灰 + 只留「自动」
     video.src = src
+    qualitySource.value = QUALITY_MODE.NATIVE
+    qualityTiers.value = []
+    qualityValue.value = 'auto'
     video.play().catch(() => {})
     return
   }
-  if (Hls.isSupported()) {
+  if (mode === QUALITY_MODE.MSE) {
     // liveSyncDurationCount 3→2：播放位距直播边缘少回退一个切片，延迟降约 1~2s（推流端切 1s 片后再降）。
-    // 若卡顿明显可回调 3；网络稳定也可压到 1
-    hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
+    // 若卡顿明显可回调 3；网络稳定也可压到 1。回放（VOD）不吃这套：从清单开头播，要的是稳
+    hls = isVod
+      ? new Hls({ lowLatencyMode: false, liveSyncDurationCount: 4 })
+      : new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
     const inst = hls
     let netRetries = 0
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       netRetries = 0
+      // 拿到主清单才能枚举档位：按用户偏好锁定/走自动（档位不够时自动回落，不会黑屏）
+      syncQualityLevels(inst, QUALITY_MODE.MSE)
       video.play().catch(() => {})
     })
+    // 刚开播那几秒 ffmpeg 可能只写出了第一档，剩下的逐档补进主清单；档位集变了要跟着重算
+    hls.on(Hls.Events.LEVELS_UPDATED, () => syncQualityLevels(inst, QUALITY_MODE.MSE))
+    // 单档流或主清单没写 RESOLUTION 时，解析那一刻 level.height 还是 0（选项会全灰成一排「未标注」），
+    // 真实尺寸要等首分片解出 track info 才补上；直播清单每秒重读一次，跟着 LEVEL_UPDATED 重算就能自愈
+    hls.on(Hls.Events.LEVEL_UPDATED, () => syncQualityLevels(inst, QUALITY_MODE.MSE))
     hls.on(Hls.Events.ERROR, (_evt, data) => {
       if (!data?.fatal) {
         return
       }
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        // 开播头几秒 init.mp4/m3u8 还没 PUT 上来，首次加载必然 404。旧实现只 startLoad 一次，
-        // 失败后无人接管——表现为「点开播看不到画面，必须回大厅再进」。改为每秒重试一次、最多 30 次，
-        // 覆盖 ffmpeg 启动+首片上传窗口；manifest 成功解析后计数清零
-        if (netRetries++ < 30) {
+        if (isVod) {
+          // 回放没有「还没上传」的窗口，重试只是白等
+          ElMessage.error('回放加载失败，请稍后重试')
+        } else if (netRetries++ < 30) {
+          // 开播头几秒 init.mp4/m3u8 还没 PUT 上来，首次加载必然 404。旧实现只 startLoad 一次，
+          // 失败后无人接管——表现为「点开播看不到画面，必须回大厅再进」。改为每秒重试一次、最多 30 次，
+          // 覆盖 ffmpeg 启动+首片上传窗口；manifest 成功解析后计数清零
           setTimeout(() => {
             // inst 可能已被 destroyPlayer（退房/关播）销毁，守卫防止操作死实例
             if (hls === inst) {
@@ -948,6 +1344,12 @@ function destroyPlayer() {
     webmPlayer = null
   }
   playerMode.value = ''
+  // 清晰度属于「这一场流」而不是全局：换场/退回黑屏态都得清掉，否则旧档位会挂在新流上
+  qualityTiers.value = []
+  qualitySource.value = ''
+  qualityValue.value = 'auto'
+  qualityPushed = null
+  qualityTiersSig = ''
   if (videoEl.value) {
     videoEl.value.removeAttribute('src')
     videoEl.value.load?.()
@@ -962,6 +1364,12 @@ function setupWebmPlayer(playUrl) {
     return
   }
   playerMode.value = 'webm'
+  // 连麦合成流只有一档：选择器仍出（四个选项全灰 + 原因），不能因为切不了就突然消失
+  qualitySource.value = QUALITY_MODE.WEBM
+  qualityTiers.value = []
+  qualityValue.value = 'auto'
+  qualityPushed = null
+  qualityTiersSig = ''
   webmPlayer = createWebmPlayer({
     video,
     playUrl,
@@ -1077,6 +1485,9 @@ function onWsFrame(raw) {
       ensurePlayerMode()
       appendSystem(frame.active ? '主播正在连麦' : '连麦已结束')
       break
+    case 'pk':
+      onPkFrame(frame)
+      break
     case 'notice':
       appendSystem(`公告：${frame.content}`)
       break
@@ -1093,6 +1504,7 @@ function onWsFrame(raw) {
       destroyPlayer()
       appendSystem(text)
       ElMessage.info(text)
+      probeReplay(room.value && room.value.id)
       break
     }
     case 'error':
@@ -1108,6 +1520,8 @@ function appendDanmaku(frame) {
   danmakuList.value.push({
     id: `${frame.ts || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     kind: 'danmaku',
+    // userId 是主播「点谁禁言」的依据，服务端弹幕帧本就带了这个字段（见 broadcastDanmaku）
+    userId: frame.userId ? String(frame.userId) : '',
     nickname: frame.nickname || '观众',
     avatar: frame.avatar || '',
     anchor: !!frame.anchor,
@@ -1167,10 +1581,331 @@ function sendLike() {
   likeCount.value += 1
 }
 
+/* ==================== 弹幕房管（仅主播） ==================== */
+// 禁言与屏蔽词都按主播 id 存服务端（跨场次生效），所以这份状态挂在页面级而不是房间级。
+// 名单与词表都是「打开面板才拉」：主播面板不是高频入口，进房就拉两次 REST 不值当。
+const moderationOpen = ref(false)
+const muteList = ref([])
+const blockWords = ref([])
+const wordDraft = ref('')
+/** 当前在弹幕气泡上展开禁言菜单的用户 id（一次只开一个，免得刷屏时满屏都是菜单） */
+const muteMenuUserId = ref('')
+const MUTE_PRESETS = [
+  { label: '5 分钟', minutes: 5 },
+  { label: '30 分钟', minutes: 30 },
+  { label: '1 小时', minutes: 60 },
+  { label: '永久', minutes: 0 }
+]
+const mutedIds = computed(() => new Set(muteList.value.map((m) => String(m.userId))))
+
+async function loadModeration() {
+  try {
+    // 两份数据并行拉：面板打开后两边都要展示，串行会把等待时间叠加
+    const [mutes, words] = await Promise.all([fetchMuteList(), fetchBlockWords()])
+    muteList.value = mutes || []
+    blockWords.value = words || []
+  } catch {
+    // 静默接口失败已由 request 拦截器兜住，这里不重复弹提示
+  }
+}
+
+function openModeration() {
+  moderationOpen.value = true
+  loadModeration()
+}
+
+function toggleMuteMenu(item) {
+  if (!isAnchor.value || item.anchor || !item.userId) {
+    return
+  }
+  muteMenuUserId.value = muteMenuUserId.value === item.userId ? '' : item.userId
+}
+
+async function onMute(item, minutes) {
+  muteMenuUserId.value = ''
+  try {
+    await muteUser({ userId: item.userId, minutes, roomId: roomId.value || undefined })
+    ElMessage.success(minutes > 0 ? `已禁言 ${item.nickname} ${minutes} 分钟` : `已将 ${item.nickname} 永久禁言`)
+    // 名单立即重拉：服务端带了 roomId 会给那人的在线连接推一帧提示，本地不必伪造一条记录
+    loadModeration()
+  } catch {
+    // 错误文案（名单已满/不能禁自己）由拦截器提示
+  }
+}
+
+async function onUnmute(m) {
+  try {
+    await unmuteUser(m.userId, roomId.value || undefined)
+    muteList.value = muteList.value.filter((x) => String(x.userId) !== String(m.userId))
+    ElMessage.success(`已解除对 ${m.nickname} 的禁言`)
+  } catch {
+    // 同上
+  }
+}
+
+/** 增删一个词后整表 PUT：服务端只给了整表替换接口（理由见 LiveWordsRequest 注释），前端就不保留草稿态 */
+async function commitWords(next) {
+  try {
+    const saved = await replaceBlockWords(next)
+    blockWords.value = saved || []
+  } catch {
+    // 超长/超量会被服务端拒绝并给出原因，词表维持原样即可
+  }
+}
+
+function onAddWord() {
+  const word = wordDraft.value.trim()
+  if (!word) {
+    return
+  }
+  if (blockWords.value.includes(word)) {
+    ElMessage.info('这个词已经在屏蔽列表里')
+    wordDraft.value = ''
+    return
+  }
+  commitWords([...blockWords.value, word])
+  wordDraft.value = ''
+}
+
+function onRemoveWord(word) {
+  commitWords(blockWords.value.filter((w) => w !== word))
+}
+
+/** 禁言条目上的人读时长：永久就写永久，否则写「还剩几分钟」好过抛一个时间戳 */
+function muteExpireText(m) {
+  if (m.permanent) {
+    return '永久'
+  }
+  const left = Math.max(0, Math.round(((m.expireAt || 0) - Date.now()) / 60000))
+  return left > 0 ? `还剩 ${left} 分钟` : '已到期'
+}
+
+/* ==================== 连麦 PK（两个在播房间比热度） ==================== */
+// 进度不轮询：服务端每秒给两个房间各推一帧 pk（见 LivePkService.tick）。
+// 倒计时也不靠「每收到一帧就减一秒」：弹幕通道抖动、页面切后台都会漏帧，那样会出现
+// 「剩余 12 秒卡住然后突然归零」。改为记住最近一帧到达的时刻与它报的剩余秒数，本地每秒算差值，
+// 帧到达时重设锚点——这样漏帧只是把锚点重新校准，不会把倒计时带偏。
+const pk = ref(null)
+const pkRemain = ref(0)
+/** 本人这一票投给了会话里的 A 还是 B（服务端不在帧里回传个人票，本地记住即可） */
+const pkMyVote = ref('')
+const pkDialogOpen = ref(false)
+const pkTargets = ref([])
+const pkTargetsLoading = ref(false)
+const pkBusy = ref(false)
+const pkDuration = ref(300)
+const PK_DURATIONS = [
+  { label: '3 分钟', seconds: 180 },
+  { label: '5 分钟', seconds: 300 },
+  { label: '10 分钟', seconds: 600 }
+]
+/** endReason 是人看的文案，不是日志字段：room-ended 说「对方关播」比说「房间已结束」直观 */
+const PK_END_TEXT = { time: '时间到', manual: '提前结束', 'room-ended': '对方关播', banned: '违规终止' }
+let pkExpireAt = 0
+let pkTicker = null
+let pkClearTimer = null
+
+const pkActive = computed(() => !!pk.value && pk.value.status === 0)
+
+/**
+ * 我这方是 A 还是 B：帧里的 A/B 是会话内部的固定编号，两个房间收到的是同一帧，
+ * 前端必须按自己所在的 roomId 认领一边，否则进度条与胜负文案会左右镜像颠倒。
+ */
+const pkMySide = computed(() => {
+  const p = pk.value
+  if (!p) {
+    return 'A'
+  }
+  return String(p.roomA) === String(roomId.value) ? 'A' : 'B'
+})
+
+/** 投票要传的是会话里的 A/B，不是「我方/对方」——按钮文字给人看，参数给服务端看 */
+const pkOppSide = computed(() => (pkMySide.value === 'A' ? 'B' : 'A'))
+
+/** 给人看的面板一律「我方在左、对方在右」，A/B 只在投票时作为参数出现 */
+const pkView = computed(() => {
+  const p = pk.value
+  if (!p) {
+    return null
+  }
+  const meFirst = pkMySide.value === 'A'
+  const ratioA = Number(p.ratioA ?? 50)
+  return {
+    selfName: meFirst ? p.nameA : p.nameB,
+    oppName: meFirst ? p.nameB : p.nameA,
+    selfAvatar: meFirst ? p.avatarA : p.avatarB,
+    oppAvatar: meFirst ? p.avatarB : p.avatarA,
+    selfHeat: meFirst ? p.heatA : p.heatB,
+    oppHeat: meFirst ? p.heatB : p.heatA,
+    selfVotes: meFirst ? p.voteA : p.voteB,
+    oppVotes: meFirst ? p.voteB : p.voteA,
+    selfRatio: meFirst ? ratioA : 100 - ratioA,
+    iWon: !!p.winner && p.winner !== 'DRAW' && String(p.winner) === pkMySide.value,
+    draw: p.winner === 'DRAW' || !p.winner
+  }
+})
+
+const pkRemainText = computed(() => {
+  const s = Math.max(0, Number(pkRemain.value) || 0)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+})
+
+function pkDurationText(sec) {
+  const s = Number(sec) || 0
+  return s >= 60 ? `${Math.round(s / 60)} 分钟` : `${s} 秒`
+}
+
+function pkResultText(p) {
+  const reason = PK_END_TEXT[p.endReason] || '已结束'
+  const score = `${p.heatA ?? 0} : ${p.heatB ?? 0}`
+  if (!p.winner || p.winner === 'DRAW') {
+    return `PK ${reason}：平局（${score}）`
+  }
+  const iWon = (p.winner === 'A') === (String(p.roomA) === String(roomId.value))
+  return `PK ${reason}：${iWon ? '我方' : '对方'}胜（${score}）`
+}
+
+/**
+ * 一帧 PK 状态落进界面。phase 只有 WS 帧带（start/running/end），REST 返回的对象不传，
+ * 于是开场与结算的旁白都只由 WS 那一路说一次——自己发起时 REST 先落状态，随后收到的
+ * start 帧 pkId 相同，不会再报一次「PK 开始」。
+ */
+function applyPk(obj, phase) {
+  if (!obj || !obj.pkId) {
+    return
+  }
+  const isNew = !pk.value || String(pk.value.pkId) !== String(obj.pkId)
+  if (isNew) {
+    pkMyVote.value = ''
+    clearPkClear()
+  }
+  pk.value = obj
+  if (phase === 'start') {
+    appendSystem(`PK 开始：${obj.nameA} vs ${obj.nameB}，${pkDurationText(obj.durationSeconds)}`)
+  }
+  if (Number(obj.status) === 0) {
+    pkExpireAt = Date.now() + Math.max(0, Number(obj.remainSeconds) || 0) * 1000
+    startPkTicker()
+  } else {
+    stopPkTicker()
+    pkRemain.value = 0
+  }
+  if (phase === 'end') {
+    appendSystem(pkResultText(obj))
+    // 结果面板留 15 秒：观众要看清谁赢了，但也不该在下一场直播里挂着一块上场的比分牌
+    pkClearTimer = setTimeout(() => {
+      pk.value = null
+      pkMyVote.value = ''
+    }, 15000)
+  }
+}
+
+function clearPkClear() {
+  if (pkClearTimer) {
+    clearTimeout(pkClearTimer)
+    pkClearTimer = null
+  }
+}
+
+function startPkTicker() {
+  // 先算一次再建表：否则面板要等第一秒过完才从 0:00 跳到真实剩余时间
+  pkRemain.value = Math.max(0, Math.round((pkExpireAt - Date.now()) / 1000))
+  if (pkTicker) {
+    return
+  }
+  pkTicker = setInterval(() => {
+    pkRemain.value = Math.max(0, Math.round((pkExpireAt - Date.now()) / 1000))
+    // 走到 0 就停表，胜负等服务端的 end 帧：本地不擅自判平局，否则会出现「先显示平局再跳出真结果」
+    if (pkRemain.value <= 0) {
+      stopPkTicker()
+    }
+  }, 1000)
+}
+
+function stopPkTicker() {
+  if (pkTicker) {
+    clearInterval(pkTicker)
+    pkTicker = null
+  }
+}
+
+function onPkFrame(frame) {
+  applyPk(frame, frame.phase)
+}
+
+async function onPkVote(side) {
+  if (!pk.value || pk.value.status !== 0) {
+    return
+  }
+  try {
+    const vo = await votePk(pk.value.pkId, side)
+    pkMyVote.value = side
+    // 票数与热度就地回填，不等下一拍广播：投完立刻看见自己那一票生效才有反馈感
+    if (pk.value && String(pk.value.pkId) === String(vo.pkId)) {
+      pk.value = { ...pk.value, heatA: vo.heatA, heatB: vo.heatB, voteA: vo.voteA, voteB: vo.voteB, ratioA: vo.ratioA }
+    }
+  } catch {
+    // PK 已结束、功能未开启等由拦截器给文案，面板保持原样等下一帧即可
+  }
+}
+
+/** 发起入口只在主播侧，且对手必须此刻也在直播——服务端会拒不在播的目标，所以候选直接取自「直播中」列表 */
+async function openPkDialog() {
+  pkDialogOpen.value = true
+  pkTargetsLoading.value = true
+  try {
+    const page = await fetchLivePage({ current: 1, size: 30, status: 1 })
+    const mine = String(room.value?.anchorId || '')
+    pkTargets.value = ((page && page.records) || []).filter((r) => r.status === 1 && String(r.anchorId) !== mine)
+  } catch {
+    pkTargets.value = []
+  } finally {
+    pkTargetsLoading.value = false
+  }
+}
+
+async function onStartPk(target) {
+  pkBusy.value = true
+  try {
+    const vo = await startPk({ targetUserId: target.anchorId, durationSeconds: pkDuration.value })
+    applyPk(vo)
+    pkDialogOpen.value = false
+  } catch {
+    // 「对方当前不在直播」「已有 PK 在进行」等保持弹窗打开，好换一个人再试
+  } finally {
+    pkBusy.value = false
+  }
+}
+
+async function onPkStop() {
+  if (!pk.value) {
+    return
+  }
+  try {
+    await stopPk(pk.value.pkId)
+    // 不在此处拆面板：服务端会把 end 帧广播给两个房间，两边同时收到才有同一份结果
+  } catch {
+    // 非对阵主播喊停会被拒（LIVE_FORBIDDEN），拦截器已提示
+  }
+}
+
+function teardownPk() {
+  stopPkTicker()
+  clearPkClear()
+  pk.value = null
+  pkRemain.value = 0
+  pkMyVote.value = ''
+  pkDialogOpen.value = false
+  pkTargets.value = []
+}
+
 function teardownRoom() {
-  destroyPlayer()
+  // closeReplay 内含 destroyPlayer：回放态与播放器一起收掉
+  clearTimeout(replayProbeTimer)
+  closeReplay()
   closeDanmaku()
   room.value = null
+  gateDialog.value = false
   danmakuList.value = []
   onlineCount.value = 0
   streamEnded.value = false
@@ -1178,6 +1913,9 @@ function teardownRoom() {
   giftRank.value = []
   giftPanelOpen.value = false
   linkmicOn.value = false
+  moderationOpen.value = false
+  muteMenuUserId.value = ''
+  teardownPk()
   linkmic.reset()
 }
 
@@ -1189,6 +1927,7 @@ function syncRoute() {
     teardownRoom()
     loadRooms()
     loadMyLive()
+    loadReplays()
   }
 }
 
@@ -1197,8 +1936,17 @@ onMounted(() => {
     liveBridge.value.onState((state) => {
       const s = state?.state || 'idle'
       pushState.value = s
+      // pushing 事件带着本场档位（硬编回落软编重开时也会再报一次），以此为准
+      if (Array.isArray(state?.tiers) && state.tiers.length) {
+        pushTiers.value = state.tiers
+      }
       if (state?.error) {
         pushError.value = state.error
+      }
+      // 主进程生成的回放统计：只有 ffmpeg 自己崩掉（或被超时巡检关掉）这条路会带上来，
+      // 存下来等 endBroadcast 上报；正常关播时 stopPush 的返回值更新鲜
+      if (s === 'stopped' && state?.replay) {
+        lastReplay.value = state.replay
       }
       // 只有「推流意外中断（error）」才需要前端联动收尾并回调后端关房；
       // 'stopped' 多半是我们自己 endBroadcast→stopPush 触发的回声，不再重复处理，否则会递归
@@ -1233,6 +1981,21 @@ watch(() => route.params.roomId, () => syncRoute())
           <span class="live-room__online">👁 {{ onlineCount }}</span>
           <span class="live-room__like">❤ {{ likeCount }}</span>
         </div>
+        <!--
+          举报入口放在顶栏右侧而不是弹幕按钮行：那一行已经有点赞/礼物/发送，
+          再挤一个负向操作会把主操作顶下去；report.enabled 为假（服务端关了举报）时整个按钮不渲染。
+        -->
+        <el-button
+          v-if="room && !isAnchor && report.enabled"
+          class="live-room__report"
+          size="small"
+          type="warning"
+          plain
+          :icon="'Warning'"
+          @click="onReportRoom"
+        >
+          举报直播间
+        </el-button>
       </div>
 
       <div class="live-room__body">
@@ -1279,8 +2042,25 @@ watch(() => route.params.roomId, () => syncRoute())
               </div>
             </div>
             <div v-if="roomLoading" class="live-player__mask">加载中…</div>
-            <div v-else-if="!room || room.status !== 1 || streamEnded" class="live-player__mask">
-              {{ streamEnded || (room && room.status === 2) ? '主播已结束直播，可继续聊天' : '直播已结束' }}
+            <div v-else-if="!replayOn && (!room || room.status !== 1 || streamEnded)" class="live-player__mask">
+              <span>{{ streamEnded || (room && room.status === 2) ? '主播已结束直播，可继续聊天' : '直播已结束' }}</span>
+              <!-- 回放入口：后端只在「已结束且 Redis 里有入口标记」时下发 hasReplay；
+                   按钮不直接带地址，点了才现取一次签名 -->
+              <el-button
+                v-if="room && room.hasReplay"
+                size="small"
+                type="primary"
+                :loading="replayBusy"
+                @click.stop="openReplay"
+              >
+                ▶ 看回放
+              </el-button>
+            </div>
+            <!-- 回放态顶条：与直播中的连麦/PK 面板错开位置，只管「在看回放」这件事 -->
+            <div v-if="replayOn" class="live-replay">
+              <span class="live-replay__tag">回放</span>
+              <span class="live-replay__meta">{{ replayMetaText }}</span>
+              <el-button size="small" text @click.stop="closeReplay">退出回放</el-button>
             </div>
             <!-- 礼物飘屏：服务端 gift 帧驱动，从右下向左上滑过 -->
             <div class="live-gift__floats">
@@ -1296,6 +2076,74 @@ watch(() => route.params.roomId, () => syncRoute())
             </div>
             <!-- 连麦中徽标：观众侧据 /ws/live linkmic 帧显示，提示当前为合成连麦流；本端已在分屏舞台里就不重复挂标 -->
             <div v-if="linkmicOn && !stageActive" class="live-linkmic__badge">🎤 连麦中</div>
+            <!-- 清晰度：只要画面在播就出现，选项固定四个（自动/480p/720p/1080p/1440p）且与开播面板同名字；
+                 本场没铺到的档位置灰并在右侧标出原因（本场无 / 单档 / 不支持 / 未标注），
+                 右侧那句汇总说清本场到底有哪几档——观众与主播面对同一套选项：
+                 既不给出点了没反应的假控件，也不把本来能切的入口整体藏掉 -->
+            <div
+              v-if="qualitySource"
+              class="live-quality"
+              :class="{ 'live-quality--below': linkmicOn && !stageActive }"
+              @click.stop
+            >
+              <span class="live-quality__label">清晰度</span>
+              <el-select :model-value="qualityValue" size="small" @change="onQualityChange">
+                <el-option label="自动" value="auto" />
+                <el-option
+                  v-for="q in qualityChoices"
+                  :key="q.value"
+                  :label="q.label"
+                  :value="q.value"
+                  :disabled="!q.enabled"
+                >
+                  <span>{{ q.label }}</span>
+                  <span v-if="q.note" class="live-quality__note">{{ q.note }}</span>
+                </el-option>
+              </el-select>
+              <span class="live-quality__meta" :title="qualitySummaryText">{{ qualitySummaryText }}</span>
+            </div>
+            <!-- PK 面板：挂在画面上沿居中，正好压在分屏那条中缝的上方；不论本端是不是分屏都在同一位置，
+                 因为两个房间收到的帧内容相同，靠 roomId 认领左右 -->
+            <div v-if="pkView" class="live-pk" :class="{ 'live-pk--ended': !pkActive }">
+              <div class="live-pk__row">
+                <span class="live-pk__name live-pk__name--self im-ellipsis">{{ pkView.selfName }}</span>
+                <span class="live-pk__vs">VS</span>
+                <span class="live-pk__name live-pk__name--opp im-ellipsis">{{ pkView.oppName }}</span>
+                <button class="live-pk__close" title="关闭" @click="teardownPk">✕</button>
+              </div>
+              <div class="live-pk__track">
+                <div class="live-pk__fill" :style="{ width: pkView.selfRatio + '%' }"></div>
+                <span class="live-pk__heat live-pk__heat--self">{{ pkView.selfHeat }}</span>
+                <span class="live-pk__heat live-pk__heat--opp">{{ pkView.oppHeat }}</span>
+              </div>
+              <div v-if="pkActive" class="live-pk__foot">
+                <span class="live-pk__count">⏳ {{ pkRemainText }}</span>
+                <span class="live-pk__votes">{{ pkView.selfVotes }} : {{ pkView.oppVotes }} 票</span>
+                <template v-if="!isAnchor">
+                  <el-button
+                    size="small"
+                    :type="pkMyVote === pkMySide ? 'primary' : 'default'"
+                    @click="onPkVote(pkMySide)"
+                  >
+                    挺我方
+                  </el-button>
+                  <el-button
+                    size="small"
+                    :type="pkMyVote === pkOppSide ? 'primary' : 'default'"
+                    @click="onPkVote(pkOppSide)"
+                  >
+                    挺对方
+                  </el-button>
+                </template>
+                <el-button v-else size="small" text type="danger" @click="onPkStop">提前结束</el-button>
+              </div>
+              <div v-else class="live-pk__foot live-pk__foot--end">
+                <span class="live-pk__result" :class="{ 'live-pk__result--win': pkView.iWon }">
+                  {{ pkView.draw ? '平局' : pkView.iWon ? '我方胜' : '对方胜' }}
+                </span>
+                <span class="live-pk__reason">{{ PK_END_TEXT[pk.endReason] || '已结束' }}</span>
+              </div>
+            </div>
           </div>
           <div v-if="room" class="live-room__title">
             <h3 class="im-ellipsis">{{ room.title }}</h3>
@@ -1322,11 +2170,43 @@ watch(() => route.params.roomId, () => syncRoute())
               </template>
               <template v-else>
                 <UserAvatar :src="item.avatar" :name="item.nickname" :size="24" />
-                <span class="live-danmaku__nick" :class="{ 'live-danmaku__nick--anchor': item.anchor }">
+                <span
+                  class="live-danmaku__nick"
+                  :class="{
+                    'live-danmaku__nick--anchor': item.anchor,
+                    'live-danmaku__nick--actionable': isAnchor && !item.anchor
+                  }"
+                  :title="isAnchor && !item.anchor ? '点击设为禁言对象' : ''"
+                  @click="toggleMuteMenu(item)"
+                >
                   {{ item.anchor ? '主播 · ' : '' }}{{ item.nickname }}
                 </span>
+                <el-tag v-if="mutedIds.has(item.userId)" class="live-danmaku__muted" size="small" type="warning">
+                  已禁言
+                </el-tag>
                 <span class="live-danmaku__text">{{ item.content }}</span>
               </template>
+              <!-- 点昵称就地展开的禁言菜单：比弹框快，也不必给 200 条流水各挂一个 popover -->
+              <div v-if="muteMenuUserId === item.userId" class="live-danmaku__mute-menu">
+                <el-button
+                  v-for="p in MUTE_PRESETS"
+                  :key="p.minutes"
+                  size="small"
+                  :type="p.minutes === 0 ? 'danger' : 'default'"
+                  @click.stop="onMute(item, p.minutes)"
+                >
+                  {{ p.label }}
+                </el-button>
+                <el-button
+                  v-if="mutedIds.has(item.userId)"
+                  size="small"
+                  text
+                  type="success"
+                  @click.stop="onUnmute({ userId: item.userId, nickname: item.nickname })"
+                >
+                  取消禁言
+                </el-button>
+              </div>
             </div>
             <div v-if="!danmakuList.length" class="live-danmaku__empty">还没有互动，来说点什么吧</div>
           </div>
@@ -1408,7 +2288,16 @@ watch(() => route.params.roomId, () => syncRoute())
               >
                 {{ linkmic.guestStatus === 'active' ? '下麦' : linkmic.guestStatus === 'requesting' ? '取消申请' : '申请上麦' }}
               </el-button>
-              <span v-if="isAnchor" class="live-danmaku__tip">主播不能给自己点赞/送礼物</span>
+              <el-button v-if="isAnchor" class="live-danmaku__mod" @click="openModeration">🛡 房管</el-button>
+              <el-button
+                v-if="isAnchor && !pkActive"
+                class="live-danmaku__pk"
+                :disabled="!room || room.status !== 1"
+                @click="openPkDialog"
+              >
+                ⚔ PK
+              </el-button>
+              <span v-if="isAnchor" class="live-danmaku__tip">不能给自己点赞/送礼；点观众昵称可禁言</span>
             </div>
           </div>
         </aside>
@@ -1469,6 +2358,80 @@ watch(() => route.params.roomId, () => syncRoute())
             </div>
           </div>
         </transition>
+
+        <!-- 房管面板（仅主播）：禁言名单 + 屏蔽词。用 dialog 而不是塞进 320px 侧栏，
+             因为这两份列表都需要横向空间（昵称 + 剩余时长 + 操作 / 词标签 + 输入框） -->
+        <el-dialog v-model="moderationOpen" class="live-mod__dialog" title="🛡 弹幕房管" width="520px" append-to-body>
+          <el-tabs>
+            <el-tab-pane :label="muteList.length ? `禁言名单（${muteList.length}）` : '禁言名单'">
+              <div v-if="!muteList.length" class="live-mod__empty">还没有人被打过静音——点观众昵称即可禁言</div>
+              <div v-for="m in muteList" :key="m.userId" class="live-mod__row">
+                <UserAvatar :src="m.avatar" :name="m.nickname" :size="26" />
+                <span class="live-mod__name im-ellipsis">{{ m.nickname }}</span>
+                <span class="live-mod__expire">{{ muteExpireText(m) }}</span>
+                <el-button size="small" text type="success" @click="onUnmute(m)">取消禁言</el-button>
+              </div>
+            </el-tab-pane>
+            <el-tab-pane :label="blockWords.length ? `屏蔽词（${blockWords.length}）` : '屏蔽词'">
+              <div class="live-mod__words-input">
+                <el-input
+                  v-model="wordDraft"
+                  size="small"
+                  placeholder="加一个词，回车确认"
+                  @keyup.enter="onAddWord"
+                />
+                <el-button size="small" type="primary" @click="onAddWord">添加</el-button>
+              </div>
+              <div class="live-mod__tags">
+                <el-tag
+                  v-for="w in blockWords"
+                  :key="w"
+                  class="live-mod__tag"
+                  type="danger"
+                  effect="plain"
+                  closable
+                  @close="onRemoveWord(w)"
+                >
+                  {{ w }}
+                </el-tag>
+                <span v-if="!blockWords.length" class="live-mod__empty">还没有屏蔽词</span>
+              </div>
+              <p class="live-mod__hint">
+                命中屏蔽词的弹幕直接拒发；全局敏感词由服务端词库统一遮罩，不需要在这里重复配置。
+              </p>
+            </el-tab-pane>
+          </el-tabs>
+        </el-dialog>
+
+        <!-- 发起 PK：对手必须此刻也在直播（服务端会拒不在播的目标），所以候选直接取自直播中列表，
+             不让人手填用户 ID -->
+        <el-dialog v-model="pkDialogOpen" class="live-pk__dialog" title="⚔ 发起连麦 PK" width="480px" append-to-body>
+          <div class="live-pk__dur">
+            <span class="live-pk__dur-label">时长</span>
+            <el-radio-group v-model="pkDuration" size="small">
+              <el-radio-button v-for="d in PK_DURATIONS" :key="d.seconds" :value="d.seconds">
+                {{ d.label }}
+              </el-radio-button>
+            </el-radio-group>
+          </div>
+          <div v-loading="pkTargetsLoading" class="live-pk__targets">
+            <div v-for="t in pkTargets" :key="t.id" class="live-pk__target">
+              <UserAvatar :src="t.anchorAvatar" :name="t.anchorName" :size="28" />
+              <div class="live-pk__target-info">
+                <span class="live-pk__target-name im-ellipsis">{{ t.anchorName }}</span>
+                <span class="live-pk__target-title im-ellipsis">{{ t.title }}</span>
+              </div>
+              <span class="live-pk__target-online">👁 {{ t.onlineCount || 0 }}</span>
+              <el-button size="small" type="primary" :loading="pkBusy" @click="onStartPk(t)">发起挑战</el-button>
+            </div>
+            <div v-if="!pkTargetsLoading && !pkTargets.length" class="live-pk__empty">
+              此刻没有别的主播在播：PK 要对方也开着播才有得比，稍后再试
+            </div>
+          </div>
+          <p class="live-pk__hint">
+            热度 = 期间礼物 + 点赞 + 观众投票按权重相加，只算两个房间各自的增量（开场前攒下的不算）；投票一人一次，改票即覆盖。
+          </p>
+        </el-dialog>
       </div>
     </div>
 
@@ -1493,6 +2456,8 @@ watch(() => route.params.roomId, () => syncRoute())
           </el-radio-group>
         </div>
         <div class="live-lobby__actions">
+          <!-- 数据面板人人可开（没播过就是空态）：要播一场才能看到数，不如让入口一直在那 -->
+          <el-button plain @click="statsDialog = true">📊 我的数据</el-button>
           <el-button v-if="myLiving" type="danger" plain @click="confirmEndBroadcast">
             结束我的直播
           </el-button>
@@ -1508,11 +2473,40 @@ watch(() => route.params.roomId, () => syncRoute())
           <el-tag type="success" effect="dark">直播中</el-tag>
           <span class="live-anchor__title im-ellipsis">{{ myLiving.title }}</span>
           <span class="live-anchor__state">推流状态：{{ pushState }}</span>
+          <!-- 阶梯实际铺开的档位（主进程上报）：比采集源高的档会被砍掉，主播看这里就知道 1440p 有没有真出 -->
+          <span v-if="pushTiers.length" class="live-anchor__tiers">档位 {{ pushTiers.join(' / ') }}</span>
         </div>
         <div v-if="pushError" class="live-anchor__error">{{ pushError }}</div>
         <div class="live-anchor__row live-anchor__row--btns">
           <el-button size="small" @click="enterRoom(myLiving.id)">进入我的直播间</el-button>
           <el-button size="small" type="danger" @click="confirmEndBroadcast">结束直播</el-button>
+        </div>
+      </div>
+
+      <!-- 可回看场次：入口标记活 retention-days（默认 1 天），而上面那些「已结束」卡片
+           只留 ended-room-visible-minutes（默认 1 小时），这条横条负责中间这一天的窗口；
+           到期后入口消失，媒体服务器上的分片也由 live-retention.js 一并删掉（见 md/直播.md §10.7） -->
+      <div v-if="replays.length" class="live-replays">
+        <div class="live-replays__head">🎬 可看回放</div>
+        <div class="live-replays__row">
+          <div
+            v-for="item in replays"
+            :key="item.id"
+            class="live-replays__card"
+            @click="openReplayRoom(item)"
+          >
+            <div class="live-replays__cover">
+              <img v-if="item.cover" :src="item.cover" alt="" />
+              <div v-else class="live-replays__placeholder">
+                <el-icon :size="22"><VideoCamera /></el-icon>
+              </div>
+              <span class="live-replays__play">▶</span>
+            </div>
+            <div class="live-replays__title im-ellipsis">{{ item.title }}</div>
+            <div class="live-replays__meta im-ellipsis">
+              {{ item.anchorName }} · {{ formatConvTime(item.endTime) }}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1533,6 +2527,13 @@ watch(() => route.params.roomId, () => syncRoute())
               {{ STATUS_TEXT[item.status] || '未知' }}
             </span>
             <span v-if="item.status === 1" class="live-card__online">👁 {{ item.onlineCount || 0 }}</span>
+            <!-- 已结束且能回看：标在右上角（那里正好不被在线人数占） -->
+            <span v-else-if="item.hasReplay" class="live-card__replay">▶ 回放</span>
+            <!-- 门禁徽标：直播中的密码房/付费房，左下角提示需解锁才能进（gate 仅 status===1 时有值） -->
+            <span
+              v-if="item.status === 1 && item.gate && item.gate.type !== 'none'"
+              class="live-card__gate"
+            >🔒 {{ item.gate.type === 'paid' ? item.gate.price + '积分' : '密码' }}</span>
           </div>
           <div class="live-card__info">
             <div class="live-card__title im-ellipsis">{{ item.title }}</div>
@@ -1570,9 +2571,7 @@ watch(() => route.params.roomId, () => syncRoute())
             <UserAvatar :src="playingVideo.uploaderAvatar" :name="playingVideo.uploaderName" :size="26" />
             <div class="live-video__player-info">
               <div class="live-video__player-title im-ellipsis">{{ playingVideo.title }}</div>
-              <div class="live-video__player-meta">
-                {{ playingVideo.uploaderName }} · {{ fmtDuration(playingVideo.duration) }} · {{ playingVideo.playCount || 0 }} 次播放
-              </div>
+              <div class="live-video__player-meta">{{ playingVideoMeta }}</div>
             </div>
             <el-button text @click="closePlayer">关闭 ✕</el-button>
           </div>
@@ -1614,6 +2613,13 @@ watch(() => route.params.roomId, () => syncRoute())
       </template>
     </div>
 
+    <!-- ==================== 主播数据面板 ==================== -->
+    <AnchorStatsDialog
+      v-model="statsDialog"
+      @open-room="openStatsRoom"
+      @open-replay="openStatsReplay"
+    />
+
     <!-- ==================== 开播对话框 ==================== -->
     <el-dialog v-model="startDialog" title="开始直播" width="460px">
       <el-form label-width="80px">
@@ -1639,16 +2645,67 @@ watch(() => route.params.roomId, () => syncRoute())
             <el-option label="480p" value="480p" />
             <el-option label="720p" value="720p" />
             <el-option label="1080p" value="1080p" />
+            <el-option label="1440p (2K)" value="1440p" />
           </el-select>
+          <span class="live-form__hint">选的是原画</span>
         </el-form-item>
         <el-form-item label="码率">
-          <el-input-number v-model="startForm.bitrateKbps" :min="500" :max="8000" :step="500" />
-          <span class="live-form__hint">kbps</span>
+          <el-input-number v-model="startForm.bitrateKbps" :min="500" :max="bitrateMax" :step="500" />
+          <span class="live-form__hint">kbps，上限 {{ bitrateMax }}</span>
+        </el-form-item>
+        <el-form-item label="清晰度">
+          <span class="live-form__hint live-form__hint--wide">
+            自动同时转出多档（最多 {{ ladderHint }}）；观众端始终能看到自动/480p/720p/1080p/1440p 五个选项，
+            比采集源高的档会被跳过，本场没铺到的档在观众那边置灰
+          </span>
+        </el-form-item>
+        <el-form-item label="门禁">
+          <el-input v-model="startForm.password" maxlength="32" show-password placeholder="设房间密码（可空）" style="width: 200px" />
+          <span class="live-form__hint">填了即密码直播</span>
+        </el-form-item>
+        <el-form-item label="入场价">
+          <el-input-number v-model="startForm.price" :min="0" :max="1000000" :step="10" :disabled="!!startForm.password" />
+          <span class="live-form__hint">积分，&gt;0 即付费直播（与密码互斥）</span>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="startDialog = false">取消</el-button>
         <el-button type="primary" :loading="starting" @click="submitStart">开始推流</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ==================== 门禁解锁弹窗（观众进密码/付费房且未解锁） ==================== -->
+    <!-- :show-close=false 且不绑 @close：避免解锁成功时程序关框误触发「回大厅」，离房只走「暂不观看」按钮 -->
+    <el-dialog
+      v-model="gateDialog"
+      :title="room && room.gate && room.gate.type === 'paid' ? '付费直播' : '密码直播'"
+      width="360px"
+      :close-on-click-modal="false"
+      :show-close="false"
+    >
+      <div v-if="room && room.gate" class="live-gate">
+        <p class="live-gate__title im-ellipsis">{{ room.title }}</p>
+        <template v-if="room.gate.type === 'paid'">
+          <p>本场为付费直播，解锁需支付 <b>{{ room.gate.price }}</b> 积分。</p>
+          <p class="live-gate__hint">积分为站内虚拟币，支付后不可退回（同送礼口径）。</p>
+        </template>
+        <template v-else>
+          <p>本场为密码直播，请输入主播设定的房间密码。</p>
+          <el-input
+            v-model="gatePassword"
+            type="password"
+            show-password
+            maxlength="32"
+            placeholder="房间密码"
+            @keyup.enter="submitGateUnlock"
+          />
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="gateCancel">暂不观看</el-button>
+        <el-button type="primary" :loading="gateBusy" @click="submitGateUnlock">
+          {{ room && room.gate && room.gate.type === 'paid' ? '支付并解锁' : '解锁' }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -1724,6 +2781,11 @@ watch(() => route.params.roomId, () => syncRoute())
   flex: none;
 }
 
+.live-room__report {
+  margin-left: auto;
+  flex: none;
+}
+
 .live-room__meta {
   display: flex;
   align-items: center;
@@ -1778,11 +2840,84 @@ watch(() => route.params.roomId, () => syncRoute())
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
   font-size: 15px;
+}
+
+/* 回放态顶条：左上角一枚「回放」标 + 一行元数据 + 退出按钮 */
+.live-replay {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.live-replay__tag {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(255, 120, 30, 0.9);
+}
+
+.live-replay__meta {
+  opacity: 0.85;
+}
+
+/* 清晰度选择器：右上角浮层，与连麦徽标同层位但可交互（徽标是 pointer-events:none） */
+.live-quality {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.55);
+  max-width: calc(100% - 24px);
+}
+
+/* 本场档位汇总：空间不够就裁掉，不让它把右上角浮层撑到遮住画面 */
+.live-quality__meta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+/* 下拉项右侧的不可用原因（本场无 / 单档 / 不支持） */
+.live-quality__note {
+  margin-left: 10px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 连麦徽标占着右上角时往下挪一格，别叠在一起 */
+.live-quality--below {
+  top: 46px;
+}
+
+.live-quality__label {
+  font-size: 12px;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.live-quality :deep(.el-select) {
+  width: 96px;
 }
 
 /* 连麦：观众侧徽标 + 主播/嘉宾面板 */
@@ -2262,6 +3397,8 @@ watch(() => route.params.roomId, () => syncRoute())
 
 .live-danmaku__item {
   display: flex;
+  /* wrap 是为禁言菜单准备的：菜单靠 flex:1 0 100% 换行占满一条，否则会被当成第二个气泡挤在右侧 */
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 6px;
   margin-bottom: 10px;
@@ -2289,6 +3426,264 @@ watch(() => route.params.roomId, () => syncRoute())
 .live-danmaku__nick--anchor {
   color: #f56c6c;
   font-weight: 600;
+}
+
+/* 主播侧的观众昵称其实是个按钮：不给出 pointer 与 hover，它看起来就只是段文字 */
+.live-danmaku__nick--actionable {
+  cursor: pointer;
+}
+
+.live-danmaku__nick--actionable:hover {
+  color: var(--el-color-primary);
+  text-decoration: underline;
+}
+
+.live-danmaku__muted {
+  flex: none;
+}
+
+.live-danmaku__mute-menu {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--im-border, #e4e7ed);
+  border-radius: 6px;
+  background: var(--im-panel, #f5f7fa);
+}
+
+/* 房管面板（el-dialog 内容靠 slot 编译到本组件作用域，所以 scoped 样式照常生效） */
+.live-mod__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--im-border, #ebeef5);
+}
+
+.live-mod__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.live-mod__expire {
+  flex: none;
+  color: #e6a23c;
+  font-size: 12px;
+}
+
+.live-mod__empty {
+  padding: 12px 0;
+  color: #909399;
+  font-size: 13px;
+  text-align: center;
+}
+
+.live-mod__words-input {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.live-mod__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.live-mod__hint {
+  margin: 10px 0 0;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* --- 连麦 PK：进度面板挂在画面上沿居中 --- */
+/* 半透黑底 + 毛玻璃：底下是任意颜色的直播画面，用主题色反而会在浅色主题上被视频淹掉 */
+.live-pk {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  width: min(420px, calc(100% - 110px));
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  color: #fff;
+  font-size: 12px;
+}
+
+.live-pk--ended {
+  border-color: rgba(255, 214, 102, 0.55);
+}
+
+.live-pk__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 右上角的关闭是绝对定位的，不给这行留白就会压住对方昵称的尾字 */
+  padding-right: 16px;
+}
+
+.live-pk__name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  text-align: center;
+}
+
+.live-pk__vs {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #ffd666;
+}
+
+.live-pk__close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: 0;
+  padding: 2px 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.live-pk__track {
+  position: relative;
+  margin-top: 8px;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* 热度条从左侧（我方）向右推进；双方都是 0 时服务端给 50%，看着是均分而不是空条 */
+.live-pk__fill {
+  height: 100%;
+  background: linear-gradient(90deg, #409eff, #67c23a);
+  transition: width 0.4s ease;
+}
+
+.live-pk__heat {
+  position: absolute;
+  top: 0;
+  line-height: 14px;
+  font-size: 10px;
+  color: #fff;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.75);
+}
+
+.live-pk__heat--self {
+  left: 6px;
+}
+
+.live-pk__heat--opp {
+  right: 6px;
+}
+
+.live-pk__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.live-pk__foot--end {
+  justify-content: center;
+}
+
+/* 倒计时用等宽数字：不然每一位都在抖宽度，整条 foot 跟着颤 */
+.live-pk__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.live-pk__votes {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.live-pk__foot .el-button + .el-button {
+  margin-left: 0;
+}
+
+.live-pk__result {
+  font-weight: 600;
+}
+
+.live-pk__result--win {
+  color: #ffd666;
+}
+
+.live-pk__reason {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* 发起弹窗：候选列表要滚动，30 个在播房间不可能一屏列出 */
+.live-pk__dur {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.live-pk__dur-label {
+  color: #909399;
+  font-size: 13px;
+}
+
+.live-pk__targets {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.live-pk__target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--im-border);
+}
+
+.live-pk__target-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.live-pk__target-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.live-pk__target-title,
+.live-pk__target-online {
+  font-size: 12px;
+  color: #909399;
+}
+
+.live-pk__empty {
+  padding: 18px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.live-pk__hint {
+  margin: 10px 0 0;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .live-danmaku__text {
@@ -2389,6 +3784,12 @@ watch(() => route.params.roomId, () => syncRoute())
   color: #67c23a;
 }
 
+/* 本场实际铺开的阶梯档位 */
+.live-anchor__tiers {
+  font-size: 12px;
+  color: #909399;
+}
+
 .live-anchor__error {
   margin-top: 6px;
   font-size: 12px;
@@ -2478,6 +3879,97 @@ watch(() => route.params.roomId, () => syncRoute())
   background: rgba(0, 0, 0, 0.55);
 }
 
+.live-card__replay {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: #fff;
+  background: rgba(255, 120, 30, 0.85);
+}
+
+/* 门禁徽标：直播中的密码房/付费房，放左下角（避开状态标签与在线人数的上部） */
+.live-card__gate {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* 大厅「可看回放」横条：小尺寸封面 + 标题/主播，横向滑动 */
+.live-replays {
+  margin-bottom: 14px;
+}
+
+.live-replays__head {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.live-replays__row {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.live-replays__card {
+  flex: 0 0 148px;
+  cursor: pointer;
+}
+
+.live-replays__cover {
+  position: relative;
+  height: 84px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #111;
+}
+
+.live-replays__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-replays__placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+}
+
+.live-replays__play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0.9;
+}
+
+.live-replays__title {
+  font-size: 13px;
+  margin-top: 6px;
+}
+
+.live-replays__meta {
+  font-size: 12px;
+  color: #999;
+}
+
 .live-card__info {
   padding: 8px 10px 10px;
 }
@@ -2511,6 +4003,24 @@ watch(() => route.params.roomId, () => syncRoute())
 
 .live-form__hint {
   margin-left: 8px;
+  color: #909399;
+  font-size: 12px;
+}
+
+/* 整行都是提示（阶梯说明）：不需要左边那段间距，长句子要能折行 */
+.live-form__hint--wide {
+  margin-left: 0;
+  line-height: 1.6;
+}
+
+/* 门禁解锁弹窗 */
+.live-gate__title {
+  margin: 0 0 12px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.live-gate__hint {
+  margin: 8px 0 0;
   color: #909399;
   font-size: 12px;
 }

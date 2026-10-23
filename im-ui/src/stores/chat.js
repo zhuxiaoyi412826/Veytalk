@@ -50,8 +50,22 @@ const STATUS_TEXT = {
   5: '发送失败'
 }
 
-/** 附件消息在气泡里显示的类型名，msgTypeDesc 缺失时兜底 */
-const TYPE_TEXT = { 1: '文本', 2: '图片', 3: '文件', 4: '语音', 5: '系统通知' }
+/** 附件消息在气泡里显示的类型名，msgTypeDesc 缺失时兜底；补齐到 13 是为了转账/红包在本地占位与离线缓存里也有名字 */
+const TYPE_TEXT = {
+  1: '文本',
+  2: '图片',
+  3: '文件',
+  4: '语音',
+  5: '系统通知',
+  6: '通话',
+  7: '名片',
+  8: '位置',
+  9: '聊天记录',
+  10: '投票',
+  11: '机器人',
+  12: '转账',
+  13: '红包'
+}
 
 function seqOf(message) {
   const value = Number(message && message.seq)
@@ -163,7 +177,12 @@ export const useChatStore = defineStore('chat', {
      * 挂在 store 单例而不是组件里：切换会话再回来不至于丢掉没发出去的文件；
      * 页面刷新会丢（浏览器没法找回 File 对象），那时手动重发会提示重新选择。
      */
-    retryFiles: {}
+    retryFiles: {},
+    /**
+     * 待定位的消息（跳转会话用）：{ conversationId, messageId }。
+     * 由「我的收藏」等面板写入，ChatWindow 首轮历史落地后消费并置 null（一次性，不进本地库）。
+     */
+    locateTarget: null
   }),
 
   getters: {
@@ -693,6 +712,62 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
+     * 收藏标记变更（服务端下发）：就地把目标消息的 favorite 布尔位赋值。
+     * 与 essence 同理，全量赋值，本端 HTTP 回包与 favorite-notify 双路抵达也不会错乱。
+     *
+     * <p>favorite-notify 只推给操作者本人（收藏是私人数据，不打扰其他成员），所以本方法
+     * 处理的是「同一账号的多端同步」：手机收了，电脑上的气泡也要亮起来。
+     */
+    applyFavorite(payload) {
+      if (!payload) {
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (!target) {
+        return
+      }
+      target.favorite = !!payload.favorite
+      dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
+     * 标记 / 取消收藏（HTTP 通道）：本人任意会话都能收，无需权限。本端就地刷新，其他端由 favorite-notify 同步。
+     */
+    async markFavorite(conversationId, messageId, favorite) {
+      await messageApi.markMessageFavorite(messageId, favorite)
+      this.applyFavorite({ conversationId, messageId, favorite })
+    },
+
+    /**
+     * 把某条消息设为「跳转目标」：先切会话、再由 ChatWindow 消费。
+     */
+    setLocateTarget(conversationId, messageId) {
+      this.locateTarget = { conversationId: asId(conversationId), messageId: asId(messageId) }
+    },
+
+    /**
+     * 为了定位一条消息而按需补拉更早的历史：命中返回 true。
+     *
+     * 收藏的多半是老消息，只看当前视图基本找不到，所以一页页往前拉；但上限卡死在
+     * maxPages 页（默认 200 条），宁可让调用方提示「手动向上滚动」，也不为了一条消息把整个会话拉穿。
+     * 注意 loadHistory 并发时会直接返回当前列表，所以循环里的下一轮会重新判定，不会死锁。
+     */
+    async ensureMessageLoaded(conversationId, messageId, maxPages = 10) {
+      const key = this.bucket(conversationId)
+      for (let i = 0; i <= maxPages; i++) {
+        if (this.messages[key].some((item) => sameId(item.messageId, messageId))) {
+          return true
+        }
+        if (!this.hasMore[key]) {
+          return false
+        }
+        await this.loadHistory(conversationId, false)
+      }
+      return false
+    },
+
+    /**
      * 投票变更（服务端下发）：直接以权威票数覆盖各选项计数 + 总人数 + 是否截止。
      * 票数是全量赋值（非增量），所以 HTTP 回包与 vote-notify 双路抵达也不会双计。
      * 不携带投票人身份，本人已选（selfVoted）从现有视图保留。
@@ -739,6 +814,50 @@ export const useChatStore = defineStore('chat', {
         const target = this.messages[key].find((item) => sameId(item.messageId, messageId))
         if (target) {
           target.vote = vo.vote
+          dbUpsertMessage(conversationId, target)
+        }
+      }
+      return vo
+    },
+
+    /**
+     * 接龙变更（chain-notify）：服务端推的是全量条目快照，整份替换 extra.chainItems。
+     * 不像 applyReaction 那样做加减——接龙条目自带正文且需按序，拿整份覆盖最不易错且幂等。
+     */
+    applyChain(payload) {
+      if (!payload) {
+        return
+      }
+      const key = this.bucket(payload.conversationId)
+      const target = this.messages[key].find((item) => sameId(item.messageId, payload.messageId))
+      if (!target) {
+        return
+      }
+      const base = target.extra || {}
+      target.extra = {
+        ...base,
+        chainItems: Array.isArray(payload.chainItems) ? payload.chainItems : (base.chainItems || []),
+        chainClosed: payload.chainClosed === undefined ? !!base.chainClosed : !!payload.chainClosed
+      }
+      dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
+     * 参与 / 截止接龙（HTTP 通道）：本端用服务端回包的最新条目就地刷新；
+     * 其他成员随后通过 chain-notify 拿到同一份权威名单。不做本地乐观更新（序号与昵称快照由服务端定）。
+     */
+    async chain(conversationId, messageId, text, close) {
+      const vo = await messageApi.chainMessage(messageId, text, close)
+      if (vo && vo.extra) {
+        const key = this.bucket(conversationId)
+        const target = this.messages[key].find((item) => sameId(item.messageId, messageId))
+        if (target) {
+          const base = target.extra || {}
+          target.extra = {
+            ...base,
+            chainItems: vo.extra.chainItems || [],
+            chainClosed: !!vo.extra.chainClosed
+          }
           dbUpsertMessage(conversationId, target)
         }
       }

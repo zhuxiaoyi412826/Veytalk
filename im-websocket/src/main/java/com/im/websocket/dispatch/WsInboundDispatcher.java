@@ -16,6 +16,7 @@ import com.im.websocket.dto.WsChatPayload;
 import com.im.websocket.manager.WsConnection;
 import com.im.websocket.manager.WsSessionManager;
 import com.im.websocket.service.CallSignalingService;
+import com.im.websocket.service.GroupCallSignalingService;
 import com.im.websocket.service.LiveLinkSignalingService;
 import com.im.websocket.service.WsPresenceService;
 import lombok.RequiredArgsConstructor;
@@ -45,6 +46,7 @@ public class WsInboundDispatcher {
     private final WsPresenceService presenceService;
     private final WsSessionManager sessionManager;
     private final CallSignalingService callSignalingService;
+    private final GroupCallSignalingService groupCallSignalingService;
     private final LiveLinkSignalingService liveLinkSignalingService;
     private final JsonUtil jsonUtil;
     private final RateLimiter rateLimiter;
@@ -114,6 +116,12 @@ public class WsInboundDispatcher {
             case PULL_OFFLINE -> presenceService.pullOffline(connection);
             case CALL -> callSignalingService.handle(connection, packet);
             case LINKMIC -> liveLinkSignalingService.handle(connection, packet);
+            case GROUPCALL -> {
+                // 群通话信令量比 1:1 通话大一个量级（mesh 下每人 N-1 路 PeerConnection，trickle-ICE 一个候选一帧），
+                // 只在这一类上加闸门；超阈值抛业务异常，由 dispatch 翻译成 error 帧，不断连
+                requireGroupCallQuota(connection);
+                groupCallSignalingService.handle(connection, packet);
+            }
             // 剩下的全是下行类型。客户端发这些过来，要么是前端写错了枚举，
             // 要么是有人在探协议边界，两种情况都只回错误、不断连
             default -> reject(connection, packet.getClientMsgId(), ResultCode.BAD_REQUEST.getCode(),
@@ -218,6 +226,24 @@ public class WsInboundDispatcher {
             throw new BusinessException(ResultCode.BAD_REQUEST, "recall 报文缺少 messageId");
         }
         requireMessageSpi().recall(payload.getMessageId(), connection.userId());
+    }
+
+    /**
+     * 群通话信令的频率闸门。
+     *
+     * <p>阈值默认 60 秒 600 帧，比 {@code ws.chat} 宽两个量级：四个人的正常通话光 ICE 候选
+     * 就能在几十秒里抛出上百帧，按聊天的阈值会误伤真实用户。这道闸门只用于兜底，
+     * 防止脚本绕开 REST 从长连接通道无限写 Redis。
+     *
+     * <p>被拦时这一帧就是丢了，不会重试：落在 offer/answer 上会让那一路协商停在半路，
+     * 但前端本来就对每路 PeerConnection 做了超时回收，用户重新点一次接听即可，代价可接受。
+     */
+    private void requireGroupCallQuota(WsConnection connection) {
+        ImProperties.RateLimiting limit = imProperties.getRateLimit();
+        if (limit.isEnabled() && !rateLimiter.tryAcquire("ws.groupcall", String.valueOf(connection.userId()),
+                limit.getWsGroupCallCount(), limit.getWsGroupCallSeconds())) {
+            throw new BusinessException(ResultCode.TOO_MANY_REQUESTS);
+        }
     }
 
     private WsActionPayload parseAction(Object data) {

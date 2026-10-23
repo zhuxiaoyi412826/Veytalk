@@ -28,6 +28,15 @@ public interface WalletService {
     /** 扣款，amount 为正数；余额不足抛 {@code WALLET_BALANCE_NOT_ENOUGH}；写余额与账本流水，同事务 */
     void deduct(Long userId, long amount, String type, Long refId, String remark);
 
+    /**
+     * 用户之间转积分的支出（转账与发红包），amount 为正数；余额不足抛 {@code WALLET_BALANCE_NOT_ENOUGH}。
+     *
+     * <p>与 {@link #deduct} 的唯一区别是<b>不累加</b> {@code total_consumed}：那一列的口径是
+     * 「向平台买服务的累计」（送礼等），而转账只是把钱从我的行挪到对方的行，平台没有多收一分钱。
+     * 入账侧直接复用 {@link #credit}（它走的也是不污染累计充值的那条通用入账）。
+     */
+    void debit(Long userId, long amount, String type, Long refId, String remark);
+
     /** 充值：校验开关与额度上下界 → 走支付通道 → 入账；返回刷新后的钱包视图 */
     WalletVO recharge(Long userId, long amount);
 

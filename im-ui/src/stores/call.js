@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getCallConfig } from '@/api/call'
 import { uploadFileSmart } from '@/api/file'
-import { createCallPeer } from '@/utils/webrtc'
+import { createCallPeer, hasMediaApi, INSECURE_HINT } from '@/utils/webrtc'
 import { createCallRecorder, callRecordSupported } from '@/utils/callRecorder'
 import { openRecordDir, fetchDefaultRecordDir } from '@/utils/recorder'
 import { useChatStore } from '@/stores/chat'
@@ -51,8 +51,22 @@ export const useCallStore = defineStore('call', () => {
   const recordSupported = ref(false)
   // 服务端通话开关：ensureConfig 拉到后置真，未拉到前默认不可用（避免误开入口）
   const enabled = ref(false)
+  // 群通话两个旋钮也从这里下发（同一个 /call/config，不为群通话再开一个端点）：
+  // groupcall store 读它们而不是自己再拉一次，免得两份缓存各自看到不同时刻的开关
+  const groupEnabled = ref(false)
+  const groupMaxSlots = ref(0)
+  // ICE 清单以 shallowRef 交出：群通话建 N-1 路 PeerConnection 时要读同一个数组，
+  // 而 config 是个普通变量，不具有响应式，不能直接给别的 store 用
+  const iceServers = shallowRef([])
   const localStream = shallowRef(null)
   const remoteStream = shallowRef(null)
+  /**
+   * 浮层是否收起成可拖动的悬浮小窗。
+   * 放 store 而不是组件局部态：小窗与浮层是两个组件（都挂 MainLayout），得共享这一个开关；
+   * 而浮层最小化时用的是 opacity 抹掉而不是卸载——视频元素一卸载 srcObject 就得重挂，
+   * 语音通话还会连带把声音出口搞断，所以宁可让画面常驻、只是看不见。
+   */
+  const minimized = ref(false)
 
   /* ------------------------------ 非响应式内部态 ------------------------------ */
   let engine = null
@@ -64,6 +78,8 @@ export const useCallStore = defineStore('call', () => {
   let recordedFilePath = ''
   let config = null // { enabled, iceServers }
   let configLoading = null
+  // 最后一次 ICE 诊断文本：hint 会随挂断一起被 reset，但用户往往是挂断后才想起截图
+  let lastIceDiag = ''
 
   const isActive = computed(() => status.value === 'active')
   const visible = computed(() => status.value !== 'idle' && status.value !== 'ended')
@@ -85,13 +101,25 @@ export const useCallStore = defineStore('call', () => {
           iceServers: (vo && vo.iceServers) || []
         }
         enabled.value = config.enabled
+        iceServers.value = config.iceServers
+        groupEnabled.value = !!(vo && vo.groupEnabled)
+        groupMaxSlots.value = Number((vo && vo.groupMaxSlots) || 0)
         recordSupported.value = callRecordSupported()
         return config
       })
       .catch(() => {
-        config = { enabled: false, iceServers: [] }
+        // ★ 关键：请求失败不能缓存成「关闭」。config 一旦被写成 {enabled:false} 这个真值，
+        // 第 82 行的 `if (config && !force)` 会让之后每次 ensureConfig 都提前返回、永不再请求——
+        // 而 store 是全局单例，于是「页面加载那一刻后端恰好在重启/网络抖一下」就把通话入口
+        // 永久藏掉，直到用户手动刷新整页（正是「按钮不见了」的成因）。
+        // 这里把 config 留空、只临时置灰 enabled，下次进入会话（onMounted 再调 ensureConfig）会自动重试，
+        // 后端恢复后入口即自愈。只有后端明确回 enabled=false 的成功响应才缓存关闭态（见上面 then）。
+        config = null
         enabled.value = false
-        return config
+        iceServers.value = []
+        groupEnabled.value = false
+        groupMaxSlots.value = 0
+        return null
       })
       .finally(() => {
         configLoading = null
@@ -110,16 +138,9 @@ export const useCallStore = defineStore('call', () => {
   /* ------------------------------ 媒体引擎 ------------------------------ */
 
   /**
-   * 本环境能不能拿到麦/摄像头。浏览器只在安全上下文（https 或 localhost/127.0.0.1）
-   * 暴露 navigator.mediaDevices：手机用 http://局域网IP 访问时它是 undefined，
-   * 不预检直接调 getUserMedia 会撞一个天书一样的 TypeError（navigator.mediaDevices 不存在），
-   * 用户只看到「接通后就关闭」——这正是那个 bug 的主要现场。
+   * 取流前的安全上下文预检与提示文案都在 utils/webrtc.js（hasMediaApi / INSECURE_HINT）：
+   * 1:1 通话与群通话要的是同一句解释，写两处早晚变成一个改了另一个没改。
    */
-  function hasMediaApi() {
-    return !!(typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
-  }
-
-  const INSECURE_HINT = '当前访问地址不是 HTTPS/localhost，浏览器禁止使用麦克风/摄像头：手机请用 https://<电脑IP>:5173 访问（npm run gen:cert 生成证书）'
 
   async function buildEngine() {
     engine = createCallPeer({
@@ -139,17 +160,25 @@ export const useCallStore = defineStore('call', () => {
           if (status.value === 'active') {
             hint.value = ''
           }
+          // 连通时也只把现场进 console：下次换网络拓扑（USB 共享 / 热点 / 路由器）时，
+          // 能对比出上一次走通的是哪个候选对，而不是「好了但不知道为什么好」
+          dlog('[call] ICE 明细', engine && engine.iceDetail())
           startTimer()
         } else if (state === 'failed') {
-          // ICE 彻底失败（同网段但防火墙拦了 UDP、两端不同网段等）：不自动收口的话
+          // ICE 彻底失败（同网段但防火墙拦了 UDP、两端不同网段、mDNS 解不开等）：不自动收口的话
           // 本端卡在一个无声无像的浮层里，对端也不知道你挂了 —— 给 5s 重连窗口，
           // 没救回来就主动挂断（hangup 会同时通知对端 teardown）
-          hint.value = 'P2P 连接失败：确认两端在同一局域网，且电脑防火墙未拦截 UDP'
+          reportIceFailure()
           clearFailTimer()
           failTimer = setTimeout(() => {
             failTimer = null
             if (status.value === 'active') {
-              ElMessage.error('通话无法建立，已挂断（检查同网段 / 防火墙 UDP）')
+              ElMessage({
+                type: 'error',
+                message: `通话无法建立，已挂断。${lastIceDiag || ''}`,
+                duration: 20000,
+                showClose: true
+              })
               hangup()
             }
           }, 5000)
@@ -157,6 +186,31 @@ export const useCallStore = defineStore('call', () => {
       }
     })
     await engine.initMedia()
+  }
+
+  /**
+   * 把 ICE 失败的原因摊开给人看。
+   *
+   * 以前只有一句「P2P 连接失败：确认两端在同一局域网，且电脑防火墙未拦截 UDP」，
+   * 而这句话把三种互不相干的成因（入站 UDP 被拦 / 两端不同网段 / mDNS 候选解析不了）
+   * 压成了一个，用户只能一遍遍重拨。现在直接把两端候选统计与选通结果写在浮层上，
+   * 手机也能截图，一眼能定位到具体是哪一类。
+   */
+  async function reportIceFailure() {
+    if (!engine) {
+      hint.value = 'P2P 连接失败'
+      return
+    }
+    lastIceDiag = engine.iceSummary()
+    hint.value = `P2P 连接失败：${lastIceDiag}`
+    dlog('[call] ICE 明细', engine.iceDetail())
+    const selected = await engine.selectedPairText()
+    if (selected) {
+      lastIceDiag = `${lastIceDiag} · ${selected}`
+      if (status.value === 'active') {
+        hint.value = `P2P 连接失败：${lastIceDiag}`
+      }
+    }
   }
 
   /* ------------------------------ 计时 ------------------------------ */
@@ -623,8 +677,18 @@ export const useCallStore = defineStore('call', () => {
     cameraOff.value = false
     sharing.value = false
     recording.value = false
+    minimized.value = false
     localStream.value = null
     remoteStream.value = null
+  }
+
+  /** 收起成悬浮小窗 / 从小窗回到通话界面（小窗那边只调 restore） */
+  function minimize() {
+    minimized.value = true
+  }
+
+  function restore() {
+    minimized.value = false
   }
 
   /** 在资源管理器打开录制目录（浮层「查看录像」用） */
@@ -648,8 +712,12 @@ export const useCallStore = defineStore('call', () => {
     hint,
     recordSupported,
     enabled,
+    groupEnabled,
+    groupMaxSlots,
+    iceServers,
     localStream,
     remoteStream,
+    minimized,
     // getters
     isActive,
     visible,
@@ -660,6 +728,8 @@ export const useCallStore = defineStore('call', () => {
     reject,
     cancel,
     hangup,
+    minimize,
+    restore,
     toggleMute,
     toggleCamera,
     toggleScreen,

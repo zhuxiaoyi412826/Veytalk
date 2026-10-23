@@ -3,7 +3,7 @@ package com.im.common.api;
 /**
  * 全局响应码。
  *
- * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接、9xxx 远程控制、10xxx AI 面试、11xxx 直播、12xxx 音视频通话。
+ * <p>分段规则：1xxx 通用、2xxx 用户、3xxx 好友、4xxx 会话、5xxx 消息、6xxx 群组、7xxx 文件、8xxx 长连接、9xxx 远程控制、10xxx AI 面试、11xxx 直播、12xxx 音视频通话（含群通话）、13xxx 钱包与礼物、14xxx 管理后台与举报。
  */
 public enum ResultCode {
 
@@ -123,6 +123,10 @@ public enum ResultCode {
     AI_INTERVIEW_NOT_FOUND(10001, "面试会话不存在或已过期"),
     AI_INTERVIEW_FORBIDDEN(10002, "无权访问该面试会话"),
     AI_INTERVIEW_ENDED(10003, "面试已结束，不能再上报该会话的数据"),
+    /* 语音链路三码：配置缺失与调用失败分开，前端据此决定是「置灰入口」还是「提示重试」 */
+    AI_AUDIO_DISABLED(10004, "语音服务未启用，请配置 ALI_BABA_API_KEY 后重启服务"),
+    AI_ASR_FAILED(10005, "语音转文字失败，请重试"),
+    AI_TTS_FAILED(10006, "语音合成失败，请重试或切换系统音色"),
 
     /* ==================== 11xxx 直播 ==================== */
     LIVE_DISABLED(11001, "直播功能未开启"),
@@ -136,6 +140,22 @@ public enum ResultCode {
     LIVE_LINK_NOT_FOUND(11008, "连麦申请不存在或已结束"),
     LIVE_LINK_FORBIDDEN(11009, "无权操作该连麦"),
     LIVE_LINK_DISABLED(11010, "连麦功能未开启"),
+    /* 弹幕房管：禁言名单与屏蔽词都只存 Redis（无表），文案在服务端定口径，REST 报错与弹幕 error 帧共用同一段 */
+    LIVE_USER_MUTED(11011, "你已被主播禁言"),
+    LIVE_MUTE_SELF(11012, "不能禁言主播自己"),
+    /* 连麦 PK：会话态只存 Redis（无表），与连麦态同构——只在两个房间同时直播时有意义 */
+    LIVE_PK_NOT_FOUND(11013, "PK 不存在或已结束"),
+    LIVE_PK_RUNNING(11014, "你已在一场 PK 中，请先结束当前对局"),
+    LIVE_PK_OPPONENT_NOT_LIVING(11015, "对方当前没在直播，无法开始 PK"),
+    LIVE_PK_DISABLED(11016, "PK 功能未开启"),
+    /* 直播回放存档：元数据只存 Redis（无表），画面字节本来就在媒体服务器上，见 md/直播.md §15 */
+    LIVE_REPLAY_DISABLED(11017, "回放功能未开启"),
+    LIVE_REPLAY_NOT_FOUND(11018, "该场直播没有可用的回放"),
+    /* 付费 / 密码直播：门禁态只存 Redis（无表），与 PK / 房管 / 回放同构，见 md/直播.md §17 */
+    LIVE_GATE_PASSWORD_WRONG(11019, "房间密码错误"),
+    LIVE_GATE_NOT_PASSWORD(11020, "该房间不是密码直播"),
+    LIVE_GATE_NOT_PAID(11021, "该房间不是付费直播"),
+    LIVE_GATE_PRICE_INVALID(11022, "房间价格不合法"),
 
     /* ==================== 12xxx 音视频通话 ==================== */
     CALL_DISABLED(12001, "通话功能未开启"),
@@ -145,6 +165,11 @@ public enum ResultCode {
     CALL_NOT_FOUND(12005, "通话不存在或已结束"),
     CALL_FORBIDDEN(12006, "无权访问该通话"),
     CALL_RECORD_TOO_LARGE(12007, "通话录制文件过大，未能上传"),
+    /* 群通话（多人）三个码：不复用 12001~12006，因为同一个失败在 1:1 与多人场景下
+     * 该给用户的文案不同（「对方正忙」对四个人同时在等的群通话是错的话） */
+    GROUP_CALL_DISABLED(12008, "群通话功能未开启"),
+    GROUP_CALL_FULL(12009, "群通话人数已满"),
+    GROUP_CALL_NOT_MEMBER(12010, "只有本群成员才能发起或加入群通话"),
 
     /* ==================== 13xxx 钱包与礼物 ==================== */
     /* 虚拟积分/币体系：不涉真实货币，充值走模拟支付桩（预留 PaymentSpi），与 D1 语音转文字降级同构 */
@@ -156,7 +181,37 @@ public enum ResultCode {
     RECHARGE_AMOUNT_INVALID(13006, "充值数额超出允许范围"),
     PAYMENT_UNAVAILABLE(13007, "支付服务未配置，暂时无法充值"),
     CHECKIN_ALREADY_DONE(13008, "今日已签到，明天再来吧"),
-    GIFT_SELF_FORBIDDEN(13009, "不能给自己的直播送礼物");
+    GIFT_SELF_FORBIDDEN(13009, "不能给自己的直播送礼物"),
+
+    /* 用户之间转移积分：转账（1301x）与红包（1302x）。两者都是「先动钱、后发消息」，
+       所以校验全在钱包侧跑完，消息侧只定格展示字段 */
+    TRANSFER_AMOUNT_INVALID(13010, "转账积分超出允许范围"),
+    TRANSFER_SELF_FORBIDDEN(13011, "不能给自己转账"),
+    TRANSFER_PEER_NOT_FOUND(13012, "收款人不存在"),
+    TRANSFER_PEER_NOT_FRIEND(13013, "只能给好友转账"),
+    TRANSFER_SINGLE_ONLY(13014, "转账仅支持单聊，群聊里请用红包"),
+    PACKET_AMOUNT_INVALID(13020, "红包积分超出允许范围"),
+    PACKET_COUNT_INVALID(13021, "红包份数不合法"),
+    PACKET_NOT_FOUND(13022, "红包不存在或已过期退回"),
+    PACKET_NOT_MEMBER(13023, "只有本会话成员能领取这个红包"),
+    PACKET_SELF_CLAIM_FORBIDDEN(13024, "不能领取自己发出的红包"),
+    PACKET_ALREADY_CLAIMED(13025, "你已经领过这个红包了"),
+    PACKET_EMPTY(13026, "红包已被领完"),
+    MONEY_MESSAGE_FORBIDDEN(13027, "转账与红包消息发出后不能撑回或转发"),
+    
+    /* ==================== 14xxx 举报与管理后台 ==================== */
+    /* 举报是面对全体用户的入口，所以错误文案直接写给举报人看（能回 14xxx 的都是业务拒绝，不是系统错）；
+       14005~14008 是后台侧的，只会在管理页面上出现；14009 虽然由运维开关触发，但拒绝的是普通用户的提交，
+       文案要能被举报人读懂 */
+    REPORT_TARGET_NOT_FOUND(14001, "被举报的对象不存在或已被删除"),
+    REPORT_SELF_FORBIDDEN(14002, "不能举报自己"),
+    REPORT_DUPLICATED(14003, "你已经举报过这个对象了，请等处理结果"),
+    REPORT_QUOTA_EXCEEDED(14004, "今日举报次数已用完，请明天再来"),
+    REPORT_NOT_FOUND(14005, "举报工单不存在"),
+    REPORT_ALREADY_HANDLED(14006, "该举报已处理，不能重复处置"),
+    ADMIN_SELF_FORBIDDEN(14007, "不能对自己执行该管理操作（封禁自己会把自己锁在门外）"),
+    ADMIN_DISPOSITION_UNAVAILABLE(14008, "该处置动作需要的能力未装配（如直播模块未启用）"),
+    REPORT_DISABLED(14009, "举报功能当前未开启");
 
     private final int code;
     private final String message;

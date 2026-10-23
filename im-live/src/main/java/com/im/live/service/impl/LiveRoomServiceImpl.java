@@ -8,27 +8,28 @@ import com.im.common.constant.RedisKeys;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.exception.BusinessException;
 import com.im.common.spi.UserQuerySpi;
+import com.im.common.spi.WalletSpi;
 import com.im.common.util.RedisUtil;
 import com.im.common.util.SecurityUtil;
 import com.im.live.config.LiveProperties;
+import com.im.live.dto.po.LiveGatePO;
 import com.im.live.dto.req.LiveStartRequest;
 import com.im.live.dto.vo.LiveRoomVO;
 import com.im.live.entity.LiveRoom;
 import com.im.live.mapper.LiveRoomMapper;
 import com.im.live.service.LiveDanmakuService;
+import com.im.live.service.LiveGateService;
+import com.im.live.service.LiveReplayService;
 import com.im.live.service.LiveRoomService;
+import com.im.live.service.LiveUrlSigner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.util.DigestUtils;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.Base64;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -48,10 +49,7 @@ import java.util.Set;
  *
  * <h2>播放地址签名</h2>
  *
- * <p>算法固定 {@code md5(path + expire + secret)}，与 Nginx
- * {@code secure_link_md5 "$uri$arg_expire$secret"} 逐字对应；path 必须是 Nginx 看到的
- * {@code $uri}（含 location 前缀），所以这里从 {@code playBaseUrl} 里把 path 抠出来拼接，
- * 而不是拿整个 URL 去算——多算进 scheme/host 会让签名永远对不上。
+ * <p>算法与路径拼装在 {@link LiveUrlSigner}（直播与回放共用一套口径），本类只管何时该签、签完给谁。
  */
 @Slf4j
 @Service
@@ -63,12 +61,18 @@ public class LiveRoomServiceImpl implements LiveRoomService {
     private final RedisUtil redisUtil;
     private final UserQuerySpi userQuerySpi;
     private final LiveDanmakuService danmakuService;
+    private final LiveUrlSigner signer;
+    private final LiveReplayService replayService;
+    private final LiveGateService gateService;
+    private final WalletSpi walletSpi;
 
     /** streamKey 用密码学随机源：它是能力凭证，可预测等于形同虚设 */
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final char[] KEY_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".toCharArray();
     private static final int STREAM_KEY_LENGTH = 24;
+    /** 回放列表单次最多返多少条（前端要的是一个横条，不是运营分页），也据此限制逐行 EXISTS 的量 */
+    private static final int REPLAY_LIST_MAX = 20;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -82,6 +86,13 @@ public class LiveRoomServiceImpl implements LiveRoomService {
             throw new BusinessException(ResultCode.LIVE_NOT_CONFIGURED);
         }
         Long userId = SecurityUtil.getUserId();
+
+        // 付费门禁的前置校验排在建房之前：设了价却因钱包关了而没人能解锁，等于把一场直播锁死，
+        // 这比开播这一刻直接报错好得多（密码房不花积分、不受钱包开关约束，无需校验）
+        Long price = request.getPrice();
+        if (price != null && price > 0) {
+            BusinessException.throwUnless(walletSpi.enabled(), ResultCode.WALLET_DISABLED);
+        }
 
         Long living = roomMapper.selectCount(new LambdaQueryWrapper<LiveRoom>()
                 .eq(LiveRoom::getAnchorId, userId)
@@ -108,16 +119,22 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         // 播种心跳键：TTL = 心跳间隔 × 超时倍数。推流端必须在 TTL 内续期，
         // 否则巡检任务会判定断播并自动关播。
         seedHeartbeat(room.getId());
+        // 门禁配置落 Redis（零 DDL）：密码/价都为空时 seed 内部不写键（公开房）。start 带 @Transactional，
+        // 但 Redis 写不并入该事务——此处写门禁失败的概率与写心跳同量级，且都在 insert 之后，
+        // 真写丢了这房间就成公开房（宁放人进来也不把主播自己锁在门外），可接受。
+        gateService.seed(room.getId(), userId, request.getPassword(), request.getPrice());
 
         String dir = room.getId() + "/" + room.getStreamKey();
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("roomId", room.getId());
         result.put("streamKey", room.getStreamKey());
         // 推流目标是 m3u8 播放列表地址，ffmpeg 以 -method PUT 上传列表与分片
-        result.put("pushUrl", joinUrl(properties.getPushBaseUrl(), dir + "/index.m3u8"));
-        result.put("playUrl", signedPlayUrl(room.getId(), room.getStreamKey()));
+        result.put("pushUrl", signer.absolute(properties.getPushBaseUrl(), dir + "/index.m3u8"));
+        result.put("playUrl", signer.playUrl(room.getId(), room.getStreamKey()));
         result.put("heartbeatSeconds", properties.getHeartbeatSeconds());
         result.put("danmakuWs", danmakuWsPath(room.getId()));
+        // 回放开关随开播响应下发：推流端据此决定关播时要不要做 VOD 定版（不开就连清单都不写）
+        result.put("replayEnabled", properties.getReplay().isEnabled());
         log.info("开播: roomId={}, anchorId={}, source={}", room.getId(), userId, room.getSourceType());
         return result;
     }
@@ -170,6 +187,7 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         danmakuService.drainStats(roomId);
         danmakuService.closeRoom(roomId, "直播启动失败，房间已撤销");
         redisUtil.delete(RedisKeys.liveOnline(roomId));
+        gateService.drop(roomId);
         roomMapper.deleteById(roomId);
         log.info("撤销未推流房间: roomId={}, anchorId={}", roomId, room.getAnchorId());
     }
@@ -186,6 +204,8 @@ public class LiveRoomServiceImpl implements LiveRoomService {
             throw new BusinessException(ResultCode.LIVE_FORBIDDEN);
         }
         seedHeartbeat(roomId);
+        // 门禁键随直播心跳续期：让配置与直播同生命周期，直播一停不再续、自然过期
+        gateService.touch(roomId);
         // 首次心跳时种「推流端已跑起来」标记：与心跳键不同，它只在推流端真调过心跳接口后才存在，
         // abort 据此区分「建房后 ffmpeg 就没起来（可删）」与「真实直播过（只能关）」。TTL 24h 兑底。
         redisUtil.setIfAbsent(RedisKeys.livePushed(roomId), String.valueOf(System.currentTimeMillis()),
@@ -269,6 +289,50 @@ public class LiveRoomServiceImpl implements LiveRoomService {
     }
 
     @Override
+    public List<LiveRoomVO> recentReplays(Long anchorId, int limit) {
+        if (!properties.getReplay().isEnabled()) {
+            return List.of();
+        }
+        int size = Math.min(Math.max(1, limit), REPLAY_LIST_MAX);
+        // 候选多取四倍再筛：库里没有「这场有没有回放」这一列（零 DDL 的代价），只能先按时间
+        // 捞一批刚结束的场次，再拿 Redis 的入口标记逐行筛。筛不满 size 是正常现象。
+        LocalDateTime since = LocalDateTime.now()
+                .minusDays(Math.max(1, properties.getReplay().getRetentionDays()));
+        List<LiveRoom> candidates = roomMapper.selectList(new LambdaQueryWrapper<LiveRoom>()
+                .eq(anchorId != null, LiveRoom::getAnchorId, anchorId)
+                .eq(LiveRoom::getStatus, LiveRoom.STATUS_ENDED)
+                .ge(LiveRoom::getEndTime, since)
+                .orderByDesc(LiveRoom::getEndTime)
+                .last("limit " + size * 4));
+        List<LiveRoom> picked = new ArrayList<>(size);
+        for (LiveRoom room : candidates) {
+            if (!replayService.has(room.getId())) {
+                continue;
+            }
+            picked.add(room);
+            if (picked.size() >= size) {
+                break;
+            }
+        }
+        if (picked.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> anchorIds = new HashSet<>();
+        for (LiveRoom room : picked) {
+            anchorIds.add(room.getAnchorId());
+        }
+        Map<Long, UserBriefDTO> anchors = userQuerySpi.listByIds(anchorIds);
+        Long me = SecurityUtil.getUserIdOrNull();
+        List<LiveRoomVO> vos = new ArrayList<>(picked.size());
+        for (LiveRoom room : picked) {
+            LiveRoomVO vo = toVO(room, anchors.get(room.getAnchorId()));
+            vo.setMine(room.managedBy(me));
+            vos.add(vo);
+        }
+        return vos;
+    }
+
+    @Override
     public void expireTimeouts() {
         // 点赞合并计数每拍冲刷一次：与超时巡检共用节拍，省一个独立的调度项
         danmakuService.flushLikes();
@@ -345,7 +409,8 @@ public class LiveRoomServiceImpl implements LiveRoomService {
      * 只广播 ended 帧（观众端黑屏+提示），连接保留到聊天超时由巡检收尾。
      *
      * <p>streamKey 置空是有意的：它是本场地址的能力凭证，关播后即便分片目录还在
-     * Nginx 上（供回放），旧的签名地址也无法再定位——回放走另一套不带 key 的持久地址。
+     * Nginx 上（供回放），旧的签名地址也无法再定位——回放正是走另一套不带 key 的持久地址
+     * {@code {roomId}/replay/index.m3u8}，分片路径则写在这份清单的正文里（见 {@link LiveReplayService}）。
      */
     private void closeRoom(LiveRoom room, int status, String reason) {
         int[] stats = danmakuService.drainStats(room.getId());
@@ -359,10 +424,16 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         redisUtil.delete(RedisKeys.liveHeartbeat(room.getId()));
         // pushed 标记一并清掉：它的使命到关播为止，留着只会白占 24h TTL
         redisUtil.delete(RedisKeys.livePushed(room.getId()));
+        // 门禁配置随关播作废（unlock 标记靠 TTL 自然消失，不逐个删）：下一场是新 roomId、需重新设
+        gateService.drop(room.getId());
 
         if (status == LiveRoom.STATUS_BANNED || properties.getEndedChatMinutes() <= 0) {
             danmakuService.closeRoom(room.getId(), endReasonText(reason));
             redisUtil.delete(RedisKeys.liveOnline(room.getId()));
+            if (status == LiveRoom.STATUS_BANNED) {
+                // 被封的场不留回放入口：内容不该还能被回看（分片本体仍在盘上，是治理而非存储问题）
+                replayService.drop(room.getId());
+            }
         } else {
             // 在线计数键保留：聊天模式期间观众仍在房间，计数要继续正确增减
             danmakuService.enterChatMode(room.getId(), endReasonText(reason));
@@ -412,62 +483,41 @@ public class LiveRoomServiceImpl implements LiveRoomService {
         if (room.isLiving()) {
             // 在线人数取 Redis 实时计数，库里的 peakOnline 只在关播时定格
             vo.setOnlineCount(danmakuService.onlineOf(room.getId()));
-            // streamKey 关播后置空，直播中才拼得出播放地址与弹幕端点
-            if (!isBlank(room.getStreamKey())) {
-                vo.setPlayUrl(signedPlayUrl(room.getId(), room.getStreamKey()));
+            // 门禁闸门就在这里：未解锁的人拿不到 playUrl（分片 path 带 streamKey + 签名，没地址就拉不到流），
+            // 也拿不到 danmakuWs。主播本人/无门禁/已解锁都放行。
+            LiveGatePO gate = gateService.configOf(room.getId());
+            boolean unlocked = viewerUnlocked(room, gate);
+            vo.setGate(gateService.describe(gate));
+            vo.setUnlocked(unlocked);
+            if (unlocked && !isBlank(room.getStreamKey())) {
+                // streamKey 关播后置空，直播中才拼得出播放地址
+                vo.setPlayUrl(signer.playUrl(room.getId(), room.getStreamKey()));
             }
-            vo.setDanmakuWs(danmakuWsPath(room.getId()));
+            if (unlocked) {
+                vo.setDanmakuWs(danmakuWsPath(room.getId()));
+            }
         } else if (chatOpenUntil(room).isAfter(LocalDateTime.now())) {
             // 已结束但聊天模式未超时：不给播放地址（前端黑屏），但仍下发弹幕端点，
-            // 便于观众刷新 / 从大厅重进时能重新接上聊天室
+            // 便于观众刷新 / 从大厅重进时能重新接上聊天室。门禁房同样闸住潜水——锁着的人不该能进聊天。
             vo.setOnlineCount(danmakuService.onlineOf(room.getId()));
-            vo.setDanmakuWs(danmakuWsPath(room.getId()));
+            LiveGatePO gate = gateService.configOf(room.getId());
+            boolean unlocked = viewerUnlocked(room, gate);
+            vo.setGate(gateService.describe(gate));
+            vo.setUnlocked(unlocked);
+            if (unlocked) {
+                vo.setDanmakuWs(danmakuWsPath(room.getId()));
+            }
         } else {
             vo.setOnlineCount(0);
+            vo.setGate(gateService.describe(null));
+            vo.setUnlocked(true);
+        }
+        // 回放入口只对不在直播的房间有意义（直播中看的是直播本身）。列表逐行问一次 EXISTS：
+        // 一页最多 100 行、而绝大多数房间根本没上报过回放，EXISTS 不取值也不解压 JSON
+        if (!room.isLiving()) {
+            vo.setHasReplay(replayService.has(room.getId()));
         }
         return vo;
-    }
-
-    /**
-     * 生成签名播放地址：{@code {playBaseUrl}/{roomId}/{streamKey}/index.m3u8?expire=&sign=}。
-     *
-     * <p>签名只对 path 部分计算，且 path 必须与 Nginx 的 {@code $uri} 逐字一致——
-     * 因此从 playBaseUrl 里解析出 path 前缀（含 location），再拼上目录与文件名。
-     *
-     * <p>摘要以 <b>base64url（无填充）</b>编码，与 {@code ngx_http_secure_link_module} 一致：
-     * 该模块把 {@code secure_link_md5} 指定的串做 md5 后 base64url 编码再与 URL 上的 sign 比对，
-     * 并在 expire 早于当前时间时判失效。用十六进制会永远对不上。
-     */
-    private String signedPlayUrl(Long roomId, String streamKey) {
-        String relative = roomId + "/" + streamKey + "/index.m3u8";
-        String full = joinUrl(properties.getPlayBaseUrl(), relative);
-        String path = pathOf(full);
-        long expire = System.currentTimeMillis() / 1000L + properties.getSignTtlSeconds();
-        String raw = path + expire + properties.getSignSecret();
-        // 必须与 Nginx secure_link 的编码一致：它把 md5 摘要（16 字节原始值）做 base64url（无填充），
-        // 而不是十六进制。用十六进制的话 secure_link 比对永远失败，播放口会一律 403。
-        byte[] digest = DigestUtils.md5Digest(raw.getBytes(StandardCharsets.UTF_8));
-        String sign = Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
-        return full + "?expire=" + expire + "&sign=" + sign;
-    }
-
-    /** 从绝对 URL 中取出 path（含前导斜杠），解析失败时退回「去掉 scheme://host」的粗略切法 */
-    private String pathOf(String url) {
-        try {
-            String path = URI.create(url).getPath();
-            return path == null ? "" : path;
-        } catch (IllegalArgumentException e) {
-            int schemeEnd = url.indexOf("://");
-            int pathStart = schemeEnd < 0 ? url.indexOf('/') : url.indexOf('/', schemeEnd + 3);
-            return pathStart < 0 ? "" : url.substring(pathStart);
-        }
-    }
-
-    /** 拼接基址与相对路径，吃掉基址尾部与相对头部的重复斜杠 */
-    private String joinUrl(String base, String relative) {
-        String left = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
-        String right = relative.startsWith("/") ? relative.substring(1) : relative;
-        return left + "/" + right;
     }
 
     private String randomStreamKey() {
@@ -488,5 +538,18 @@ public class LiveRoomServiceImpl implements LiveRoomService {
      */
     private static String danmakuWsPath(Long roomId) {
         return ImConstants.WS_LIVE_ENDPOINT + "?roomId=" + roomId;
+    }
+
+    /**
+     * 当前登录者对这一间房是否已拿到观看权：无门禁（{@code gate==null}）、主播本人、或已有解锁标记都算。
+     *
+     * <p>主播恒免：自己开的场不该被自己的密码/价锁在门外（也便于开播后直接进房自监）。
+     */
+    private boolean viewerUnlocked(LiveRoom room, LiveGatePO gate) {
+        if (gate == null) {
+            return true;
+        }
+        Long me = SecurityUtil.getUserIdOrNull();
+        return room.managedBy(me) || gateService.isUnlocked(room.getId(), me);
     }
 }

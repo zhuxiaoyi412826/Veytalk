@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.im</groupId>
+        <artifactId>im-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>im-admin</artifactId>
+    <name>im-admin</name>
+    <description>管理后台：举报工单（用户端提交 + 后台处置闭环）、用户管理、运营看板</description>
+
+    <dependencies>
+        <!--
+          只依赖 im-common，与其余业务模块同构：跨模块的三件事（查用户、按对象类型抓证据并处置、
+          取看板数字）全部经 com.im.common.spi 契约反转给归属模块实现。
+          本模块因此不 import 任何 UserMapper / MessageMapper / LiveRoomService，
+          也就不会出现「后台把业务表当自己的读」这种迟早和业务侧写冲突的暗依赖。
+        -->
+        <dependency>
+            <groupId>com.im</groupId>
+            <artifactId>im-common</artifactId>
+        </dependency>
+
+        <!--
+          监控告警（三期）：星型约束管的是「不 import 业务模块」，而 actuator / micrometer
+          是基础设施库，不在约束范围内。两个依赖都声明在本模块而不是 im-bootstrap：
+          监控页的取数方（AdminMonitorService 读 MeterRegistry）就是 im-admin 自己；
+          依赖随消费者走，没装后台模块的部署不会出现半截 actuator。
+          prometheus registry 把 /actuator/prometheus 文本暴露在独立的 management 端口上，
+          由同机的 Prometheus 抓取（见 md/监控告警部署指南.md）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+    </dependencies>
+</project>

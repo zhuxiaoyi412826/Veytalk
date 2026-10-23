@@ -9,7 +9,11 @@
     class="bubble"
     :class="{ 'bubble--self': message.self, 'bubble--selecting': selectable }"
     @click.capture="onBubbleClick"
-    @contextmenu.prevent="emit('menu', $event)"
+    @contextmenu.prevent="onContextMenu"
+    @touchstart.passive="onTouchStart"
+    @touchmove.passive="onTouchMove"
+    @touchend.passive="onTouchEnd"
+    @touchcancel.passive="onTouchEnd"
   >
     <span v-if="selectable" class="bubble__check" :class="{ 'is-checked': selected }">
       <el-icon v-if="selected"><Select /></el-icon>
@@ -37,8 +41,12 @@
         <span class="bubble__quote-text im-ellipsis">{{ quoteContent }}</span>
       </div>
 
-      <!-- 群精华标记：群主/管理员标为精华的消息，在气泡上方挂一个错色小标签 -->
-      <div v-if="message.essence" class="bubble__essence">★ 群精华</div>
+      <!-- 消息角标行：群精华（群主/管理员标记）与收藏（本人私有标记）可能同时存在，共用一行左右排 -->
+      <div v-if="message.essence || message.favorite" class="bubble__flags">
+        <div v-if="message.essence" class="bubble__essence">★ 群精华</div>
+        <!-- 收藏是自己给的私人书签，只在本端可见（后端按 user_id 回填），不会推给聊天对象 -->
+        <div v-if="message.favorite" class="bubble__favorite">★ 已收藏</div>
+      </div>
 
       <div class="bubble__row">
         <!-- 自己的消息：状态显示在气泡左侧 -->
@@ -115,17 +123,25 @@
             </div>
           </div>
 
-          <!-- 语音 -->
-          <div
-            v-else-if="msgType === 4"
-            class="bubble__voice"
-            :class="{ 'bubble__voice--playing': playing }"
-            :style="{ width: voiceWidth }"
-            @click="toggleVoice"
-          >
-            <el-icon :size="16"><component :is="playing ? VideoPause : VideoPlay" /></el-icon>
-            <span class="bubble__voice-duration">{{ voiceDuration }}</span>
-          </div>
+          <!-- 语音：语音条 + 转文字结果。微信那份手感靠「文字贴在条子下面」，
+               不是弹框——所以这里用 template 包住两块，不能插到 v-else-if 链中间 -->
+          <template v-else-if="msgType === 4">
+            <div
+              class="bubble__voice"
+              :class="{ 'bubble__voice--playing': playing }"
+              :style="{ width: voiceWidth }"
+              @click="toggleVoice"
+            >
+              <el-icon :size="16"><component :is="playing ? VideoPause : VideoPlay" /></el-icon>
+              <span class="bubble__voice-duration">{{ voiceDuration }}</span>
+            </div>
+            <div v-if="transcript" class="bubble__transcript">
+              <div v-show="transcriptOpen" class="bubble__transcript-text">{{ transcript }}</div>
+              <button class="bubble__transcript-toggle" @click.stop="toggleTranscript">
+                {{ transcriptOpen ? '收起文字' : '展开文字' }}
+              </button>
+            </div>
+          </template>
 
           <!-- 通话记录：类型图标 + 时长；已录制则可回放 -->
           <div v-else-if="msgType === 6" class="bubble__call">
@@ -217,6 +233,51 @@
             </div>
           </div>
 
+          <!-- 接龙（14）：有序条目列表，成员点「参与接龙」把自己那条追到末尾（序号=列表位置，服务端定） -->
+          <div v-else-if="msgType === 14" class="bubble__chain">
+            <div class="bubble__chain-head">
+              <span class="bubble__chain-title">{{ chainTitle }}</span>
+              <span class="bubble__chain-tag">{{ chainItems.length }} 条{{ chainClosed ? ' · 已截止' : '' }}</span>
+            </div>
+            <ol v-if="chainItems.length" class="bubble__chain-list">
+              <li v-for="(it, idx) in chainItems" :key="idx" class="bubble__chain-item">
+                <span class="bubble__chain-no">{{ idx + 1 }}.</span>
+                <span class="bubble__chain-name">{{ it.nickname || '匿名' }}</span>
+                <span class="bubble__chain-text">{{ it.text }}</span>
+              </li>
+            </ol>
+            <div v-else class="bubble__chain-empty">还没有人接龙，来当第 1 个</div>
+            <div class="bubble__chain-foot">
+              <span class="bubble__chain-spacer"></span>
+              <el-button v-if="!chainClosed" link type="primary" size="small" @click="onChainJoin">参与接龙</el-button>
+              <el-button v-if="message.self && !chainClosed" link size="small" @click="onCloseChain">结束接龙</el-button>
+            </div>
+          </div>
+
+          <!-- 转账（12）：金额与附言。即时到账，所以没有「点一下领取」这一步，只把结论写清楚 -->
+          <div v-else-if="msgType === 12" class="bubble__money">
+            <el-icon class="bubble__money-icon" :size="26"><Coin /></el-icon>
+            <div class="bubble__money-body">
+              <div class="bubble__money-amount">{{ transferAmount }} 积分</div>
+              <div class="bubble__money-memo im-ellipsis">{{ transferMemo }}</div>
+              <div class="bubble__money-hint">{{ transferHint }}</div>
+            </div>
+          </div>
+
+          <!-- 红包（13）：点开才去取领取态，气泡本身只带 packetId 这个寻址钩子 -->
+          <div
+            v-else-if="msgType === 13"
+            class="bubble__packet"
+            :class="{ 'is-opened': packetOpened }"
+            @click="onPacketClick"
+          >
+            <el-icon class="bubble__packet-icon" :size="26"><Present /></el-icon>
+            <div class="bubble__packet-body">
+              <div class="bubble__packet-greeting im-ellipsis">{{ packetGreeting }}</div>
+              <div class="bubble__packet-hint">{{ packetHint }}</div>
+            </div>
+          </div>
+
           <!-- 兜底：后端将来加了新类型而前端还没跟上时，至少把原文露出来 -->
           <div v-else class="bubble__text">{{ textContent }}</div>
 
@@ -241,18 +302,41 @@
           :key="r.emoji"
           class="bubble__reaction"
           :class="{ 'is-self': r.self }"
+          :title="r.self ? '取消我的回应' : '贴上同款表情'"
           @click.stop="toggleReaction(r)"
         >{{ r.emoji }} <b>{{ r.count }}</b></span>
       </div>
 
-      <!-- 悬停浮现的快捷回应栏（仅可回应时）：纯 CSS hover，桌面端主用 -->
-      <div v-if="canReact" class="bubble__quick">
+      <!-- 悬停浮现的快捷回应栏：纯 CSS hover，桌面端主用。
+           多选模式下整条让位给勾选 —— 点气泡即切换选中，留着回应入口只会误触；
+           触屏没得 hover，靠下面的 @media (hover: none) 常显，否则手机上根本贴不了表情 -->
+      <div v-if="canReact && !selectable" class="bubble__quick">
         <span
           v-for="e in quickEmojis"
           :key="e"
           class="bubble__quick-emoji"
+          :class="{ 'is-active': reactedSelf.includes(e) }"
+          :title="reactedSelf.includes(e) ? '取消回应' : '用 ' + e + ' 回应'"
           @click.stop="pickReaction(e)"
         >{{ e }}</span>
+        <!-- 快捷栏只摊最常用的几个，其余走这个面板。复用输入框那套 EmojiPicker
+             而不是另列一份表情字典：两处各自维护迟早对不上。
+             ★ 面板内容必须用 v-if 拦住：el-popover 默认 persistent，会把 140 个表情
+             先渲染出来，一个长会话上百个气泡就是上万个 DOM 节点 -->
+        <el-popover
+          v-model:visible="moreVisible"
+          placement="top-start"
+          trigger="click"
+          :width="360"
+          :show-arrow="false"
+        >
+          <template #reference>
+            <span class="bubble__quick-more" title="更多表情">
+              <el-icon><Plus /></el-icon>
+            </span>
+          </template>
+          <EmojiPicker v-if="moreVisible" hint="点击表情贴到这条消息上" @select="onPickMore" />
+        </el-popover>
       </div>
     </div>
   </div>
@@ -261,8 +345,9 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, Coin, Present, Plus } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
+import EmojiPicker from './EmojiPicker.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -291,7 +376,7 @@ const props = defineProps({
   selected: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote', 'chain', 'close-chain', 'open-packet'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -331,6 +416,33 @@ const mergedTitle = computed(() => extra.value.mergedTitle || '聊天记录')
 const mergedCount = computed(() => (Array.isArray(extra.value.mergedMessages) ? extra.value.mergedMessages.length : 0))
 function onMergedClick() {
   emit('view-merged', { title: mergedTitle.value, messages: extra.value.mergedMessages || [] })
+}
+
+/* -------------------------------- 转账 / 红包 -------------------------------- */
+// 金额与份数都是发出时定格的快照（服务端在扣款成功后写进 extra），前端不参与任何资金计算
+const transferAmount = computed(() => Number(extra.value.transferAmount || 0))
+const transferMemo = computed(() => extra.value.transferMemo || '转账给好友')
+// 付款方与收款方看到的结论不同，但都是「已到」：单聊转账没有待领取环节
+const transferHint = computed(() => {
+  if (props.message.recalled) return '已撤回'
+  return props.message.self ? `已转出给 ${extra.value.transferToNickname || '对方'}` : '已到账'
+})
+
+const packetId = computed(() => extra.value.packetId || '')
+const packetCount = computed(() => Number(extra.value.packetCount || 1))
+const packetGreeting = computed(() => extra.value.packetGreeting || '恭喜发财，大吉大利')
+// 本端是否已经点开过：只是本地视觉状态，领取结论一律以服务端返回的 status 为准
+const packetOpened = ref(false)
+const packetHint = computed(() => {
+  if (props.message.recalled) return '已撤回'
+  if (packetOpened.value) return '已查看，可再看一次'
+  return packetCount.value > 1 ? `拼手气红包 · 共 ${packetCount.value} 份` : '专属红包 · 点击拆开'
+})
+function onPacketClick() {
+  if (!packetId.value || props.message.recalled) return
+  packetOpened.value = true
+  // 把整条消息一起交给外层：详情弹窗需要「来自谁」，而 sender 在消息上而不在 packetId 里
+  emit('open-packet', { packetId: packetId.value, message: props.message })
 }
 
 /* -------------------------------- 投票 -------------------------------- */
@@ -401,6 +513,18 @@ function onCloseVote() {
   emit('close-vote', props.message)
 }
 
+/* -------------------------------- 接龙 -------------------------------- */
+// 接龙的条目就住在 extra.chainItems 里（服务端 write 后整份推回），无需像投票那样另往 message 上挂一个聚合视图
+const chainTitle = computed(() => extra.value.chainTitle || '接龙')
+const chainItems = computed(() => (Array.isArray(extra.value.chainItems) ? extra.value.chainItems : []))
+const chainClosed = computed(() => extra.value.chainClosed === true)
+function onChainJoin() {
+  emit('chain', props.message)
+}
+function onCloseChain() {
+  emit('close-chain', props.message)
+}
+
 /**
  * 多选模式下的点选拦截：在捕获阶段抢在内部媒体/菜单处理器之前接管，
  * 点整行即切换选中，避免选中时误触图片预览、文件下载。
@@ -429,11 +553,15 @@ const flashViewed = computed(() => isFlash.value && extra.value.flashViewed === 
 
 /* -------------------------------- 表情回应 -------------------------------- */
 
-/** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴 */
+/** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴、再点取消 */
 const quickEmojis = ['👍', '❤️', '😄', '😢', '🎉', '🔥']
 /** 已撤回与系统消息不提供回应入口 */
 const canReact = computed(() => !props.message.recalled && !isSystem.value && !!props.message.messageId)
 const reactions = computed(() => (Array.isArray(props.message.reactions) ? props.message.reactions : []))
+/** 我已经贴过哪几个表情（服务端聚合结果里的 self）：快捷栏据此高亮，并决定下一次点击是贴还是撕 */
+const reactedSelf = computed(() => reactions.value.filter((r) => r.self === true).map((r) => r.emoji))
+/** 「更多表情」面板开关 */
+const moreVisible = ref(false)
 
 /** 点已有表情 chip：自己贴过的再点为取消，否则追加同款 */
 function toggleReaction(item) {
@@ -443,12 +571,23 @@ function toggleReaction(item) {
   emit('react', { message: props.message, emoji: item.emoji, remove: item.self === true })
 }
 
-/** 从快捷栏选一个表情贴上 */
+/**
+ * 从快捷栏选一个表情。
+ *
+ * 已贴过的再点一次是取消而不是重复贴：服务端对 (消息, 人, 表情) 有唯一键，
+ * 再 POST 一次只会幂等命中、计数不变，用户看着就是「点了没反应」。
+ */
 function pickReaction(emoji) {
   if (!canReact.value) {
     return
   }
-  emit('react', { message: props.message, emoji, remove: false })
+  emit('react', { message: props.message, emoji, remove: reactedSelf.value.includes(emoji) })
+}
+
+/** 从「更多表情」面板选完就收面板：它浮在气泡上方，不收会挡住下一步操作 */
+function onPickMore(emoji) {
+  moreVisible.value = false
+  pickReaction(emoji)
 }
 
 /**
@@ -741,10 +880,102 @@ async function toggleVoice() {
   }
 }
 
+/* --------------------------- 转文字结果（本端查看） --------------------------- */
+
+/**
+ * 长按→「转文字」得回的文本：由父组件 ChatWindow 写回 message.transcript。
+ * 不落库也不同步给对方——谁转的谁看，与微信一致；切会话重进气泡就消失。
+ * 收不收起也记在消息对象上：同一个气泡重进时不该忘记刚才被自己收起来过，
+ * 而且父组件要在「重复点转文字」时把它重新展开。
+ */
+const transcript = computed(() => props.message.transcript || '')
+const transcriptOpen = computed(() => props.message.transcriptHidden !== true)
+
+function toggleTranscript() {
+  props.message.transcriptHidden = !transcriptOpen.value
+}
+
+/* ---------------------------- 移动端长按唤菜单 ---------------------------- */
+
+/** 长按判定时长与允许的手指微动：太短会在正常点按时误弹菜单，太松则列表一滑就断 */
+const LONG_PRESS_MS = 500
+const LONG_PRESS_SLOP = 12
+let longPressTimer = null
+let longPressAnchor = null
+/**
+ * Android Chrome 长按之后会补发一次 contextmenu：菜单已经被长按开过了，
+ * 不去重就会看到菜单在同一个位置闪两下。
+ */
+let menuOpenedAt = 0
+
+function onTouchStart(event) {
+  // 多选模式下点气泡是勾选，不该再叠一层菜单；多指（缩放）也不算长按
+  if (props.selectable || event.touches.length !== 1) {
+    return
+  }
+  const touch = event.touches[0]
+  // 先清理上一轮的计时与锚点，再落下新的锚点（顺序反了会把刚记下的起点抹掉）
+  clearLongPress()
+  longPressAnchor = { x: touch.clientX, y: touch.clientY }
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null
+    if (!longPressAnchor) {
+      return
+    }
+    menuOpenedAt = Date.now()
+    // 与右键菜单同一个出口：父组件只认 clientX/clientY，这里造一个等价的事件体
+    emit('menu', { clientX: longPressAnchor.x, clientY: longPressAnchor.y })
+  }, LONG_PRESS_MS)
+}
+
+function onTouchMove(event) {
+  if (!longPressTimer || !longPressAnchor) {
+    return
+  }
+  const touch = event.touches[0]
+  if (!touch) {
+    return
+  }
+  // 在滑消息列表，不是长按：立即放弃，否则每滑一下都弹菜单
+  if (Math.abs(touch.clientX - longPressAnchor.x) > LONG_PRESS_SLOP
+    || Math.abs(touch.clientY - longPressAnchor.y) > LONG_PRESS_SLOP) {
+    clearLongPress()
+  }
+}
+
+function onTouchEnd() {
+  clearLongPress()
+}
+
+function clearLongPress() {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+  longPressAnchor = null
+}
+
+function onContextMenu(event) {
+  if (Date.now() - menuOpenedAt < 800) {
+    return
+  }
+  emit('menu', event)
+}
+
+onBeforeUnmount(clearLongPress)
+
 /* -------------------------------- 通话记录 -------------------------------- */
 
 const callIsVideo = computed(() => extra.value.callMediaType === 'video')
-const callLabel = computed(() => (callIsVideo.value ? '视频通话' : '语音通话'))
+/**
+ * 参与人数：只有群通话会写 extra.callParticipantCount（1:1 没这个字段），
+ * 所以「有值就是群通话」，不用再另加一个类型标记。旧记录无此字段，自然回落成 1:1 文案。
+ */
+const callParticipantCount = computed(() => Number(extra.value.callParticipantCount) || 0)
+const callLabel = computed(() => {
+  const base = callIsVideo.value ? '视频通话' : '语音通话'
+  return callParticipantCount.value > 0 ? `群${base} · ${callParticipantCount.value} 人` : base
+})
 const callDurationText = computed(() => {
   const sec = Number(extra.value.duration) || 0
   return sec > 0 ? formatDuration(sec) : '未接通'
@@ -806,6 +1037,9 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 8px;
   padding: 6px 16px;
+
+  /* 长按菜单由自己实现：不留系统那套长按弹字/翻译气泡，否则两个菜单会打架 */
+  -webkit-touch-callout: none;
 }
 
 .bubble--self {
@@ -1092,6 +1326,38 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color-light, #f0f2f5);
 }
 
+/* 自己已经贴过的在快捷栏里也标出来：不然只有下方 chip 能看出“我已经表过态” */
+.bubble__quick-emoji.is-active {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  box-shadow: inset 0 0 0 1px var(--el-color-primary, #409eff);
+}
+
+/* 「更多表情」入口：图标不是文本字符，行高对不齐，靠 flex 居中拉到与旁边表情同高 */
+.bubble__quick-more {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 5px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bubble__quick-more:hover {
+  background: var(--el-fill-color-light, #f0f2f5);
+  color: var(--im-text, #303133);
+}
+
+/* 触屏没得 hover，快捷栏一直隐着就是“这个功能根本没有”：这类设备上常显 */
+@media (hover: none) {
+  .bubble__quick {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .bubble__text {
   font-size: calc(14px * var(--im-font-scale, 1));
   line-height: calc(22px * var(--im-font-scale, 1));
@@ -1216,6 +1482,45 @@ onBeforeUnmount(() => {
   color: var(--im-text-secondary);
 }
 
+/* 转文字结果：贴在语音条下面，与微信一致。自己一行小面板，不抢气泡的圆角风格 */
+.bubble__transcript {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+  max-width: 260px;
+}
+
+/* 自己发的气泡靠右，里面的文字块与「收起」也要跟着靠右 */
+.bubble--self .bubble__transcript {
+  align-items: flex-end;
+  margin-left: auto;
+}
+
+.bubble__transcript-text {
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--im-text-primary, #303133);
+  background: var(--im-panel);
+  border: 1px solid var(--im-border);
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.bubble__transcript-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  cursor: pointer;
+}
+
 /* 通话记录：图标 + 类型 + 时长；若留有录制则附带回放入口 */
 .bubble__call {
   display: flex;
@@ -1304,9 +1609,20 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.bubble__essence {
+.bubble__flags {
+  display: flex;
+  gap: 6px;
   align-self: flex-start;
   margin-bottom: 3px;
+  width: fit-content;
+}
+
+/* 自己的消息靠右，角标行跟着右对齐（原 .bubble__essence 的 margin-left:auto 由这里统一承担） */
+.bubble--self .bubble__flags {
+  align-self: flex-end;
+}
+
+.bubble__essence {
   padding: 1px 8px;
   font-size: 11px;
   line-height: 1.5;
@@ -1317,8 +1633,15 @@ onBeforeUnmount(() => {
   width: fit-content;
 }
 
-.bubble--self .bubble__essence {
-  margin-left: auto;
+.bubble__favorite {
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #d4380d;
+  background: #fff2e8;
+  border: 1px solid #ffbb96;
+  border-radius: 10px;
+  width: fit-content;
 }
 
 .bubble__video {
@@ -1391,6 +1714,69 @@ onBeforeUnmount(() => {
 }
 
 /* 投票卡片 */
+/* 转账与红包：共用一套「资金卡片」骨架，只靠配色区分（转账偏金、红包偏红） */
+.bubble__money,
+.bubble__packet {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 240px;
+  padding: 10px 12px;
+  background: var(--im-panel, #fff);
+  border: 1px solid var(--im-border, #ebeef5);
+  border-radius: 8px;
+}
+
+.bubble__money {
+  background: linear-gradient(135deg, #fffaf0, #fff);
+}
+
+/* 红包必须点一下才去取领取态，所以它才是可点的；转账即时到账，不需要任何交互 */
+.bubble__packet {
+  background: linear-gradient(135deg, #fff1f0, #fff);
+  cursor: pointer;
+}
+
+.bubble__packet.is-opened {
+  opacity: 0.78;
+}
+
+.bubble__money-icon {
+  flex: none;
+  color: #d4a017;
+}
+
+.bubble__packet-icon {
+  flex: none;
+  color: #e6544a;
+}
+
+.bubble__money-body,
+.bubble__packet-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.bubble__money-amount,
+.bubble__packet-greeting {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__money-memo {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__money-hint,
+.bubble__packet-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--im-text-secondary, #909399);
+}
+
 .bubble__vote {
   width: 260px;
   padding: 10px 12px;
@@ -1518,5 +1904,93 @@ onBeforeUnmount(() => {
 .bubble--selecting {
   cursor: pointer;
   user-select: none;
+}
+
+/* 接龙卡片：与投票同宽同容器，内容是一条条编号行，多时内部滚动不吃掉整个聊天区高度 */
+.bubble__chain {
+  width: 260px;
+  padding: 10px 12px;
+  background: var(--im-panel, #fff);
+  border: 1px solid var(--im-border, #ebeef5);
+  border-radius: 8px;
+}
+
+.bubble__chain-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bubble__chain-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--im-text, #303133);
+}
+
+.bubble__chain-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__chain-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.bubble__chain-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.bubble__chain-no {
+  flex: none;
+  color: var(--im-primary, #409eff);
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble__chain-name {
+  flex: none;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--im-text, #303133);
+  font-weight: 500;
+}
+
+.bubble__chain-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--im-text-regular, #606266);
+  word-break: break-word;
+}
+
+.bubble__chain-empty {
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--im-text-secondary, #909399);
+}
+
+.bubble__chain-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bubble__chain-spacer {
+  flex: 1;
 }
 </style>

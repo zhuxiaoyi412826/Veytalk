@@ -1,0 +1,20 @@
+{
+  "name": "im-website",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Veytalk IM 即时通讯系统官网（产品介绍 / 下载入口 / 文档链接）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "fetch:downloads": "powershell -ExecutionPolicy Bypass -File scripts/fetch-downloads.ps1"
+  },
+  "dependencies": {
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^7.3.6"
+  }
+}

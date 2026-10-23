@@ -21,6 +21,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "server-config.js",
       "localdb.js",
       "direct.js",
       "recorder.js",

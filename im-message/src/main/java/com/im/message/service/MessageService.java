@@ -121,6 +121,25 @@ public interface MessageService {
     MessageVO markEssence(Long userId, Long messageId, boolean essence);
 
     /**
+     * 收藏列表：按收藏时间倒序分页取当前用户的收藏消息，{@code conversationId} 非空时只看本会话。
+     *
+     * <p>收藏是用户维度的私人数据，所以这里<b>不验成员关系</b>（只按 user_id 取自己的行）。
+     * 列表里的行仍然走同一套查看者视图：已被自己单端删除的不会返回（收藏行在删除时已级联清掉）；
+     * <b>被发送者撤回的会留一行空内容占位</b>，因为用户需要能看到「这条我收过的消息已经没了」并能取消收藏。
+     */
+    PageResult<MessageVO> pageFavorites(Long userId, Long conversationId, PageQuery query);
+
+    /**
+     * 收藏 / 取消收藏：任何会话里未撤回的消息都能收，仅本人可见、无需管理权限。
+     *
+     * <p>{@code favorite=true} 写入收藏行（已收藏则幂等），{@code false} 删除本人那一行（别人对同一条
+     * 消息的收藏不受影响）；变更后推 {@code favorite-notify} 给<b>操作者自己的其他设备</b>。
+     *
+     * @return 含最新 favorite 标记的消息视图
+     */
+    MessageVO markFavorite(Long userId, Long messageId, boolean favorite);
+
+    /**
      * 离线消息（前端视图），按会话与 seq 升序，返回后自动推进已确认位点。
      */
     List<MessageVO> offlineView(Long userId);
@@ -136,6 +155,18 @@ public interface MessageService {
      * 撤回消息：2 分钟内可撤回，本人或群管理员可操作。
      */
     void recall(Long messageId, Long operatorId);
+
+    /**
+     * 管理侧强制撤回（举报处置入口）：跳过撤回时限与逐人权限校验。
+     *
+     * <p>与 {@link #recall} 共用同一条落库与广播链路，只放开「时限」和「权限」两道闸；
+     * 资金类消息（转账 / 红包）与系统通知<b>仍然拒绝</b>——这两道拦的不是权限，
+     * 而是「撤回会把已经生效的业务凭证抹掉」这件事本身。管理员身份由调用方（im-admin）
+     * 经 {@code PERM_SYSTEM_MANAGE} 校验，本方法不再复查。
+     *
+     * <p>幂等：目标已撤回时静默返回，与 {@link #recall} 同口径。
+     */
+    void adminRecall(Long messageId, Long adminId);
 
     /**
      * 编辑消息：仅限发送者本人、时限内、且为未撤回的文本消息。
@@ -165,6 +196,17 @@ public interface MessageService {
      * @return 含最新票数的消息视图
      */
     MessageVO vote(Long userId, Long messageId, List<Integer> options, boolean close);
+
+    /**
+     * 接龙：向一条接龙消息追加一个自己的条目（{@code text} 为空时回落为本人昵称）；
+     * {@code close=true} 时由发起人截止接龙。
+     *
+     * <p>服务端在 Redis 短锁保护下 read-modify-write 重写 {@code extra.chainItems}（锁避免并发追加互相覆盖），
+     * 改完推全量快照给会话全员。仅会话成员可参与，已截止或超过条目上限时拒绝。
+     *
+     * @return 含最新条目列表的消息视图（extra.chainItems）
+     */
+    MessageVO chain(Long userId, Long messageId, String text, boolean close);
 
     /**
      * 查看闪照：首次查看即销毁。

@@ -11,6 +11,9 @@
  * 与 Nginx 方案的差异：局域网自测**不校验签名**——后端下发的 ?expire=&sign= 被忽略，
  * 防盗链仍由路径里不可猜的 streamKey 兜底（每场随机、关播作废）。上生产请换回 §10 的 Nginx。
  *
+ * 回放的画面寿命：本进程自带一个周期清理（见 live-retention.js），默认只留 1 天，
+ * 可用 IM_LIVE_REPLAY_RETENTION_DAYS 覆盖——它与后端 im.live.replay.retention-days 是同一个数。
+ *
  * 用法：node electron/live-media-server.js     （可选 PORT=xxxx 覆盖端口，默认 8088）
  * 配套：im.live.push-base-url=http://127.0.0.1:8088/hls（本机推流，与 DHCP 换 IP 无关）；
  *       play-base-url=/hls（相对路径，观众经前端同源代理拉流，IP 免配，见 md/直播.md §11）
@@ -18,10 +21,14 @@
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const { sweepExpired, DEFAULT_DAYS } = require('./live-retention')
 
 const PORT = Number(process.env.PORT || 8088)
 const ROOT = path.join(__dirname, 'live-data') // URI /hls/… → ROOT/hls/…（与 Nginx root /data 同构）
 const URL_PREFIX = '/hls/'
+const ROOMS_ROOT = path.join(ROOT, 'hls')      // {roomId} 那一层的父目录
+const RETENTION_DAYS = Number(process.env.IM_LIVE_REPLAY_RETENTION_DAYS || DEFAULT_DAYS) || DEFAULT_DAYS
+const SWEEP_INTERVAL_MS = 30 * 60 * 1000       // 每 30 分钟扫一轮过期回放
 
 // 与 electron/live.js 的 contentTypeOf、Nginx 播放侧 types 保持一致
 const MIME = {
@@ -145,4 +152,20 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[media] 监听 http://0.0.0.0:${PORT}   落盘根目录 ${ROOT}`)
   console.log(`[media] 后端 im.live：push-base-url=http://127.0.0.1:${PORT}/hls、play-base-url=/hls（前端同源，IP 免配）`)
   console.log('[media] 仅局域网自测：不校验签名、无 HTTPS；生产请改用 md/直播.md §10 的 Nginx')
+  console.log(`[media] 回放源文件保留 ${RETENTION_DAYS} 天，每 ${SWEEP_INTERVAL_MS / 60000} 分钟清理一次过期房间`)
 })
+
+// 画面寿命不靠人记着删：启动后补一轮（上一次进程没跑时积下来的），之后周期扫。
+// 口径是「整个房间目录里最新文件的 mtime」，正在直播的房间永远不会被误删（见 live-retention.js 头注释）
+const runSweep = () => {
+  try {
+    const s = sweepExpired({ root: ROOMS_ROOT, days: RETENTION_DAYS })
+    if (s.deleted || s.failed) {
+      console.log(`[media] 过期回放清理：删 ${s.deleted} 个房间，释放约 ${(s.freedBytes / 1024 / 1024).toFixed(1)}MB`)
+    }
+  } catch (err) {
+    console.warn('[media] 回放清理异常（不影响收流）:', err.message)
+  }
+}
+setTimeout(runSweep, 5000)
+setInterval(runSweep, SWEEP_INTERVAL_MS)

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import * as conversationApi from '@/api/conversation'
 import { asId, sameId } from '@/utils/id'
 import { setUnreadCount } from '@/utils/title'
+import { clearConversationNotification } from '@/utils/notify'
 
 /**
  * 会话列表与未读数。
@@ -213,6 +214,9 @@ export const useConversationStore = defineStore('conversation', {
      * 会看到角标迟迟不掉，而失败的概率远低于这个体验损耗。
      */
     async markRead(conversationId, lastAckSeq) {
+      // 人已进到这个会话：把后台里挂着的那条通知一起收掉。
+      // 放在 find 之前、也放在「没有未读就早退」之前：未读数归零不等于通知已经被人看过
+      clearConversationNotification(conversationId)
       const target = this.find(conversationId)
       if (!target || !(target.unreadCount > 0)) {
         // 没有未读就不必发请求：切换会话时会高频走到这里
@@ -290,8 +294,11 @@ export const useConversationStore = defineStore('conversation', {
  * 后端存进 last_msg_content 的已经是可直接展示的摘要（附件类是「[图片]」这样的占位），
  * 但 WebSocket 推来的 MessageDTO 带的是消息原文 —— 附件消息的 content 是文件 ID，
  * 直接显示会在会话列表里露出一串雪花数字。所以这里按类型重新走一遍和后端口径相同的转换。
+ *
+ * 对外导出给系统通知复用：通知正文里把文件 ID 当文字抄出来是最刺眼的穿帮，
+ * 而「会话列表」与「通知」本来就该是同一句话。
  */
-function summarize(dto) {
+export function summarize(dto) {
   switch (Number(dto.msgType)) {
     case 2:
       return '[图片]'

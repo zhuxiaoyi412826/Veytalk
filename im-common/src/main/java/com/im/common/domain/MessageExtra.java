@@ -23,6 +23,9 @@ import java.util.List;
  *   <li>语音：fileId / fileUrl / duration / fileSize</li>
  *   <li>群聊 @：atUserIds / atAll</li>
  *   <li>系统通知：action（前端据此决定点击后的跳转行为）</li>
+ *   <li>转账：transferAmount / transferToUserId / transferToNickname / transferMemo</li>
+ *   <li>红包：packetId / packetAmount / packetCount / packetGreeting（领取状态不落这里）</li>
+ *   <li>通话记录：callMediaType / duration / callScreenRecorded / fileId，群通话另带 callParticipantCount</li>
  * </ul>
  */
 @Data
@@ -96,6 +99,16 @@ public class MessageExtra implements Serializable {
     @Schema(description = "通话是否录屏留存（仅通话记录）：为真时 content 指向的录制文件包含屏幕画面")
     private Boolean callScreenRecorded;
 
+    /**
+     * 参与人数（仅群通话记录）：{@code null} 表示这是一路 1:1 通话，页面不显示人数；
+     * 有值则渲染成「群语音通话 · 4 人」。
+     *
+     * <p>只存一个整数而不存参与者 ID 清单：通话记录是「几点打了多久」的凭证，
+     * 具体哪几个人参加过属于可变数据（成员事后退群就变成假名单），而群内查人随时能查。
+     */
+    @Schema(description = "参与人数（仅群通话记录）：为 null 表示 1:1 通话")
+    private Integer callParticipantCount;
+
     @Schema(description = "文本消息是否已被发送者编辑过：编辑标记落 extra JSON 列，不新增表字段")
     private Boolean edited;
 
@@ -146,6 +159,39 @@ public class MessageExtra implements Serializable {
 
     @Schema(description = "机器人消息：机器人头像快照（仅群机器人 Webhook 发出时写入）")
     private String robotAvatar;
+
+    @Schema(description = "转账：金额（积分，正数）。服务端在扣款成功后写入，不接受客户端上报")
+    private Long transferAmount;
+
+    @Schema(description = "转账：收款人用户 ID")
+    private Long transferToUserId;
+
+    @Schema(description = "转账：收款人昵称快照（发送时定格，付款方气泡无需再查库就能写「转给谁」）")
+    private String transferToNickname;
+
+    @Schema(description = "转账：附言（已经 XSS 清洗与敏感词遮蔽，可空）")
+    private String transferMemo;
+
+    @Schema(description = "红包：红包 ID（兼作 Redis 键与账本流水的 ref_id），领取时按此寻址")
+    private Long packetId;
+
+    @Schema(description = "红包：总额（积分，正数）")
+    private Long packetAmount;
+
+    @Schema(description = "红包：份数；私聊恒为 1（独占），群聊可多份拼手气")
+    private Integer packetCount;
+
+    @Schema(description = "红包：祝福语（可空，默认「恭喜发财，大吉大利」）")
+    private String packetGreeting;
+
+    @Schema(description = "接龙：主题 / 引导语（发送时定格，限长）")
+    private String chainTitle;
+
+    @Schema(description = "接龙：有序条目列表，列表下标即序号；服务端 read-modify-write 维护，发送时恒为空")
+    private List<ChainItem> chainItems;
+
+    @Schema(description = "接龙：是否已由发起人截止（截止后不再接受新条目）")
+    private Boolean chainClosed;
 
     /**
      * 是否包含 @ 提醒，供会话模块判断是否需要打破免打扰。

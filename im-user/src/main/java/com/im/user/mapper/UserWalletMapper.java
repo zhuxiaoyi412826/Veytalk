@@ -62,7 +62,9 @@ public interface UserWalletMapper extends BaseMapper<UserWallet> {
             """)
     int recharge(@Param("userId") Long userId, @Param("amount") long amount);
 
-    /** 通用入账：只加余额（签到赠送、后台调整用），不动累计充值 */
+    /**
+     * 只加余额的入账（签到赠送、后台调整、收到转账与红包），不动累计充值与累计消费。
+     */
     @Update("""
             UPDATE im_user_wallet
             SET balance = balance + #{amount},
@@ -71,6 +73,25 @@ public interface UserWalletMapper extends BaseMapper<UserWallet> {
               AND deleted = 0
             """)
     int creditBalance(@Param("userId") Long userId, @Param("amount") long amount);
+
+    /**
+     * 用户之间转积分的支出：只减余额，<b>不动</b> {@code total_consumed}。
+     *
+     * <p>为什么不复用 {@link #deduct}：{@code total_consumed} 是运营口径的「向平台买服务的累计」
+     * （送礼等），而转账/发红包只是把同一批积分从我的行挪到对方的行，平台一分钱都没多。
+     * 把它计成消费会让「累计消费」失去意义，还会让「充值 100 、转出 100」看起来像消费了 100。
+     *
+     * <p>与 {@code deduct} 同样靠 {@code balance >= amount} 做行锁原子判定，返回 0 即没扣动（余额不足）。
+     */
+    @Update("""
+            UPDATE im_user_wallet
+            SET balance = balance - #{amount},
+                update_time = NOW()
+            WHERE user_id = #{userId}
+              AND deleted = 0
+              AND balance >= #{amount}
+            """)
+    int debitBalance(@Param("userId") Long userId, @Param("amount") long amount);
 
     /**
      * 每日签到：余额加赠金并把 {@code sign_last_date} 拨到今天，条件 {@code sign_last_date < today}

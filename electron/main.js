@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, session, dialog, ipcMain, Notification, Tray, nativeImage } = require('electron')
 const path = require('path')
 const os = require('os')
 const fs = require('fs')
@@ -7,6 +7,7 @@ const { setupLocalDb } = require('./localdb')
 const { setupDirectBridge, closeDirectLink } = require('./direct')
 const { setupRecorder, closeRecording } = require('./recorder')
 const { setupLiveBridge, closeLivePush } = require('./live')
+const { setupServerConfig, resolve: resolveServerBase } = require('./server-config')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -15,12 +16,27 @@ const { setupLiveBridge, closeLivePush } = require('./live')
  * 前端必须拿到后端的绝对地址才能发请求。这个值经 preload 用 additionalArguments
  * 注入到渲染进程的 window.__IM_SERVER__.baseUrl，前端 utils/env.js 据此拼 /api 与 ws。
  *
- * ★ 打包分发前，把它改成你实际部署后端的地址，例如 'http://192.168.1.10:8080'
- *   或 'https://im.example.com'。改完重新 npm run build 即可，前端代码无需改动。
+ * ★ 地址现在不再烤死在本文件里，而是运行期三层回落（见 server-config.js）：
+ *   userData/server-config.json → 环境变量 IM_SERVER_BASE → 内置默认 http://localhost:8080。
+ *   登录页的「开发调试」入口与设置页的「后端地址」行改的就是第一层，
+ *   所以分发给别人之后换后端不必重打包；内置默认值保留是为了开发机本机起后端时零配置可用。
  */
-const SERVER_BASE = 'http://localhost:8080'
+
+/**
+ * 主窗口引用。托盘、通知点击、任务栏闪烁都要拿到它，
+ * 而 BrowserWindow.getAllWindows() 在「关到托盘」之后会空掉（窗口只是 hide 不是 close），
+ * 靠它去找会把新消息提醒发给一个不存在的目标。
+ */
+let mainWindow = null
+/** 只有真正要退出进程时才让 close 放行（托盘菜单的「退出」与 app.quit()） */
+let quitting = false
+/** 托盘实例：创建失败（无图标可用）时为 null，那时关窗口就按老行为直接退进程 */
+let tray = null
 
 function createWindow() {
+  // 启动时解析一次，作为 additionalArguments 的兜底值；页面加载时的实时值由 preload
+  // 走 im:server-resolve 同步通道现取（additionalArguments 是建窗口时定死的，reload 不会刷新它）
+  const server = resolveServerBase()
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -32,17 +48,224 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      /**
+       * ★ 关掉后台节流。默认 true 时，窗口一隐藏/最小化，Chromium 就把页面里的定时器
+       * 压到约 1 次/分钟——心跳发不出去，服务端 90 秒没收到就踢会话，前端那两周期后
+       * 也自己判死，于是「切后台就收不到消息」。IM 长连接必须常年醒着，这一行是根因修复。
+       * 代价是后台 CPU 占用略增（一个 WS 客户端的量级，可以忽略）。
+       */
+      backgroundThrottling: false,
       // 桌面端加载的是本地可信 dist，但要从 file:// 跨源访问远程后端（含带自定义头
       // satoken/X-Trace-Id 的预检请求）。关掉同源策略可免去后端 CORS 配置与预检失败问题；
       // 若后端已正确配置 CORS，可改回 true 获得更严格的安全边界。
       webSecurity: false,
       // 把后端地址透传给 preload，再由 contextBridge 暴露给渲染进程
-      additionalArguments: [`--server-base=${SERVER_BASE}`]
+      additionalArguments: [`--server-base=${server.baseUrl}`]
     }
   })
 
   Menu.setApplicationMenu(null)
   win.loadFile(path.join(__dirname, 'dist', 'index.html'))
+
+  mainWindow = win
+  // 点回窗口就停掉任务栏闪烁：闪烁只是「有条消息没看」的引子，人来了就该结束
+  win.on('focus', () => {
+    try {
+      win.flashFrame(false)
+    } catch { /* flashFrame 在部分 Linux 桌面环境上不可用 */ }
+  })
+  /**
+   * 关窗口 = 收进托盘，进程与长连接继续跑。
+   * 不给用户一个「关了窗口是不是就收不到消息了」的悬念——现在确实收得到，
+   * 因为窗口只是 hide，WS 还开着（backgroundThrottling 已关）。
+   * quitting 为真（托盘菜单退出 / 系统登出）或托盘没建起来时不拦——后者得让窗口真关掉，
+   * 否则进程会无窗口、无托盘地挂在那里，只能从任务管理器杀。
+   */
+  win.on('close', (event) => {
+    if (quitting || !tray) {
+      return
+    }
+    event.preventDefault()
+    win.hide()
+  })
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null
+    }
+  })
+}
+
+/* ------------------------------ 托盘 ------------------------------ */
+
+/**
+ * 自己画一枚 32x32 的托盘/角标图（聊天气泡 + 右上红点）。
+ *
+ * 为什么不放一张 png：本仓的 electron/ 目录里一张图标资源都没有（见 build.files 与
+ * buildResources 目录），托盘图标又要跟着打包走；用 nativeImage.createFromBitmap 自己填
+ * BGRA 像素阵只需十几行，换来的是「不必维护一个二进制资源、也不会因为文件丢了整个托盘建不起来」。
+ * 真的需要品牌图标时，在 electron/tray.png 放一张就行，下面会优先用它。
+ */
+function trayIcon() {
+  const file = path.join(__dirname, 'tray.png')
+  if (fs.existsSync(file)) {
+    const image = nativeImage.createFromPath(file)
+    if (!image.isEmpty()) {
+      return image.resize({ width: 32, height: 32 })
+    }
+  }
+  const size = 32
+  const buf = Buffer.alloc(size * size * 4)
+  const inCircle = (x, y, cx, cy, r) => (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4
+      let color = null
+      if (inCircle(x, y, 24, 24, 7)) {
+        color = [0x4a, 0x5c, 0xf5, 0xff] // 红点（BGRA）
+      } else if (x >= 5 && x < 26 && y >= 7 && y < 22) {
+        color = [0xff, 0xff, 0xff, 0xff] // 气泡主体
+      } else if (x >= 9 && x < 16 && y >= 21 && y < 26) {
+        color = [0xff, 0xff, 0xff, 0xff] // 气泡左下的小尾巴
+      } else if (x >= 1 && x < 31 && y >= 1 && y < 31 && !inCircle(x, y, 3, 3, 3) && !inCircle(x, y, 29, 3, 3) &&
+        !inCircle(x, y, 3, 29, 3) && !inCircle(x, y, 29, 29, 3)) {
+        color = [0xff, 0x9e, 0x40, 0xff] // 底色 #409eff
+      }
+      if (color) {
+        buf[i] = color[0]
+        buf[i + 1] = color[1]
+        buf[i + 2] = color[2]
+        buf[i + 3] = color[3]
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width: size, height: size })
+}
+
+/** 把窗口唤到前台：托盘单击、通知点击、二次启动都走这里 */
+function revealWindow() {
+  const win = mainWindow
+  if (!win || win.isDestroyed()) {
+    createWindow()
+    return
+  }
+  win.show()
+  if (win.isMinimized()) {
+    win.restore()
+  }
+  win.focus()
+}
+
+function setupTray() {
+  if (tray) {
+    return
+  }
+  const image = trayIcon()
+  if (!image || image.isEmpty()) {
+    // 画不出图标就整体不做托盘：宁可保持「关窗口 = 退进程」的旧行为，也不挂一个看不见的常驻进程
+    console.warn('[tray] 图标不可用，不启用托盘常驻')
+    return
+  }
+  try {
+    tray = new Tray(image)
+    tray.setToolTip('IM 即时通讯')
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: '显示主窗口', click: revealWindow },
+        { type: 'separator' },
+        {
+          label: '退出 IM',
+          click: () => {
+            quitting = true
+            app.quit()
+          }
+        }
+      ])
+    )
+    // 单击唤回窗口，双击也唤（有些用户习惯双击图标）
+    tray.on('click', revealWindow)
+    tray.on('double-click', revealWindow)
+  } catch (error) {
+    console.warn('[tray] 托盘创建失败，关窗口将直接退出进程', error)
+    tray = null
+  }
+}
+
+/* ------------------------------ 系统通知与任务栏角标 ------------------------------ */
+
+/**
+ * 提醒出口的主进程侧。
+ *
+ * 为什么通知要下沉到主进程而不是让渲染进程用 Web Notification：桌面壳加载的是 file:// 页面，
+ * 非安全上下文下 Notification 拿不到权限；而主进程的 electron#Notification 是真正的系统通知，
+ * 窗口隐藏时也能弹、点击能把窗口唤回来。渲染侧只负责判断该不该提醒（见 im-ui/src/utils/notify.js）。
+ *
+ * 上行都用 send 而不是 invoke：提醒是「发完就不管」的事件，
+ * 拿不到回执也不该让渲染侧因一个 rejected Promise 而卡住或报错。
+ */
+function setupNotify() {
+  ipcMain.on('im:notify', (event, payload) => {
+    const title = (payload && payload.title) || '新消息'
+    const body = (payload && payload.body) || ''
+    const tag = (payload && payload.tag) || ''
+    if (!Notification.isSupported()) {
+      // Windows 上服务没起来、Linux 上没有 libnotify 时会走到这：
+      // 没系统通知不等于什幺提醒都没有，让任务栏闪起来兼作兜底
+      const win = mainWindow
+      if (win && !win.isDestroyed() && !win.isFocused()) {
+        try {
+          win.flashFrame(true)
+        } catch { /* 同上 */ }
+      }
+      return
+    }
+    try {
+      const notification = new Notification({
+        title,
+        body,
+        icon: trayIcon(),
+        silent: !!(payload && payload.silent)
+        // 去重与节流不做在这里：同一个会话 4 秒内只提醒一次是渲染侧的职责（utils/notify.js 的 buckets），
+        // 主进程只负责「把这一条变成系统里看得见的东西」，不知道也不该知道业务上该不该响
+      })
+      notification.on('click', () => {
+        revealWindow()
+        const win = mainWindow
+        if (win && !win.isDestroyed() && tag) {
+          win.webContents.send('im:notify-click', tag)
+        }
+      })
+      notification.show()
+    } catch (error) {
+      console.warn('[notify] 系统通知弹出失败', error)
+    }
+  })
+
+  ipcMain.on('im:badge', (event, payload) => {
+    const count = Math.max(0, Number(payload && payload.count) || 0)
+    const win = mainWindow
+    if (!win || win.isDestroyed()) {
+      return
+    }
+    if (process.platform === 'darwin') {
+      // macOS 有真正的 Dock 角标数字
+      try {
+        app.setBadgeCount(count)
+      } catch { /* 部分系统版本不支持 */ }
+    }
+    if (process.platform === 'win32') {
+      // Windows 任务栏没有数字角标 API，能做的只有叠加一个小图标 + 未读时闪烁；
+      // 数字已经在 tooltip 里了，不把「有角标」当成「有数字」吹
+      try {
+        win.setOverlayIcon(count > 0 ? trayIcon() : null, count > 0 ? `${count} 条未读` : '')
+        win.flashFrame(count > 0 && !win.isFocused())
+      } catch { /* setOverlayIcon 在部分环境下不可用 */ }
+    }
+    if (count === 0) {
+      try {
+        win.flashFrame(false)
+      } catch { /* 同上 */ }
+    }
+  })
 }
 
 /**
@@ -327,15 +550,24 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    const win = BrowserWindow.getAllWindows()[0]
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.focus()
-    }
+    // 必须包含 show()：图标被再点一次时窗口很可能正藏在托盘里（只是 hide 过），
+    // 只 focus 一个隐藏窗口在 Windows 上是看不出任何反应的
+    revealWindow()
   })
 }
 
 app.whenReady().then(() => {
+  /**
+   * Windows 的 Toast 通知靠 AUMID 找到「该用哪个应用的名字与图标」，
+   * 不设的话通知要么根本不弹、要么显示为“Electron”。这个值必须与打包时
+   * NSIS 给快捷方式写的 AUMID 一致（见 package.json 的 build.appId = com.im.desktop），
+   * 两边不一样时用户看到的仍是一个陌生的应用名。
+   */
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.im.desktop')
+  }
+  // 先注册地址解析通道，后建窗口：preload 在页面脚本之前就要能 sendSync 拿到地址
+  setupServerConfig(ipcMain)
   setupDownload()
   setupVideoCompress()
   setupLocalDb()
@@ -343,14 +575,26 @@ app.whenReady().then(() => {
   setupRecorder()
   setupLive()
   setupContentProtection()
+  setupNotify()
   setupAgentAutostart()
   createWindow()
+  // 托盘在建窗口之后：close 钩子已经挂上，这时 tray 不是 null，「关窗口」才会落到收进托盘那一路
+  setupTray()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
     }
   })
+})
+
+// 托盘菜单的「退出」与系统登出都走 quit：先置位再关窗口，否则下面的 close 会把退出拆在原地
+app.on('before-quit', () => {
+  quitting = true
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
 })
 
 app.on('window-all-closed', () => {

@@ -64,10 +64,10 @@ graph TD
 
 ```mermaid
 flowchart TD
-    A["① 改 electron/main.js 的 SERVER_BASE<br/>= 实际后端地址"] --> B["② cd im-ui<br/>npm run build:electron"]
+    A["① （可选）定内置默认地址<br/>electron/server-config.js 的 BUILT_IN_BASE<br/>——不改也能装，运行期可改"] --> B["② cd im-ui<br/>npm run build:electron"]
     B --> C{"构建成功？<br/>base='./' + hash 路由"}
     C -->|否| C1["查 vite.config.js / utils/env.js 语法"] --> B
-    C -->|是| D["③ 复制 im-ui/dist → electron/dist"]
+    C -->|是| D["③ 产物已直出 electron/dist<br/>（vite outDir 按 mode 定，不再手动拷贝）"]
     D --> E["④ cd electron<br/>设 ELECTRON_SKIP_BINARY_DOWNLOAD=1<br/>npm install"]
     E --> F{"依赖装好？<br/>（electron 二进制已跳过下载）"}
     F -->|SSL 证书报错| F1["确认 SKIP 变量已设 +<br/>package.json 的 electronDist 指向本地 electron"] --> E
@@ -102,11 +102,12 @@ electron-builder 打包时直接复制它，**不联网下载 electron**（既�
 
 ```
 spring-boot-duomokuia/
-├── electron/                          # ★ 桌面端项目（本次新增）
+├── electron/                          # ★ 桌面端项目
 │   ├── main.js                        # 主进程：窗口 + 下载处理 + 跨域 + 注入后端地址
-│   ├── preload.js                     # 预加载：contextBridge 暴露 __IM_SERVER__
+│   ├── server-config.js               # ★ 后端地址运行期配置（文件 > 环境变量 > 内置默认）+ IPC
+│   ├── preload.js                     # 预加载：contextBridge 暴露 __IM_SERVER__ / __IM_NATIVE__.server
 │   ├── package.json                   # electron-builder 配置（含 electronDist）
-│   ├── dist/                          # 从 im-ui/dist 复制来的前端产物
+│   ├── dist/                          # `vite build --mode electron` 直接产到这里（不经 im-ui/dist）
 │   └── release/                       # ★ 打包产物输出目录
 │       ├── IM通讯 Setup 1.0.0.exe      #   NSIS 安装包（分发用）
 │       └── win-unpacked/IM通讯.exe     #   免安装版（可直接双击测试）
@@ -135,7 +136,7 @@ flowchart TD
     Q1 -->|否：浏览器 Web| W1["baseURL = '/api'（同源）<br/>WS 按 location.host 推导<br/>路由 createWebHistory<br/>base = '/'<br/>走 vite proxy / Nginx"]
     Q1 -->|是：Electron| Q2{"__IM_SERVER__.baseUrl 有值？<br/>（由 preload 注入）"}
     Q2 -->|有| E1["baseURL = baseUrl + '/api'<br/>WS = baseUrl 的 http→ws<br/>路由 createWebHashHistory<br/>base = './'<br/>直连远程后端"]
-    Q2 -->|无| E2["回落同源<br/>（异常：SERVER_BASE 没配）"]
+    Q2 -->|无| E2["回落同源<br/>（异常：preload 现取失败且 argv 也没值）"]
 ```
 
 | 维度 | 浏览器 Web 部署 | Electron 桌面端 |
@@ -144,22 +145,33 @@ flowchart TD
 | 构建命令 | `npm run build` | `npm run build:electron`（`--mode electron`） |
 | vite `base` | `/` | `./`（相对路径，否则 file:// 下资源 404 白屏） |
 | 路由模式 | `createWebHistory` | `createWebHashHistory`（file:// 无 URL 重写） |
-| API 地址 | `/api`（同源相对） | `SERVER_BASE + /api`（远程绝对） |
-| WebSocket | 按 `location.host` | `SERVER_BASE` 的 `http→ws` |
-| 地址来源 | 无需配置 | 主进程 `SERVER_BASE` → preload 注入 |
+| API 地址 | `/api`（同源相对） | 运行期解析出的地址 + `/api`（远程绝对） |
+| WebSocket | 按 `location.host` | 同一个地址的 `http→ws` |
+| 地址来源 | 无需配置 | 主进程三层回落 → preload 注入（见下） |
 
-**后端地址是怎么进到前端的**（关键链路）：
+**后端地址是怎么进到前端的**（关键链路，运行期三层回落）：
 
 ```
-main.js: const SERVER_BASE = 'http://localhost:8080'
-   │  webPreferences.additionalArguments: ['--server-base=' + SERVER_BASE]
+server-config.js: resolve() = ① userData/server-config.json 的 baseUrl
+                              ② 环境变量 IM_SERVER_BASE
+                              ③ 内置默认 BUILT_IN_BASE = http://localhost:8080
+   │  main.js createWindow(): additionalArguments: ['--server-base=' + resolve().baseUrl]
+   │  （★ 这个 argv 值是建窗口时定死的、reload 不会刷新，只当兜底）
    ▼
-preload.js: 从 process.argv 取出 → contextBridge.exposeInMainWorld('__IM_SERVER__', { baseUrl })
+preload.js: ipcRenderer.sendSync('im:server-resolve') 现取实时值 → 暴露 __IM_SERVER__
+   │        同时把 __IM_NATIVE__.server（get/normalize/set/reset/reveal）挂给界面
    ▼
 utils/env.js: serverBase() 读 window.__IM_SERVER__.baseUrl → apiBaseURL() / wsBaseURL()
    ▼
 request.js / socket.js: 用绝对地址请求远程后端
 ```
+
+> **为什么不靠 argv**：`additionalArguments` 在 `new BrowserWindow()` 时就固定了，
+> 用户在界面上改完地址只 `location.reload()`，窗口对象并没重建 —— 读 argv 会拿到旧值，
+> 出现「地址存了、请求还往老地方发」。所以 preload 每次页面加载都用 `sendSync` 现取。
+>
+> **改地址不用重打包，也不用重启程序**：登录页的「开发调试」入口（连不上后端时唯一进得去的地方）
+> 与设置页的「后端地址」行都能改，保存后自动重载页面生效。
 
 > Web 部署没有 preload，`window.__IM_SERVER__` 不存在，`serverBase()` 返回空串，
 > 所有判断自动回落到同源逻辑——**这就是「两用」能成立的原因**。
@@ -170,7 +182,10 @@ request.js / socket.js: 用绝对地址请求远程后端
 
 `electron/main.js` 里有三处不能省的处理，直接关系到能不能正常用：
 
-**① 注入后端地址**（`additionalArguments`）——见上一节链路。
+**① 注入后端地址**（`additionalArguments` + preload 现取）——见上一节链路。
+
+> 注：地址不再写成本文件的一个常量，而是 `require('./server-config.js')` 里的三层回落；
+> `setupServerConfig(ipcMain)` 必须在 `createWindow()` **之前**调，否则 preload 的 sendSync 没人应答。
 
 **② 绕过跨域**（`webSecurity: false`）：
 
@@ -182,7 +197,7 @@ webPreferences: {
   // file:// 页面跨源访问远程后端（含带自定义头 satoken/X-Trace-Id 的预检请求），
   // 关掉同源策略免去后端 CORS 配置与预检失败。若后端已正确配 CORS，可改回 true。
   webSecurity: false,
-  additionalArguments: [`--server-base=${SERVER_BASE}`]
+  additionalArguments: [`--server-base=${resolveServerBase().baseUrl}`]  // 仅当兜底，实时值走 sendSync
 }
 ```
 
@@ -211,9 +226,9 @@ session.defaultSession.on('will-download', (event, item) => {
 cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
 npm run build:electron
 
-# ② 复制前端产物到 electron 项目
-New-Item -ItemType Directory -Path "..\electron\dist" -Force | Out-Null
-Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
+# ② 产物已经直接落在 ..\electron\dist（vite 的 outDir 按 mode 定），不需要拷
+#    ★ 别再执行 Copy-Item im-ui\dist -> electron\dist：那一步会把 Web 模式（base:'/'）
+#      的产物盖进来，打进包就是白屏
 
 # ③ 安装依赖（跳过 electron 二进制下载，用本地 electronDist）
 cd ..\electron
@@ -257,11 +272,19 @@ npm run build
 
 ## 九、注意事项
 
-### ⚠️ 分发前必做：改后端地址
+### ⚠️ 分发前：后端地址不再需要「改源码 + 重打包」
 
-`electron/main.js` 顶部的 `SERVER_BASE` 默认是 `http://localhost:8080`（本机联调用）。
-**分发给别人前，必须改成实际后端地址**（如 `http://192.168.1.10:8080` 或 `https://im.example.com`），
-然后**重新打包**（第七节 ①②④，`npm install` 可跳过）。否则客户端连不上后端。
+以前这里写的是「必须把 `main.js` 的 `SERVER_BASE` 改成实际地址再重新打包」。
+现在不需要了：地址已改为**运行期三层回落**（`electron/server-config.js`），
+装到用户机器上之后，登录页右下角的「开发调试」链接就能改地址、点「测试连接」验证，
+保存后页面自动重载生效 —— 换后端不必再重打一个 250MB+ 的安装包。
+
+打包时可选只有一件事：`server-config.js` 顶部的 `BUILT_IN_BASE`（默认 `http://localhost:8080`），
+它决定「什么都没填时连哪里」。保持 `localhost` 是为了开发机本机起后端时零配置可用；
+分发给外部用户且确定他们不会进这个入口时，可把它改成正式地址后重打包（仍然不是必须）。
+
+> **为什么登录页也要挂一个入口**：后端连不上的时候根本登不进去，设置页进不了；
+> 只在设置页提供改地址能力，就等于在最需要它的那一刻用不上。
 
 ### 后端侧唯一注意点：WebSocket 的 Origin
 
@@ -283,8 +306,16 @@ HTTP 已用 `webSecurity: false` 绕过 CORS，后端不用改。
 ### app.asar 打包后不可直接改
 
 前端资源封进了 `win-unpacked/resources/app.asar`，**改前端要重新构建 + 重新打包**，
-不能像改 `dist/app-config.js` 那样热改。要「运行时可配后端地址」，需把配置外部化
-（extraResources + 读外部 json），本项目当前用编译期 `SERVER_BASE`，够用且简单。
+不能像改 `dist/app-config.js` 那样热改。【已做】后端地址已外部化为运行期配置：
+配置文件落在 `userData/server-config.json`，实测完整路径是
+`%APPDATA%\im-desktop\server-config.json`（★ 目录名取的是 `package.json` 的 `name`「im-desktop」，
+**不是** productName「IM通讯」，也不是安装目录；免安装版与安装版共用同一个 userData，
+所以在一边改过地址，另一边也会跟着变），
+**不在 asar 里**，所以既能从界面改，也能直接手写该文件或用环境变量 `IM_SERVER_BASE` 覆盖。
+
+> 排查时用这个区别：「界面能改的值」在 userData 里，打包时烤进 asar 的是**内置默认值**；
+> 两者不一致时以 userData 为准（弹窗里会显示当前生效值与其**来源**）。
+> 把配置文件改坏了（非法 JSON）也不会让应用起不来：解析失败就当没配，回落到下一层。
 
 ### 体积预期
 
@@ -306,7 +337,7 @@ NSIS 安装包约 **90 MB**、免安装版约 **195 MB**（Electron 自带 Chrom
 
 **验证步骤**：
 
-1. 确认后端已在 `SERVER_BASE` 指向的地址启动；
+1. 确认后端已启动，且桌面端用的地址指向它（看登录页「开发调试」弹窗里的当前生效值与来源）；
 2. 双击 `electron\release\win-unpacked\IM通讯.exe`（免安装版最快）；
 3. 依次测：登录 → 收发消息 → 图片显示 → 上传文件 → **下载大文件**（验证 `will-download`）；
 4. F12 打不开是正常的（生产包默认禁用 DevTools），要看日志用免安装版 + 命令行启动。
@@ -319,14 +350,16 @@ NSIS 安装包约 **90 MB**、免安装版约 **195 MB**（Electron 自带 Chrom
 
 ```powershell
 cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui; npm run build:electron
-Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
+# 产物已直出 ..\electron\dist，不要再从 im-ui\dist 拷（拷了会用 Web 模式产物盖掉 electron 模式）
 cd ..\electron
 $env:NODE_TLS_REJECT_UNAUTHORIZED=0
 $env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
 npm run build
 ```
 
-**改了 `SERVER_BASE`**：同上（`SERVER_BASE` 在 main.js，`npm run build` 会重新封装）。
+**改了后端地址**：分两种情况。给已经装好的用户改 -> 不重打包，让他们在登录页「开发调试」里改（或写
+`%APPDATA%\im-desktop\server-config.json`、设环境变量 `IM_SERVER_BASE`）；
+改内置默认值 `BUILT_IN_BASE` -> 在 `electron/server-config.js`，改完走下文的 `npm run build` 重封即可。
 
 **换了电脑 / 清了 node_modules**：补一步装依赖（带跳过下载）：
 
@@ -374,12 +407,12 @@ mvn -q -pl im-remote-agent -am package -DskipTests
 # ② jlink 裁剪 JRE（输出目录必须不存在，先删）
 Remove-Item electron\jre -Recurse -Force -ErrorAction SilentlyContinue
 & "D:\software\jdk\jdk21\bin\jlink.exe" --add-modules java.base,java.desktop,java.net.http,jdk.charsets,jdk.httpserver,jdk.crypto.ec,jdk.crypto.mscapi --strip-debug --no-man-pages --no-header-files --output electron\jre
-# ③ 前端 Electron 模式构建；拷入前先清空 electron/dist（Copy-Item 只覆盖不删除，
-#    不清会堆积历代哈希 chunk 并被打进 asar）
+# ③ 前端 Electron 模式构建：vite 的 outDir 在 electron 模式下就是 ..\electron\dist，
+#    且 emptyOutDir: true 已先清空，不会堆积历代哈希 chunk
+#    ★ 这里绝不能再 Remove-Item electron\dist + Copy-Item im-ui\dist：
+#      刚构建好的 electron 模式产物会被删掉，再灌进 im-ui\dist 里那份 Web 模式
+#      （base:'/' + history 路由）的旧产物，装上就是白屏
 cd im-ui; npm run build:electron
-Remove-Item "..\electron\dist" -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "..\electron\dist" | Out-Null
-Copy-Item ".\dist\*" "..\electron\dist" -Recurse -Force
 # ④ 打安装包
 cd ..\electron
 $env:ELECTRON_SKIP_BINARY_DOWNLOAD=1; $env:NODE_TLS_REJECT_UNAUTHORIZED=0; $env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"

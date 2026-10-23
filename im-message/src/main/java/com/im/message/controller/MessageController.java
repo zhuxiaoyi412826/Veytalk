@@ -12,6 +12,8 @@ import com.im.common.util.SecurityUtil;
 import com.im.message.dto.req.ForwardMessageRequest;
 import com.im.message.dto.req.EditMessageRequest;
 import com.im.message.dto.req.EssenceRequest;
+import com.im.message.dto.req.ChainRequest;
+import com.im.message.dto.req.FavoriteRequest;
 import com.im.message.dto.req.MessageIdsRequest;
 import com.im.message.dto.req.MessageSearchQuery;
 import com.im.message.dto.req.ReactionRequest;
@@ -45,8 +47,8 @@ import java.util.Map;
  * {@code read} / {@code recall}），两条通道最终都落到同一个 Service，行为完全一致。
  * REST 通道的存在意义是兜底：长连接不可用、客户端刚打开页面还没建连时，消息照样能发能查。
  *
- * <p>路径上没有 {@code GET /{id}}，因此 {@code history} / {@code offline} / {@code search}
- * 三个字面量段不会被误当成消息 ID 解析；清除离线标记也刻意做成两段的 {@code /offline/clear}，
+ * <p>路径上没有 {@code GET /{id}}，因此 {@code history} / {@code offline} / {@code search} /
+ * {@code favorites} 这些字面量段不会被误当成消息 ID 解析；清除离线标记也刻意做成两段的 {@code /offline/clear}，
  * 避开与 {@code DELETE /{id}} 同段同方法的歧义。
  */
 @Tag(name = "04-消息", description = "消息收发、历史分页、撤回删除、送达已读上报、离线消息与内容检索")
@@ -195,6 +197,17 @@ public class MessageController {
         return Result.ok(messageService.vote(SecurityUtil.getUserId(), id,
                 request.getOptions(), Boolean.TRUE.equals(request.getClose())));
     }
+    
+    @Operation(summary = "接龙",
+            description = "向一条接龙消息追加一个自己的条目（text 为空回落为本人昵称）；close=true 由发起人截止接龙。"
+                    + "服务端在 Redis 短锁下串行写 extra.chainItems，改完推全量快照给会话全员")
+    @RateLimit(count = 120, dimension = RateLimit.Dimension.USER, key = "message.chain")
+    @PostMapping("/{id}/chain")
+    public Result<MessageVO> chain(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                   @RequestBody @Valid ChainRequest request) {
+        return Result.ok(messageService.chain(SecurityUtil.getUserId(), id,
+                request.getText(), Boolean.TRUE.equals(request.getClose())));
+    }
 
     @Operation(summary = "群文件 / 群相册",
             description = "按群会话 + 消息类型分页取沉淀的附件消息：msgType=2 为群相册（图片）、3 为群文件；仅群成员可查，按发送时间倒序")
@@ -231,6 +244,31 @@ public class MessageController {
                                          @RequestBody @Valid EssenceRequest request) {
         return Result.ok(messageService.markEssence(SecurityUtil.getUserId(), id,
                 Boolean.TRUE.equals(request.getEssence())));
+    }
+
+    @Operation(summary = "我的收藏列表",
+            description = "按收藏时间倒序分页取当前用户收藏的消息；conversationId 为空则跨全部会话。"
+                    + "收藏属用户维度私有数据，只能看到自己的，已被自己删除的消息不再占行")
+    @GetMapping("/favorites")
+    public Result<PageResult<MessageVO>> favorites(
+            @Parameter(description = "会话 ID，不传表示跨全部会话") @RequestParam(value = "conversationId", required = false) Long conversationId,
+            @Parameter(description = "页码，从 1 开始") @RequestParam(value = "current", defaultValue = "1") Long current,
+            @Parameter(description = "每页条数，最大 100") @RequestParam(value = "size", defaultValue = "20") Long size) {
+        PageQuery query = new PageQuery();
+        query.setCurrent(current);
+        query.setSize(size);
+        return Result.ok(messageService.pageFavorites(SecurityUtil.getUserId(), conversationId, query));
+    }
+
+    @Operation(summary = "标记 / 取消收藏消息",
+            description = "用户维度的私人收藏，单聊群聊都可收、无需管理权限；favorite=true 收藏（幂等）、false 取消；"
+                    + "变更后只推 favorite-notify 给本人，不打扰其他成员")
+    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.favorite")
+    @PutMapping("/{id}/favorite")
+    public Result<MessageVO> markFavorite(@Parameter(description = "消息 ID") @PathVariable("id") Long id,
+                                          @RequestBody @Valid FavoriteRequest request) {
+        return Result.ok(messageService.markFavorite(SecurityUtil.getUserId(), id,
+                Boolean.TRUE.equals(request.getFavorite())));
     }
 
     @Operation(summary = "删除消息",

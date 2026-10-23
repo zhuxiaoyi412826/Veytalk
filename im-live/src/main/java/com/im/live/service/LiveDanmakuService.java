@@ -68,6 +68,15 @@ public class LiveDanmakuService {
     public static final String TYPE_GIFT = "gift";
     /** 服务端 → 客户端：连麦态变更（有嘉宾上麦/全部下麦），观众据此在 HLS 与 MSE/WebM 播放器间切换 */
     public static final String TYPE_LINKMIC = "linkmic";
+    /** 服务端 → 客户端：PK 态（进度/倒计时/结果），扇出给对阵双方的房间 */
+    public static final String TYPE_PK = "pk";
+
+    /**
+     * 房间维度热度键的兼容 TTL：与礼物热度键同值，让两个计数同步老化。
+     *
+     * <p>热度只在当场有意义，但 PK 结算可能在关播前几秒才跑，留一天足够；房间结束后自然回收。
+     */
+    private static final Duration HEAT_TTL = Duration.ofHours(24);
 
     private final RedisUtil redisUtil;
     private final LiveProperties properties;
@@ -269,7 +278,13 @@ public class LiveDanmakuService {
             }
             // 先摘除再广播：并发点赞会在广播期间继续累加，remove 拿到的是这一轮的确定值
             pendingLikes.remove(entry.getKey());
-            broadcast(entry.getKey(), frame(TYPE_LIKE, "count", count));
+            Long roomId = entry.getKey();
+            // 同时把合并后的增量沉到 Redis：内存计数只在本实例可见、且重启即归零，
+            // 而 PK 热度需要一个能按房间读到的总量。写在这里而不是每次点赞：每房间每 2 秒一次 INCRBY
+            String likeKey = RedisKeys.liveLikeHeat(roomId);
+            redisUtil.increment(likeKey, count);
+            redisUtil.expire(likeKey, HEAT_TTL);
+            broadcast(roomId, frame(TYPE_LIKE, "count", count));
             flushed++;
         }
         return flushed;
@@ -319,6 +334,32 @@ public class LiveDanmakuService {
     }
 
     /**
+     * 给本房间里某个用户的全部连接发一帧（一人多端进房则每端都收到）。
+     *
+     * <p>房管动作靠它做即时通知：主播点了禁言，被禁的人应当马上看到提示，
+     * 而不是下一次发弹幕才被拒——后者会让人误以为是自己网络坏了。
+     *
+     * @return 实际送达的连接数；0 表示这人此刻不在本实例的连接表里（通知放弃，不影响禁言本身生效）
+     */
+    public int sendToUser(Long roomId, Long userId, Map<String, Object> frame) {
+        if (roomId == null || userId == null) {
+            return 0;
+        }
+        Set<WebSocketSession> sessions = rooms.get(roomId);
+        if (sessions == null || sessions.isEmpty()) {
+            return 0;
+        }
+        int sent = 0;
+        for (WebSocketSession session : sessions) {
+            if (userId.equals(session.getAttributes().get(com.im.live.ws.LiveHandshakeInterceptor.ATTR_USER_ID))) {
+                sendTo(session, frame);
+                sent++;
+            }
+        }
+        return sent;
+    }
+
+    /**
      * 连麦态变更广播：有嘉宾上麦（{@code active=true}，主播端合成流生效）或全部下麦（{@code false}）时推一帧。
      *
      * <p>与送礼一样是可丢弃的临时帧：观众当前在麦与否只影响此刻用哪路播放器，进房的人靠 REST 在麦列表补齐初始态。
@@ -337,6 +378,28 @@ public class LiveDanmakuService {
     public int[] drainStats(Long roomId) {
         int[] stat = stats.remove(roomId);
         return stat == null ? new int[]{0, 0} : stat;
+    }
+
+    /**
+     * 只读不清地把本场统计取出来（峰值在线 / 累计人次），供「主播数据面板」在直播途中看实时值。
+     *
+     * <p>与 {@link #drainStats} 分开是对的：那个是关播落库用的，读一次就把表项抹掉，
+     * 面板要是复用它，主播刷新一下页面就把自己的峰值归零了，下一次关播落库就成了错数。
+     *
+     * <p>两个局限写在这里，免得面板上把它当成全量：① 统计注册表在<b>本实例内存</b>里，
+     * 重启即归零（只有 Redis 的在线计数跟得过重启）；② 值只在有人进过房后存在，
+     * 没记录时返回 {@code {0, 0}}。
+     *
+     * @return 长度为 2 的数组 {peakOnline, viewerTotal}，为副本而不是注册表里那个数组
+     */
+    public int[] peekStats(Long roomId) {
+        int[] stat = stats.get(roomId);
+        if (stat == null) {
+            return new int[]{0, 0};
+        }
+        synchronized (stat) {
+            return new int[]{stat[0], stat[1]};
+        }
     }
 
     /* ==================== 限流 ==================== */
