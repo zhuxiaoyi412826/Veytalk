@@ -644,6 +644,14 @@ im:
       - https://127.0.0.1:5173
       - https://localhost:4173
       - https://127.0.0.1:4173
+      # Tauri 桌面壳：Windows 下页面 Origin 是 http://tauri.localhost（macOS/Linux 是 tauri://localhost），
+      # 不在白名单时预检 403，axios 报 Network Error，前端提示「无法连接服务器」
+      - http://tauri.localhost
+      - tauri://localhost
+      # Capacitor 安卓/iOS 壳：androidScheme=https 时 Origin 是 https://localhost；iOS 是 capacitor://localhost
+      - https://localhost
+      - http://localhost
+      - capacitor://localhost
       # 管理后台前端（im-admin-ui 新工程，vite dev 5273 / preview 4273）。
       # 它是独立起源，不在这里放行就是「页面打得开、接口全 403 Invalid CORS request」。
       # 上线后后台通常要换成内网域名并加访问限制，部署步骤见 im-admin-ui/README.md。

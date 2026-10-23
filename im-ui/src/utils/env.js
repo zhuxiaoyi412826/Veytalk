@@ -17,15 +17,43 @@ export function isElectron() {
   return typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent)
 }
 
-/** Electron 主进程注入的远程后端根地址（协议+host+端口，不含 /api），Web 环境为空串 */
-function serverBase() {
-  return (typeof window !== 'undefined' && window.__IM_SERVER__ && window.__IM_SERVER__.baseUrl) || ''
+/** 是否运行在 Tauri 壳里（v2 无论 withGlobalTauri 与否都会注入 __TAURI_INTERNALS__） */
+export function isTauri() {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-/** axios 的 baseURL：Electron 用「后端绝对地址 + /api」，Web 用同源相对路径 /api */
+/** 是否运行在 Capacitor 原生壳里（安卓/iOS，原生桥会注入 window.Capacitor） */
+export function isCapacitor() {
+  return typeof window !== 'undefined' && !!window.Capacitor
+}
+
+/** 是否任意原生壳（Electron / Tauri / Capacitor）——凡是「非浏览器同源」的宿主都用它 */
+export function isNativeShell() {
+  return isElectron() || isTauri() || isCapacitor()
+}
+
+/**
+ * 远程后端根地址（协议+host+端口，不含 /api），Web 环境为空串。
+ * Electron 由主进程经 preload 注入；Tauri 没有 preload，用编译期 Vite 环境变量（.env.tauri）。
+ */
+function serverBase() {
+  if (typeof window !== 'undefined' && window.__IM_SERVER__ && window.__IM_SERVER__.baseUrl) {
+    return window.__IM_SERVER__.baseUrl
+  }
+  if (isTauri() || isCapacitor()) {
+    // 运行时覆盖优先于编译期默认值：热点/换网段导致后端 IP 变化时，
+    // 在登录页改一下即可连上新地址，无需重打包（localStorage 每次请求实时读取）。
+    const override = window.localStorage && window.localStorage.getItem('IM_SERVER_URL_OVERRIDE')
+    if (override) return override.replace(/\/+$/, '')
+    return (import.meta.env && import.meta.env.VITE_IM_SERVER_URL) || ''
+  }
+  return ''
+}
+
+/** axios 的 baseURL：桌面壳用「后端绝对地址 + /api」，Web 用同源相对路径 /api */
 export function apiBaseURL() {
   const base = serverBase()
-  return isElectron() && base ? `${base.replace(/\/+$/, '')}/api` : '/api'
+  return isNativeShell() && base ? `${base.replace(/\/+$/, '')}/api` : '/api'
 }
 
 /**
@@ -38,7 +66,7 @@ export function apiBaseURL() {
  */
 export function mediaBaseURL() {
   const base = serverBase()
-  return isElectron() && base ? base.replace(/\/+$/, '') : ''
+  return isNativeShell() && base ? base.replace(/\/+$/, '') : ''
 }
 
 /**
@@ -47,7 +75,7 @@ export function mediaBaseURL() {
  */
 export function wsBaseURL() {
   const base = serverBase()
-  if (isElectron() && base) {
+  if (isNativeShell() && base) {
     return base.replace(/^http/i, 'ws').replace(/\/+$/, '')
   }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -61,7 +89,7 @@ export function wsBaseURL() {
  * 后端 normalizeBase 只保留 scheme://host[:port]，因此多带的 /api 会被剥掉。
  */
 export function webhookBase() {
-  if (isElectron()) {
+  if (isNativeShell()) {
     const base = serverBase();
     if (base) {
       return base.replace(/\/+$/, '');
@@ -85,6 +113,14 @@ const LIVE_MEDIA_PORT = 8088
  * 生产若把 play-base-url 配成绝对域名，后端下发的 playUrl 就是 http(s) 开头，调用方直接用、不经过这里。
  */
 export function livePlayBase() {
+  // Tauri / Capacitor：流媒体服务器地址编译期注入（.env.tauri / .env.capacitor 的 VITE_IM_MEDIA_BASE）
+  if (isTauri() || isCapacitor()) {
+    // 服务器地址被运行时覆盖时（热点换 IP）：流媒体与后端同机部署，跟随覆盖地址的 host，只换端口为 8088
+    const override = window.localStorage && window.localStorage.getItem('IM_SERVER_URL_OVERRIDE')
+    if (override) return override.replace(/\/+$/, '').replace(/:\d+$/, '') + ':8088'
+    return import.meta.env.VITE_IM_MEDIA_BASE || 'http://127.0.0.1:8088'
+  }
+  return isElectron() ? 'http://127.0.0.1:8088' : ''
   if (!isElectron()) return ''
   const base = serverBase()
   if (base) {

@@ -43,6 +43,36 @@ $env:PORT=8088; node live-media-server.js
 npm run build
 
 
+添加证书
+路径  im-ui\certs\ca.pem 
+certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
+
+
+
+问题1 
+$env:MYSQL_USER='root'; $env:MYSQL_PASSWORD='412826'
+$env:JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"   # 解决控制台中文乱码
+mvn spring-boot:run    # 在 im-bootstrap 目录
+使这个环境变量永久生效
+
+
+netsh advfirewall firewall add rule name="IM Backend 8080" dir=in action=allow protocol=TCP localport=8080
+重新打包
+# Windows exe（增量编译，很快）
+cd c:\daima\Veytalk\im-ui; 
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"; $env:CARGO_HTTP_CHECK_REVOKE="false"; npm run tauri build
+# 安卓 APK（改了前端后）
+cd c:\daima\Veytalk\im-ui; npm run build:capacitor; npx cap sync android; cd android; .\gradlew assembleDebug
+
+
+`c:\daima\Veytalk\md\打包` 生成一个tauri打包实际过程  需要下载的软件和版本 准备的工作 ，实际打包过程，和教训， 的markdown文档
+
+
+Windows 安装包 `C:\daima\Veytalk\im-ui\src-tauri\target\release\bundle\nsis\IM通讯_1.0.0_x64-setup.exe` （31.2 MB） 
+Windows 免安装版 `C:\daima\Veytalk\im-ui\src-tauri\target\release\app.exe` （37.7 MB） 
+安卓 APK `C:\daima\Veytalk\im-ui\android\app\build\outputs\apk\debug\app-debug.apk` （37.5 MB）
+
+http://192.168.17.18:8080  在笔记本电脑上修改每次手机插入固定都是这个
 admin            123456
 alice            123456
 bob              123456
