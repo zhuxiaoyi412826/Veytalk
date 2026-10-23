@@ -1087,10 +1087,18 @@ public class MessageServiceImpl implements MessageService {
         String trimmed = emoji == null ? "" : emoji.trim();
         BusinessException.throwIf(trimmed.isEmpty() || trimmed.length() > 32,
                 ResultCode.BAD_REQUEST, "表情不合法");
+        List<String> replaced = List.of();
         if (remove) {
             // 删 0 行不报错：并发取消或重复取消都视作成功
             messageReactionMapper.deleteOne(messageId, userId, trimmed);
         } else if (!messageReactionMapper.exists(messageId, userId, trimmed)) {
+            // ★ 一人对一条消息只保留最后一个表情：换表情 = 先清掉自己在这条上的旧表情再插新的。
+            // 不改唯一键（那要动 DDL 且存量数据得洗），语义收在本层。
+            // 旧表情列表要带进通知：否则其他端的聚合栏只会减掉一个，剩下的 chip 成为幽灵。
+            replaced = ownReactionEmojis(messageId, userId, trimmed);
+            if (!replaced.isEmpty()) {
+                messageReactionMapper.deleteOthersByUser(messageId, userId, trimmed);
+            }
             MessageReaction row = new MessageReaction();
             row.setMessageId(messageId);
             row.setUserId(userId);
@@ -1098,8 +1106,9 @@ public class MessageServiceImpl implements MessageService {
             // id 由雪花、create_time 由自动填充
             messageReactionMapper.insert(row);
         }
-        // 推增量：只告知「谁对哪条消息加了/删了哪个表情」，各端本地聚合自行加减；不推服务端权威快照（self 因人而异）
-        afterCommit(() -> pushReaction(message.getConversationId(), messageId, userId, trimmed, remove));
+        // 推增量：告知「谁对哪条消息加了/删了哪个表情」以及「顶掉了哪几个」，各端本地聚合自行加减；不推服务端权威快照（self 因人而异）
+        final List<String> dropped = replaced;
+        afterCommit(() -> pushReaction(message.getConversationId(), messageId, userId, trimmed, remove, dropped));
         UserBriefDTO sender = userQuerySpi.getById(message.getFromUserId());
         MessageVO vo = MessageConvert.toVO(message, sender, userId, MessageStatus.SENT, 0);
         attachReactions(List.of(vo), userId);
@@ -1409,10 +1418,14 @@ public class MessageServiceImpl implements MessageService {
     }
 
     /**
-     * 表情回应变更通知：把增量（谁、哪条、哪个表情、加还是删）推给会话全员（含操作者其他设备），
+     * 表情回应变更通知：把增量（谁、哪条、哪个表情、加还是删、顶掉了哪几个）推给会话全员（含操作者其他设备），
      * 各端在本地聚合列表上做加减，不需要重拉整页。
+     *
+     * <p>{@code replaced} 只在非空时下发：一个用户换表情时被顶掉的那些旧表情。各端拿到后先逐个减、
+     * 再处理本条新表情，否则会留下服务端已经没有的幽灵 chip。
      */
-    private void pushReaction(Long conversationId, Long messageId, Long userId, String emoji, boolean remove) {
+    private void pushReaction(Long conversationId, Long messageId, Long userId, String emoji, boolean remove,
+                              List<String> replaced) {
         PushSpi pushSpi = pushSpiProvider.getIfAvailable();
         if (pushSpi == null) {
             return;
@@ -1427,7 +1440,23 @@ public class MessageServiceImpl implements MessageService {
         data.put("userId", userId);
         data.put("emoji", emoji);
         data.put("remove", remove);
+        if (replaced != null && !replaced.isEmpty()) {
+            data.put("replaced", replaced);
+        }
         pushSpi.pushToUsers(memberIds, null, WsPacket.of(WsMessageType.REACTION_NOTIFY, data));
+    }
+
+    /**
+     * 取该用户在这条消息上已有的全部表情（排除正要贴的这个），供「只留最后一个」清理与通知。
+     *
+     * <p>正常只有一行；返回多个只可能是本轮改造前的存量数据（当时允许一人多表情），
+     * 那些旧行会在本次一并清掉。
+     */
+    private List<String> ownReactionEmojis(Long messageId, Long userId, String keepEmoji) {
+        return messageReactionMapper.selectByMessageAndUser(messageId, userId).stream()
+                .map(MessageReaction::getEmoji)
+                .filter(e -> !e.equals(keepEmoji))
+                .collect(Collectors.toList());
     }
 
     /**
@@ -1450,9 +1479,20 @@ public class MessageServiceImpl implements MessageService {
         if (rows.isEmpty()) {
             return;
         }
+        // ★ 一人只算最后一个：同一人在这条消息上若还留着多行（本轮改造前的存量数据），
+        // 只取时间最后那行。查询已按 create_time 正序，所以同一个键后来者自然覆盖。
+        // 不先洗数据而是在展示层收口，代价是零 DDL、零运维，且新写的行本来就只能是一行。
+        Map<String, MessageReaction> latest = new HashMap<>();
+        for (MessageReaction row : rows) {
+            latest.put(row.getMessageId() + ":" + row.getUserId(), row);
+        }
         // messageId -> (emoji -> 聚合项)，LinkedHashMap 保留表情首次出现顺序
         Map<Long, Map<String, ReactionItemVO>> grouped = new HashMap<>();
         for (MessageReaction row : rows) {
+            // 仍按 rows 的正序扫描（而不是取 latest.values()）：chip 的显示顺序跟反应时间走
+            if (latest.get(row.getMessageId() + ":" + row.getUserId()) != row) {
+                continue;
+            }
             Map<String, ReactionItemVO> byEmoji = grouped.computeIfAbsent(row.getMessageId(), k -> new LinkedHashMap<>());
             ReactionItemVO item = byEmoji.get(row.getEmoji());
             boolean mine = viewerId.equals(row.getUserId());

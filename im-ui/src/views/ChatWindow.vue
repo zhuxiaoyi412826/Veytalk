@@ -2249,6 +2249,8 @@ async function sendText() {
   // 引用消息：发送前先拿到 quoteMsgId 再清空，发送失败时 replyTarget 已经清空，
   // 用户重新点回复才能再引用，避免失败消息带者一个看不见的引用关系
   const quoteMsgId = replyTarget.value?.messageId || undefined
+  // 同时本地拼一份引用预览给占位气泡，不让「回复 某人」那一行等 HTTP 回包（原因见 buildQuotePreview）
+  const quote = replyTarget.value ? buildQuotePreview(replyTarget.value) : undefined
   replyTarget.value = null
   // 先清输入框再发：失败时内容还在气泡里（带「重发」入口），
   // 留在输入框反而会让用户以为没发出去而再按一次，制造重复消息
@@ -2260,7 +2262,8 @@ async function sendText() {
       content: cleanText,
       atUserIds: atUserIds.length ? atUserIds : undefined,
       atAll: atAll || undefined,
-      quoteMsgId
+      quoteMsgId,
+      quote
     })
   } catch (error) {
     // 网络类失败：气泡红叹号 + 离线队列自动重发，断网时不弹 toast；
@@ -3081,18 +3084,49 @@ const replyTarget = ref(null)
 const forwardDialog = reactive({ visible: false, messageId: null })
 
 /**
- * 回复横幅里的内容摘要，与气泡里的引用块保持一致的口径。
+ * 引用块里那行摘要的唯一口径（与 MessageBubble 的 quoteContent 逐字对齐）。
+ *
+ * 附件类消息的 content 存的是文件 ID，不转就会在窄窄的引用条里露出一串雪花数字。
+ * 回复横幅与发出去的气泡共用这一份：上一版两处各写一套（一处 `[文件]`、一处
+ * `[文件] 名字`，且都漏了闪照与通话），同一句话在横幅里和气泡里长得不一样的问题就是这么来的。
  */
-const replyPreview = computed(() => {
-  const msg = replyTarget.value
-  if (!msg) return ''
-  if (msg.recalled) return '[消息已撤回]'
+function quoteSummaryText(msg) {
+  if (!msg) {
+    return ''
+  }
+  if (msg.recalled) return '[引用内容已撤回]'
   const type = Number(msg.msgType)
-  if (type === 2) return '[图片]'
-  if (type === 3) return `[文件] ${msg.extra?.fileName || ''}`
+  if (type === 2) return msg.extra?.flash ? '[闪照]' : '[图片]'
+  if (type === 3) return '[文件]'
   if (type === 4) return '[语音]'
+  if (type === 6) return '[通话]'
   return msg.content || ''
-})
+}
+
+/**
+ * 本地即时构造一份引用预览，字段与服务端的 QuotePreview 同形。
+ *
+ * ★ 为什么不等服务端回包再画：发送时的占位消息过去只带了 quoteMsgId、没带 quote，
+ * 而气泡上的引用块认的是 `message.quote`，所以「回复 某人」那一行要等 HTTP 回包落地才出现；
+ * 网络慢、发送失败进离线队列、或走 WS 回执路径时，引用行就看不见（引用本身在服务端是完好入库的，
+ * 刷新又能看到——正是「回复颜文字时引用不显示」这类现象的形态）。占位阶段就本地拼一份，
+ * 回包来了再用权威内容覆盖（服务端还会带上昵称快照与已撤回标记）。
+ */
+function buildQuotePreview(msg) {
+  return {
+    messageId: msg.messageId,
+    fromUserId: msg.fromUserId,
+    fromNickname: msg.fromNickname,
+    msgType: msg.msgType,
+    content: quoteSummaryText(msg),
+    recalled: !!msg.recalled
+  }
+}
+
+/**
+ * 回复横幅里的内容摘要。
+ */
+const replyPreview = computed(() => quoteSummaryText(replyTarget.value))
 
 function cancelReply() {
   replyTarget.value = null
@@ -3151,8 +3185,8 @@ async function submitEdit() {
 /**
  * 贴/取消表情回应。
  *
- * 只发 HTTP，不做本地乐观更新：reaction-notify 会推回本端，由 chat.applyReaction 统一应用一次，
- * 避免本端改 + 回执改把 count 算重。messageId 为空（尚在发送中/失败）时忽略。
+ * 发 HTTP 后用服务端回包的权威聚合快照整份覆盖（chat.react 里做），本端因此不依赖 WebSocket 也能即时变对；
+ * 随后到达的本端回执不会把 count 算重。messageId 为空（尚在发送中/失败）时忽略。
  */
 async function onReact({ message, emoji, remove }) {
   if (!message?.messageId || !emoji) {
@@ -3217,8 +3251,8 @@ async function consumeLocateTarget() {
   }
 }
 
-/** 撤回时限，与后端 im.message.recall-limit-seconds 保持一致（2 小时） */
-const RECALL_LIMIT_MS = 2 * 60 * 60 * 1000
+/** 时限窗口，与后端 im.message.recall-limit-seconds 保持一致（2 分钟）；目前只给「编辑」入口做软判断用 */
+const RECALL_LIMIT_MS = 2 * 60 * 1000
 
 /**
  * 消息是否还在可撤回的时间窗口内。
@@ -3275,10 +3309,9 @@ function itemsFor(message) {
       key: 'recall',
       label: '撤回',
       // 撤回别人的消息需要 message:recall:any 权限（群主/管理员/运营），普通用户只能撤自己的；
-      // 且发送超过 2 小时后不再提供入口，与后端时限保持一致
-      show: !message.recalled
-        && (message.self || auth.hasPermission('message:recall:any'))
-        && withinRecallWindow(message)
+      // ★ 不按时间隐藏入口：超过 2 分钟仍展示，点击后由后端回 MESSAGE_RECALL_TIMEOUT，
+      // 全局 toast 弹「已经超出2分钟，无法撤回」（用户要求超出时给提示，而不是静默收起入口）
+      show: !message.recalled && (message.self || auth.hasPermission('message:recall:any'))
     },
     { key: 'download', label: '另存为', show: [TYPE_IMAGE, TYPE_FILE, TYPE_VOICE].includes(Number(message.msgType)) && !message.extra?.flash },
     // 发送端 OCR 提取的图内文字（已经过服务端敏感词遮蔽），有才给入口；闪照不存 ocrText

@@ -39,39 +39,26 @@
 
       <!-- ==================== 通话中 ==================== -->
       <div v-else class="call-overlay__stage">
-        <!-- 主画面（位置）：两端默认都放自己（自己的画面通常与屏幕同朝向，不会出大黑边），可点小窗互换。
-             手机端在 @media 里改成 object-fit: cover，保证互换前后都是满屏无黑边的同一种格式。
-             语音通话时它静默隐藏但仍存在——那是承接对端声音的出口；
-             muted 跟着 swapped 走，保证对方的声音永远能播、自己的声音永远不回灌 -->
-        <video
-          ref="mainVideoRef"
-          class="call-overlay__main"
-          :class="{ 'call-overlay__main--hidden': !isVideo }"
-          :muted="swappedView"
-          autoplay
-          playsinline
-        />
-
-        <!-- 语音通话的封面 -->
-        <div v-if="!isVideo" class="call-overlay__audio-face">
-          <UserAvatar :src="peerAvatar" :name="peerName" :size="96" />
-          <div class="call-overlay__peer-name">{{ peerName }}</div>
-          <div class="call-overlay__timer">{{ elapsedText }}</div>
-        </div>
-
-        <!-- 右上角画中画（位置）：两端点一下都与主画面互换；放大/缩小圆钮只给电脑端 -->
+        <!-- ★ 两路流各自固定绑一个 <video>，互换只切 CSS 位置（main / pip），绝不重挂 srcObject。
+             移动端（尤其 iOS Safari）把一条正在播放的 MediaStream 换到新 video 会白屏 / 卡在第一帧
+             （本端 getUserMedia 流尤其明显、远端常能重挂，所以表现为「我的画面卡住、对方正常」），
+             谁在主画面完全由 class 决定。远端元素永不静音（声音出口）、本端元素恒静音（不回灌），与位置无关。 -->
         <div
-          v-if="isVideo"
-          class="call-overlay__pip call-overlay__pip--clickable"
-          :class="{ 'call-overlay__pip--expanded': pipExpanded }"
-          title="点击与对方画面互换"
-          @click="onPipClick"
+          class="call-overlay__slot"
+          :class="{
+            'call-overlay__slot--pip': swappedView,
+            'call-overlay__slot--main': !swappedView,
+            'call-overlay__slot--expanded': swappedView && pipExpanded,
+            'call-overlay__slot--clickable': swappedView,
+            'call-overlay__slot--hidden': !isVideo
+          }"
+          @click="swappedView && onPipClick()"
         >
-          <video ref="pipVideoRef" class="call-overlay__pip-video" :muted="!swappedView" autoplay playsinline />
-          <span class="call-overlay__pip-tag">{{ swappedView ? '对方' : '我' }}</span>
+          <video ref="remoteVideoRef" class="call-overlay__slot-video" autoplay playsinline />
+          <span v-if="isVideo && swappedView" class="call-overlay__slot-tag">对方</span>
           <button
-            v-if="isDesktop"
-            class="call-overlay__pip-zoom"
+            v-if="isVideo && swappedView && isDesktop"
+            class="call-overlay__slot-zoom"
             :title="pipExpanded ? '缩小小窗' : '放大小窗'"
             @click.stop="pipExpanded = !pipExpanded"
           >
@@ -79,7 +66,37 @@
           </button>
         </div>
 
-        <!-- 顶部信息条（视频通话时叠在画面上） -->
+        <div
+          class="call-overlay__slot"
+          :class="{
+            'call-overlay__slot--main': swappedView,
+            'call-overlay__slot--pip': !swappedView,
+            'call-overlay__slot--expanded': !swappedView && pipExpanded,
+            'call-overlay__slot--clickable': !swappedView,
+            'call-overlay__slot--hidden': !isVideo
+          }"
+          @click="!swappedView && onPipClick()"
+        >
+          <video ref="localVideoRef" class="call-overlay__slot-video" muted autoplay playsinline />
+          <span v-if="isVideo && !swappedView" class="call-overlay__slot-tag">我</span>
+          <button
+            v-if="isVideo && !swappedView && isDesktop"
+            class="call-overlay__slot-zoom"
+            :title="pipExpanded ? '缩小小窗' : '放大小窗'"
+            @click.stop="pipExpanded = !pipExpanded"
+          >
+            <el-icon :size="12"><ZoomOut v-if="pipExpanded" /><ZoomIn v-else /></el-icon>
+          </button>
+        </div>
+
+        <!-- 语音通话的封面（两个视频槽都隐藏时叠一层头像） -->
+        <div v-if="!isVideo" class="call-overlay__audio-face">
+          <UserAvatar :src="peerAvatar" :name="peerName" :size="96" />
+          <div class="call-overlay__peer-name">{{ peerName }}</div>
+          <div class="call-overlay__timer">{{ elapsedText }}</div>
+        </div>
+
+        <!-- 顶部信息条（视频通话时叠在主画面上）：主画面是谁由 swappedView 决定 -->
         <div v-if="isVideo" class="call-overlay__topbar">
           <span class="call-overlay__topbar-name">{{ swappedView ? '我的画面' : peerName }}</span>
           <span class="call-overlay__timer">{{ elapsedText }}</span>
@@ -181,9 +198,9 @@ const call = useCallStore()
 const auth = useAuthStore()
 const friends = useFriendStore()
 
-// 两个位置（主画面 / 画中画）的 DOM，装哪一路流由 swappedView 决定
-const mainVideoRef = ref(null)
-const pipVideoRef = ref(null)
+// 两个固定元素：各自永久绑一路流（远端 / 本端），互换只换 CSS 位置，从不重挂 srcObject
+const remoteVideoRef = ref(null)
+const localVideoRef = ref(null)
 /** 画中画尺寸：默认缩小，点右下角按钮放大 / 缩回（仅电脑端有这颗按钮） */
 const pipExpanded = ref(false)
 /**
@@ -196,12 +213,11 @@ const isDesktop =
 /**
  * 位置互换：false = 中间对方 + 右上我；true = 反过来。
  *
- * ★ 两端初值都是 true（中间＝我自己、右上＝对方）——用户先拿手机截图说只要第一张那种，
- * 本轮又拿电脑截图补了一句「我需要显示的是第一张图片的格式（中间我的画面、右上对方），
- * 而不是第二张（中间对方、右上我），在电脑端」，所以不再按 `isDesktop` 分端。
- * 点小窗仍可互换；上一轮他补的「显示格式不变」靠手机端主画面 cover 实现（见 @media）。
+ * ★ 两端初值都是 false（中间＝对方、右上＝我自己）——用户本轮明确要求
+ * 「视频通话主界面默认显示的是对方的视角而不是我的视角」，与之前几轮「默认中间＝自己」相反，
+ * 以本条为准。点小窗仍可互换；手机端主画面 cover 保证换前后都满屏无黑边（见 @media）。
  */
-const swapped = ref(true)
+const swapped = ref(false)
 
 const isVideo = computed(() => call.mediaType === 'video')
 /**
@@ -227,39 +243,42 @@ function onPipClick() {
 }
 
 /**
- * 把两路 MediaStream 挂到两个位置。
+ * 把两路 MediaStream 各自绑到自己的固定元素（一个元素只认一条流、永不变）。
  *
- * 为什么不能只 watch 流：通话中的 stage（两个 video）是 isPending 的 v-else 分支，
+ * 为什么不能只 watch 流：通话中的两个 video 在 isPending 的 v-else 分支里，
  * 振铃/呼叫阶段根本还没这个元素，而本地流在 dialing 里 initMedia() 时就 set 好了——
- * 只 watch 流会永远错过这一次，之后元素出现也没人再给它赋值，
- * 表现就是「右上角本端小窗整块黑」（远端流一般等接通后才到，反而撞上不了）。
- * 所以流、阶段、互换三个输入一起 watch，任一边变化都重挂；srcObject 相同则跳过，免得重新 play 把画面抖一下。
+ * 只 watch 流会错过这一次，所以连 isPending 一起 watch，元素一挂载就补绑。
+ *
+ * ★ 关键：这里只在「流对象本身变了」时赋一次 srcObject，且一条流永远只挂一个元素。
+ * 互换（swappedView 变化）不重新调这个、也不碰 srcObject，只改 class——因为移动端把一条
+ * 正在播放的流换到新 video 会白屏 / 卡第一帧。绑完不再动，从根上消除互换卡顿。
  */
-async function attachStreams() {
+async function bindStreams() {
   await nextTick()
-  attachTo(mainVideoRef.value, swappedView.value ? call.localStream : call.remoteStream)
-  attachTo(pipVideoRef.value, swappedView.value ? call.remoteStream : call.localStream)
+  bindStream(remoteVideoRef.value, call.remoteStream)
+  bindStream(localVideoRef.value, call.localStream)
 }
 
-function attachTo(el, stream) {
+function bindStream(el, stream) {
   if (!el || el.srcObject === stream) {
     return
   }
   el.srcObject = stream || null
   if (stream) {
+    // 移动端 autoplay 属性不一定自动起，显式 play() 一次；被策略拒时静默（属性会兼）
     el.play().catch(() => {})
   }
 }
 
-watch([() => call.remoteStream, () => call.localStream, isPending, swappedView], attachStreams, {
+watch([() => call.remoteStream, () => call.localStream, isPending], bindStreams, {
   immediate: true
 })
 
-// 每通新通话都回到默认：中间＝自己、右上＝对方；小窗都是缩小态
+// 每通新通话都回到默认：中间＝对方、右上＝自己；小窗都是缩小态
 watch(
   () => call.callId,
   () => {
-    swapped.value = true
+    swapped.value = false
     pipExpanded.value = false
   }
 )
@@ -351,16 +370,27 @@ watch(
   justify-content: center;
 }
 
-.call-overlay__main {
+/* ------------------------- 通话画面槽（主画面 / 画中画共用一个基类）-------------------------
+   两个 slot 元素永久各自绑一路流（远端 / 本端），谁铺满、谁在角落只由 --main / --pip
+   这两个「位置类」决定，互换时只切类、绝不重挂 srcObject——移动端（尤其 iOS Safari）把一条
+   正在播放的 MediaStream 换到新 <video> 会白屏 / 卡在第一帧（本端 getUserMedia 流尤其明显，
+   远端常能重挂，所以旧写法表现为「我的画面卡住、对方正常」）。位置与流彻底解耦。 */
+.call-overlay__slot {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  overflow: hidden;
   background: #000;
 }
 
-.call-overlay__main--hidden {
+.call-overlay__slot--main {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+/* 语音通话两路画面都不展示，但仍要留着元素（远端那颗是不静音的声音出口）：
+   用 opacity 归零而非 display: none，避免部分移动端把不渲染的视频元素降速 / 暂停解码 */
+.call-overlay__slot--hidden {
   opacity: 0;
   pointer-events: none;
 }
@@ -380,42 +410,46 @@ watch(
   color: #c9cdd4;
 }
 
-/* ------------------------- 右上角画中画 ------------------------- */
-/* 默认（缩小）态是旧尺寸的 1.5 倍；点右下角按钮再放大一档，点整块小窗与主画面互换 */
-.call-overlay__pip {
-  position: absolute;
+/* ------------------------- 画中画位置态 ------------------------- */
+/* 默认（缩小）态；点右下角按钮放大一档（仅电脑端有圆钮），点整块小窗与主画面互换（只切类） */
+.call-overlay__slot--pip {
   top: 24px;
   right: 24px;
   width: 270px;
   height: 192px;
   z-index: 2;
-  overflow: hidden;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.3);
   background: #111;
   transition: width 0.18s ease, height 0.18s ease;
 }
 
-/* 只有真能点（电脑端）才给手型，否则手机上看着可点其实没反应 */
-.call-overlay__pip--clickable {
-  cursor: pointer;
-}
-
-.call-overlay__pip--expanded {
+.call-overlay__slot--pip.call-overlay__slot--expanded {
   width: 405px;
   height: 288px;
 }
 
-.call-overlay__pip-video {
+/* 只有真能点（有互换目标）才给手型，否则看着可点其实没反应 */
+.call-overlay__slot--clickable {
+  cursor: pointer;
+}
+
+.call-overlay__slot-video {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* 主画面默认 contain：把对方竖屏流塞横屏窗口时 cover 会只剩下半张脸，比黑边更糟 */
+  object-fit: contain;
   background: #111;
 }
 
-/* 小窗角标：没有它时「中间是谁」全靠猜，而且互换后这个角标就是唯一提示 */
-.call-overlay__pip-tag {
+/* 小窗永远 cover：格子小，裁满比留边好看 */
+.call-overlay__slot--pip .call-overlay__slot-video {
+  object-fit: cover;
+}
+
+/* 角标：没有它时「中间是谁」全靠猜，而且互换后这个角标就是唯一提示 */
+.call-overlay__slot-tag {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -428,7 +462,7 @@ watch(
   pointer-events: none;
 }
 
-.call-overlay__pip-zoom {
+.call-overlay__slot-zoom {
   position: absolute;
   bottom: 6px;
   right: 6px;
@@ -445,7 +479,7 @@ watch(
   background: rgba(0, 0, 0, 0.45);
 }
 
-.call-overlay__pip-zoom:hover {
+.call-overlay__slot-zoom:hover {
   background: rgba(0, 0, 0, 0.7);
 }
 
@@ -579,27 +613,26 @@ watch(
 /* ------------------------- 手机窄屏 ------------------------- */
 /* 必须放在所有基础规则之后：同特异度下后写的规则赢，写在前面会被上面的基础值盖掉 */
 @media (max-width: 640px) {
-  /* 主画面改成裁满：用户要的是「怎么点都是第一张那种满屏格式」。
-     contain 下横屏流（电脑摄像头）放在竖屏里就是中间一条 + 上下大黑边，正是他不要的第二张。
-     代价是横屏流会被裁掉左右只剩中间约四分之一宽（看着像放大），这是满屏的必然取舍。 */
-  .call-overlay__main {
+  /* 主画面在手机上改成裁满：用户要「怎么点都是满屏那种格式」。contain 下横屏流放竖屏就是
+     中间一条 + 上下大黑边（他不要的第二张）。代价是横屏流被裁左右只剩中间，这是满屏的必然取舍。 */
+  .call-overlay__slot--main .call-overlay__slot-video {
     object-fit: cover;
   }
 
-  .call-overlay__pip {
+  .call-overlay__slot--pip {
     top: 12px;
     right: 12px;
     width: 150px;
     height: 111px;
   }
 
-  .call-overlay__pip--expanded {
+  .call-overlay__slot--pip.call-overlay__slot--expanded {
     width: 225px;
     height: 167px;
   }
 
   /* 22px 的圆钮在触屏上偏小，手指按不准 */
-  .call-overlay__pip-zoom {
+  .call-overlay__slot-zoom {
     width: 28px;
     height: 28px;
   }

@@ -295,8 +295,10 @@
         <el-button link type="danger" size="small" @click="emit('discard', message)">删除</el-button>
       </div>
 
-      <!-- 表情回应栏：有回应才占位；点 chip——自己贴过的再点取消，否则追加同款 -->
-      <div v-if="reactions.length" class="bubble__reactions">
+      <!-- 表情回应栏：有回应才占位；点 chip——自己贴过的再点取消，否则追加同款。
+           ★ reactEnabled：按需求手机浏览器 / App 不展示这个功能（连已存的 chip 也不显），
+           只在 PC 端给。数据照常同步，只是本端不渲染，回到电脑上看得到全部 -->
+      <div v-if="reactEnabled && reactions.length" class="bubble__reactions">
         <span
           v-for="r in reactions"
           :key="r.emoji"
@@ -304,7 +306,7 @@
           :class="{ 'is-self': r.self }"
           :title="r.self ? '取消我的回应' : '贴上同款表情'"
           @click.stop="toggleReaction(r)"
-        >{{ r.emoji }} <b>{{ r.count }}</b></span>
+        >{{ r.emoji }}</span>
       </div>
 
       <!-- 悬停浮现的快捷回应栏：纯 CSS hover，桌面端主用。
@@ -352,6 +354,7 @@ import WatermarkOverlay from './WatermarkOverlay.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useFriendStore } from '@/stores/friend'
+import { isPcPointer } from '@/utils/device'
 import { mediaUrl, downloadFile, isPreviewableFile, isVideo } from '@/utils/media'
 import { riskCategoryOf } from '@/utils/riskFile'
 import { formatDuration, formatFileSize } from '@/utils/format'
@@ -555,8 +558,15 @@ const flashViewed = computed(() => isFlash.value && extra.value.flashViewed === 
 
 /** 快捷回应表情集（悬停气泡时浮现）；与右键无关，点一下即贴、再点取消 */
 const quickEmojis = ['👍', '❤️', '😄', '😢', '🎉', '🔥']
-/** 已撤回与系统消息不提供回应入口 */
-const canReact = computed(() => !props.message.recalled && !isSystem.value && !!props.message.messageId)
+/**
+ * 表情回应只在 PC 端提供（用户明确要求：手机浏览器与 App 上不显示这个功能）。
+ *
+ * 模块级常量而不是每气泡一份：一台设备的指针类型不会中途变，上百个气泡各自算一次没意义。
+ * 只是「不给入口、不渲染 chip」，不是「不上报」：数据在服务端照存，换到电脑上看得全。
+ */
+const reactEnabled = isPcPointer()
+/** 已撤回与系统消息不提供回应入口；触屏端整个关掉 */
+const canReact = computed(() => reactEnabled && !props.message.recalled && !isSystem.value && !!props.message.messageId)
 const reactions = computed(() => (Array.isArray(props.message.reactions) ? props.message.reactions : []))
 /** 我已经贴过哪几个表情（服务端聚合结果里的 self）：快捷栏据此高亮，并决定下一次点击是贴还是撕 */
 const reactedSelf = computed(() => reactions.value.filter((r) => r.self === true).map((r) => r.emoji))

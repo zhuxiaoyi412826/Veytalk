@@ -73,7 +73,7 @@ export function reportDelivered(messageIds) {
 
 /**
  * 撤回消息。
- * 后端限制发出后撤回时限内（im.message.recall-limit-seconds，默认 2 小时）、且只有发送者本人（或持 message:recall:any 权限者）可撤。
+ * 后端限制发出后撤回时限内（im.message.recall-limit-seconds，默认 2 分钟）、且只有发送者本人（或持 message:recall:any 权限者）可撤；超出回 MESSAGE_RECALL_TIMEOUT。
  */
 export function recallMessage(messageId) {
   return http.put(`/message/${messageId}/recall`)
@@ -91,7 +91,8 @@ export function editMessage(messageId, content) {
 /**
  * 表情回应。
  * 对一条消息贴（remove=false）或取消（remove=true）一个表情，所有消息类型适用、已撤回不可；
- * 一人对一条消息的同一表情只计一次，重复添加服务端幂等。本人气泡由 reaction-notify 回执刷新。
+ * ★ 一人对一条消息只保留最后一个表情（换表情会顶掉旧的），重复点同一个服务端幂等。
+ * 回包带最新权威聚合视图，store 直接用它覆盖本端；其他端靠 reaction-notify 增量同步。
  */
 export function reactMessage(messageId, emoji, remove) {
   return http.post(`/message/${messageId}/reaction`, { emoji, remove })

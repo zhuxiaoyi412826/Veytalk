@@ -63,8 +63,14 @@ public class AiProperties {
         private String asrModel = "qwen3-asr-flash";
         /** 语音合成模型（omni 系列，输出 base64 wav 分片） */
         private String ttsModel = "qwen3-omni-flash";
-        /** 神经音色的说话人名（随 ttsModel 的型号而变，换模型时到这个模型的音色列表里选） */
-        private String ttsVoice = "Tina";
+        /**
+         * 神经音色的说话人名（随 ttsModel 的型号而变，换模型时到这个模型的音色列表里选）。
+         *
+         * <p>实测 qwen3-omni-flash 认 Cherry / Serena / Ethan / Chelsie / Bella，
+         * 不认 Tina 与 Nofa —— 送错名字厂商直接回 400 "Voice 'X' is not supported"，
+         * 整条朗读链路跟着失效，所以换模型时必须一起核对这里。
+         */
+        private String ttsVoice = "Cherry";
         /** ASR 单次转写超时（非流式，一问一答） */
         private Duration asrTimeout = Duration.ofSeconds(30);
         /** TTS 聚合超时（流式收完全部音频分片的总时长上限） */

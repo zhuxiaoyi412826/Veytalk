@@ -130,8 +130,8 @@ public class ImProperties {
 
     @Data
     public static class Message {
-        /** 撤回时限（秒），默认 2 小时 */
-        private int recallLimitSeconds = 7200;
+        /** 撤回时限（秒），默认 2 分钟（120 秒）；编辑时限与撤回同源，复用本值 */
+        private int recallLimitSeconds = 120;
         /** 历史消息默认每页条数 */
         private int historyPageSize = 20;
         /** 文本消息最大长度 */

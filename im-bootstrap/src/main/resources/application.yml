@@ -162,7 +162,9 @@ spring:
       audio:
         asr-model: ${AI_ASR_MODEL_NAME:qwen3-asr-flash}
         tts-model: ${AI_TTS_MODEL_NAME:qwen3-omni-flash}
-        tts-voice: ${AI_TTS_VOICE:Tina}
+        # 音色名必须落在所配 omni 模型的音色表里：实测 qwen3-omni-flash 不认 Tina（厂商回
+        # 400 "Voice 'Tina' is not supported"，朗读直接失败），Cherry 为其默认女声。
+        tts-voice: ${AI_TTS_VOICE:Cherry}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -436,8 +438,10 @@ im:
     max-text-length: 120
 
   message:
-    # 撤回时限（秒），默认 2 小时。超过这个时间的消息只能删除（仅本端不可见），不能撤回。
-    recall-limit-seconds: 7200
+    # 撤回时限（秒），默认 2 分钟（120 秒）。超过这个时间的消息不能再撤回，
+    # 前端仍展示撤回入口、点击后由后端回 MESSAGE_RECALL_TIMEOUT 提示「已经超出2分钟，无法撤回」。
+    # ★ 编辑时限与撤回同源（复用本值），改这里会同时把可编辑窗口变成 2 分钟。
+    recall-limit-seconds: 120
     history-page-size: 20
     max-text-length: 5000
     # 敏感词过滤：命中后遮成 * 再落库投递（不拒发），词库在 im-common 的

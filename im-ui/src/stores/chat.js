@@ -289,8 +289,11 @@ export const useChatStore = defineStore('chat', {
      *
      * 先塞一条本地占位（status=0 发送中）再发请求，用户按下回车立刻就能看到气泡。
      * 失败时不删除占位，而是标成 status=5，让用户能看见「这条没发出去」并重试。
+     *
+     * @param quote 调用方本地拼好的引用预览（由 ChatWindow 的 buildQuotePreview 产出）。
+     *              占位阶段就要带上：气泡上的引用块只认 message.quote，不带给回包前就是一片空白。
      */
-    async send(conversationId, { msgType, content, extra, atAll, atUserIds, clientMsgId, quoteMsgId }) {
+    async send(conversationId, { msgType, content, extra, atAll, atUserIds, clientMsgId, quoteMsgId, quote }) {
       const auth = useAuthStore()
       const id = clientMsgId || newClientMsgId()
       const now = new Date().toISOString()
@@ -306,6 +309,7 @@ export const useChatStore = defineStore('chat', {
           content,
           extra,
           quoteMsgId: quoteMsgId || null,
+          quote: quote || null,
           seq: null,
           status: 0,
           recalled: false,
@@ -574,12 +578,15 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
-     * 表情回应增量通知：data = { messageId, conversationId, userId, emoji, remove }。
+     * 表情回应增量通知：data = { messageId, conversationId, userId, emoji, remove, replaced? }。
      *
      * 服务端只推「谁对哪条消息加/删了哪个表情」这一条增量，不推权威快照（self 因人而异），
      * 所以这里必须在本地聚合列表上做加减。与 applyEdit 的赋值不同，increment 不幂等，
-     * 每个 notify 只能应用一次——react() 因此不做本地乐观更新，完全依赖这条回执（含本端）。
-     * 自己那一路用 userId==auth.userId 判 self；自己重复贴时 count 不 +1（防双计）。
+     * 每个 notify 只能应用一次。
+     *
+     * ★ replaced：一个用户在同一条消息上只保留最后一个表情，他换表情时旧表情被顶掉，
+     * 旧的那几个列在 replaced 里（只动这个人的份额）。必须先逐个减、再处理本条，
+     * 否则新 chip 加上去了、被顶掉的旧的还赖在栏里。
      */
     applyReaction(payload) {
       if (!payload) {
@@ -593,6 +600,10 @@ export const useChatStore = defineStore('chat', {
       }
       const isSelf = !!auth.userId && sameId(auth.userId, payload.userId)
       const list = Array.isArray(target.reactions) ? target.reactions.slice() : []
+      // 先清被顶掉的旧表情（自己换表情时连自己的 self 标记一起撤）
+      if (Array.isArray(payload.replaced)) {
+        payload.replaced.forEach((emoji) => this.reduceReaction(list, emoji, isSelf))
+      }
       const idx = list.findIndex((r) => r.emoji === payload.emoji)
       if (payload.remove) {
         if (idx >= 0) {
@@ -621,6 +632,51 @@ export const useChatStore = defineStore('chat', {
       }
       target.reactions = list
       dbUpsertMessage(payload.conversationId, target)
+    },
+
+    /**
+     * 在聚合列表里把某个表情的计数减一（归零则移掉）；就地改 list，不返回新数组。
+     *
+     * 从 applyReaction 的 remove 分支拆出来给 replaced 复用：两处语义完全一样，
+     * 写两遍迟早对不上。
+     */
+    reduceReaction(list, emoji, isSelf) {
+      const idx = list.findIndex((r) => r.emoji === emoji)
+      if (idx < 0) {
+        return
+      }
+      const item = { ...list[idx] }
+      item.count = Math.max(0, (item.count || 0) - 1)
+      if (isSelf) {
+        item.self = false
+      }
+      if (item.count <= 0) {
+        list.splice(idx, 1)
+      } else {
+        list[idx] = item
+      }
+    },
+
+    /**
+     * 用服务端回包的权威聚合结果整份覆盖本条的 reactions。
+     *
+     * 只给「自己动手」那一路用：reaction 接口本身就返最新视图，拿来直接用比等
+     * WebSocket 回执可靠得多——回执可能慢、可能因为 wss 没连上根本不到（手机端尤其明显，
+     * 自签证书被静默拒），而覆盖是幂等的，所以下一条 notify 再来也不会算重：
+     * add 分支已有 isSelf && self===true 的保护。
+     */
+    applyReactionSnapshot(conversationId, messageId, reactions) {
+      if (!messageId || !Array.isArray(reactions)) {
+        return
+      }
+      const key = this.bucket(conversationId)
+      const list = this.messages[key] || []
+      const target = list.find((item) => sameId(item.messageId, messageId))
+      if (!target) {
+        return
+      }
+      target.reactions = reactions.map((r) => ({ emoji: r.emoji, count: r.count || 0, self: r.self === true }))
+      dbUpsertMessage(conversationId, target)
     },
 
     /**
@@ -679,11 +735,15 @@ export const useChatStore = defineStore('chat', {
 
     /**
      * 表情回应（HTTP 通道）。
-     * 不做本地乐观更新：reaction-notify 会推给会话全员（含本端），由 applyReaction 统一应用一次，
-     * 避免本地改 + 回执再改导致 count 双计。失败由全局 toast 提示。
+     *
+     * ★ 不再丢弃回包：服务端在 react 里已经 attachReactions 好了最新权威视图，直接整份覆盖，
+     * 本端就不依赖 WebSocket 也能即时变对（旧写法完全靠 reaction-notify 回执，wss 一断
+     * 就是「点了没反应」）。随后到达的本端回执因为 count 不重复累加，不会算重。
      */
     async react(conversationId, messageId, emoji, remove) {
-      await messageApi.reactMessage(messageId, emoji, remove)
+      const vo = await messageApi.reactMessage(messageId, emoji, remove)
+      this.applyReactionSnapshot(conversationId, vo?.messageId || messageId, vo?.reactions)
+      return vo
     },
 
     /**

@@ -481,7 +481,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `AI_MODEL_NAME` | `qwen-flash` | 百炼模型名（也可换 qwen-plus / qwen-max） |
 | `AI_ASR_MODEL_NAME` | `qwen3-asr-flash` | 面试语音转写（ASR）模型名，与主管线同 key 不同模型 |
 | `AI_TTS_MODEL_NAME` | `qwen3-omni-flash` | 面试电话模式朗读（TTS）模型名；神经音色按输出 token 计费 |
-| `AI_TTS_VOICE` | `Tina` | 神经音色名（omni 支持的 voice）；系统音色档不经这里 |
+| `AI_TTS_VOICE` | `Cherry` | 神经音色名（必须在所配 omni 模型的音色表内：`qwen3-omni-flash` 实测认 Cherry/Serena/Ethan/Chelsie/Bella，不认 Tina）；系统音色档不经这里 |
 | `IM_AI_KNOWLEDGE_DIR` | `D:/资料/知识库/面试官` | AI 面试知识库目录，递归扫 `.md`/`.txt`，内容增删改后自动重建索引 |
 | `IM_LIVE_ENABLED` | `true` | 直播总开关；关掉则开播/观看接口与 `/ws/live` 弹幕端点全部拒绝服务 |
 | `IM_LIVE_PLAY_BASE_URL` | `/hls` | 观众播放基址（相对路径，前端按访问源补全：Web 同源、Electron 取「后端 host + 8088」）；生产换成 Nginx 播放口绝对地址 |
@@ -971,7 +971,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | PUT | `/{id}/edit` | 编辑本人已发出的文本消息（时限内，全员同步并标「已编辑」） |
 | POST | `/{id}/to-text` | 语音转文字（`SpeechToTextSpi` → im-ai 的 `DashScopeSpeechToTextSpi`，按 fileId 直读存储字节走百炼 `qwen3-asr-flash`；未配 key 时降级为提示） |
 | POST | `/{id}/translate` | 文本翻译（依赖 `TranslationSpi`，同上） |
-| POST | `/{id}/reaction` | 表情回应（贴 / 取消，`{emoji, remove}`；一人一消息一表情只计一次） |
+| POST | `/{id}/reaction` | 表情回应（贴 / 取消，`{emoji, remove}`）；★ **一人对一条消息只保留最后一个**表情（换表情顶掉旧的，被顶掉的列进通知的 `replaced`），重复点同一个幂等；回包带最新权威聚合视图。前端只在 **PC 端**（`(pointer: fine)`）给入口与渲染 chip，手机浏览器 / APP 不显示此功能但数据照常存 |
 | POST | `/{id}/vote` | 投票（`{options, close}`：整体替换旧票、空集合撤回本人、`close=true` 发起人截止） |
 | GET | `/group-media` | 群文件 / 群相册（`msgType=2` 图片 / `3` 文件，仅群成员） |
 | GET | `/group-essence` | 群精华消息分页（按标记时间倒序，仅群成员） |
@@ -1178,7 +1178,7 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | | `delivered-notify` / `read-notify` | 把送达/已读状态推回发送方 |
 | | `recall-notify` | 撤回通知 |
 | | `edit-notify` | 发送者改了正文，推新文本给全员（气泡标「已编辑」） |
-| | `reaction-notify` | 表情回应增量（`{messageId, emoji, delta, userId}`），推给会话全员含本端 |
+| | `reaction-notify` | 表情回应增量（`{messageId, conversationId, userId, emoji, remove, replaced?}`），推给会话全员含本端；`replaced` 只在非空时下发，列出本次被顶掉的旧表情（一人只留最后一个），各端先逐个减旧、再处理本条 |
 | | `vote-notify` | 投票权威票数（有人投 / 改票或发起人截止），推给会话全员 |
 | | `essence-notify` | 群精华标记变更，推给全群 |
 | | `favorite-notify` | 收藏标记变更（`{messageId, conversationId, favorite}`），**只推给操作者本人**（同一账号的多端同步） |

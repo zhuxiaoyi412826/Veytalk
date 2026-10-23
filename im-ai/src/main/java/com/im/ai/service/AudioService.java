@@ -98,11 +98,15 @@ public class AudioService {
         String audioFormat = normalizeAsrFormat(format);
         String dataUri = "data:;base64," + Base64.getEncoder().encodeToString(audioBytes);
 
+        // ★ content 里只能有 input_audio 这一项，不能再塞 text：qwen3-asr-flash 是 dedicated task
+        // 模型，实测多带一条转写指令会被厂商直接拒 —— 400
+        // "InternalError.Algo.InvalidParameter: The dedicated task `asr` corresponding to the
+        // current service does not support this input."，聊天转文字与面试「按住说话」因此全废。
+        // 原先那句「不加指令模型会回答音频内容」的护栏假设是从对话模型（omni）抄来的，
+        // 对本模型不成立：它只会转写，不需要也不接受额外指令。
         List<Map<String, Object>> content = new ArrayList<>();
         content.add(Map.of("type", "input_audio",
                 "input_audio", Map.of("data", dataUri, "format", audioFormat)));
-        // ASR 指令文本是护栏而非需求：不加时模型偶尔会「回答」音频内容而不是转写它
-        content.add(Map.of("type", "text", "text", "请逐字转写这段音频里的说话内容，只输出转写文本，不要添加任何解释"));
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", audio.getAsrModel());
