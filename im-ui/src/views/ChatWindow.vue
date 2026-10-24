@@ -480,11 +480,19 @@
       <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_PENDING_FILES }} 个（也可以 Ctrl+V 粘贴）</span>
     </div>
 
-    <!-- 录音遮罩：手指盖住了下边的按钮，上滑取消要变红、时长要能看见，所以在窗口中部再给一份 -->
-    <div v-if="talkActive && talkState !== 'idle'" class="chat-window__talk-mask" :class="{ 'is-cancel': talkState === 'cancel' }">
-      <el-icon :size="30"><Microphone /></el-icon>
-      <span class="chat-window__talk-seconds">{{ talkState === 'cancel' ? '松开手指，取消发送' : `${talkSeconds}″` }}</span>
-      <span class="chat-window__talk-tip">{{ talkState === 'cancel' ? '手指滑回下方可继续录音' : '松开发送 · 上滑取消' }}</span>
+    <!-- 录音遮罩（微信式三区）：左滑取消、右滑转文字、松手发语音。手指盖住了按钮，所以在窗口中部给一份可读反馈 -->
+    <div v-if="talkActive && talkState !== 'idle'" class="chat-window__talk-mask">
+      <div class="chat-window__talk-zone" :class="{ 'is-active': talkState === 'cancel' }">
+        <span>取消</span>
+      </div>
+      <div class="chat-window__talk-bubble">
+        <el-icon :size="30"><Microphone /></el-icon>
+        <span class="chat-window__talk-seconds">{{ talkSeconds }}″</span>
+        <span class="chat-window__talk-tip">{{ talkZoneTip }}</span>
+      </div>
+      <div class="chat-window__talk-zone" :class="{ 'is-active': talkState === 'toText' }">
+        <span>转文字</span>
+      </div>
     </div>
 
     <ContextMenu
@@ -816,6 +824,7 @@ import { uploadFileSmart } from '@/api/file'
 import { fetchQuickReplies, replaceQuickReplies } from '@/api/conversation'
 import { fetchWallet, transfer as transferApi, sendPacket, fetchPacket, claimPacket } from '@/api/wallet'
 import { searchMessages, clearConversationMessages, flashViewMessage, toMessageText, translateMessage } from '@/api/message'
+import { transcribeAudio } from '@/api/ai'
 import { downloadFile, readAudioDuration, readImageSize, readVideoMetadata, isVideo, mediaUrlAsync, mediaForget } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
 import { ocrImageText } from '@/utils/ocr'
@@ -1934,15 +1943,60 @@ function onTalkState(name, seconds) {
   talkSeconds.value = seconds || 0
 }
 
+/** 遮罩中部气泡的引导文案：随手指所在分区（录音/取消/转文字）切换 */
+const talkZoneTip = computed(() => {
+  if (talkState.value === 'cancel') {
+    return '松开手指，取消发送'
+  }
+  if (talkState.value === 'toText') {
+    return '松开转成文字并发送'
+  }
+  return '松开发送语音 · 左滑取消 · 右滑转文字'
+})
+
 /**
  * 录好的 WAV 直接交给现成的附件发送链路：包成 File 后 kindOf 按 audio/ 命中 'voice'，
  * 消息类型、bizType=chat_voice、时长读取、占位气泡与失败重发全部无需改动。
  */
-function onTalkResult({ blob }) {
+function onTalkResult({ blob, action }) {
+  // 右滑「转文字」：直接把这段音频转写并发成文本消息（微信式），不走上传链路
+  if (action === 'text') {
+    transcribeVoiceToTextAndSend(blob)
+    return
+  }
   const now = new Date()
   const pad = (n) => String(n).padStart(2, '0')
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   uploadAndSend(new File([blob], `语音_${stamp}.wav`, { type: 'audio/wav' }))
+}
+
+/**
+ * 录音右滑「转文字」：把刚录的 WAV 直接调 ASR 转写，成功即作为文本消息发出。
+ * 复用上传态 `uploading` 占住按钮（busy），转写期间不让连按。
+ * 识别为空 → 提示「没有识别到文字」；服务未配置/失败 → 弹后端原因（与微信一致，不静默吞）。
+ */
+async function transcribeVoiceToTextAndSend(blob) {
+  if (uploading.value) {
+    return
+  }
+  uploading.value = true
+  try {
+    const text = ((await transcribeAudio(blob)) || '').trim()
+    if (!text) {
+      ElMessage.warning('没有识别到文字，请确认是否说清楚了')
+      return
+    }
+    await chat.send(props.conversationId, { msgType: 1, content: text })
+  } catch (error) {
+    // 转写失败（服务未配置/网络）弹后端原因；文本发送失败（敏感词等）走业务错误文案
+    if (isBusinessError(error)) {
+      ElMessage.error(sendErrorText(error))
+    } else {
+      ElMessage.error(error?.message || '转文字失败，请稍后重试')
+    }
+  } finally {
+    uploading.value = false
+  }
 }
 
 /* ------------------------------ 常用语（快捷回复） ------------------------------ */
@@ -4005,19 +4059,44 @@ watch(key, async () => {
   inset: 0;
   z-index: 20;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
   color: #ffffff;
   background: rgba(0, 0, 0, 0.55);
   border-radius: 8px;
   pointer-events: none;
 }
 
-/* 上滑取消：整块转红，不看按钮也能知道松手会发生什么 */
-.chat-window__talk-mask.is-cancel {
-  background: rgba(245, 108, 108, 0.75);
+/* 左右两个落指区：滑到一侧即高亮（不靠颜色而靠“哪颗发白”区分当前分区） */
+.chat-window__talk-zone {
+  flex: none;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  background: rgba(255, 255, 255, 0.14);
+  transition: background 0.15s, color 0.15s, transform 0.15s;
+}
+
+.chat-window__talk-zone.is-active {
+  background: rgba(255, 255, 255, 0.92);
+  color: #303133;
+  transform: scale(1.08);
+}
+
+.chat-window__talk-bubble {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .chat-window__talk-seconds {

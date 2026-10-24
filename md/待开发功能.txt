@@ -25,8 +25,11 @@
 8. 面试结束后，可以对候选人整体方案打分并总结。
 
 
-手机共享功能开启，电脑上就会显示手机上的画面  
-然后电脑共享屏幕时，手机视频会自动翻转，横屏观看
+实现手机共享功能，电脑上就会显示手机上的画面  【现状：纯网页无法采集整机屏幕（iOS Safari 无 getDisplayMedia、Android 极不稳），
+  已按 A 方案实现：手机网页端点「共享」直接弹「网页端不支持，请在桌面端/APP 使用」；桌面浏览器/客户端仍可共享。
+  手机整屏采集只有原生 APP（Android MediaProjection / iOS ReplayKit）才能实现，留作后续】
+然后电脑共享屏幕时，手机视频会自动翻转，横屏观看  【已做：新增 call/screen 信令让接收端识别对方在共享 → 主画面强制 contain 不裁剪（全平台稳态），
+  移动端再尽力 requestFullscreen+orientation.lock('landscape') 自动横屏（Android 常需手势、iOS 不支持则静默降级为竖屏 contain）】
 
 
 会议功能

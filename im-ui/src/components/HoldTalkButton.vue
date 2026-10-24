@@ -4,6 +4,7 @@
     :class="{
       'hold-talk--recording': state === 'recording',
       'hold-talk--cancel': state === 'cancel',
+      'hold-talk--to-text': state === 'toText',
       'hold-talk--busy': busy,
       'hold-talk--off': disabled && !busy && state === 'idle'
     }"
@@ -11,7 +12,7 @@
     @pointerdown.prevent="startPress"
     @pointermove="onMove"
     @pointerup="releasePress"
-    @pointercancel="releasePress"
+    @pointercancel="cancelPress"
     @contextmenu.prevent
   >
     <slot name="icon">
@@ -28,7 +29,7 @@ import { Microphone } from '@element-plus/icons-vue'
 import { createSpeechRecorder } from '@/utils/audioRec'
 
 /**
- * 通用「按住说话」：按下开麦、松开交出一段音频、上滑取消。
+ * 通用「按住说话」：按下开麦，松手发语音、左滑取消、右滑转成文字发送（微信式分区）。
  *
  * 面试页（转成文字）与聊天页（发成语音消息）要的是同一段录音交互，
  * 差别只在「拿到音频之后干什么」，所以这里只管录、不碰识别也不碰上传：
@@ -57,8 +58,8 @@ const props = defineProps({
 
 const emit = defineEmits(['result', 'state', 'too-short', 'mic-denied'])
 
-/** 上滑超过这个距离判定为取消 */
-const SWIPE_CANCEL_PX = 80
+/** 左右滑动进入功能区（左=取消 / 右=转文字）所需的水平位移 */
+const SWIPE_ZONE_PX = 56
 /** 短于这个时长按「没说话」处理：误触一秒内的气泡对双方都是噪音 */
 const MIN_DURATION_MS = 300
 /**
@@ -67,11 +68,13 @@ const MIN_DURATION_MS = 300
  */
 const MAX_DURATION_MS = 60_000
 
-const state = ref('idle') // idle | recording | cancel
-let startY = 0
+const state = ref('idle') // idle | recording | cancel | toText
+let startX = 0
 let pressing = false
 let startedAt = 0
 let tickTimer = null
+/** 录音会话号：每按下一次自增，用来作废上一段可能还在 await 中的异步收尾，防旧音频误发进新一轮 */
+let session = 0
 const recorder = createSpeechRecorder()
 
 const labelText = computed(() => {
@@ -79,10 +82,13 @@ const labelText = computed(() => {
     return props.busyLabel
   }
   if (state.value === 'recording') {
-    return '松开 发送 · 上滑 取消'
+    return '松开 发送'
   }
   if (state.value === 'cancel') {
-    return '松开 取消发送'
+    return '松开 取消'
+  }
+  if (state.value === 'toText') {
+    return '松开 转文字'
   }
   return props.label
 })
@@ -111,7 +117,8 @@ function startPress(event) {
     return
   }
   pressing = true
-  startY = event.clientY
+  session += 1 // 作废上一段录音可能还在 await 中的收尾，避免它把旧音频误发进这一轮
+  startX = event.clientX
   startedAt = Date.now()
   state.value = 'recording'
   announce()
@@ -119,6 +126,12 @@ function startPress(event) {
   event.target.setPointerCapture?.(event.pointerId)
   // 每秒刷一次录音时长（聊天页的遮罩靠它读数）；到上限自动收尾，不等用户一直按着
   tickTimer = setInterval(() => {
+    // 只有「确实还按着、且计时有效」时才判时长；startedAt 为 0（已松手/复位）却残留的计时器
+    // 若不误判，就会 Date.now()-0 远超上限而秒发一条——移动端「按住却自动发送」的根因之一。
+    if (!pressing || !startedAt) {
+      stopTick()
+      return
+    }
     if (Date.now() - startedAt >= MAX_DURATION_MS) {
       releasePress(true)
       return
@@ -142,7 +155,14 @@ function onMove(event) {
   if (!pressing || props.busy) {
     return
   }
-  const next = startY - event.clientY > SWIPE_CANCEL_PX ? 'cancel' : 'recording'
+  // 微信式横向分区：左滑进「取消」、右滑进「转文字」，中间保持「录音」（松手即发语音）
+  const dx = event.clientX - startX
+  let next = 'recording'
+  if (dx <= -SWIPE_ZONE_PX) {
+    next = 'cancel'
+  } else if (dx >= SWIPE_ZONE_PX) {
+    next = 'toText'
+  }
   if (next !== state.value) {
     state.value = next
     announce()
@@ -158,7 +178,8 @@ async function releasePress(reachedMax = false) {
     return
   }
   pressing = false
-  const willCancel = state.value === 'cancel'
+  const mySession = session
+  const finalState = state.value // 'recording' 松手发语音 | 'cancel' 丢弃 | 'toText' 转文字发送
   state.value = 'idle'
   announce()
   startedAt = 0
@@ -166,28 +187,49 @@ async function releasePress(reachedMax = false) {
     recorder.cancel()
     // 权限弹窗或开轨还没完成就松手：以前这里静默 return，用户按了个寂寞。
     // 首次授权必然撞上，所以要说出来——不是失灵，是还没开始录。
-    if (!willCancel) {
+    if (finalState !== 'cancel') {
       ElMessage.info('麦克风还没准备好，请按住说完再松开')
     }
     return
   }
-  if (willCancel) {
-    recorder.cancel() // 上滑取消：直接丢帧，不再白白编码一段 WAV
+  if (finalState === 'cancel') {
+    recorder.cancel() // 左滑取消：直接丢帧，不再白白编码一段 WAV
     return
   }
   const result = await recorder.stop()
   if (!result) {
     return // 开轨还没完成就松手的竞态
   }
+  if (mySession !== session) {
+    return // 期间用户已重新按下：这段旧音频不该发出去
+  }
   if (result.durationMs < MIN_DURATION_MS) {
     emit('too-short')
     ElMessage.warning('说话时间太短，请按住按钮说完再松开')
     return
   }
-  if (reachedMax) {
-    ElMessage.info('已达单条录音上限，自动发送')
+  emit('result', {
+    blob: result.blob,
+    durationMs: result.durationMs,
+    action: finalState === 'toText' ? 'text' : 'voice'
+  })
+}
+
+/**
+ * 浏览器接管手势（页面滚动 / 缩放 / 系统弹窗）时会发 pointercancel，这不是「用户说完松手」，
+ * 绝不能当成发送——否则按住说话会被莫名甩出一条一两秒的语音（移动端“按住却自动发送”的主因）。
+ * 这里按「取消」丢弃这段并复位；正常的松手发送仍走 pointerup，不受影响。
+ */
+function cancelPress() {
+  if (!pressing) {
+    return
   }
-  emit('result', { blob: result.blob, durationMs: result.durationMs })
+  stopTick()
+  pressing = false
+  startedAt = 0
+  state.value = 'idle'
+  announce()
+  recorder.cancel()
 }
 
 function stopTick() {
@@ -242,6 +284,13 @@ onBeforeUnmount(() => {
 .hold-talk--cancel {
   background: #f56c6c;
   border-color: #f56c6c;
+  color: #ffffff;
+}
+
+/* 右滑转文字：微信绿高亮，与取消红、录音蓝区分 */
+.hold-talk--to-text {
+  background: #07c160;
+  border-color: #07c160;
   color: #ffffff;
 }
 

@@ -10,6 +10,7 @@ import { openRecordDir, fetchDefaultRecordDir } from '@/utils/recorder'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { asId } from '@/utils/id'
+import { isPcPointer } from '@/utils/device'
 import { dlog } from '@/utils/logger'
 
 /**
@@ -45,6 +46,8 @@ export const useCallStore = defineStore('call', () => {
   const muted = ref(false)
   const cameraOff = ref(false)
   const sharing = ref(false)
+  // 对端是否正在屏幕共享（由 screen 信令驱动）：本端据此把主画面改成不裁剪并尽力横屏观看
+  const remoteSharing = ref(false)
   const recording = ref(false)
   const seconds = ref(0)
   const hint = ref('')
@@ -378,11 +381,19 @@ export const useCallStore = defineStore('call', () => {
     if (mediaType.value !== 'video' || !engine) {
       return
     }
+    // L28：屏幕共享只有桌面 / 原生 APP 具备采集能力，手机网页端点这里直接弹提示、不去调 getDisplayMedia
+    // （iOS Safari 无该 API、Android 极不稳定；判据与表情 PC-only 同一把尺 isPcPointer）
+    if (!isPcPointer()) {
+      ElMessage.warning('网页端不支持屏幕共享，请在桌面端或 APP 中使用')
+      return
+    }
     try {
       const ok = await engine.setScreenShare(!sharing.value)
       if (ok) {
         sharing.value = !sharing.value
         hint.value = sharing.value ? '正在共享屏幕' : ''
+        // L29：把共享状态广播给对端，接收端据此识别「对方在共享」并调整观看布局
+        wsSend('call', { action: 'screen', callId: callId.value, sharing: sharing.value })
       }
     } catch {
       hint.value = '屏幕共享已取消'
@@ -504,6 +515,10 @@ export const useCallStore = defineStore('call', () => {
           await engine.handleCandidate(data.candidate)
         }
         break
+      case 'screen':
+        // 对端开始 / 停止屏幕共享：只切一个标志，界面（CallOverlay）据此改主画面的裁剪与横屏
+        remoteSharing.value = !!data.sharing
+        break
       case 'reject':
         // 主叫收到被叫拒绝
         if (role.value === 'caller') {
@@ -587,6 +602,7 @@ export const useCallStore = defineStore('call', () => {
     muted.value = false
     cameraOff.value = false
     sharing.value = false
+    remoteSharing.value = false
     recording.value = false
     startedAtTs = 0
     wasConnected = false
@@ -676,6 +692,7 @@ export const useCallStore = defineStore('call', () => {
     muted.value = false
     cameraOff.value = false
     sharing.value = false
+    remoteSharing.value = false
     recording.value = false
     minimized.value = false
     localStream.value = null
@@ -707,6 +724,7 @@ export const useCallStore = defineStore('call', () => {
     muted,
     cameraOff,
     sharing,
+    remoteSharing,
     recording,
     seconds,
     hint,

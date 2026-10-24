@@ -108,7 +108,7 @@ public class CallSignalingService {
             case "reject" -> handleTerminate(me, deviceId, payload, "reject");
             case "cancel" -> handleTerminate(me, deviceId, payload, "cancel");
             case "hangup" -> handleTerminate(me, deviceId, payload, "hangup");
-            case "offer", "answer", "ice" -> handleRelay(me, deviceId, payload);
+            case "offer", "answer", "ice", "screen" -> handleRelay(me, deviceId, payload);
             default -> throw new BusinessException(ResultCode.BAD_REQUEST, "未知的 call action: " + payload.getAction());
         }
     }
@@ -239,6 +239,8 @@ public class CallSignalingService {
         out.setSdpType(payload.getSdpType());
         out.setSdp(payload.getSdp());
         out.setCandidate(payload.getCandidate());
+        // screen 动作只带共享布尔态，其余动作此字段为 null，中继时原样搬过去即可
+        out.setSharing(payload.getSharing());
         if (me.equals(state.getCallerUserId())) {
             pushToCallee(state, out);
         } else {

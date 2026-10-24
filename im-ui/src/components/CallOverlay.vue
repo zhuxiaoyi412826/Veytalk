@@ -38,7 +38,7 @@
       </div>
 
       <!-- ==================== 通话中 ==================== -->
-      <div v-else class="call-overlay__stage">
+      <div v-else ref="stageRef" class="call-overlay__stage">
         <!-- ★ 两路流各自固定绑一个 <video>，互换只切 CSS 位置（main / pip），绝不重挂 srcObject。
              移动端（尤其 iOS Safari）把一条正在播放的 MediaStream 换到新 video 会白屏 / 卡在第一帧
              （本端 getUserMedia 流尤其明显、远端常能重挂，所以表现为「我的画面卡住、对方正常」），
@@ -48,6 +48,7 @@
           :class="{
             'call-overlay__slot--pip': swappedView,
             'call-overlay__slot--main': !swappedView,
+            'call-overlay__slot--contain': call.remoteSharing,
             'call-overlay__slot--expanded': swappedView && pipExpanded,
             'call-overlay__slot--clickable': swappedView,
             'call-overlay__slot--hidden': !isVideo
@@ -67,15 +68,22 @@
         </div>
 
         <div
+          ref="localSlotRef"
           class="call-overlay__slot"
           :class="{
             'call-overlay__slot--main': swappedView,
             'call-overlay__slot--pip': !swappedView,
+            'call-overlay__slot--mini': localDraggable,
             'call-overlay__slot--expanded': !swappedView && pipExpanded,
             'call-overlay__slot--clickable': !swappedView,
             'call-overlay__slot--hidden': !isVideo
           }"
-          @click="!swappedView && onPipClick()"
+          :style="localPipStyle"
+          @click="onLocalSlotClick"
+          @pointerdown="onLocalPointerDown"
+          @pointermove="onLocalPointerMove"
+          @pointerup="onLocalPointerUp"
+          @pointercancel="onLocalPointerUp"
         >
           <video ref="localVideoRef" class="call-overlay__slot-video" muted autoplay playsinline />
           <span v-if="isVideo && !swappedView" class="call-overlay__slot-tag">我</span>
@@ -98,10 +106,11 @@
 
         <!-- 顶部信息条（视频通话时叠在主画面上）：主画面是谁由 swappedView 决定 -->
         <div v-if="isVideo" class="call-overlay__topbar">
-          <span class="call-overlay__topbar-name">{{ swappedView ? '我的画面' : peerName }}</span>
+          <span class="call-overlay__topbar-name">{{ swappedView ? '我的画面' : (call.remoteSharing ? '对方共享的屏幕' : peerName) }}</span>
           <span class="call-overlay__timer">{{ elapsedText }}</span>
           <span v-if="call.recording" class="call-overlay__rec-dot">● 录制中</span>
           <span v-if="call.sharing" class="call-overlay__share-tag">共享中</span>
+          <span v-if="call.remoteSharing" class="call-overlay__share-tag">对方共享中</span>
         </div>
 
         <div v-if="call.hint" class="call-overlay__hint call-overlay__hint--stage">{{ call.hint }}</div>
@@ -149,6 +158,27 @@
             <span>{{ call.sharing ? '停止共享' : '共享' }}</span>
           </button>
 
+          <!-- L29：接收端横屏观看。★ 只有对端在共享、且是移动端才给；由用户点击（带手势），Android 才能锁向 -->
+          <button
+            v-if="isVideo && !isDesktop && call.remoteSharing && !landscapeOn"
+            class="call-btn call-btn--ghost"
+            title="横屏观看对方共享的屏幕"
+            @click="enterLandscape()"
+          >
+            <el-icon :size="20"><FullScreen /></el-icon>
+            <span>横屏观看</span>
+          </button>
+
+          <button
+            v-if="landscapeOn"
+            class="call-btn call-btn--ghost"
+            title="返回竖屏 / 退出全屏"
+            @click="exitLandscape()"
+          >
+            <el-icon :size="20"><Back /></el-icon>
+            <span>返回</span>
+          </button>
+
           <button
             v-if="call.recordSupported"
             class="call-btn call-btn--ghost"
@@ -170,8 +200,8 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, nextTick } from 'vue'
-import { Microphone, Minus, Monitor, Mute, PhoneFilled, VideoCamera, VideoCameraFilled, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { Back, FullScreen, Microphone, Minus, Monitor, Mute, PhoneFilled, VideoCamera, VideoCameraFilled, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useCallStore } from '@/stores/call'
 import { useAuthStore } from '@/stores/auth'
@@ -201,6 +231,10 @@ const friends = useFriendStore()
 // 两个固定元素：各自永久绑一路流（远端 / 本端），互换只换 CSS 位置，从不重挂 srcObject
 const remoteVideoRef = ref(null)
 const localVideoRef = ref(null)
+// 通话舞台：对端共享屏幕时要对它请求全屏（L29 尽力横屏的前提）
+const stageRef = ref(null)
+// 本端「我的摄像头」那一格：共享屏幕时要把它做成可拖动的悬浮小窗
+const localSlotRef = ref(null)
 /** 画中画尺寸：默认缩小，点右下角按钮放大 / 缩回（仅电脑端有这颗按钮） */
 const pipExpanded = ref(false)
 /**
@@ -243,6 +277,97 @@ function onPipClick() {
 }
 
 /**
+ * 屏幕共享时把「我的摄像头」这一格缩到一半、并做成可自由拖动的悬浮小窗。
+ *
+ * 为什么单独处理：横屏看对方共享的整屏内容时，本端预览既不该占那么大、也不该死钉在右上角
+ * 挡住共享内容。只在「对端正在共享 + 本端处于画中画位（未互换）+ 视频通话」时启用。
+ * 拖动沿用 CallFloatWindow 那套 pointer 范式：4px 位移阈值区分「拖动 vs 点击」，
+ * setPointerCapture 让手指移出元素也不丢事件，clamp 夹在视口内别拖出屏幕。
+ */
+const localDraggable = computed(() => call.remoteSharing && !swappedView.value && isVideo.value)
+/** null = 没拖过，走 CSS 右上角默认位；一旦拖动换成 left/top（继续用 right 鼠标一动会朝反方向跑） */
+const localPos = ref(null)
+const localPipStyle = computed(() =>
+  localPos.value && localDraggable.value
+    ? { left: `${localPos.value.x}px`, top: `${localPos.value.y}px`, right: 'auto' }
+    : {}
+)
+
+let localDragging = false
+let localMoved = false
+let localStartClient = { x: 0, y: 0 }
+let localStartRect = { x: 0, y: 0 }
+
+function clampNum(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max))
+}
+
+function onLocalPointerDown(event) {
+  if (!localDraggable.value || (event.button != null && event.button !== 0)) {
+    return
+  }
+  const el = localSlotRef.value
+  if (!el) {
+    return
+  }
+  // 落在缩放圆钮上的按下不开拖动（否则会一下拖一下点，两件事同时发生）
+  if (event.target instanceof Element && event.target.closest('.call-overlay__slot-zoom')) {
+    return
+  }
+  const rect = el.getBoundingClientRect()
+  localPos.value = { x: rect.left, y: rect.top }
+  localStartRect = { x: rect.left, y: rect.top }
+  localStartClient = { x: event.clientX, y: event.clientY }
+  localDragging = true
+  localMoved = false
+  if (el.setPointerCapture && event.pointerId != null) {
+    el.setPointerCapture(event.pointerId)
+  }
+}
+
+function onLocalPointerMove(event) {
+  if (!localDragging) {
+    return
+  }
+  const dx = event.clientX - localStartClient.x
+  const dy = event.clientY - localStartClient.y
+  if (!localMoved && Math.abs(dx) <= 4 && Math.abs(dy) <= 4) {
+    return
+  }
+  localMoved = true
+  const el = localSlotRef.value
+  if (!el) {
+    return
+  }
+  localPos.value = {
+    x: clampNum(localStartRect.x + dx, 8, window.innerWidth - el.offsetWidth - 8),
+    y: clampNum(localStartRect.y + dy, 8, window.innerHeight - el.offsetHeight - 8)
+  }
+}
+
+function onLocalPointerUp() {
+  localDragging = false
+}
+
+/** 拖动后松手浏览器仍会补一次 click，这里吃掉「刚拖动过」的那次，避免误触发小窗与主画面互换 */
+function onLocalSlotClick() {
+  if (localMoved) {
+    localMoved = false
+    return
+  }
+  if (!swappedView.value) {
+    onPipClick()
+  }
+}
+
+// 退出共享 / 换到主画面位时把拖动位复位，下次进共享回到右上角默认位
+watch(localDraggable, (on) => {
+  if (!on) {
+    localPos.value = null
+  }
+})
+
+/**
  * 把两路 MediaStream 各自绑到自己的固定元素（一个元素只认一条流、永不变）。
  *
  * 为什么不能只 watch 流：通话中的两个 video 在 isPending 的 v-else 分支里，
@@ -280,6 +405,82 @@ watch(
   () => {
     swapped.value = false
     pipExpanded.value = false
+    localPos.value = null
+  }
+)
+
+/**
+ * L29：对端共享屏幕时的「横屏观看」。
+ *
+ * ★ 为何需要手动按钮：requestFullscreen / orientation.lock 都要求「用户手势」，而对端一开始共享
+ * 就触发的 watch 回调没有手势——Android 几乎总直接拒，iOS 更是两个 API 都不支持。自动这条路仍走
+ * （能成就省一次点击），但真正可靠的是下面那颗由用户点击的「横屏观看」按钮。
+ * 无论横屏成不成，画面都靠 CSS 的 --contain 保证完整不裁剪（全平台稳态）。
+ */
+const landscapeOn = ref(false)
+
+/** 进入横屏全屏：用户点击（带手势）时 Android 可成功；iOS 无 orientation.lock，退化为竖屏 contain */
+async function enterLandscape() {
+  const el = stageRef.value
+  if (!el) {
+    return
+  }
+  try {
+    if (document.fullscreenElement !== el && el.requestFullscreen) {
+      await el.requestFullscreen()
+    }
+    if (screen.orientation && screen.orientation.lock) {
+      await screen.orientation.lock('landscape')
+    }
+  } catch {
+    /* 锁向被拒（iOS 不支持）：全屏可能已生效，以下面按实际全屏态回写 */
+  }
+  landscapeOn.value = !!document.fullscreenElement
+}
+
+/** 退出横屏全屏：解锁方向 + 退全屏，回到正常通话浮层 */
+async function exitLandscape() {
+  try {
+    if (screen.orientation && screen.orientation.unlock) {
+      screen.orientation.unlock()
+    }
+    if (document.fullscreenElement && document.exitFullscreen) {
+      await document.exitFullscreen()
+    }
+  } catch {
+    /* 退出失败不影响状态复位 */
+  }
+  landscapeOn.value = false
+}
+
+// 用户按 ESC / 浏览器手势退全屏时，本地态要跟上，否则「返回」按钮会因态不同步而失联
+function onFullscreenChange() {
+  landscapeOn.value = !!document.fullscreenElement
+}
+
+onMounted(() => {
+  if (typeof document !== 'undefined') {
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+  }
+})
+onBeforeUnmount(() => {
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }
+})
+
+/** 对端开始 / 停止共享时自动进出横屏（best-effort，无手势多半会失败，不报错） */
+watch(
+  () => call.remoteSharing,
+  (on) => {
+    if (isDesktop) {
+      return
+    }
+    if (on) {
+      enterLandscape()
+    } else {
+      exitLandscape()
+    }
   }
 )
 </script>
@@ -429,6 +630,15 @@ watch(
   height: 288px;
 }
 
+/* ★ 屏幕共享时本端预览：缩到 pip 的一半并做成可拖动悬浮窗。双类 (0,2,0) 盖过 --pip 的尺寸，
+   touch-action:none 让触屏拖动不被浏览器当页面滚动吃掉，cursor:move 提示可拖 */
+.call-overlay__slot--pip.call-overlay__slot--mini {
+  width: 135px;
+  height: 96px;
+  cursor: move;
+  touch-action: none;
+}
+
 /* 只有真能点（有互换目标）才给手型，否则看着可点其实没反应 */
 .call-overlay__slot--clickable {
   cursor: pointer;
@@ -446,6 +656,13 @@ watch(
 /* 小窗永远 cover：格子小，裁满比留边好看 */
 .call-overlay__slot--pip .call-overlay__slot-video {
   object-fit: cover;
+}
+
+/* ★ 对端共享屏幕：强制 contain，整块桌面 16:9 内容放手机竖屏也不裁剪（cover 会裁成中间一条）。
+   用双类选择器把特异度抬到 (0,3,0)，盖过上面 --main/--pip 的 cover（(0,2,0)），无需 !important、也不必进 @media */
+.call-overlay__slot--main.call-overlay__slot--contain .call-overlay__slot-video,
+.call-overlay__slot--pip.call-overlay__slot--contain .call-overlay__slot-video {
+  object-fit: contain;
 }
 
 /* 角标：没有它时「中间是谁」全靠猜，而且互换后这个角标就是唯一提示 */
@@ -629,6 +846,11 @@ watch(
   .call-overlay__slot--pip.call-overlay__slot--expanded {
     width: 225px;
     height: 167px;
+  }
+
+  .call-overlay__slot--pip.call-overlay__slot--mini {
+    width: 75px;
+    height: 55px;
   }
 
   /* 22px 的圆钮在触屏上偏小，手指按不准 */

@@ -75,6 +75,8 @@ public enum ResultCode {
     MESSAGE_TRANSLATE_UNSUPPORTED(5013, "只有未撤回的文本消息支持翻译"),
     MESSAGE_TO_TEXT_UNAVAILABLE(5014, "语音转文字服务未配置或暂不可用"),
     MESSAGE_TRANSLATE_UNAVAILABLE(5015, "消息翻译服务未配置或暂不可用"),
+    /* 识别结果为空（静音/没说话/声音太短）：与「服务未配置」是两回事，单独给码让前端分开提示 */
+    MESSAGE_TO_TEXT_EMPTY(5016, "没有识别到文字，请确认是否说清楚了"),
 
     /* ==================== 6xxx 群组 ==================== */
     GROUP_NOT_FOUND(6001, "群组不存在"),

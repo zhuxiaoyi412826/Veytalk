@@ -571,7 +571,8 @@ public class MessageServiceImpl implements MessageService {
                 extra == null ? null : extra.getFileUrl(),
                 extra == null ? null : extra.getDuration());
         if (TextUtil.isBlank(text)) {
-            throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_UNAVAILABLE);
+            // 识别为空是「没听清/静音」，与「服务未配置」分开：前者提示重说，后者才提示配置
+            throw new BusinessException(ResultCode.MESSAGE_TO_TEXT_EMPTY);
         }
         return text;
     }

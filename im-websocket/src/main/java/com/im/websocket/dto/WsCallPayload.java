@@ -18,6 +18,7 @@ import java.io.Serializable;
  *   <li>{@code accept}/{@code reject}/{@code cancel}/{@code hangup} —— {@link #callId}（hangup/cancel 另带 {@link #reason}）</li>
  *   <li>{@code offer}/{@code answer} —— {@link #callId} + {@link #sdpType} + {@link #sdp}</li>
  *   <li>{@code ice} —— {@link #callId} + {@link #candidate}（原样透传的 RTCIceCandidate JSON）</li>
+ *   <li>{@code screen} —— {@link #callId} + {@link #sharing}（对端开始 / 停止屏幕共享的状态广播）</li>
  * </ul>
  * 合法性（callId 是否存在、发送方是否为该通话的当事人）全部在 {@code CallSignalingService} 里判，
  * 不依赖这里的字段约束。
@@ -28,7 +29,7 @@ public class WsCallPayload implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** 信令子类型：invite / accept / reject / cancel / offer / answer / ice / hangup */
+    /** 信令子类型：invite / accept / reject / cancel / offer / answer / ice / screen / hangup */
     private String action;
 
     /** 通话 ID，由主叫生成的 uuid，同一次通话的所有信令共享 */
@@ -54,6 +55,12 @@ public class WsCallPayload implements Serializable {
 
     /** 挂断 / 取消原因，可选，用于前端文案（如 busy / timeout / user-hangup） */
     private String reason;
+
+    /**
+     * 屏幕共享状态，仅 {@code screen} 动作使用：true 开始共享、false 停止共享。
+     * 服务端不理解其语义，只随 {@code handleRelay} 原样中继给对端，让接收端据此调整观看布局。
+     */
+    private Boolean sharing;
 
     /**
      * 信令发起方用户 ID，仅下行由服务端填充（取连接身份），客户端上行填了也会被覆盖。
