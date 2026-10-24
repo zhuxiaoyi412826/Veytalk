@@ -211,10 +211,11 @@
         <el-tooltip content="发送位置（一个坐标 + 文字地址，对方可在地图里打开）" placement="top">
           <el-button text :icon="Location" @click="openLocationPicker" />
         </el-tooltip>
-        <el-tooltip content="发起投票（一个主题 + 多个选项，成员可选并实时计票）" placement="top">
+        <!-- 投票/接龙只给群聊：计票与汇总的对象是「群成员」，单聊好友之间没有这个语义，入口隐藏 -->
+        <el-tooltip v-if="isGroup" content="发起投票（一个主题 + 多个选项，成员可选并实时计票）" placement="top">
           <el-button text :icon="Histogram" @click="openVoteDialog" />
         </el-tooltip>
-        <el-tooltip content="发起接龙（一个主题，成员依次加入自己的一条，实时汇总）" placement="top">
+        <el-tooltip v-if="isGroup" content="发起接龙（一个主题，成员依次加入自己的一条，实时汇总）" placement="top">
           <el-button text :icon="Operation" @click="openChainDialog" />
         </el-tooltip>
         <!-- 转账只给单聊：群聊里「转给会话」没有明确目标，一人转全群等于变相发红包，那条路已经有入口 -->
@@ -225,7 +226,7 @@
           <el-button text :icon="Present" @click="openPacketDialog" />
         </el-tooltip>
 
-        <!-- 常用语：点一条就填进输入框（不自动发），「管理」里才能增删 -->
+        <!-- 常用语：点一条直接发送，行右侧铅笔才是「先填入输入框」；增删在「管理」里 -->
         <el-popover
           v-model:visible="quickVisible"
           placement="top-start"
@@ -253,10 +254,18 @@
                 v-for="(q, idx) in quickList"
                 :key="idx"
                 class="chat-window__quick-item"
-                title="点击填入输入框"
-                @click="useQuickReply(q)"
+                title="点击直接发送"
+                @click="sendQuickReply(q)"
               >
-                {{ q }}
+                <span class="chat-window__quick-item-text">{{ q }}</span>
+                <el-button
+                  class="chat-window__quick-insert"
+                  text
+                  size="small"
+                  :icon="EditPen"
+                  title="填入输入框（不直接发送）"
+                  @click.stop="useQuickReply(q)"
+                />
               </div>
               <div v-if="quickLoading" class="chat-window__quick-empty">加载中…</div>
               <div v-else-if="!quickList.length" class="chat-window__quick-empty">
@@ -480,18 +489,29 @@
       <span class="chat-window__drop-sub">图片 / 文件 / 视频都能拖进来，一次最多 {{ MAX_PENDING_FILES }} 个（也可以 Ctrl+V 粘贴）</span>
     </div>
 
-    <!-- 录音遮罩（微信式三区）：左滑取消、右滑转文字、松手发语音。手指盖住了按钮，所以在窗口中部给一份可读反馈 -->
+    <!-- 录音遮罩（微信同款三层）：中部波形气泡悬空、底部两颗落点胶囊、最底「松开」面板。
+         手指盖住了按钮，所以在窗口中部给可读反馈；整体 pointer-events:none 不抢手势 -->
     <div v-if="talkActive && talkState !== 'idle'" class="chat-window__talk-mask">
-      <div class="chat-window__talk-zone" :class="{ 'is-active': talkState === 'cancel' }">
-        <span>取消</span>
+      <div class="chat-window__talk-stage">
+        <div class="chat-window__talk-bubble">
+          <div class="chat-window__talk-wave">
+            <span
+              v-for="(h, i) in TALK_WAVE"
+              :key="i"
+              class="chat-window__talk-bar"
+              :style="{ height: h * 100 + '%', animationDelay: (i % 5) * -0.16 + 's' }"
+            />
+          </div>
+          <span class="chat-window__talk-seconds">{{ talkSeconds }}″</span>
+        </div>
+        <div class="chat-window__talk-tip">{{ talkZoneTip }}</div>
       </div>
-      <div class="chat-window__talk-bubble">
-        <el-icon :size="30"><Microphone /></el-icon>
-        <span class="chat-window__talk-seconds">{{ talkSeconds }}″</span>
-        <span class="chat-window__talk-tip">{{ talkZoneTip }}</span>
+      <div class="chat-window__talk-pills">
+        <div class="chat-window__talk-pill chat-window__talk-pill--cancel" :class="{ 'is-active': talkState === 'cancel' }">取消</div>
+        <div class="chat-window__talk-pill chat-window__talk-pill--text" :class="{ 'is-active': talkState === 'toText' }">滑到这里 转文字</div>
       </div>
-      <div class="chat-window__talk-zone" :class="{ 'is-active': talkState === 'toText' }">
-        <span>转文字</span>
+      <div class="chat-window__talk-sheet" :class="{ 'is-cancel': talkState === 'cancel', 'is-text': talkState === 'toText' }">
+        {{ talkSheetText }}
       </div>
     </div>
 
@@ -589,7 +609,10 @@
           @click="sendCard(f)"
         >
           <UserAvatar :src="f.avatar" :name="friendDisplayName(f)" :size="36" />
-          <div class="chat-window__card-item-name im-ellipsis">{{ friendDisplayName(f) }}</div>
+          <div class="chat-window__card-item-name im-ellipsis">
+            {{ friendDisplayName(f) }}
+            <span v-if="f.isSelf" class="chat-window__card-self">我的名片</span>
+          </div>
           <el-button link type="primary" size="small">发送</el-button>
         </div>
       </div>
@@ -798,7 +821,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Operation, Plus, Collection, Coin, Present, Delete as DeleteIcon } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Close, Delete, Document, FolderOpened, Grid, Location, Microphone, Picture, Postcard, Refresh, Search, Select, Setting, Sunny, User, VideoCamera, Finished, Histogram, Operation, Plus, Collection, Coin, Present, EditPen, Delete as DeleteIcon } from '@element-plus/icons-vue'
 import MessageBubble from '@/components/MessageBubble.vue'
 import HoldTalkButton from '@/components/HoldTalkButton.vue'
 import EmojiPicker from '@/components/EmojiPicker.vue'
@@ -957,13 +980,20 @@ function openProfile() {
 const cardPicker = reactive({ visible: false, keyword: '' })
 const cardCandidates = computed(() => {
   const kw = (cardPicker.keyword || '').trim().toLowerCase()
-  if (!kw) {
-    return friends.friends
-  }
-  return friends.friends.filter((f) => {
-    const name = (f.remark || f.displayName || f.nickname || '').toLowerCase()
-    return name.includes(kw) || String(f.friendId).includes(kw)
-  })
+  // 「我的名片」排第一位（微信也是把自己放在好友前面）：服务端名片校验只要求
+  // 目标用户存在、不要求好友关系，所以发自己走的是同一条链路，零后端改动
+  const self = { friendId: auth.userId, nickname: auth.nickname, avatar: auth.avatarRaw, isSelf: true }
+  const list = !kw
+    ? friends.friends
+    : friends.friends.filter((f) => {
+        const name = (f.remark || f.displayName || f.nickname || '').toLowerCase()
+        return name.includes(kw) || String(f.friendId).includes(kw)
+      })
+  const selfMatched =
+    !kw ||
+    (self.nickname || '').toLowerCase().includes(kw) ||
+    String(self.friendId || '').includes(kw)
+  return self.friendId && selfMatched ? [self, ...list] : list
 })
 
 function openCardPicker() {
@@ -1939,20 +1969,39 @@ function toggleVoiceMode() {
 }
 
 function onTalkState(name, seconds) {
+  // 滑入功能区给一次短震动（微信也有）：只在分区变化时振，每秒计时刷新与回 idle 不振；
+  // iOS Safari 没有 navigator.vibrate，可选链直接跳过
+  if (name !== talkState.value && (name === 'cancel' || name === 'toText')) {
+    navigator.vibrate?.(35)
+  }
   talkState.value = name
   talkSeconds.value = seconds || 0
 }
 
-/** 遮罩中部气泡的引导文案：随手指所在分区（录音/取消/转文字）切换 */
+/** 气泡下方的小字提示：录音态引导滑动，进入分区后确认动作 */
 const talkZoneTip = computed(() => {
   if (talkState.value === 'cancel') {
     return '松开手指，取消发送'
   }
   if (talkState.value === 'toText') {
-    return '松开转成文字并发送'
+    return '松开手指，转成文字发送'
   }
-  return '松开发送语音 · 左滑取消 · 右滑转文字'
+  return '手指不离开屏幕 · 左滑取消 · 右滑转文字'
 })
+
+/** 最底面板的大字：与微信一致，随手指所在分区切换 */
+const talkSheetText = computed(() => {
+  if (talkState.value === 'cancel') {
+    return '松开 取消'
+  }
+  if (talkState.value === 'toText') {
+    return '松开 转文字'
+  }
+  return '松开 发送'
+})
+
+/** 波形条的固定高度配比（伪随机排布）：CSS 动画摆动即可，不值得接真实音量 */
+const TALK_WAVE = [0.3, 0.62, 0.44, 0.88, 0.52, 1, 0.68, 0.38, 0.84, 0.5, 0.94, 0.58, 0.34, 0.72]
 
 /**
  * 录好的 WAV 直接交给现成的附件发送链路：包成 File 后 kindOf 按 audio/ 命中 'voice'，
@@ -2025,7 +2074,7 @@ async function onQuickShow() {
   }
 }
 
-/** 点某一条：追加到输入框末尾，不自动发送——发不发、要不要再补一句，留给用户 */
+/** 点某一条右侧铅笔：追加到输入框末尾，不自动发送——发不发、要不要再补一句，留给用户 */
 function useQuickReply(text) {
   if (quickEditing.value) {
     return
@@ -2035,6 +2084,27 @@ function useQuickReply(text) {
   draft.value = current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`
   quickVisible.value = false
   nextTick(() => inputRef.value?.focus?.())
+}
+
+/**
+ * 点常用语正文 = 直接发送（本轮需求）。失败口径与 sendText 一致：
+ * 网络类失败由占位气泡红叹号 + 离线队列兜住，业务类拒绝（敏感词/限流）弹原因。
+ */
+async function sendQuickReply(text) {
+  if (quickEditing.value || sending.value || uploading.value) {
+    return
+  }
+  quickVisible.value = false
+  sending.value = true
+  try {
+    await chat.send(props.conversationId, { msgType: 1, content: text })
+  } catch (error) {
+    if (isBusinessError(error)) {
+      ElMessage.error(sendErrorText(error))
+    }
+  } finally {
+    sending.value = false
+  }
 }
 
 function startQuickEdit() {
@@ -3821,6 +3891,13 @@ watch(key, async () => {
   font-size: 14px;
 }
 
+/* 列表第一项是本人：给个小标记，免得误以为把名片发给了某个叫自己昵称的“好友” */
+.chat-window__card-self {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--im-primary, #409eff);
+}
+
 .chat-window__loc-footer {
   display: flex;
   align-items: center;
@@ -4053,60 +4130,147 @@ watch(key, async () => {
   font-size: 13px;
 }
 
-/* 录音遮罩：与拖拽遮罩同理——纯展示，不能把手势抢走（pointer-events:none） */
+/* 录音遮罩（微信同款三层）：中部波形气泡 / 底部两颗落点胶囊 / 最底松开面板。
+   与拖拽遮罩同理——纯展示，不能把手势抢走（pointer-events:none）；overflow:hidden 让面板底角跟窗口圆角裁切 */
 .chat-window__talk-mask {
   position: absolute;
   inset: 0;
   z-index: 20;
   display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 16px;
+  flex-direction: column;
+  overflow: hidden;
   color: #ffffff;
   background: rgba(0, 0, 0, 0.55);
   border-radius: 8px;
   pointer-events: none;
 }
 
-/* 左右两个落指区：滑到一侧即高亮（不靠颜色而靠“哪颗发白”区分当前分区） */
-.chat-window__talk-zone {
-  flex: none;
-  width: 92px;
-  height: 92px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  background: rgba(255, 255, 255, 0.14);
-  transition: background 0.15s, color 0.15s, transform 0.15s;
-}
-
-.chat-window__talk-zone.is-active {
-  background: rgba(255, 255, 255, 0.92);
-  color: #303133;
-  transform: scale(1.08);
-}
-
-.chat-window__talk-bubble {
+.chat-window__talk-stage {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 18px;
+}
+
+/* 绿色波形气泡：微信发送气泡同款色，下方小尾巴指向松开面板 */
+.chat-window__talk-bubble {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 210px;
+  padding: 26px 36px 20px;
+  border-radius: 16px;
+  background: #95ec69;
+  color: #1d1d1d;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.chat-window__talk-bubble::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  margin-left: -9px;
+  border: 9px solid transparent;
+  border-bottom: 0;
+  border-top-color: #95ec69;
+}
+
+.chat-window__talk-wave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+}
+
+.chat-window__talk-bar {
+  width: 4px;
+  border-radius: 2px;
+  background: #3e8e2f;
+  transform-origin: center;
+  animation: talk-wave 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes talk-wave {
+  from {
+    transform: scaleY(0.3);
+  }
+  to {
+    transform: scaleY(1);
+  }
 }
 
 .chat-window__talk-seconds {
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 600;
+  color: rgba(0, 0, 0, 0.55);
 }
 
 .chat-window__talk-tip {
   font-size: 13px;
-  opacity: 0.9;
+  opacity: 0.85;
+}
+
+/* 两颗落点胶囊：微信里它们是「滑到哪侧哪颗亮」的落指区，所以给足高度（含手指宽度）而不是小圆钮 */
+.chat-window__talk-pills {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 18px 16px;
+}
+
+.chat-window__talk-pill {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 84px;
+  border-radius: 42px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 15px;
+  transition: background 0.15s, color 0.15s, transform 0.15s;
+}
+
+.chat-window__talk-pill.is-active {
+  transform: scale(1.03);
+  color: #ffffff;
+}
+
+/* 取消红 / 转文字绿：与 HoldTalkButton 按钮高亮同两色，遮罩与按钮一处亮一处不矛盾 */
+.chat-window__talk-pill--cancel.is-active {
+  background: #fa5151;
+}
+
+.chat-window__talk-pill--text.is-active {
+  background: #07c160;
+}
+
+/* 最底松开面板：浅色圆角托底，大字随分区切文案并染该分区色 */
+.chat-window__talk-sheet {
+  flex: none;
+  padding: 22px 0 calc(22px + env(safe-area-inset-bottom, 0px));
+  border-radius: 28px 28px 0 0;
+  background: linear-gradient(180deg, #f8f8f8, #e8e8e8);
+  color: #111111;
+  font-size: 19px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.chat-window__talk-sheet.is-cancel {
+  color: #fa5151;
+}
+
+.chat-window__talk-sheet.is-text {
+  color: #07c160;
 }
 
 .chat-window__drop-sub {
@@ -4533,6 +4697,9 @@ watch(key, async () => {
 }
 
 .chat-window__quick-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 6px 8px;
   border-radius: 6px;
   font-size: 13px;
@@ -4541,6 +4708,17 @@ watch(key, async () => {
   /* 常用语可能是一整段话，不给换行规则就会把面板撑宽 */
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.chat-window__quick-item-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 行右侧铅笔：保留「填入输入框」的老能力，直接发送不堵死想补一句的路 */
+.chat-window__quick-insert {
+  flex: none;
+  color: var(--im-text-secondary);
 }
 
 .chat-window__quick-item:hover {
