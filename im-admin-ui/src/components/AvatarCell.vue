@@ -5,7 +5,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { fetchAvatar } from '@/api/request'
+import { fetchMedia } from '@/api/request'
 
 /**
  * 头像单元格：把「头像地址要先换成 blob 才能显示」这件事收在一个组件里。
@@ -44,8 +44,8 @@ watch(
       return
     }
     src.value = ''
-    // 同一个地址在列表里会重复出现（同一个人被举报多次），缓存与合流都在 fetchAvatar 里
-    src.value = await fetchAvatar(url)
+    // 同一个地址在列表里会重复出现（同一个人被举报多次），缓存与合流都在 fetchMedia 里
+    src.value = await fetchMedia(url)
   },
   { immediate: true }
 )

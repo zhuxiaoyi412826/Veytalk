@@ -124,16 +124,21 @@ http.interceptors.response.use(
 )
 
 /**
- * 取受登录态保护的图片字节（头像）。
+ * 取受登录态保护的文件字节（头像、视频封面、预览视频）。
  *
- * 后端 /api/file/** 要带头的 token，<img src> 带不了，直接塞地址只会得到一张裂图。
- * 这里拉回 blob 换成 object URL；不做持久缓存与 ETag 复核 —— 后台的头像出现频次低，
- * 加一层 IndexedDB 只是多一处要维护的失效逻辑。
+ * 后端 /api/file/** 要带头的 token，而 <img src> 与 <video src> 的资源请求带不了
+ * 自定义头（Cookie 读取也为规避 CSRF 关着），直接把受控地址塞进标签只会得到一张
+ * 裂图 / 一个黑屏 0:00 的播放器。这里用带登录头把 blob 取回换成 object URL；
+ * 不做持久缓存与 ETag 复核 —— 后台的媒体出现频次低，加一层 IndexedDB 只是多一处
+ * 要维护的失效逻辑。
+ *
+ * @param {string} url 受控地址（/api/file/download/{id}）或直链
+ * @param {{ timeout?: number }} [options] timeout 单独放宽：几十 MB 的视频会被 20s 默认值掐断
  */
 const blobUrls = new Map()
 const inflight = new Map()
 
-export async function fetchAvatar(url) {
+export async function fetchMedia(url, { timeout } = {}) {
   if (!url) {
     return ''
   }
@@ -148,13 +153,23 @@ export async function fetchAvatar(url) {
   }
   const task = (async () => {
     try {
-      const blob = await http.get(url, { baseURL: '', responseType: 'blob', silent: true })
-      const objectUrl = URL.createObjectURL(blob instanceof Blob ? blob : blob.data)
+      const config = { baseURL: '', responseType: 'blob', silent: true }
+      if (timeout !== undefined) {
+        config.timeout = timeout
+      }
+      const blob = await http.get(url, config)
+      // 后端的业务失败同样是 HTTP 200 + JSON 体（文件被删 / 无权等），responseType 为
+      // blob 时 axios 不会帮你识别。不拦这一步就会拿错误 JSON 做一个假 objectURL，
+      // <video> 只会静默卡住而不报错，所以按 JSON 内容类型判定为失败
+      if (blob && typeof blob.type === 'string' && blob.type.includes('application/json')) {
+        return ''
+      }
+      const objectUrl = URL.createObjectURL(blob instanceof Blob ? blob : blob?.data)
       blobUrls.set(url, objectUrl)
       return objectUrl
     } catch {
-      // 取不到就留空串，由组件回退到昵称首字母；失败不缓存，下次渲染还会重试
-      blobUrls.set(url, '')
+      // 失败刻意不缓存成空串：网络抖动或票据链路瞬断时，下次渲染 / 下次开预览还会重试，
+      // 而不是永久裂图（早先的失败缓存与这里的意图相反，视频页暴露了出来）
       return ''
     } finally {
       inflight.delete(url)
