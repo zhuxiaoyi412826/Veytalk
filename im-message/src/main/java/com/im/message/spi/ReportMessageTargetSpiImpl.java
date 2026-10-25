@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 「举报一条消息」的证据解析与强制撤回执行。
@@ -74,6 +75,11 @@ public class ReportMessageTargetSpiImpl implements ReportTargetSpi {
 
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    /** 文件消息按扩展名推断渲染类型的小码表（只影响后台用哪个标签渲染，判错也只退化到下载链接） */
+    private static final Set<String> VIDEO_EXTS = Set.of("mp4", "mov", "avi", "mkv", "webm", "flv", "wmv");
+    private static final Set<String> AUDIO_EXTS = Set.of("mp3", "wav", "m4a", "aac", "opus", "amr", "ogg", "weba");
+    private static final Set<String> IMAGE_EXTS = Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp");
+
     private final MessageMapper messageMapper;
     private final MessageService messageService;
     private final ConversationSpi conversationSpi;
@@ -108,6 +114,9 @@ public class ReportMessageTargetSpiImpl implements ReportTargetSpi {
         if (message.getExtra() != null && message.getExtra().getFileId() != null) {
             meta.put("文件 ID", String.valueOf(message.getExtra().getFileId()));
         }
+        // 附件证据的结构化三字段：后台据此拉回真实内容（图片/视频/语音）渲染，而不是只看到 [图片] 占位
+        Long mediaFileId = message.getExtra() == null ? null : message.getExtra().getFileId();
+        String mediaKind = mediaFileId == null ? null : mediaKindOf(message, type);
         return ReportTargetDTO.builder()
                 .targetType(ReportTargetType.MESSAGE.getCode())
                 .targetId(message.getId())
@@ -116,6 +125,9 @@ public class ReportMessageTargetSpiImpl implements ReportTargetSpi {
                 .excerpt(TextUtil.summary(MessageConvert.summaryOf(message, senderName), EXCERPT_MAX))
                 .meta(meta)
                 .dispositions(dispositionsFor(message, type))
+                .mediaFileId(mediaFileId)
+                .mediaKind(mediaKind)
+                .mediaName(message.getExtra() == null ? null : message.getExtra().getFileName())
                 .build();
     }
 
@@ -143,6 +155,56 @@ public class ReportMessageTargetSpiImpl implements ReportTargetSpi {
             return ReportDisposeResult.fail("消息撤回失败：" + e.getMessage());
         }
         return ReportDisposeResult.ok("已强制撤回该消息，会话内各端同步显示");
+    }
+
+    /**
+     * 附件证据的渲染类型：图片/语音直接按消息类型定；文件与通话录制按扩展名/MIME 推断
+     * （mp4 视频文件在消息表里只是 FILE，后台得知道用 <video> 而不是下载链接）。
+     * 推不出来就回 file：宁可只给下载按钮，不要把音频当视频渲染。
+     */
+    private String mediaKindOf(Message message, MsgType type) {
+        if (type == MsgType.IMAGE) {
+            return "image";
+        }
+        if (type == MsgType.VOICE) {
+            return "audio";
+        }
+        if (type == MsgType.CALL) {
+            var extra = message.getExtra();
+            boolean video = extra != null
+                    && ("video".equals(extra.getCallMediaType()) || Boolean.TRUE.equals(extra.getCallScreenRecorded()));
+            return video ? "video" : "audio";
+        }
+        var extra = message.getExtra();
+        String ext = extra == null ? null : extra.getExt();
+        if (TextUtil.isBlank(ext) && extra != null && TextUtil.isNotBlank(extra.getFileName())) {
+            String name = extra.getFileName();
+            int dot = name.lastIndexOf('.');
+            ext = dot >= 0 ? name.substring(dot + 1) : null;
+        }
+        String lower = ext == null ? "" : ext.toLowerCase();
+        if (VIDEO_EXTS.contains(lower)) {
+            return "video";
+        }
+        if (IMAGE_EXTS.contains(lower)) {
+            return "image";
+        }
+        if (AUDIO_EXTS.contains(lower)) {
+            return "audio";
+        }
+        String contentType = extra == null ? null : extra.getContentType();
+        if (contentType != null) {
+            if (contentType.startsWith("video/")) {
+                return "video";
+            }
+            if (contentType.startsWith("image/")) {
+                return "image";
+            }
+            if (contentType.startsWith("audio/")) {
+                return "audio";
+            }
+        }
+        return "file";
     }
 
     /**

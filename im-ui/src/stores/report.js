@@ -42,16 +42,20 @@ export const useReportStore = defineStore('report', {
   actions: {
     /** 进主界面时拉一次；force 用于处置开关被改后不想刷新页面的场合 */
     async ensureConfig(force = false) {
-      if (this.loading || (this.loaded && !force)) {
+      // 守卫只看「成功拿到过没有」：只看 loaded 的话，首次失败（后端没起、网络抖）
+      // 会把 loaded 置真再短路掉所有重试，弹窗里的理由下拉框从此永远空着，
+      // 非得刷新页面才能恢复——失败必须留着下次重开弹窗时自动再试的机会
+      if (this.loading || (this.loaded && this.config && !force)) {
         return this.config
       }
       this.loading = true
       try {
         this.config = await fetchReportConfig()
-      } catch {
-        // silent 请求，失败不弹提示；config 留 null，enabled 那道 getter 会按「开」处理
-      } finally {
         this.loaded = true
+      } catch {
+        // silent 请求，失败不弹提示；config 留 null、loaded 留 false，下次打开弹窗重试；
+        // enabled 那道 getter 会按「开」处理
+      } finally {
         this.loading = false
       }
       return this.config

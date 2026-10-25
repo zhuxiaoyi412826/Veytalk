@@ -1,7 +1,9 @@
 <template>
   <div class="call">
     <div class="call__top">
-      <button class="call__chip" @click="$emit('minimize')">‹ 文字模式</button>
+      <button class="call__chip" :class="{ 'call__chip--active': textMode }" @click="textMode = !textMode">
+        {{ textMode ? '语音模式' : '文字模式' }}
+      </button>
       <div class="call__voices">
         <button
           class="call__chip"
@@ -21,7 +23,7 @@
     </div>
     <p v-if="!sysAvailable && engine !== 'system'" class="call__voice-tip">浏览器没有可用中文音色，已切到神经音色</p>
 
-    <div class="call__stage">
+    <div v-if="!textMode" class="call__stage">
       <div class="call__avatar" :class="avatarClass">
         <el-icon :size="42"><Microphone /></el-icon>
       </div>
@@ -29,13 +31,20 @@
       <p class="call__duration">{{ durationText }}</p>
       <p class="call__phase">{{ statusText }}</p>
     </div>
+    <!-- 文字态不挂舞台，但通话还在跑：用一行状态条把时长与提示补回来 -->
+    <p v-else class="call__status-line">{{ durationText }} · {{ statusText }}</p>
 
-    <div class="call__captions">
-      <div v-for="(line, index) in captions" :key="index" class="call__caption" :class="`call__caption--${line.role}`">
-        <span class="call__caption-role">{{ line.role === 'ai' ? '面试官' : '我' }}</span>
+    <div ref="scrollEl" class="call__captions" :class="{ 'call__captions--full': textMode }">
+      <div
+        v-for="(line, index) in visibleCaptions"
+        :key="index"
+        class="call__caption"
+        :class="[`call__caption--${line.role}`, { 'call__caption--draft': line.draft }]"
+      >
+        <span class="call__caption-role">{{ captionLabel(line) }}</span>
         <span class="call__caption-text">{{ line.content }}</span>
       </div>
-      <p v-if="!captions.length" class="call__caption-empty">接通后面试官会先提问，直接回答即可</p>
+      <p v-if="!visibleCaptions.length" class="call__caption-empty">接通后面试官会先提问，直接回答即可</p>
     </div>
 
     <div class="call__actions">
@@ -56,15 +65,16 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { Microphone, Mute, Pointer, Phone } from '@element-plus/icons-vue'
 
 /**
  * 电话面试全屏浮层：纯展示 + 事件上抛，音频环路状态机全部在主页面。
  *
  * phase 决定舞台动画与提示文案：connecting/listening/thinking/speaking/muted；
- * 字幕区只展示最近两句（完整记录回文字模式看），移动端竖屏 + safe-area 适配，
- * 底部按钮统一 ≥44px 触控高度。
+ * 「文字模式」只在浮层内收起/展开头像舞台，通话不断；两种模式都常驻完整问答史（带序号）可上滑查看，
+ * 退出通话只由「挂断」触发。
+ * 移动端竖屏 + safe-area 适配，底部按钮统一 ≥44px 触控高度。
  */
 defineOptions({ name: 'CallPanel' })
 
@@ -76,11 +86,42 @@ const props = defineProps({
   engine: { type: String, default: 'system' },
   sysAvailable: { type: Boolean, default: true }
 })
-defineEmits(['toggle-mute', 'interrupt', 'hangup', 'minimize', 'switch-engine'])
+defineEmits(['toggle-mute', 'interrupt', 'hangup', 'switch-engine'])
+
+/** 文字态只收起头像舞台；问答史两种模式都给全量（含序号），长回答也不会被截成尾巴 */
+const textMode = ref(false)
+const scrollEl = ref(null)
+const visibleCaptions = computed(() => props.captions)
+
+/** 序号标签：面试官按出题顺序计「第 N 问」，我的回答与正在说的草稿都归属当前这题 */
+function captionLabel(line) {
+  if (line.draft) {
+    return '我（正在说…）'
+  }
+  if (line.role === 'ai') {
+    return line.no ? `面试官 · 第 ${line.no} 问` : '面试官'
+  }
+  return line.no ? `我的回答 · 第 ${line.no} 问` : '我'
+}
+
+// 跟随最新消息滚到底，但只要用户上滑翻看历史就不再强行拽回底部（否则长回答的开头永远看不到）。
+// 切到文字态时滚到底是为了立刻看到当前这题。watch 数组本身而非 length：逐 token 追加条数不变、只有引用变。
+watch([() => props.captions, textMode], ([, toText], [, fromText]) => {
+  nextTick(() => {
+    const el = scrollEl.value
+    if (!el) {
+      return
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    if (nearBottom || (toText && toText !== fromText)) {
+      el.scrollTop = el.scrollHeight
+    }
+  })
+})
 
 const STATUS_TEXT = {
   connecting: '正在接通…',
-  listening: '请讲话，停顿自动送出',
+  listening: '请讲话，停顿 5 秒自动送出',
   thinking: '面试官思考中…',
   speaking: '正在播报，可点「打断播报」',
   muted: '已静音（不退出通话）'
@@ -206,15 +247,30 @@ const avatarClass = computed(() => 'call__avatar--' + props.phase)
   color: #79c0ff;
 }
 
+.call__status-line {
+  flex: none;
+  margin: 6px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: #79c0ff;
+  font-variant-numeric: tabular-nums;
+}
+
 .call__captions {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+  /* 从顶部排起、整体可滚动：用 flex-end 钉底时，单条长回答超高会把开头顶到滚动区上方且划不回去（“只剩最后几个字”的根因） */
+  justify-content: flex-start;
   gap: 10px;
   padding: 10px 0;
+}
+
+/* 兼容旧类名：文字态与语音态现在都是完整转写，此处与基类保持一致 */
+.call__captions--full {
+  justify-content: flex-start;
 }
 
 .call__caption {
@@ -230,6 +286,13 @@ const avatarClass = computed(() => 'call__avatar--' + props.phase)
 .call__caption--user {
   align-self: flex-end;
   background: rgba(64, 158, 255, 0.25);
+}
+
+/* 正在说的草稿泡：虚线框 + 半透明，与已送出的正式回答区分开 */
+.call__caption--draft {
+  border: 1px dashed rgba(64, 158, 255, 0.6);
+  background: rgba(64, 158, 255, 0.12);
+  opacity: 0.85;
 }
 
 .call__caption-role {

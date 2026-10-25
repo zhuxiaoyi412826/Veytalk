@@ -14,15 +14,18 @@
       </div>
 
       <p class="rp__label">选择理由</p>
-      <div v-loading="!report.loaded" class="rp__reasons">
+      <div v-loading="report.loading" class="rp__reasons">
         <el-radio-group v-model="reasonCode" class="rp__group">
           <el-radio v-for="item in report.reasons" :key="item.code" :value="item.code">
             {{ item.name }}
             <span v-if="item.textRequired" class="rp__must">*</span>
           </el-radio>
         </el-radio-group>
-        <p v-if="report.loaded && !report.reasons.length" class="rp__empty">
-          字典没取到，可能是后端未启动；稍后再试。
+        <p v-if="!report.loading && !report.config" class="rp__empty">
+          理由字典没取到，可能是后端未启动；重开弹窗会自动重试。
+        </p>
+        <p v-else-if="report.config && !report.reasons.length" class="rp__empty">
+          后台没有配置举报理由，请用下方补充描述说明。
         </p>
       </div>
 

@@ -168,6 +168,21 @@
         />
         <template v-else>
           <p v-if="current.evidence.excerpt" class="excerpt">{{ current.evidence.excerpt }}</p>
+          <!-- 附件证据的真实内容：图片/视频/语音内联渲染，其余只给下载链接。
+               地址是后台自己的 /admin/report/{id}/media（带 system:report:handle 门），
+               不经 im-file 的会话成员校验；同样取成 blob 才能交给媒体标签 -->
+          <div v-if="current.evidence.mediaFileId" class="evidence-media">
+            <p v-if="media.loading" class="muted">媒体证据加载中…</p>
+            <p v-else-if="!media.url" class="muted">媒体证据不可用（文件已被删除，或闪照查看后即销毁）</p>
+            <template v-else>
+              <img v-if="current.evidence.mediaKind === 'image'" :src="media.url" alt="" />
+              <video v-else-if="current.evidence.mediaKind === 'video'" :src="media.url" controls preload="metadata" />
+              <audio v-else-if="current.evidence.mediaKind === 'audio'" :src="media.url" controls />
+              <a v-else :href="media.url" :download="current.evidence.mediaName || 'evidence'">
+                下载附件证据：{{ current.evidence.mediaName || '未知文件名' }}
+              </a>
+            </template>
+          </div>
           <el-table v-if="metaEntries.length" :data="metaEntries" class="meta-table" size="small">
             <el-table-column label="字段" prop="label" width="140" />
             <el-table-column label="值" prop="value" show-overflow-tooltip />
@@ -244,6 +259,7 @@ import {
   rejectReport
 } from '@/api/admin'
 import AvatarCell from '@/components/AvatarCell.vue'
+import { fetchMedia } from '@/api/request'
 import { accountStatusTag, formatDateTime, formatListTime, reportStatusTag } from '@/utils/format'
 
 /**
@@ -335,6 +351,38 @@ async function openDetail(row) {
   form.remark = ''
   drawerSize.value = window.innerWidth < 900 ? '100%' : '620px'
   drawer.value = true
+  loadEvidenceMedia(current.value)
+}
+
+/**
+ * 证据媒体的 blob 地址（按 mediaFileId 经后台自己的 /admin/report/{id}/media 取回）。
+ *
+ * 不复用 im-file 的受控地址：那套 canAccess 只认上传者/同会话成员，管理员两者都不是；
+ * 新端点的门就是本页已在的 system:report:handle 权限点。同样要取成 blob——
+ * <img>/<video> 带不了登录头（与视频管理页同一套路）；大视频不设超时。
+ * 自增序号防快速连开两张工单时先回的覆盖后开的。
+ */
+const media = reactive({ url: '', loading: false })
+let mediaSeq = 0
+
+async function loadEvidenceMedia(report) {
+  const seq = ++mediaSeq
+  media.url = ''
+  media.loading = false
+  if (!report?.evidence?.mediaFileId) {
+    return
+  }
+  media.loading = true
+  try {
+    const src = await fetchMedia(`/api/admin/report/${report.id}/media`, { timeout: 0 })
+    if (seq === mediaSeq) {
+      media.url = src
+    }
+  } finally {
+    if (seq === mediaSeq) {
+      media.loading = false
+    }
+  }
 }
 
 async function onAccept(row) {
@@ -499,6 +547,23 @@ onMounted(async () => {
 
 .meta-table {
   margin-bottom: 6px;
+}
+
+.evidence-media {
+  margin-bottom: 8px;
+}
+
+.evidence-media img,
+.evidence-media video {
+  background: #000;
+  border-radius: 6px;
+  display: block;
+  max-height: 320px;
+  max-width: 100%;
+}
+
+.evidence-media audio {
+  width: 100%;
 }
 
 .action-pick {

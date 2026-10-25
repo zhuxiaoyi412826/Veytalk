@@ -128,7 +128,6 @@
       @toggle-mute="toggleCallMute"
       @interrupt="interruptCall"
       @hangup="hangupCall"
-      @minimize="minimizeCall"
       @switch-engine="switchCallEngine"
     />
   </div>
@@ -153,6 +152,7 @@ import {
 import { createMicSource, encodeWav16k } from '@/utils/audioRec'
 import { createEnergyVad } from '@/utils/vad'
 import { canSystemSpeak, createSpeech, loadEngine, saveEngine } from '@/utils/speech'
+import { isNarrowViewport } from '@/utils/device'
 
 defineOptions({ name: 'Interview' })
 
@@ -373,7 +373,10 @@ async function send(text) {
   try {
     await streamInterviewChat(history, {
       onDelta: (delta) => {
-        aiMessage.content += delta
+        // 必须经数组代理改：push 进去的原始对象直接 += 不触发响应，
+        // 文字页与通话转写就看不到逐 token 流式（整块文字到流结束才出现）
+        const last = messages.value[messages.value.length - 1]
+        last.content += delta
         scrollToBottom()
       },
       signal: abortController.signal
@@ -761,13 +764,29 @@ let callTimer = null
 let callStartedAt = 0
 let callToken = 0
 
-/** 字幕只展示最近两句：通话时靠听，不靠滚屏读稿 */
-const callCaptions = computed(() =>
-  messages.value
-    .filter((item) => item.role !== 'error')
-    .slice(-2)
-    .map((item) => ({ role: item.role, content: item.content }))
-)
+/** 通话中正在说的草稿（逐段转写累加，停顿 5 秒后整段送出） */
+const callDraft = ref('')
+
+/** 字幕给全量并带问题序号：ai 每出一题计一号，我的回答/正在说的草稿都归属当前这题 */
+const callCaptions = computed(() => {
+  const list = []
+  let no = 0
+  for (const item of messages.value) {
+    if (item.role === 'error') {
+      continue
+    }
+    if (item.role === 'ai') {
+      no += 1
+      list.push({ role: 'ai', content: item.content, no })
+    } else {
+      list.push({ role: 'user', content: item.content, no })
+    }
+  }
+  if (callDraft.value) {
+    list.push({ role: 'user', content: callDraft.value, draft: true, no })
+  }
+  return list
+})
 
 const speechCtl = createSpeech({
   engine: loadEngine(),
@@ -809,7 +828,7 @@ function stopCallMic() {
   }
 }
 
-/** 只在 listening 态开麦 + VAD；断句即关麦，形成半双工 */
+/** 只在 listening 态开麦 + VAD；断句不关麦不送出，转写进草稿实时显示，静满 5 秒才整段送出 */
 async function callListening() {
   if (!callVisible.value || finished.value || callMic || callMuted.value) {
     return
@@ -839,32 +858,77 @@ async function callListening() {
   })
 }
 
+/** 送答前的静默等待：最后一段转写完再等这么久没新语音，就把草稿整段送出 */
+const CALL_SEND_SILENCE_MS = 5000
+let callChunkQueue = []
+let callChunkBusy = false
+let callSilenceTimer = null
+
 function onCallSegment(segment, token) {
   if (token !== callToken || !callVisible.value || callPhase.value !== 'listening') {
     return
   }
-  stopCallMic() // 断句先关麦：等 ASR 与候答案期间不收自己的声音
-  callPhase.value = 'thinking'
+  // 不再断句即送：每段只转写进草稿，麦继续开着让用户把话说完
+  callChunkQueue.push(segment)
+  armCallSilence(token)
+  pumpCallChunks(token)
+}
+
+/** 段转写串行消费：并发回包会把说话顺序打乱 */
+function pumpCallChunks(token) {
+  if (callChunkBusy || callChunkQueue.length === 0) {
+    return
+  }
+  callChunkBusy = true
+  const segment = callChunkQueue.shift()
   transcribeAudio(encodeWav16k([segment.samples], segment.sampleRate))
     .then((text) => {
       if (token !== callToken || !callVisible.value) {
         return
       }
-      const answer = (text || '').trim()
-      if (!answer) {
-        ElMessage.warning('没听清，请再说一次')
-        resumeAfterSpeech()
-        return
+      const piece = (text || '').trim()
+      if (piece) {
+        // 上一段没落标点时补个逗号：ASR 分段结果直接拼接会糊成一串
+        const glue = callDraft.value && !/[，。？！、；：?!,.;:]$/.test(callDraft.value) ? '，' : ''
+        callDraft.value += glue + piece
+        armCallSilence(token) // 新文字落地才重新起 5 秒表
       }
-      runCallRound(() => send(answer), token)
     })
-    .catch((error) => {
+    .catch(() => {
       if (token !== callToken || !callVisible.value) {
         return
       }
-      ElMessage.error(error?.message || '语音转写失败')
-      resumeAfterSpeech()
+      ElMessage.warning('有段话没转写成功，可继续说，或停顿几秒先送出已说部分')
     })
+    .finally(() => {
+      callChunkBusy = false
+      pumpCallChunks(token)
+    })
+}
+
+function armCallSilence(token) {
+  if (callSilenceTimer) {
+    clearTimeout(callSilenceTimer)
+  }
+  callSilenceTimer = setTimeout(() => tryFinalizeCallAnswer(token), CALL_SEND_SILENCE_MS)
+}
+
+/** 静满 5 秒：把累积草稿当一次完整回答送出；还在说/还在转写就顺延 */
+function tryFinalizeCallAnswer(token) {
+  callSilenceTimer = null
+  if (token !== callToken || !callVisible.value || callMuted.value) {
+    return
+  }
+  if (callChunkBusy || callChunkQueue.length > 0 || (callVad && callVad.speaking)) {
+    armCallSilence(token)
+    return
+  }
+  const answer = callDraft.value.trim()
+  if (!answer) {
+    return
+  }
+  callDraft.value = '' // 先清草稿：send 会把同文本作为正式用户气泡入列，不双显
+  runCallRound(() => send(answer), token)
 }
 
 /** 一轮完整通话：thinking → send（SSE）→ speaking（朗读 onEnd 自动回 listening） */
@@ -884,18 +948,24 @@ async function runCallRound(task, token) {
 }
 
 function onCallVisibility() {
-  // 切后台在手机基本等于断麦断播，通话无法保证质量：按收尾处理（监考逻辑不经这里，一行没动）
-  if (document.visibilityState === 'hidden' && callVisible.value) {
-    const hadSession = !!sessionId.value && !finished.value
-    closeCall()
-    if (hadSession) {
-      closeSession('close')
-    }
+  if (document.visibilityState !== 'hidden' || !callVisible.value) {
+    return
+  }
+  // 桌面端（宽屏浏览器 / Electron 壳）切标签页、最小化、切虚拟桌面时，麦克风采集与 TTS 朗读
+  // 仍在正常工作，不该因此把通话和整场面试结束掉——这正是「切走再回来掉回主界面」的根因。
+  // 只有手机（窄屏移动浏览器）切后台才真的断麦断播，按收尾处理（监考逻辑不经这里，一行没动）。
+  if (!isNarrowViewport()) {
+    return
+  }
+  const hadSession = !!sessionId.value && !finished.value
+  closeCall()
+  if (hadSession) {
+    closeSession('close')
   }
 }
 
 function onCallBackKey() {
-  // 返回键/左滑 = 最小化回文字模式，会话不断
+  // 返回键/左滑 = 退出通话回文字页（会话不断）；浮层内的「文字模式」不走到这里，它不退出通话
   if (callVisible.value) {
     closeCall()
   }
@@ -953,13 +1023,17 @@ function closeCall() {
   callVisible.value = false
   callMuted.value = false
   callPhase.value = 'connecting'
+  // 在途的分段转写与 5 秒送答定时器一并作废
+  if (callSilenceTimer) {
+    clearTimeout(callSilenceTimer)
+    callSilenceTimer = null
+  }
+  callChunkQueue = []
+  callChunkBusy = false
+  callDraft.value = ''
   document.removeEventListener('visibilitychange', onCallVisibility)
   window.removeEventListener('popstate', onCallBackKey)
   window.removeEventListener('hashchange', onCallBackKey)
-}
-
-function minimizeCall() {
-  closeCall() // 只回文字模式继续答题，会话不断
 }
 
 function toggleCallMute() {

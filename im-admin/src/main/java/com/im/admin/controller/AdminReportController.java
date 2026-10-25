@@ -11,18 +11,27 @@ import com.im.admin.service.ReportService;
 import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
+import com.im.common.domain.FileDTO;
 import com.im.common.util.SecurityUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.util.StreamUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 后台的举报工单队列。
@@ -63,6 +72,33 @@ public class AdminReportController {
     @GetMapping("/{id}")
     public Result<AdminReportVO> detail(@Parameter(description = "工单 ID") @PathVariable("id") Long id) {
         return Result.ok(reportService.adminDetail(id));
+    }
+
+    @Operation(summary = "证据媒体内容",
+            description = "按工单 ID 回吐证据快照里的附件字节：图片/音视频内联渲染，其余文件强制下载；"
+                    + "闪照已销毁回 7001。不走 im-file 的会话成员校验，权限门就是类级 system:report:handle——"
+                    + "管理员天然不是会话成员，而判工单偏偏必须看到内容（与 FileController 同一手法：鉴权全在写第一个字节之前）")
+    @GetMapping("/{id}/media")
+    public void media(@Parameter(description = "工单 ID") @PathVariable("id") Long id,
+                      HttpServletResponse response) throws IOException {
+        FileDTO file = reportService.mediaOf(id);
+        String contentType = file.getContentType() == null ? "application/octet-stream" : file.getContentType();
+        boolean inline = contentType.startsWith("image/") || contentType.startsWith("video/")
+                || contentType.startsWith("audio/") || contentType.equals("application/pdf");
+        ContentDisposition disposition = (inline ? ContentDisposition.inline() : ContentDisposition.attachment())
+                .filename(file.getOriginalName() == null ? "evidence-" + file.getFileId() : file.getOriginalName(),
+                        StandardCharsets.UTF_8)
+                .build();
+        response.setContentType(contentType);
+        if (file.getSize() != null && file.getSize() > 0) {
+            response.setContentLengthLong(file.getSize());
+        }
+        response.setHeader(HttpHeaders.CONTENT_DISPOSITION, disposition.toString());
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        try (InputStream in = reportService.openMedia(file)) {
+            StreamUtils.copy(in, response.getOutputStream());
+        }
+        response.flushBuffer();
     }
 
     @Operation(summary = "受理",

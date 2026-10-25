@@ -149,6 +149,12 @@ POST /api/auth/logout
 **举报工单**（`ReportsView.vue`）
 筛选 + 队列 + 详情抽屉。抽屉里能看到**提交那一刻抓的证据快照**（`evidence.title / excerpt / meta`），
 `meta` 的键是可直接显示的中文标签，后台只按键值对展示、**不按键取值**（要按键取值请改成结构化字段）。
+被举报的是图片/视频/语音/文件消息时，证据区还会**内联渲染媒体内容**（`evidence.mediaKind` 分
+`image/video/audio/file` 四分支，文件类给下载链接）：媒体走后台自己的 `GET /api/admin/report/{id}/media`
+流式端点（门就是本页的 `system:report:handle` 权限点，不走 im-file 那套只认会话成员的 `canAccess`），
+再经 `fetchMedia` 取成 blob 交给标签（与视频管理页同一套路）。快照只存 fileId 引用不存字节；
+媒体字段上线前落库的旧工单，后端会从 `meta.文件 ID` 兼容回捞（`ReportService.compatLegacyMedia`，
+按 `meta.消息类型` 推断渲染类型），旧工单的图片/语音同样能直接播放；闪照已销毁/文件已删时显提示。
 处置下拉的选项来自 `allowedDispositions`：那是归属模块在提交时报上来的可执行动作集合，
 所以不会出现「一个注定失败的按钮」；执行失败时工单停在原状态、原因原样回显，可以改了再重试。
 `ban_user / recall_message / close_room` 三个动作会二次确认——它们直接作用于线上对象。
@@ -159,13 +165,16 @@ POST /api/auth/logout
 对话框里（仅 `auth.can('system:role:manage')` 时渲染）：复选框整体替换，保存后就地刷那一行。
 
 **视频管理**（`VideosView.vue`，三期新增）
-筛选 + 表格 + 预览弹框（`<video>` 直接吃后端的受控访问地址，不是预签名短链）。三个动作：
+筛选 + 表格 + 预览弹框。后端回的 fileUrl/coverUrl 是 `/api/file/download/{id}` 受控地址，
+而 `<img>`/`<video>` 的资源请求带不了登录头（直接塞只会 401：裂图 + 黑屏播放器），
+封面与预览统一经 `request.js` 的 `fetchMedia` 带登录头取成 blob 再渲染（视频取回不设超时）。
+三个动作：
 下架（prompt 选填事由，进审计日志）/ 恢复上架 / 删除（敲「删除」两字才能确认——逻辑删除没有回收站，
 删了就只能进数据库恢复）。就地刷那一行而不整页重查（删除除外）。
 
 **直播管理**（`LivesView.vue`，三期新增）
 只有「看」与「掐」：详情弹框展示单场档案（含公告这个主要文字证据），强制关播只对直播中的行给按钮、
-`type: 'error'` 二次确认。已结束场次的「在线」列画「—」而不是定格值，避免把 peakOnline 口径读成实时在线；
+`type: 'error'` 二次确认。房间封面同视频页套路，经 `fetchMedia` 取 blob 后渲染。已结束场次的「在线」列画「—」而不是定格值，避免把 peakOnline 口径读成实时在线；
 streamKey 后端不下发、前端也不留字段位。
 
 **监控告警**（`MonitorView.vue`，三期新增）

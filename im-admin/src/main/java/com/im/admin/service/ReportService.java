@@ -15,12 +15,14 @@ import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
 import com.im.common.constant.RedisKeys;
 import com.im.common.domain.AdminUserDTO;
+import com.im.common.domain.FileDTO;
 import com.im.common.domain.PageQuery;
 import com.im.common.domain.ReportDisposeCmd;
 import com.im.common.domain.ReportDisposeResult;
 import com.im.common.domain.ReportTargetDTO;
 import com.im.common.domain.UserBriefDTO;
 import com.im.common.domain.WsPacket;
+import com.im.common.enums.MsgType;
 import com.im.common.enums.ReportDisposition;
 import com.im.common.enums.ReportReason;
 import com.im.common.enums.ReportStatus;
@@ -29,6 +31,7 @@ import com.im.common.enums.WsMessageType;
 import com.im.common.exception.BusinessException;
 import com.im.common.sensitive.SensitiveWordFilter;
 import com.im.common.spi.AdminUserSpi;
+import com.im.common.spi.FileStorageSpi;
 import com.im.common.spi.PushSpi;
 import com.im.common.spi.ReportTargetSpi;
 import com.im.common.spi.UserQuerySpi;
@@ -40,6 +43,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
+import java.io.InputStream;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -98,6 +102,8 @@ public class ReportService {
     /** 警告与结果通知都靠长连接，im-websocket 缺席时静默跳过（工单状态照常落库） */
     private final ObjectProvider<PushSpi> pushSpiProvider;
     private final ObjectProvider<ReportTargetSpi> reportTargetSpiProvider;
+    /** 证据媒体的字节只能经文件模块取；im-file 缺席时报「存储服务不可用」而不是谎称没这个文件 */
+    private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
 
     /** 对象类型串 → 归属模块的实现，启动时一次性摊平 */
     private final Map<String, ReportTargetSpi> targetResolvers = new HashMap<>();
@@ -278,6 +284,82 @@ public class ReportService {
     public AdminReportVO adminDetail(Long reportId) {
         List<AdminReportVO> rows = toAdminRows(List.of(requireReport(reportId)));
         return rows.get(0);
+    }
+
+    /**
+     * 工单的证据媒体文件（图片 / 视频 / 语音 / 文件消息与通话录制）。
+     *
+     * <p>为什么不复用 im-file 的 canAccess：那套口径是「上传者或同会话成员」，而管理员
+     * 天然两者都不是，判工单偏偏就是必须看到内容的场景。权限门是
+     * {@code AdminReportController} 类级的 {@code system:report:handle}，本方法就是
+     * 「看证据」这个动作的唯一出口。
+     *
+     * <p>旧工单的证据里没有结构化的 mediaFileId（该字段后加），但 {@code meta} 里留有
+     * 「文件 ID」，由 {@link #compatLegacyMedia} 回捞后照常可看；真取不到才如实说「没有媒体证据」。
+     * 闪照销毁后文件记录已逻辑删，降级为「不可取回」而不是谎报。
+     */
+    public FileDTO mediaOf(Long reportId) {
+        Report report = requireReport(reportId);
+        ReportTargetDTO evidence = report.getEvidence();
+        compatLegacyMedia(evidence);
+        BusinessException.throwIf(evidence == null || evidence.getMediaFileId() == null,
+                ResultCode.NOT_FOUND, "该工单没有媒体证据");
+        FileStorageSpi spi = fileStorageSpiProvider.getIfAvailable();
+        if (spi == null) {
+            throw new BusinessException(ResultCode.FILE_STORAGE_UNAVAILABLE);
+        }
+        FileDTO file = spi.getById(evidence.getMediaFileId());
+        if (file == null) {
+            throw new BusinessException(ResultCode.FILE_NOT_FOUND, "文件已被销毁或删除（闪照查看后即不可取回）");
+        }
+        return file;
+    }
+
+    /** 打开证据媒体的内容流，调用方负责关闭。 */
+    public InputStream openMedia(FileDTO file) {
+        FileStorageSpi spi = fileStorageSpiProvider.getIfAvailable();
+        if (spi == null) {
+            throw new BusinessException(ResultCode.FILE_STORAGE_UNAVAILABLE);
+        }
+        return spi.openStream(file);
+    }
+
+    /**
+     * 旧工单的证据媒体字段回填（只改响应里的内存对象，不回写库）。
+     *
+     * <p>背景：{@code mediaFileId/mediaKind} 是后加的结构化字段，此前落库的图片/语音/文件
+     * 消息工单里它们为空，后台媒体块就不渲染，只剩 {@code [语音]} 占位文字——可证据的 fileId
+     * 其实一直躺在 {@code meta.文件 ID} 里（{@code ReportMessageTargetSpiImpl} 当时就把
+     * {@code extra.fileId} 写进了 meta）。这里按键回捞一次，旧工单也能直接看内容。
+     *
+     * <p>这是「meta 只按键值对展示、不按键取值」约定（见 {@link ReportTargetDTO} 类注释）的
+     * <b>唯一例外</b>，且只当结构化字段缺失时才走到：新提交的举报永远直接带 mediaFileId，
+     * 不依赖这两个中文键；哪天消息 SPI 改了 meta 键名，受影响的也只是旧工单退化成「没有媒体证据」，
+     * 不会拿错文件。
+     */
+    private void compatLegacyMedia(ReportTargetDTO evidence) {
+        if (evidence == null || evidence.getMediaFileId() != null || evidence.getMeta() == null) {
+            return;
+        }
+        long fileId;
+        try {
+            fileId = Long.parseLong(String.valueOf(evidence.getMeta().get("文件 ID")).trim());
+        } catch (RuntimeException e) {
+            // 键不存在（get 回 null 拼成 "null"）或不是数字：本来就没什么可回填的，不是异常
+            return;
+        }
+        evidence.setMediaFileId(fileId);
+        if (TextUtil.isBlank(evidence.getMediaKind())) {
+            String typeDesc = String.valueOf(evidence.getMeta().getOrDefault("消息类型", ""));
+            if (MsgType.VOICE.getDesc().equals(typeDesc)) {
+                evidence.setMediaKind("audio");
+            } else if (MsgType.IMAGE.getDesc().equals(typeDesc)) {
+                evidence.setMediaKind("image");
+            } else {
+                // 文件/通话等旧快照推不出真实类型：给下载链接最稳，不把音频当视频渲染
+                evidence.setMediaKind("file");
+            }
+        }
     }
 
     /**
@@ -587,6 +669,8 @@ public class ReportService {
             vo.setDisposition(report.getDisposition());
             vo.setDispositionName(dispositionName(report.getDisposition()));
             vo.setHandleRemark(report.getHandleRemark());
+            // 旧工单没结构化媒体字段，先从 meta 回捞再交给前端（只改内存，不回写库）
+            compatLegacyMedia(report.getEvidence());
             vo.setEvidence(report.getEvidence());
             vo.setAllowedDispositions(allowedDispositions(report));
             vo.setReportedUserId(report.getReportedUserId());

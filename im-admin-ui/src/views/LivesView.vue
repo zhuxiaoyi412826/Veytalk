@@ -40,7 +40,7 @@
         <el-table-column label="房间" min-width="220">
           <template #default="{ row }">
             <div class="room-cell">
-              <img v-if="row.cover" class="cover" :src="row.cover" alt="" />
+              <img v-if="covers[row.roomId]" class="cover" :src="covers[row.roomId]" alt="" />
               <div v-else class="cover cover-empty"><el-icon><VideoCamera /></el-icon></div>
               <div class="room-text">
                 <span class="ellipsis">{{ row.title || '（无标题）' }}</span>
@@ -149,6 +149,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchLiveDetail, fetchLivePage, stopLive } from '@/api/admin'
+import { fetchMedia } from '@/api/request'
 import { EMPTY_TEXT, formatDateTime, formatListTime, formatNumber } from '@/utils/format'
 
 /**
@@ -166,6 +167,9 @@ const loading = ref(false)
 
 const query = reactive({ keyword: '', status: undefined, current: 1, size: 20 })
 
+/** 封面地址映射（roomId -> object URL），取回前画占位图标 */
+const covers = reactive({})
+
 async function load() {
   loading.value = true
   try {
@@ -177,6 +181,14 @@ async function load() {
     })
     rows.value = page.records || []
     total.value = Number(page.total) || 0
+    rows.value.forEach((row) => {
+      // 封面是 /api/file/download 受控地址，<img src> 带不了登录头，与视频页同一套路取 blob
+      if (row.cover && !covers[row.roomId]) {
+        fetchMedia(row.cover).then((src) => {
+          covers[row.roomId] = src
+        })
+      }
+    })
   } catch {
     // 提示已由 request.js 弹过；保留上一次的结果
   } finally {

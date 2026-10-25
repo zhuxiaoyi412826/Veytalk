@@ -40,8 +40,10 @@ $env:PORT=8088; node live-media-server.js
 
 
 打包为EXE命令  导出为安装版和免安装版
+npm run build    
+如果打包失败先执行这个  
+Remove-Item .\release\win-unpacked -Recurse -Force -ErrorAction SilentlyContinue
 npm run build
-
 
 添加证书
 路径  im-ui\certs\ca.pem 

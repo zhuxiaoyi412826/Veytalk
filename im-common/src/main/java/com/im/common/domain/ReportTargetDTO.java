@@ -63,4 +63,21 @@ public class ReportTargetDTO implements Serializable {
 
     @Schema(description = "提交该对象可执行的处置动作码，空表示归属模块未装配")
     private List<String> dispositions;
+
+    /**
+     * 附件类证据的文件 ID（图片/视频/语音/文件消息与通话录制）：后台工单详情据此经
+     * {@code GET /api/admin/report/{id}/media} 取回内容渲染。刻意只存引用不存字节：
+     * 工单表复制一份媒体既撑爆 evidence JSON，又绕过秒传去重；文件被闪照销毁后
+     * 取不到字节，后台降级为「媒体不可用」而不是谎报。
+     */
+    @Schema(description = "附件证据的文件 ID，无附件为空")
+    private Long mediaFileId;
+
+    /** 渲染提示，前端按它选标签：image / video / audio / file（file 只给下载不做内联渲染） */
+    @Schema(description = "媒体渲染类型：image / video / audio / file")
+    private String mediaKind;
+
+    /** 原始文件名（下载链接与占位文案用，提交那一刻定格，事后文件记录被删也能说清报的是什么） */
+    @Schema(description = "附件原始文件名")
+    private String mediaName;
 }

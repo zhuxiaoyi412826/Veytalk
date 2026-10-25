@@ -39,7 +39,7 @@
         <el-table-column label="视频" min-width="260">
           <template #default="{ row }">
             <div class="video-cell">
-              <img v-if="row.coverUrl" class="cover" :src="row.coverUrl" alt="" />
+              <img v-if="covers[row.id]" class="cover" :src="covers[row.id]" alt="" />
               <div v-else class="cover cover-empty"><el-icon><Film /></el-icon></div>
               <div class="video-text">
                 <span class="ellipsis">{{ row.title || '（无标题）' }}</span>
@@ -114,9 +114,12 @@
       </div>
     </el-card>
 
-    <!-- 预览弹框：fileUrl 是服务端拼好的受控访问地址，不是预签名短链，翻页停留再久也不 404 -->
+    <!-- 预览弹框：fileUrl 是服务端拼好的受控地址（非预签名短链，翻页停留再久也不 404），
+         但 <video src> 带不了登录头，必须先经 fetchMedia 取成 blob 才能播 -->
     <el-dialog v-model="preview.visible" :title="preview.title" width="640px" destroy-on-close>
       <video v-if="preview.url" class="player" :src="preview.url" controls preload="metadata" />
+      <p v-else-if="preview.loading" class="muted">视频加载中…</p>
+      <p v-else-if="preview.failed" class="muted">视频加载失败（文件被删或无权访问），可关闭后重试</p>
       <p v-else class="muted">该记录没有可播放的文件地址</p>
     </el-dialog>
   </div>
@@ -126,6 +129,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteVideo, fetchVideoPage, offlineVideo, onlineVideo } from '@/api/admin'
+import { fetchMedia } from '@/api/request'
 import { EMPTY_TEXT, formatBytes, formatDuration, formatListTime, formatNumber } from '@/utils/format'
 
 /**
@@ -157,6 +161,7 @@ async function load() {
     })
     rows.value = page.records || []
     total.value = Number(page.total) || 0
+    loadCovers()
   } catch {
     // 提示已由 request.js 弹过；保留上一次的结果，不把列表清成空白
   } finally {
@@ -169,12 +174,52 @@ function reload() {
   load()
 }
 
-const preview = reactive({ visible: false, title: '', url: '' })
+const preview = reactive({ visible: false, title: '', url: '', loading: false, failed: false })
+let previewSeq = 0
 
-function openPreview(row) {
+async function openPreview(row) {
+  // 自增序号：快速连开两条时，先返回的那条不能覆盖后打开的那条
+  const seq = ++previewSeq
   preview.title = `预览：${row.title || `#${row.id}`}`
-  preview.url = row.fileUrl || ''
+  preview.url = ''
+  preview.failed = false
   preview.visible = true
+  if (!row.fileUrl) {
+    return
+  }
+  preview.loading = true
+  try {
+    // 受控地址直接塞 <video src> 必 401（资源请求带不了登录头），先取成 blob；
+    // 几十 MB 的视频不能用 axios 默认的 20s 超时，这里显式取消超时
+    const src = await fetchMedia(row.fileUrl, { timeout: 0 })
+    if (seq === previewSeq) {
+      preview.url = src
+      preview.failed = !src
+    }
+  } finally {
+    if (seq === previewSeq) {
+      preview.loading = false
+    }
+  }
+}
+
+/**
+ * 封面地址映射（row.id -> object URL）。
+ *
+ * 后端回的是 /api/file/download/{fileId} 受控地址，<img src> 同样带不了登录头，
+ * 直接塞只会裂图；与头像同一套路用 fetchMedia 取 blob，取回后响应式填充。
+ * 失败不缓存（fetchMedia 内部保证），翻页回来还会重试。
+ */
+const covers = reactive({})
+
+function loadCovers() {
+  rows.value.forEach((row) => {
+    if (row.coverUrl && !covers[row.id]) {
+      fetchMedia(row.coverUrl).then((src) => {
+        covers[row.id] = src
+      })
+    }
+  })
 }
 
 /** 用响应里的最新那一行就地替换（与用户页同一做法），避免整页重查丢滚动位置 */
