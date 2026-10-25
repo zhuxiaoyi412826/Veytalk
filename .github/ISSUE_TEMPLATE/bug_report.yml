@@ -1,0 +1,121 @@
+name: 🐞 Bug 反馈
+description: 报告一个可复现的问题（现象 + 复现步骤 + 环境 + 日志）
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    value: |
+      提 Issue 请带齐四件事：**现象 + 复现步骤 + 环境 + 相关日志**。缺一样通常要多轮往返才能定位。
+
+      - ⚠️ **安全漏洞不要开公开 Issue**，见 [`CONTRIBUTING.md` 九、安全问题](https://github.com/zhuxiaoyi412826/Veytalk/blob/main/CONTRIBUTING.md#九安全问题)。
+      - 🙏 贴日志与截图前，**请遮挡手机号、token、MinIO 密钥、远程控制接入码**等敏感信息。
+      - 🔍 先[搜一下有没有人提过](https://github.com/zhuxiaoyi412826/Veytalk/issues?q=is%3Aissue)。
+  - type: textarea
+    id: phenomenon
+    attributes:
+      label: 现象
+      description: 实际发生了什么、期望发生什么。有报错贴原文，有截图 / 录屏拖进来
+      placeholder: |
+        实际：点击撤回后 toast 提示「已撤回」，但气泡里的内容没变。
+        期望：气泡应立即替换为「XXX 撤回了一条消息」。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 从哪个账号、哪个页面开始，一步步点到出问题。不能稳定复现的请写明概率与已排除的条件
+      value: |
+        1. 登录账号：
+        2. 进入页面 / 会话：
+        3. 操作：
+        4. 看到：
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 出问题的功能域
+      description: 只知道自己大概在哪的话，选最接近的一项即可
+      options:
+        - 账号与鉴权（im-user）
+        - 会话与消息（im-conversation / im-message）
+        - 社交关系与黑名单（im-friend）
+        - 群组（im-group）
+        - WebSocket 与在线状态（im-websocket）
+        - 文件传输（im-file）
+        - 电话 / 视频通话（im-ui）
+        - AI 面试官与语音转写（im-ai）
+        - 直播与连麦（im-live）
+        - 远程控制（im-remote / im-remote-agent）
+        - 管理后台（im-admin / im-admin-ui）
+        - 官网与下载（im-website）
+        - Electron 桌面端（electron）
+        - 数据库与 SQL（sql）
+        - 文档与注释
+        - 其它 / 不确定
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: 客户端类型
+      description: 同一功能在不同端表现经常不一致，这一项很关键
+      options:
+        - 电脑浏览器（Chrome / Edge）
+        - 手机浏览器（请注明机型与浏览器）
+        - Electron 桌面端（IM通讯.exe）
+        - 管理后台 im-admin-ui
+        - 官网 im-website
+        - 直接调接口（curl / Postman / doc.html）
+        - 被控端 Agent（im-remote-agent）
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: 后端生效 profile
+      options:
+        - dev
+        - prod
+        - 不确定
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交号
+      description: 后端启动横幅里的版本，或 `git rev-parse --short HEAD`；不确定就留空
+      placeholder: "例：1.0.0 / ec97d24 / 不确定"
+  - type: input
+    id: jdk-node
+    attributes:
+      label: JDK 与 Node 版本
+      placeholder: "例：JDK 21.0.4 / Node 20.11.1 / Maven 3.9.6"
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 取 `IM_LOG_HOME`（默认 `D:/rizi1/IM`，Linux 常见 `/data/logs/im`）下 `error.log` / `warn.log` 的片段，必要时附 `DEBUG.log`。**贴之前先遮敏感信息**。这一栏是代码块展示（日志里的 `**` `-` 不会被排版吃掉），代价是不能拖附件——要传完整日志文件请传到下面「其它信息」
+      placeholder: |
+        2026-10-25 07:30:12.345 ERROR [im-server] traceId=... c.i.message.service.MessageServiceImpl : ...
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其它信息
+      description: 已尝试过的排查、疑似根因、临时绕过方式、是否阻塞使用
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 Issue，这不是重复问题
+          required: true
+        - label: 我贴的日志 / 截图 / 配置里不含密码、token、密钥或可用的远程控制接入码
+          required: true
+        - label: 这不是安全漏洞（是漏洞的话请走私下渠道，不要公开提 Issue）
+          required: true

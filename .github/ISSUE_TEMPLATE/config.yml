@@ -1,0 +1,22 @@
+# Issue 模板总配置。语法：https://docs.github.com/communities(using-templates-and-auxiliary-tools/using-issue-and-pull-request-templates)
+#
+# 这里保留自由模板入口：表单模板虽然收得整齐，但本项目大量问题是「跨端表现不一致」
+# 与「环境 / 证书 / 防火墙」类，硬塞进固定字段反而说不清，让人能自由写更有用。
+blank_issues_enabled: true
+
+contact_links:
+  - name: 提问 / 交流 / 求助配置
+    url: https://github.com/zhuxiaoyi412826/Veytalk/discussions
+    about: 用法、部署、二次开发方向这类"没有明确 bug"的问题请发到 Discussions，Issue 只留缺陷与需求
+
+  - name: 🚨 报告安全漏洞（不要开公开 Issue）
+    url: https://github.com/zhuxiaoyi412826/Veytalk/blob/main/CONTRIBUTING.md#九安全问题
+    about: 鉴权绕过、越权访问、密钥泄露、远程控制接入码可被爆破等，一律先私下联系维护者；公开 Issue 等于把漏洞公告给所有人
+
+  - name: 贡献流程 / Commit / PR / 发版规范
+    url: https://github.com/zhuxiaoyi412826/Veytalk/blob/main/CONTRIBUTING.md
+    about: 准备提 PR 前先读这份，能省掉一轮返工（尤其是「每次更新都要登记 md/CHANGELOG.md」这条）
+
+  - name: 功能清单与开发指南
+    url: https://github.com/zhuxiaoyi412826/Veytalk/blob/main/README%E8%AF%A6%E7%BB%86%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97.md
+    about: 环境准备、建库灌数据、启动、打包、按编号章节的接口与自测指引都在这里；README 只是仓库门面
