@@ -62,7 +62,8 @@ docker compose up -d --no-deps --wait im-server || {
 
 echo "== 现在跑的版本"
 docker compose ps im-server
-docker compose exec im-server sh -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; head -c 200 <&3' || true
+# ★ bash 不是 sh：/dev/tcp 是 bash 特性，eclipse-temurin 镜像的 /bin/sh 是 dash，dash 不认
+docker compose exec im-server bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; head -c 200 <&3' || true
 echo
 [[ $ROLLBACK -eq 1 ]] && echo "== 回滚完成。记得确认数据库里那些不兼容的 migration 是否需要人工处理。"
 echo "== 旧 tag 还在本地，别清理它（docker image prune -a 会把回滚目标一起删掉）"

@@ -119,8 +119,19 @@ jobs:
           JAR=im-bootstrap/target/im-server.jar
           [[ -f "$JAR" ]] || { echo "::error::$JAR 不存在，检查 finalName 与打包日志"; exit 1; }
           ls -lh "$JAR"
-          # 主类必须在这个包里，否则镜像里 ENTRYPOINT 起来就是「no main manifest attribute」
-          unzip -p "$JAR" META-INF/MANIFEST.MF | grep -i 'Main-Class: com.im.bootstrap.ImApplication'
+          # Spring Boot 重打包（repackage）后 MANIFEST 里是这么两行，check 必须按这个写法来：
+          #   Main-Class:  org.springframework.boot.loader.launch.JarLauncher  ← 容器入口，不是我们的类
+          #   Start-Class: com.im.bootstrap.ImApplication                      ← 我们的主类在这行
+          # ★ 踩过的坑：早期版本写成 grep 'Main-Class: com.im.bootstrap.ImApplication'，
+          #   这行永远不会出现 → pipefail 下 grep 退出码 1 → jar 明明好好的（81M）这一步却失败。
+          #   另外 MANIFEST.MF 的行尾是 CRLF，不去掉 \r 时精确匹配（grep -x）也会失败。
+          MF="$(unzip -p "$JAR" META-INF/MANIFEST.MF | tr -d '\r')"
+          printf '%s\n' "$MF" | grep -qx 'Start-Class: com.im.bootstrap.ImApplication' \
+            || { echo "::error::MANIFEST 里没有 Start-Class com.im.bootstrap.ImApplication，实际内容："; printf '%s\n' "$MF"; exit 1; }
+          printf '%s\n' "$MF" | grep -q '^Main-Class: org\.springframework\.boot\.loader\.' \
+            || { echo "::error::Main-Class 不是 Spring Boot Loader —— spring-boot-maven-plugin 的 repackage 没生效，这个 jar 不是可执行 fat jar，进镜像也起不来"; exit 1; }
+          printf '%s\n' "$MF" | grep -q '^Spring-Boot-Version: ' \
+            || echo "::warning::MANIFEST 里没有 Spring-Boot-Version，仍按 fat jar 处理"
 
       - name: 上传 artifact（jar 本体，留 14 天）
         uses: actions/upload-artifact@v4
@@ -176,7 +187,39 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.app }}/package-lock.json   # 三个站各自一份 lock，别指到根
 
+      # lockfile 自检：npm ci 碰到坏 lock 只会甩一句「npm error Invalid Version: 」（连哪个包都不说），
+      # 1 秒就挂，排查成本极高。这里先把「packages 里缺 version 的条目」按路径列出来。
+      # 真实事故：im-admin-ui/package-lock.json 里
+      #   node_modules/rollup/node_modules/@rollup/rollup-freebsd-x64 = {"dev":true,"optional":true}
+      # 是个 install 被中断留下的半成品条目（本地 npm 11 / runner 的 npm 10 都会炸）。
+      # 补救：npm install --package-lock-only 重建这一段，不要手填 integrity（填错反而装不上）。
+      - name: lockfile 自检
+        if: steps.pick.outputs.skip != 'true'
+        run: |
+          APP='${{ matrix.app }}'
+          node -e '
+          const fs = require("fs");
+          const app = process.argv[1];
+          const lockPath = app + "/package-lock.json";
+          const pk = JSON.parse(fs.readFileSync(lockPath, "utf8")).packages || {};
+          const bad = Object.entries(pk).filter(([k, v]) =>
+            k !== "" && (!v || typeof v !== "object" || typeof v.version !== "string" || v.version === ""));
+          if (bad.length) {
+            console.error("::error::" + lockPath + " 有 " + bad.length + " 个条目缺 version（npm ci 会报 Invalid Version）：");
+            bad.slice(0, 20).forEach(([k, v]) => console.error("   - " + k + "  ->  " + JSON.stringify(v)));
+            console.error("  修法：本地跑 npm install --package-lock-only 后重提这个 lock");
+            process.exit(1);
+          }
+          const rootVer = pk[""] ? pk[""].version : "(无)";
+          const pkgVer = JSON.parse(fs.readFileSync(app + "/package.json", "utf8")).version;
+          if (rootVer !== pkgVer)
+            console.warn("::warning::" + lockPath + " 根部 version=" + rootVer + " 与 package.json version=" + pkgVer + " 不一致");
+          console.log("lockfile 自检通过：" + lockPath + "（" + Object.keys(pk).length + " 个包）");
+          ' "$APP"
+
       # ★ npm ci 而不是 npm install：按 lock 精确装，「CI 绿了线上白屏」的一半来源是 install 悄悄升了版本
+      #   注意：三站 lock 里的 resolved 都是 registry.npmmirror.com（开发机全局 .npmrc 写的镜像），
+      #   runner 上装依赖会去访问境内外都可达的公网镜像站；万一它挂了，重跑不行就用官方 registry 重做 lock
       - name: 安装依赖
         if: steps.pick.outputs.skip != 'true'
         run: npm ci --no-audit --no-fund

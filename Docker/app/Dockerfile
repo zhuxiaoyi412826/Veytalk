@@ -12,6 +12,8 @@
 # ★ 别换成 eclipse-temurin:21-jre-alpine：那是 busybox sh，
 #   docker-compose.yml 里 im-server 的健康检查用 bash 的 /dev/tcp，busybox 不支持，
 #   表现是容器永远 unhealthy → nginx 的 depends_on: service_healthy 卡死，服务起不来还看不出原因。
+# ★ 同理，健康检查也不能写回 CMD-SHELL：CMD-SHELL 走 /bin/sh，而 Ubuntu 底镜像的 /bin/sh 是 dash，
+#   dash 一样不认 /dev/tcp —— compose 里那条必须明写 CMD ["bash", "-c", …]（bash 由 Ubuntu 基础镜像自带，不另装包）。
 FROM eclipse-temurin:21-jre
 
 WORKDIR /app

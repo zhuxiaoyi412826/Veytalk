@@ -45,6 +45,12 @@
     3) 应用连中间件必须用服务名 mysql / redis / minio。容器里的 127.0.0.1 指的是它自己。
     4) 时区两边一起设：MySQL --default-time-zone=+08:00 + TZ=Asia/Shanghai，只设一个就差 8 小时。
 
+  ★ 还有一条第一次真机 up 就会中的（本轮已修）：compose 里 im-server 的 healthcheck 必须写
+    CMD ["bash", "-c", …]，不能图省事用 CMD-SHELL —— CMD-SHELL 走 /bin/sh，而 eclipse-temurin 是
+    Ubuntu 底、/bin/sh 就是 dash，dash 不认 /dev/tcp。后果不是「检查报错」而是健康检查永远失败
+    → im-server 一直 unhealthy → nginx 的 depends_on: service_healthy 永久等不到 → 整个栈起不来。
+    同理：进 alpine 容器（nginx）做健康检查或诊断时，用 busybox 自带的 nc，也别用 /dev/tcp。
+
   运维一条命令（升级会先自动备份库）：
     bash scripts/update.sh 1.0.1
     bash scripts/update.sh --rollback 1.0.0
@@ -96,8 +102,12 @@
     mvn -B -ntp -DskipTests clean package
       → im-bootstrap/target/im-server.jar        （im-bootstrap/pom.xml 的 finalName=im-server）
       → im-remote-agent/target/im-remote-agent.jar（被控端，★ 不进镜像、不在服务器上跑）
-    校验主类：unzip -p im-bootstrap/target/im-server.jar META-INF/MANIFEST.MF | grep Main-Class
-      期望 com.im.bootstrap.ImApplication
+    校验主类：unzip -p im-bootstrap/target/im-server.jar META-INF/MANIFEST.MF | tr -d '\r' | grep -E 'Main-Class|Start-Class'
+      Spring Boot 重打包后是两行，各自作用不同，★ 别搞混：
+        Main-Class:  org.springframework.boot.loader.launch.JarLauncher   ← 容器的入口
+        Start-Class: com.im.bootstrap.ImApplication                       ← 我们的主类在这一行
+      去 grep 'Main-Class: com.im.bootstrap.ImApplication' 永远匹不到（Actions 上就是这么
+      把一个好好的 81M jar 判为失败的：pipefail + grep 无命中 = 退出码 1）
 
   前端 dist（三站各自一份 package-lock.json，用 npm ci 不用 npm install）：
     cd im-ui        && npm ci && npm run build      → im-ui/dist
@@ -105,6 +115,13 @@
     cd im-website   && npm ci && npm run build      → im-website/dist
     ★ im-ui 绝不能用 build:electron —— 那是 --mode electron，outDir 变 ../electron/dist、
       base 变 ./，拷到服务器就是刷新 404 + 资源路径全错。Web 部署只认 npm run build。
+    ★ lock 里只要有一个「缺 version 的条目」，npm ci 就只甩一句「npm error Invalid Version: 」（
+      不指出哪个包，1 秒就挂）。成因通常是上次 npm install 被中断，给可选依赖留了个半成品壳，比如
+        "node_modules/rollup/node_modules/@rollup/rollup-freebsd-x64": {"dev":true,"optional":true}
+      修法两步：① 先把那个缺 version 的条目删掉（lock 坏着的时候 npm install --package-lock-only 自己
+      也报同一个错）→ ② npm install --package-lock-only 让 npm 重建这一段 → 提交 lock。
+      ★ 不要删整份 lock 重做：那会把 ^ 范围内所有依赖悄悄升到最新版，与「按 lock 精确复现」相左。
+      （Windows 上的 npm 会把 lock 刷成 CRLF，已用 .gitattributes 的 *.json eol=lf 钉住，别手动改回来）
 
   镜像（两条路线）：
     路线 A（日常，推荐） Docker/app/Dockerfile，上下文 = Docker/app，只装运行时
@@ -120,7 +137,8 @@
     tag：镜像带 <版本号> / latest / sha-<短sha> 三种，部署只认精确版本号，★ 绝不用 latest
     Secret：推 GHCR 不用配（内置 GITHUB_TOKEN 的 packages: write）
             自动部署要配 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY，可选 DEPLOY_PORT / DEPLOY_DIR
-    改这个文件前必读：artifact 要写 root:（否则 jar 落在 Docker/app/im-bootstrap/target/ 里 COPY 找不到）、
+    改这个文件前必读：产物校验看 Start-Class 而不是 Main-Class、artifact 要写 root:
+      （否则 jar 落在 Docker/app/im-bootstrap/target/ 里 COPY 找不到）、
                       GHCR 镜像名必须全小写、provenance: false、前端覆盖不带 --delete
 
 

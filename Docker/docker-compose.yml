@@ -152,8 +152,11 @@ services:
           memory: 2g                     # 与镜像里 JAVA_OPTS 的 MaxRAMPercentage=75 配套：堆上限约 1.5g
     healthcheck:
       # Actuator 只绑 127.0.0.1（MANAGEMENT_ADDRESS 默认值），所以只能在容器内问。
-      # 用 bash 的 /dev/tcp 是为了免装 curl/wget；想让外部 Prometheus 抓，见指南 9.4（改 0.0.0.0 且不发布端口）
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
+      # 用 /dev/tcp 是为了免装 curl/wget；想让外部 Prometheus 抓，见指南 9.4（改 0.0.0.0 且不发布端口）
+      # ★ 必须写 CMD ["bash", …] 而不是 CMD-SHELL：CMD-SHELL 走 /bin/sh，而 eclipse-temurin:21-jre 是 Ubuntu 底，
+      #   /bin/sh 是 dash —— dash 不认 /dev/tcp，健康检查会永远失败 → im-server 一直 unhealthy →
+      #   nginx 的 depends_on: service_healthy 卡死，整个栈起不来（这是本文件第一次真机 up 就会撞到的坑）
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
       interval: 30s
       timeout: 5s
       retries: 5

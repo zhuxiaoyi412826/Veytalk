@@ -24,11 +24,14 @@ echo "   → 常见三种：IllegalStateException（配置缺 / Bean 起不来�
 echo "     Unable to connect to MinIO（没等 minio healthy 或凭据不对，见 compose 里那条 depends_on）"
 
 hr "③ 容器内自问：Actuator 是否 UP"
-docker compose exec im-server sh -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; head -c 300 <&3' || true
+# ★ 这里是 bash 不是 sh：/dev/tcp 是 bash 特性，而 eclipse-temurin 镜像的 /bin/sh 是 dash，dash 不认
+docker compose exec im-server bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; head -c 300 <&3' || true
 echo "   → MANAGEMENT_ADDRESS 默认 127.0.0.1，所以这一问只能在容器里问；宿主机 curl localhost:8081 是拒的"
 
 hr "④ 跨容器：nginx 能不能摸到后端"
-docker compose exec nginx sh -c 'exec 3<>/dev/tcp/im-server/8080 && echo upstream-ok' || echo "!! 不通：nginx 与后端不在同一网络？后端容器没起来？"
+# ★ nginx:1.27-alpine 里没有 bash（busybox sh 也不支持 /dev/tcp），用 busybox 自带的 nc；
+#   不写 -z（busybox 的 nc 不一定编了这个选项），靠 </dev/null 立刻 EOF 当作探活
+docker compose exec nginx sh -c 'nc -w 2 im-server 8080 < /dev/null' && echo "upstream-ok" || echo "!! 不通：nginx 与后端不在同一网络？后端容器没起来？"
 docker compose exec nginx sh -c 'nginx -t' 2>&1 | tail -n 5 || true
 
 hr "⑤ 外部：走完整链路（DNS → TLS → nginx → Spring）"

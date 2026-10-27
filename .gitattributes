@@ -19,10 +19,17 @@ Docker/nginx/**/*.example    text eol=lf
 # ★ 注意：.gitattributes 不认行内注释（那一列会被当成属性名，git 直接报 “# is not a valid attribute name”），注释只能整行写
 Docker/*.txt                 text eol=lf
 .dockerignore                text eol=lf
+# ★ 本文件自己也钉上：不钉的话 autocrlf=true 会把工作区副本刷成 CRLF（git 会提醒「LF will be replaced by CRLF」），
+#   属性文件本身容得下 CRLF（git 解析时不挑），但没必要让它当这个例外
+.gitattributes               text eol=lf
 *.yml                        text eol=lf
 *.yaml                       text eol=lf
 
 # ---------- 前端与脚本源码：统一 LF（vite/node 无所谓，但和上面一致省事） ----------
+# ★ package-lock.json 必须钉在这里：Windows 上的 npm 会用 os.EOL(CRLF) 重写 lock，
+#   不钉住的话任何人跑一次 npm install 就会把整份 lock 刷成 CRLF，下次改依赖的 diff 会有上千行噪声
+#   （本轮修 im-admin-ui 那份坏 lock 时就撞上过：npm 一写就是 CRLF，得手工转回来）
+*.json                       text eol=lf
 *.js                         text eol=lf
 *.mjs                        text eol=lf
 *.css                        text eol=lf

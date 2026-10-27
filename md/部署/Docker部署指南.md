@@ -360,6 +360,8 @@ scp im-bootstrap/target/im-server.jar deploy@server:/opt/im-docker/app/im-server
 ```dockerfile
 # 基础镜像固定到 21-jre（Ubuntu 系）。★ 别用 -alpine 版：那是 busybox sh，
 # 本文件后面的健康检查用 bash 的 /dev/tcp，busybox 不支持（要改写成 wget）。
+# ★ 另一个半边同类的坑：Ubuntu 底镜像的 /bin/sh 是 dash，它也不认 /dev/tcp，
+#   所以 compose 里那条健康检查必须写 CMD ["bash", "-c", …]，不能用 CMD-SHELL（详见第五节）。
 FROM eclipse-temurin:21-jre
 
 # 镜像里没有 curl 的可靠保证，健康检查依赖 bash（Ubuntu 基础镜像自带），不额外装包
@@ -570,8 +572,10 @@ services:
         limits:
           memory: 2g                 # 与 JAVA_OPTS 的 MaxRAMPercentage=75 配套：堆上限约 1.5g
     healthcheck:
-      # Actuator 只绑 127.0.0.1，所以只能在容器内问；bash 的 /dev/tcp 免装 curl/wget（alpine 基础镜像要改写）
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
+      # Actuator 只绑 127.0.0.1，所以只能在容器内问；/dev/tcp 免装 curl/wget
+      # ★ 写 CMD ["bash", …] 而不是 CMD-SHELL：CMD-SHELL 走 /bin/sh，eclipse-temurin 是 Ubuntu 底、/bin/sh 就是 dash，
+      #   而 dash 不认 /dev/tcp → 健康检查永失败 → 容器一直 unhealthy → nginx 的 service_healthy 卡死，整个栈起不来
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -668,13 +672,13 @@ docker compose logs -f im-server  # 看到「Started ImApplication」且没有 I
 
 ```bash
 # 后端能不能摸到 mysql / redis / minio（服务名解析对不对，这是容器化第一大坑）
-docker compose exec im-server sh -c 'for h in mysql redis minio; do printf "%s: " "$h"; timeout 2 bash -c "exec 3<>/dev/tcp/$h/${h/mysql/3306}" 2>&1 && echo OK || echo FAIL; done'
-# 上面这条用了嵌套替换，读起来别扭；分三条更清楚：
+# ★ 用 bash 而不是 sh：/dev/tcp 是 bash 的特性，dash / busybox sh 都不认；
+#   也别用变量替把端口凑在一起（${h/mysql/3306} 对 redis / minio 会拼成主机名当端口）
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/mysql/3306   && echo mysql-ok'
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/redis/6379   && echo redis-ok'
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/minio/9000   && echo minio-ok'
-# nginx 能不能摸到后端
-docker compose exec nginx  sh -c 'exec 3<>/dev/tcp/im-server/8080 && echo upstream-ok'
+# nginx 能不能摸到后端：nginx:1.27-alpine 里没有 bash，用 busybox 自带的 nc（不写 -z，靠 </dev/null 立刻 EOF）
+docker compose exec nginx  sh -c 'nc -w 2 im-server 8080 < /dev/null' && echo upstream-ok
 ```
 
 ---
@@ -1129,8 +1133,8 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 | job | 干什么 | 产物 |
 |---|---|---|
 | `meta` | 从根 `pom.xml` 里取版本号、把仓库主名转小写（GHCR 只认小写镜像名）、判定本次是否该 push（PR 不推） | job 输出 `version` / `image` / `push` |
-| `build-jar` | `setup-java@temurin 21` + Maven 缓存 → `mvn -B -DskipTests clean package` → 验一下 `Main-Class` 负不负 | artifact `im-server-jar-<sha>`（已用 `root:` 收窄到只剩 jar）+ `im-remote-agent-jar-<sha>` |
-| `build-web` | 矩阵跑 `im-ui` / `im-admin-ui` / `im-website`：`npm ci` → `npm run build` | artifact `web-<站>-<sha>`，里面就是干净的 `dist/**` |
+| `build-jar` | `setup-java@temurin 21` + Maven 缓存 → `mvn -B -DskipTests clean package` → 验 MANIFEST 里的 **`Start-Class`**（★ 不是 `Main-Class`，见下面坑单最后一条） | artifact `im-server-jar-<sha>`（已用 `root:` 收窄到只剩 jar）+ `im-remote-agent-jar-<sha>` |
+| `build-web` | 矩阵跑 `im-ui` / `im-admin-ui` / `im-website`：先过一道 **lockfile 自检** → `npm ci` → `npm run build` | artifact `web-<站>-<sha>`，里面就是干净的 `dist/**` |
 | `docker-image` | download jar 到 `Docker/app` → buildx + metadata → build **并 push 到 GHCR** | `ghcr.io/<owner>/im-server:<版本>` / `:latest` / `:sha-<短sha>` |
 | `deploy` | **只在手动触发且勾了 `deploy` 时跑**：`workflow_dispatch`。把三份 dist 打包走 ssh 覆盖到服务器 `web/`，再改远端 `.env` 的 `IM_SERVER_TAG` + `docker compose pull/up -d --no-deps --wait im-server` + 在部署机上 curl 探活 | —— |
 
@@ -1153,6 +1157,9 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 - **前端 dist 是“覆盖”而不是“同步”。** `tar` 走 ssh 时故意**不带 `--delete`：带上了，一个 `im-website` 的构建就能把 `web/` 下另外两站扫干净。旧版本的带 hash 文件名会堆积，想清就单独跑一次 `find web -name '*.js' -mtime +30 -delete`，别交给 CI。
 - **探活为什么绕到部署机上去 curl**：runner 在公网另一侧，目标机可能只开放内网/回环。所以探活命令是 `ssh ... "DEPLOY_DIR=$DIR bash -s" <<'EOF'`，只认 `HTTP 200`，不是「能连上就算成功」。
 - **`deploy` 绑了 `environment: production`**，可以在 Settings → Environments 里给它加「必需审批人」，就能做到「合入 main 自动出镜像，上生产需要人点一下」。
+- **★ 第一次真跑就撞上的两条（下面这些只有上 runner 才会暴露，本地静态检查看不到）**：
+  1. **`npm ci` 只报一句 `npm error Invalid Version: `（空字符串）就挂了。** 跟 node 版本、跟 Windows/Linux 差异都没关系，**是 lock 本身破了一个条目**：`im-admin-ui/package-lock.json` 里 `node_modules/rollup/node_modules/@rollup/rollup-freebsd-x64` 只剩 `{"dev":true,"optional":true}`，没 `version`（上一次 install 被中断留下的半成品）。所以 `build-web` 里加了一步 `lockfile 自检`（排在 `npm ci` 前面），直接把缺 `version` 的条目路径打印出来。修法：先删那个缺 `version` 的条目（lock 坏着时 `npm install --package-lock-only` 自己也会报同一个错），再跑一次 `npm install --package-lock-only` 让 npm 重建这一段；★ 不要删整份 lock 重做（会把 `^` 范围内全部依赖悄悄升最新版）。
+  2. **验 jar 不能 grep `Main-Class: com.im.bootstrap.ImApplication`。** Spring Boot 重打包后 `Main-Class` 是 `org.springframework.boot.loader.launch.JarLauncher`，**我们的主类在 `Start-Class:` 行**；那条 grep 永远匹不到，`set -euo pipefail` 下就是一个好端端的 81M jar 被判失败。另：MANIFEST 行尾是 CRLF，要 `tr -d '\r'` 再用 `grep -x`。
 
 > 反过来讲一句红线：**本仓库的开发机不需要、也不应该装 Maven/JDK/Node/docker 来做这些事。**
 > `Docker/app/Dockerfile.multistage` 存在的唯一理由，是那台开放机连 GitHub 都拉不动时当场 `docker compose build` 兜一份；
@@ -1167,8 +1174,8 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 ```bash
 docker compose ps                                       # ① 编排层：谁没 healthy
 docker compose logs --since=10m --tail=200 im-server    # ② 应用层：IllegalStateException / 连不上 / 端口占用
-docker compose exec im-server sh -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; cat <&3'   # ③ 容器内自问
-docker compose exec nginx sh -c 'exec 3<>/dev/tcp/im-server/8080 && echo upstream-ok'   # ④ 跳容器：nginx 能不能摸到后端
+docker compose exec im-server bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; cat <&3'   # ③ 容器内自问（★ bash：dash 不认 /dev/tcp）
+docker compose exec nginx sh -c 'nc -w 2 im-server 8080 < /dev/null'   # ④ 跨容器：nginx 能不能摸到后端（★ alpine 无 bash，用 busybox nc）
 curl -sk -o /dev/null -w "%{http_code}\n" https://im.example.com/api/auth/me -H "Origin: https://im.example.com"   # ⑤ 外部
 docker compose exec im-server env | grep -E 'IM_|MYSQL_|REDIS_|MINIO_'   # ⑥ 变量真值（3.3 那条坑的复核手段）
 ```
