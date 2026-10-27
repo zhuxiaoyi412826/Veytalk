@@ -1,0 +1,234 @@
+# ==============================================================================
+# IM 即时通讯系统 —— Ubuntu 24.04 + Docker Compose
+#
+# 本文件是 md/部署/Docker部署指南.md 第五节那份 compose 的仓库落地版：内容与它逐段对应，
+# 冲突时以文档为准（文档解释「为什么」，这里只负责「跑起来」）。
+#
+# 用法（在部署机上，不是在这台写文件的机器上）：
+#   1) 把 Docker/ 整个目录拷到服务器 /opt/im-docker（compose 里的相对路径都以该目录为基准）
+#   2) cp .env.example .env && 填三份密码            ← compose 自己插值用的
+#   3) bash scripts/bootstrap.sh                     ← 建目录、摆权限、从 example 生成 im.conf / im.env
+#   4) docker compose config -q                      ← 先静态校验（插值、缩进、未声明的卷）
+#   5) docker compose pull im-server && docker compose up -d
+#
+# ★ 三条不能破的约束，改这个文件前先读 Docker部署指南.md 第〇节：
+#   ① 单实例：不要 --scale im-server=N，不要加 deploy.replicas（WS 扇出只认本进程连接表，
+#      且 12 个 @Scheduled 没有一个 ShedLock，两个副本＝消息半丢 + 定时任务跑两遍）。
+#   ② 只发布 80/443（按需 8088、3478、8947/udp）：Docker 发布的端口会绕过 UFW，
+#      所以 3306/6379/9000/9001/8080/8081 一律不写 ports:，需要调试就临时加 "127.0.0.1:8080:8080"。
+#   ③ 应用连中间件必须用服务名（mysql / redis / minio），写 127.0.0.1 指的就是它自己。
+# ==============================================================================
+
+name: im-docker            # 卷名前缀（im-docker_mysql-data）。改了等于换了一批空卷，别顺手改
+
+services:
+  # ---------------------------------------------------------------- MySQL
+  mysql:
+    image: mysql:${MYSQL_TAG:-8.0}
+    container_name: im-mysql
+    restart: unless-stopped
+    command:
+      # ★ 与 JDBC URL 里写死的 serverTimezone=Asia/Shanghai 对齐（application.yml L62）。
+      #   不设则 MySQL 侧 DEFAULT CURRENT_TIMESTAMP 兜底写出来的时间比应用写的差 8 小时
+      - --default-time-zone=+08:00
+      - --character-set-server=utf8mb4
+      # 与 sql/im_schema.sql 的 CREATE DATABASE 同一 collation，否则 JOIN 报 Illegal mix of collations
+      - --collation-server=utf8mb4_general_ci
+      # 必须明显大于 Hikari 的 maximum-pool-size(50) × 实例数(1)；镜像默认 151，抬到 300 是给运维工具留余量
+      - --max_connections=300
+      - --innodb-buffer-pool-size=512M
+      # 认证插件用镜像默认的 caching_sha2_password：JDBC URL 已带 allowPublicKeyRetrieval=true，
+      # 不要再加 --default-authentication-plugin（不同 8.0 小版本对这个开关的拼写不一致，多写一行能让 mysqld 起不来）
+    environment:
+      # :? 而不是 :- —— 密码留空时 compose 直接报错退出，
+      # 而不是起一个「root 空密码」的 MySQL 再等它被扫
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必填，见 .env.example}
+      MYSQL_DATABASE: im_db
+      MYSQL_USER: im
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?必填，且必须与 conf/im.env 里的 MYSQL_PASSWORD 逐字一致}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # ★ 仅「全新建库」时用：空卷的第一次启动按文件名字典序执行 sql-init/ 里的 .sql/.sh/.sql.gz。
+      #   上线之后建议注释掉这两行并清空该目录——让这份 compose 失去「重建库」的能力，
+      #   是很便宜的防误操作护栏（sql/im_schema.sql 开头有 37 条 DROP TABLE IF EXISTS）。
+      - ./sql-init:/docker-entrypoint-initdb.d:ro
+    # 不发布 3306（Docker 发布的端口绕过 UFW）。临时调试：ports: ["127.0.0.1:3306:3306"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s      # 首次初始化要建 37 张表，设小了会被误判成 unhealthy
+
+  # ---------------------------------------------------------------- Redis
+  redis:
+    image: redis:${REDIS_TAG:-7-alpine}
+    container_name: im-redis
+    restart: unless-stopped
+    # ★ 镜像没有「从环境变量读密码」这回事，只能走命令行；命令行会出现在 docker inspect 里，
+    #   更克制的做法是挂一份 redis.conf 再 `redis-server /usr/local/etc/redis/redis.conf`
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?必填，且必须与 conf/im.env 里的 REDIS_PASSWORD 逐字一致}", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    environment:
+      TZ: Asia/Shanghai
+      # ★ 多一份只是为了让 `docker compose exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" ...'` 能用
+      #   （scripts/clear-perm-cache.sh 依赖它）。命令行形式的那份本来就会出现在 docker inspect 里，
+      #   多一份环境变量不算新增暂露面；真在意就把 requirepass 改走 redis.conf 挂载，两处一起去掉
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ---------------------------------------------------------------- MinIO
+  minio:
+    # ★ 不要把 latest 留成 latest：换成具体 RELEASE 标签（docker inspect 看当前跑的是哪个），
+    #   否则回滚失去目标，而且某天拉下来会发现桶数据格式不兼容
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: im-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      # MINIO_ROOT_PASSWORD 下限 8 字符、MINIO_ROOT_USER 下限 3 字符：短了容器直接退出（不是拒绝登录，是起不来）
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?必填，不要用 minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?必填，≥8 位，不要用 minioadmin}
+      TZ: Asia/Shanghai
+    volumes:
+      - minio-data:/data
+    # 9000/9001 都不发布。要看控制台：ssh -L 9001:127.0.0.1:9001 后本机开 localhost:9001
+    healthcheck:
+      # 官方镜像自带 mc。若你换的构建里没有，先 docker compose exec minio which mc 确认再改
+      test: ["CMD-SHELL", "mc ready local"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  # ---------------------------------------------------------------- 后端（唯一的 Java 进程）
+  im-server:
+    # CI 推的镜像（GHCR）就在这里；IM_SERVER_TAG 在 .env 里换版本号，回滚只改这一行
+    image: ${IM_SERVER_TAG:?必填，如 ghcr.io/<owner>/im-server:1.0.0}
+    build:
+      context: ./app                     # 路线 A：Dockerfile 只装运行时，jar 由构建机/CI 放进 ./app
+      # 在服务器上现场构建（没有独立构建机时）：
+      #   docker build -f Docker/app/Dockerfile.multistage -t local/im-server:1.0.0 <仓库根>
+      # 改了 jar 之后的重装：docker compose build im-server && docker compose up -d im-server
+    container_name: im-server
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        # ★ 关键：IM_FILE_STORAGE 默认 minio，连不上桶是刻意的 fail-fast。
+        #   没有这条 depends_on 时表现是「容器起来了→崩→重启」的无限循环，日志里全是同一句报错
+        condition: service_healthy
+    env_file:
+      - ./conf/im.env
+    volumes:
+      # ★ 容器内路径与 conf/im.env 里的 IM_LOG_HOME / IM_UPLOAD_TMP_DIR 必须一一对应：
+      #   宿主机看不到就等于没挂卷（漏挂 logs 是「日志静默丢失」，logback 不拦启动，很难第一时间发现）
+      - ./data/logs:/app/logs
+      - ./data/upload-tmp:/app/upload-tmp
+      - ./data/files:/app/files          # 只有 IM_FILE_STORAGE=local 用得到，留着不亏
+      - ./data/knowledge:/app/knowledge:ro
+      - ./app/extra:/app/extra:ro        # CORS 白名单这类「yml 字面列表、环境变量改不动」的外挂配置
+      # 开直播时把 ./data/live 也挂给后端（回放清理与录制元数据要用）；不开直播就别挂，少一个可写目录
+      # - ./data/live:/app/live
+    expose:
+      - "8080"                           # 只给 nginx 容器反代，不发布到宿主机
+    # 远控 UDP 打洞（IM_DIRECT_ENABLED=true 才需要）。★ 不写 /udp 默认是 TCP，而 TCP 打洞不通且中继照样能用，
+    # 只有延迟和流量账单会告诉你没生效。同时 IM_DIRECT_PUNCH_HOST 必须设成公网 IP（不能写服务名）
+    # ports:
+    #   - "8947:8947/udp"
+    deploy:
+      resources:
+        limits:
+          memory: 2g                     # 与镜像里 JAVA_OPTS 的 MaxRAMPercentage=75 配套：堆上限约 1.5g
+    healthcheck:
+      # Actuator 只绑 127.0.0.1（MANAGEMENT_ADDRESS 默认值），所以只能在容器内问。
+      # 用 bash 的 /dev/tcp 是为了免装 curl/wget；想让外部 Prometheus 抓，见指南 9.4（改 0.0.0.0 且不发布端口）
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s                  # Spring Boot + 建连 + 自动建桶，冷启 40~80s 是正常量级
+
+  # ---------------------------------------------------------------- Nginx（三站静态 + /api /ws 反代 + 直播媒体面）
+  nginx:
+    image: nginx:${NGINX_TAG:-1.27-alpine}
+    container_name: im-nginx
+    restart: unless-stopped
+    depends_on:
+      im-server:
+        # nginx 对 proxy_pass 的上游做启动期 DNS 解析，解析不到就启动即退出：
+        # 所以这里必须等后端 healthy，不能只 depends_on 一个「起来了」
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      # - "8088:8088"                    # 直播推流口（只在主播端要直连 8088 时放开；见 nginx/conf.d 里那段关于源 IP 的警告）
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./web/im-ui:/usr/share/nginx/html/im-ui:ro
+      - ./web/im-admin-ui:/usr/share/nginx/html/im-admin-ui:ro
+      - ./web/im-website:/usr/share/nginx/html/im-website:ro
+      - ./certs:/etc/letsencrypt:ro
+      - ./data/live:/data/live           # ★ 读写：推流口要往这里写分片（播放侧的只读语义由 im.conf 的 limit_except 保证）
+    healthcheck:
+      # ★ 打 conf 里那个专用的 location = /healthz：打 / 会被 301 带到 443，打 443 又要处理证书
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ------------------------------------------------ 选装：直播回放保留期清理（开了直播就是必装项）
+  # 后端只管 Redis 里那个入口标记，控制面一个媒体字节都不碰；分片没人删就一直吃盘
+  # （一场 2 小时四档直播约 8~10GB）。脚本从仓库 electron/live-retention.js 拷到 ./scripts/。
+  # live-retention:
+  #   image: node:${NODE_TAG:-22-alpine}
+  #   container_name: im-live-retention
+  #   restart: unless-stopped
+  #   working_dir: /app
+  #   volumes:
+  #     - ./scripts/live-retention.js:/app/live-retention.js:ro
+  #     - ./data/live:/data/live         # 与 nginx 同一个目录，才能删到真的那批分片
+  #   environment:
+  #     IM_LIVE_REPLAY_RETENTION_DAYS: 1 # ★ 与后端读同一个变量名；两边不一致＝「列表有回放、点进去 404」
+  #   # ★ 常驻形态用 --interval；要每天跑一次就注释掉本 service，改用宿主 cron（指南 9.1 的 B 方案）
+  #   command: ["node", "/app/live-retention.js", "--root=/data/live", "--interval=1800"]
+  #   depends_on:
+  #     - nginx
+
+  # ------------------------------------------------ 选装：coturn（公网跨 NAT 通话中继）
+  # coturn:
+  #   image: coturn/coturn:latest
+  #   container_name: im-coturn
+  #   restart: unless-stopped
+  #   network_mode: host                 # ★ TURN 几乎必须 host 网络：中继端口是大段 UDP，逐个 ports: 映射既难维护又会改源地址
+  #   command:
+  #     - --use-auth-secret
+  #     - --static-auth-secret=${TURN_SECRET}          # 与 conf/im.env 的 IM_TURN_SECRET 逐字一致，否则客户端拿 401
+  #     - --realm=${IM_DOMAIN}
+  #     - --listening-port=3478
+  #     - --external-ip=<公网IP>/<内网IP>               # ★ NAT 后面必须写这一对，否则下发给客户端的是内网地址，连不上
+  #     - --min-port=49160
+  #     - --max-port=49200
+  #     - --no-tls
+  #     - --no-dtls
+
+# ---------------------------------------------------------------- 命名卷（★ 必须在此声明）
+# compose 对「服务里用了但顶层没声明」的卷直接报错：
+#   service "mysql" refers to undefined volume mysql-data: invalid compose project
+# MySQL / Redis / MinIO 用命名卷而不是 bind mount，是因为三个官方镜像的运行 uid 各不相同，
+# 挂宿主目录十有八九撞 Permission denied，修 uid 的性价比极低（代价只是数据不在 ./data 下，备份脚本相应改一下）。
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:

@@ -132,11 +132,14 @@ sudo systemctl restart docker && docker info | grep -E "Storage Driver|Logging D
 ### 1.5 镜像加速（国内服务器拉不动 Docker Hub 时才需要）
 
 ```bash
-sudo mkdir -p /etc/docker && sudo tee -a /etc/docker/daemon.json <<'EOF'
-EOF
-# 在 daemon.json 里加："registry-mirrors": ["https://<你的加速地址>"]，然后 systemctl restart docker
+sudo mkdir -p /etc/docker
+# 用编辑器打开 daemon.json，在已有的 JSON 对象里加一行：
+#   "registry-mirrors": ["https://<你的加速地址>"]
+sudo systemctl restart docker
 docker pull mysql:8.0     # 能拉下来才算配好；拉不动就先去云厂商控制台开「容器镜像加速」
 ```
+
+> 别用 `echo ... >> daemon.json` 往文件里追加——那会写出两个 `{}` 拼接的非法 JSON，`dockerd` 直接起不来（第十二节有条对应的故障）。
 
 > 更快的路子是**离线导入**：在能联网的机器上 `docker save` 六个镜像 → 拷到服务器 `docker load`。
 > 内网机、以及「上线窗口只有十分钟」的场合，这条路比调镜像源可靠得多（第十二节速查表里有一条相关的失败表现）。
@@ -144,6 +147,28 @@ docker pull mysql:8.0     # 能拉下来才算配好；拉不动就先去云厂�
 ---
 
 ## 二、目录结构（先把骨架摆出来）
+
+> **★ 本份文档已经不再是「只有文档」了：仓库里的 [`Docker/`](../../Docker/) 目录就是下面这棵树的成品，可以整体拷到服务器上。**
+> 文档与文件的对应关系（照文档改文件、或照文件回查文档，都从这张表进）：
+>
+> | 文档章节 | 仓库里的文件 | 落地后在服务器上的路径 |
+> |---|---|---|
+> | §2 骨架 | `Docker/{data,web,certs,sql-init}/.gitkeep` | 目录本体（内容不进库） |
+> | §3.1 `.env` | `Docker/.env.example` | `/opt/im-docker/.env`（复制后填值，不进库） |
+> | §3.2 `conf/im.env` | `Docker/conf/im.env.example` | `conf/im.env`（`bootstrap.sh` 生成并同步凭据） |
+> | §4 Dockerfile | `Docker/app/Dockerfile`（路线 A：拷 jar）<br>`Docker/app/Dockerfile.multistage`（路线 B：容器内构建） | `app/Dockerfile` |
+> | §5 compose 全文 | `Docker/docker-compose.yml` | `docker-compose.yml` |
+> | §6 SQL 初始化 | `Docker/sql-init/`（空，由 `bootstrap.sh` 从 `sql/` 拷入并重命名为 `01_/02_`） | `sql-init/` |
+> | §7 权限缓存清理 | `Docker/scripts/clear-perm-cache.sh` | `scripts/` |
+> | §8 nginx | `Docker/nginx/conf.d/im.conf.example` + `Docker/nginx/snippets/{proxy,ssl}.conf`<br>`Docker/app/extra/application-prod-extra.example.yml` | `nginx/conf.d/im.conf`（token 替换生成） |
+> | §9 sidecar / TURN | `Docker/scripts/live-retention.js`（`bootstrap.sh` 从 `electron/` 拷入） | `scripts/` |
+> | §10 备份升级 | `Docker/scripts/{import-sql,backup,update}.sh` | `scripts/` |
+> | §11 健康检查与自启 | `Docker/scripts/{health.sh,im-docker.service}` | `scripts/` + `/etc/systemd/system/` |
+> | §10.5 CI/CD | [`.github/workflows/build-and-package.yml`](../../.github/workflows/build-and-package.yml) | 跑在 GitHub Actions 上，产物推 GHCR |
+>
+> **落地只需要三步**（细节见 `Docker/README.md`）：把整个 `Docker/` 拷到 `/opt/im-docker` → `cp .env.example .env` 填值 → `bash scripts/bootstrap.sh`。
+> `bootstrap.sh` 干的就是本节下面这些「手工摆目录、抄域名、拼凭据」的活，并且**幂等**（重复跑只会覆盖生成物，不会重复追加行）。
+> 它不启动容器、不联网、不碰数据库；没装 docker 的机器（比如写这些文件的开发机）也能跑通，只是跳过最后 `docker compose config` 的静态校验。
 
 约定部署根目录 `/opt/im-docker`。**`docker-compose.yml` 里的相对路径全部以它为基准**，别换目录再抄配置。
 
@@ -316,6 +341,10 @@ MANAGEMENT_ADDRESS=127.0.0.1                 # ★ 容器里的 loopback 只有�
 产物只有一个可执行 fat jar（`im-bootstrap/target/im-server.jar`，主类 `com.im.bootstrap.ImApplication`）。
 两条路线：
 
+> ★ 两个文件都已在仓库里：[`Docker/app/Dockerfile`](../../Docker/app/Dockerfile)（路线 A）与 [`Docker/app/Dockerfile.multistage`](../../Docker/app/Dockerfile.multistage)（路线 B）。
+> 路线 A 的构建上下文就是 `Docker/app`（jar 由 CI 的 `download-artifact` 直接丢进去），路线 B 的上下文是仓库根，两个 `-f` 不要写反。
+> 路线 A 的「构建机」在本项目里就是 **GitHub Actions 的 runner**（见 §10.5），不是你手上这台开发机。
+
 ### 4.1 路线 A：jar 由构建机产出，镜像只做运行时（**推荐**）
 
 构建机（有 JDK 21 + Maven，不需要 Docker）：
@@ -420,6 +449,12 @@ docker build -t local/im-server:1.0.0 .
 ## 五、docker-compose.yml 全文
 
 `/opt/im-docker/docker-compose.yml`。这份是**可以整份抄走**的最小生产形态：直播媒体面与 TURN 已写好但注释掉，按需放开。
+
+> ★ 仓库里的本体是 [`Docker/docker-compose.yml`](../../Docker/docker-compose.yml)，与下面这段同源，但有几处已经在服务器上补过的差异：
+> ① `redis` 服务多了 `REDIS_PASSWORD: ${REDIS_PASSWORD:?}` 这个环境变量——不加它，`docker compose exec redis redis-cli -a "$REDIS_PASSWORD"`
+> 在容器里拿到的是空串（compose 只在 `command:` 里插值，不会把变量注进容器环境），`health.sh` 与 `clear-perm-cache.sh` 就会鉴权失败；
+> 代价是 `docker inspect` 里能看到这个值，而它本来也能从 `command:` 里看到，没有新增泄露面。② 镜像名走 `${IM_SERVER_TAG}`，与 §10.5 的 CI 产出直接对接。
+> **以文件为准；下面这段的作用是把“为什么这么写”讲完。**
 
 ```yaml
 # IM 即时通讯系统 —— Ubuntu 24.04 + Docker Compose 部署
@@ -760,6 +795,10 @@ docker compose exec nginx sh -c "nginx -V 2>&1 | tr ' ' '\\n' | grep -E 'http_da
 
 ### 8.2 `nginx/conf.d/im.conf`（可直接抄）
 
+> ★ 仓库里已经落盘为 [`Docker/nginx/conf.d/im.conf.example`](../../Docker/nginx/conf.d/im.conf.example)：它把下面这些域名换成了 `__IM_DOMAIN__` 形式的 token，
+> 由 `bootstrap.sh` 从 `.env` 里取值替换后生成 `nginx/conf.d/im.conf`。**不用 nginx 自带的 `envsubst`**——那会把 `$host`、`$uri`、`$remote_addr` 这些 nginx 变量一并吃成空串，
+> 是一个很难查的坑（表现是 `Host: ` 空头发给后端，接口全 404）。下面这段保留写死的 `im.example.com`，是为了让你能直接读懂结构；两边不同步时**以文件为准**。
+
 ```nginx
 # ---------- 公共片段：snippets/proxy.conf（下面引它，避免四个 server 块各写一遍）----------
 # proxy_http_version 1.1;
@@ -1083,6 +1122,42 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 `--volumes` 会把 `mysql-data` / `minio-data` / `redis-data` 一起删掉；`-a` 会删掉所有「当前没被容器引用」的镜像，包括你留着回滚的旧 tag。
 要清理就用精确命令：`docker image prune`（只删悬空层）、`docker builder prune`（删构建缓存）。
 
+### 10.5 用 GitHub Actions 把 10.2 自动化（仓库里已给现成 workflow）
+
+本节上面那堆 `mvn package` / `scp` / `sed .env` / `compose up`，在 [`build-and-package.yml`](../../.github/workflows/build-and-package.yml) 里已经写完。**关键前提：构建不发生在开发机，也不发生在业务机，而是发生在 GitHub 的 runner 上。**
+
+| job | 干什么 | 产物 |
+|---|---|---|
+| `meta` | 从根 `pom.xml` 里取版本号、把仓库主名转小写（GHCR 只认小写镜像名）、判定本次是否该 push（PR 不推） | job 输出 `version` / `image` / `push` |
+| `build-jar` | `setup-java@temurin 21` + Maven 缓存 → `mvn -B -DskipTests clean package` → 验一下 `Main-Class` 负不负 | artifact `im-server-jar-<sha>`（已用 `root:` 收窄到只剩 jar）+ `im-remote-agent-jar-<sha>` |
+| `build-web` | 矩阵跑 `im-ui` / `im-admin-ui` / `im-website`：`npm ci` → `npm run build` | artifact `web-<站>-<sha>`，里面就是干净的 `dist/**` |
+| `docker-image` | download jar 到 `Docker/app` → buildx + metadata → build **并 push 到 GHCR** | `ghcr.io/<owner>/im-server:<版本>` / `:latest` / `:sha-<短sha>` |
+| `deploy` | **只在手动触发且勾了 `deploy` 时跑**：`workflow_dispatch`。把三份 dist 打包走 ssh 覆盖到服务器 `web/`，再改远端 `.env` 的 `IM_SERVER_TAG` + `docker compose pull/up -d --no-deps --wait im-server` + 在部署机上 curl 探活 | —— |
+
+需要在仓库 Settings → Secrets and variables → Actions 里配的（**推 GHCR 不需要任何 Secret**，用内置 `GITHUB_TOKEN` 的 `packages: write` 权限）：
+
+| Secret | 必需 | 说明 |
+|---|---|---|
+| `DEPLOY_HOST` | 要自动部署就必需 | 那台开放机的 IP 或域名 |
+| `DEPLOY_USER` | 必需 | 能 `sudo docker` 或在 docker 组里的账号 |
+| `DEPLOY_SSH_KEY` | 必需 | **私钥**全文；对应公钥进服务器 `~/.ssh/authorized_keys`，用 `ssh-keygen -t ed25519` 现做一对，不要用你日常开发机的钥匙 |
+| `DEPLOY_PORT` | 可选（默认 22） | SSH 端口 |
+| `DEPLOY_DIR` | 可选（默认 `/opt/im-docker`） | 就是本文的部署根目录 |
+
+几个已经踩过的坑，改这个文件前先读：
+
+- **`upload-artifact` 不写 `root:` 会坑死下一步。** 默认以工作区根为基准，download 到 `Docker/app` 后会变成 `Docker/app/im-bootstrap/target/im-server.jar`，而 `COPY im-server.jar /app/` 只认前者，直接构建失败。三个上传步骤都显式写了 `root`。
+- **GHCR 镜像名必须全小写。** 仓库主名字带大写时，`metadata-action` 会直接报错；所以 `meta` 里先 `tr '[:upper:]' '[:lower:]'`。
+- **PR 只构建不推送。** `push` 这个开关在 `meta` 里按事件类型算，别把它写成恒 true——那等于每个 PR 往 GHCR 里堆一堆拉不下来的野镜像。
+- **`provenance: false`。** 不关它在 GHCR 上会多两个 `unknown/unknown` 的空壳镜像，看着像多供了一个版本，实际拉不到东西。
+- **前端 dist 是“覆盖”而不是“同步”。** `tar` 走 ssh 时故意**不带 `--delete`：带上了，一个 `im-website` 的构建就能把 `web/` 下另外两站扫干净。旧版本的带 hash 文件名会堆积，想清就单独跑一次 `find web -name '*.js' -mtime +30 -delete`，别交给 CI。
+- **探活为什么绕到部署机上去 curl**：runner 在公网另一侧，目标机可能只开放内网/回环。所以探活命令是 `ssh ... "DEPLOY_DIR=$DIR bash -s" <<'EOF'`，只认 `HTTP 200`，不是「能连上就算成功」。
+- **`deploy` 绑了 `environment: production`**，可以在 Settings → Environments 里给它加「必需审批人」，就能做到「合入 main 自动出镜像，上生产需要人点一下」。
+
+> 反过来讲一句红线：**本仓库的开发机不需要、也不应该装 Maven/JDK/Node/docker 来做这些事。**
+> `Docker/app/Dockerfile.multistage` 存在的唯一理由，是那台开放机连 GitHub 都拉不动时当场 `docker compose build` 兜一份；
+> 它是兜底路线，不是日常路线。日常只走路线 A（Actions 推镜像 → 服务器 `pull`）。
+
 ---
 
 ## 十一、健康检查与开机自启
@@ -1224,4 +1299,7 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 | WebRTC 通话、STUN/TURN、群通话 mesh、录制留存 | `md/语音视频通话接入指南.md` |
 | 监控与告警（Actuator / Prometheus / Grafana） | `md/监控告警部署指南.md` |
 | 被控端 Agent 的编译与配置（**不在服务器上跑**，见服务器部署指南 §2.3） | `md/远程控制Agent使用说明.md` |
+| **本文对应的成品文件：整套部署包（compose / env 模板 / Dockerfile / nginx / 运维脚本 / bootstrap）** | [`Docker/`](../../Docker/)，上手读 [`Docker/README.md`](../../Docker/README.md) |
+| **本文 §10.5 对应的 CI：打 jar + 打三个前端 + 构建并推镜像 + 可选 SSH 部署** | [`.github/workflows/build-and-package.yml`](../../.github/workflows/build-and-package.yml) |
+| 行尾统一（`*.sh` / compose / Dockerfile 强制 LF，否则 Windows 上检出就跑不了） | [`.gitattributes`](../../.gitattributes)、仓库根 [`.dockerignore`](../../.dockerignore) |
 | 每一次变更的登记 | `md/CHANGELOG.md` |

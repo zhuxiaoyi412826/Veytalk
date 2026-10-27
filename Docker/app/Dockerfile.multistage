@@ -1,0 +1,59 @@
+# ==============================================================================
+# 路线 B：多阶段构建，源码直接进镜像，构建机上不需要装 Maven（服务器上也一样不用装）。
+# 对应 Docker部署指南.md §4.2。
+#
+# ★★ 构建上下文是「仓库根」，不是本目录：
+#      docker build -f Docker/app/Dockerfile.multistage -t local/im-server:1.0.0 .
+#    （CI 里默认用路线 A 出的 jar；只有没有独立构建机 / CI 时才对这条命令）
+#
+# 上下文是仓库根 → 仓库根的 .dockerignore 生效。**没有那个文件这个构建会慢到不能用**：
+# im-ui/node_modules + electron 打包产物 + 各模块 target 加起来是几个 GB，全被塞进上下文。
+# ==============================================================================
+
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+
+# 先只拷 pom 做依赖下载层，源码层变更就不会重新解析这 14 个模块的依赖树
+# （清单与根 pom.xml 的 <modules> 一一对应，多写或少写一个都会让 COPY 直接失败）
+COPY pom.xml ./
+COPY im-common/pom.xml                 im-common/
+COPY im-user/pom.xml                   im-user/
+COPY im-friend/pom.xml                 im-friend/
+COPY im-conversation/pom.xml           im-conversation/
+COPY im-message/pom.xml                im-message/
+COPY im-group/pom.xml                  im-group/
+COPY im-file/pom.xml                   im-file/
+COPY im-websocket/pom.xml              im-websocket/
+COPY im-ai/pom.xml                     im-ai/
+COPY im-remote/pom.xml                 im-remote/
+COPY im-live/pom.xml                   im-live/
+COPY im-admin/pom.xml                  im-admin/
+COPY im-bootstrap/pom.xml              im-bootstrap/
+COPY im-remote-agent/pom.xml           im-remote-agent/
+# dependency go-offline 只拉编译需要的依赖；maven 仓库走 cache mount 复用
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q dependency:go-offline
+
+COPY . .
+# skipTests 与根 pom 的 surefire 配置同口径（本仓库没有测试类，去掉这个参数只会让构建多跑一轮空扫描）
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q clean package -DskipTests
+
+# ------------------------------------------------------------------ 运行时阶段
+# 与 Dockerfile（路线 A）保持完全一致的基础镜像、uid、JAVA_OPTS、ENTRYPOINT，
+# 两条路线的差别只有「jar 从哪来」——不一致会让「本机能跑线上不能跑」这类问题极难定位。
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN groupadd --system --gid 1000 im \
+    && useradd  --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
+    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra \
+    && chown -R 1000:1000 /app
+
+# 产物名来自 im-bootstrap/pom.xml 的 <finalName>im-server</finalName>
+COPY --from=build --chown=1000:1000 /src/im-bootstrap/target/im-server.jar /app/im-server.jar
+
+ENV TZ=Asia/Shanghai \
+    JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport -Dfile.encoding=UTF-8" \
+    SPRING_PROFILES_ACTIVE=prod
+
+EXPOSE 8080
+USER 1000:1000
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/im-server.jar"]

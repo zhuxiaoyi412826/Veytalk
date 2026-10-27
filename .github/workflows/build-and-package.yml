@@ -1,0 +1,347 @@
+# ==============================================================================
+# 自动打 jar + 前端 dist + Docker 镜像（可选部署到那台开放机）
+#
+# ★ 本机（写这份文件的机器）不参与任何构建：所有步骤都在 GitHub runner 上跑，
+#   产物进 GHCR / Actions Artifacts，部署阶段用 SSH 推到部署机。
+#
+# 五个 job 的关系：
+#   meta         解析版本号与镜像名（GHCR 的镜像名必须全小写）
+#   build-jar    Maven 打出 im-bootstrap/target/im-server.jar，既上传 Artifacts 也交给下一个 job 做镜像
+#   build-web    三个前端 npm ci + vite build，产物 dist 打成 artifact（部署 job 会 scp 上去）
+#   docker-image 把 jar 放进 Docker/app，buildx 构建运行时镜像并推 ghcr.io
+#   deploy       仅手动触发且勾选 deploy 时执行：拉新镜像 + 覆盖前端静态文件
+#
+# 需要的 Secrets（Settings → Secrets and variables → Actions）：
+#   DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY      部署 job 用（还可选 DEPLOY_PORT / DEPLOY_DIR）
+#   推 GHCR 不用配 Secret：用内置的 GITHUB_TOKEN 就够（前提是本仓库的 Packages 权限 = write，已写在 permissions 里）
+#
+# 触发方式：
+#   push 到 main → 打镜像并推 GHCR（tag = pom 里的项目版本，如 1.0.0 + latest + sha-xxxx）
+#   打 tag v1.2.3 → tag = 1.2.3
+#   Pull Request  → 只构建验证，不推镜像（防未审代码进镜像仓库）
+#   手动（可勾选部署）→ Actions 页 Run workflow
+# ==============================================================================
+name: build-and-package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'pom.xml'
+      - 'im-*/**'
+      - 'Docker/**'
+      - '.github/workflows/build-and-package.yml'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: '构建完成后 SSH 部署到目标机（需要 DEPLOY_* secrets，且目标机已跑过 bootstrap.sh）'
+        type: boolean
+        default: false
+      deploy_web:
+        description: '同时覆盖三个前端静态目录（./web/*）'
+        type: boolean
+        default: true
+      build_website:
+        description: '是否构建官网 im-website（纯展示站，不构建就沿用服务器上现有的）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR 上新提交就取消旧构建；main/tag 的构建不取消（可能正在推同一系列 tag）
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write        # 推 GHCR
+  id-token: write        # 留给将来的 attestations/签名，不用到也不影响
+
+env:
+  JAVA_VERSION: '21'     # 与根 pom 的 <java.version> 一致，改了要两边一起改
+  NODE_VERSION: '20'
+
+jobs:
+  # ---------------------------------------------------------------- 版本号与镜像名
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}        # 镜像主 tag（也是部署时要拉的那个）
+      image:   ${{ steps.ver.outputs.image }}          # ghcr.io/<owner小写>/im-server
+      push:    ${{ steps.ver.outputs.push }}           # 'true' / 'false'（PR 为 false）
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析版本与镜像名
+        id: ver
+        run: |
+          set -euo pipefail
+          # 取 im-parent 自己那一行的 version（前三行是 parent 的 groupId/artifactId/version，别抓错）
+          VER="$(sed -n '/<artifactId>im-parent<\/artifactId>/{n;s/.*<version>\(.*\)<\/version>.*/\1/p;}' pom.xml)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          [[ -n "$VER" ]] || { echo "::error::从 pom.xml 解析不到版本号"; exit 1; }
+          # ★ GHCR 拒绝大写：owner 里有大写字母时镜像名要转小写，否则 buildx 报 invalid reference format
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          IMG="ghcr.io/${OWNER}/im-server"
+          PUSH=true
+          [[ '${{ github.event_name }}' == 'pull_request' ]] && PUSH=false
+          {
+            echo "version=$VER"
+            echo "image=$IMG"
+            echo "push=$PUSH"
+          } >> "$GITHUB_OUTPUT"
+          echo "版本=$VER  镜像=$IMG:$VER  推送=$PUSH"
+
+  # ---------------------------------------------------------------- 后端 jar
+  build-jar:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven                    # ~/.m2 走 Actions 缓存，第二次构建从几分钟降到几十秒
+
+      - name: Maven 打包（14 个模块 → im-bootstrap/target/im-server.jar）
+        # ★ 产物名来自 im-bootstrap/pom.xml 的 <finalName>im-server</finalName>，
+        #   没有版本号后缀 —— Dockerfile 与 compose 都按这个名字写死的，改这里要三处一起改
+        run: mvn -B -ntp -DskipTests clean package
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          JAR=im-bootstrap/target/im-server.jar
+          [[ -f "$JAR" ]] || { echo "::error::$JAR 不存在，检查 finalName 与打包日志"; exit 1; }
+          ls -lh "$JAR"
+          # 主类必须在这个包里，否则镜像里 ENTRYPOINT 起来就是「no main manifest attribute」
+          unzip -p "$JAR" META-INF/MANIFEST.MF | grep -i 'Main-Class: com.im.bootstrap.ImApplication'
+
+      - name: 上传 artifact（jar 本体，留 14 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-server-jar-${{ github.sha }}
+          path: im-bootstrap/target/im-server.jar
+          # ★ root 必须收窄到目录本身：默认 root 是工作区根，artifact 里会存成
+          #   im-bootstrap/target/im-server.jar，下游 download 到 Docker/app 就变成
+          #   Docker/app/im-bootstrap/target/im-server.jar —— Dockerfile 的 COPY 直接找不到文件
+          root: im-bootstrap/target
+          retention-days: 14
+          if-no-files-found: error
+
+      # 远控端（Windows 桌面的被控端）也是可执行 jar，只部署到服务器用不到，
+      # 但打包机顺手产出、当 artifact 存着比手工敲省事。★ 它不进 im-server 镜像。
+      - name: 上传 im-remote-agent jar
+        if: success()
+        continue-on-error: true           # 这个模块哪天挪了位置不该连累主流程
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-remote-agent-jar-${{ github.sha }}
+          path: im-remote-agent/target/im-remote-agent.jar
+          root: im-remote-agent/target
+          retention-days: 14
+
+  # ---------------------------------------------------------------- 前端三站
+  build-web:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [im-ui, im-admin-ui, im-website]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 官网是可选项：不勾就跳过，服务器上用现有静态文件（少一次 npm i，省 2~3 分钟）
+      - name: 是否构建这一站
+        id: pick
+        run: |
+          if [[ '${{ matrix.app }}' == 'im-website' && '${{ inputs.build_website }}' != 'true' && '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            echo '::notice::按手动触发的勾选跳过 im-website'
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 准备 Node
+        if: steps.pick.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json   # 三个站各自一份 lock，别指到根
+
+      # ★ npm ci 而不是 npm install：按 lock 精确装，「CI 绿了线上白屏」的一半来源是 install 悄悄升了版本
+      - name: 安装依赖
+        if: steps.pick.outputs.skip != 'true'
+        run: npm ci --no-audit --no-fund
+        working-directory: ${{ matrix.app }}
+
+      - name: vite build
+        if: steps.pick.outputs.skip != 'true'
+        run: npm run build
+        working-directory: ${{ matrix.app }}
+
+      - name: 上传 dist
+        if: steps.pick.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ matrix.app }}-${{ github.sha }}
+          path: ${{ matrix.app }}/dist
+          # ★ 同样要收 root：收到 ${{ matrix.app }} 这一级，artifact 里就是干净的 dist/**，
+          #   部署 job 的 tar 源目录才能写成 deploy-web/web-<app>-<sha>/dist
+          root: ${{ matrix.app }}
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- 镜像
+  docker-image:
+    needs: [meta, build-jar]
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.full.outputs.ref }}      # 部署 job 拉这一个精确 ref（不是 latest，latest 会漂）
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 jar 放进构建上下文
+        uses: actions/download-artifact@v4
+        with:
+          name: im-server-jar-${{ github.sha }}
+          path: Docker/app
+
+      - name: 上下文自检
+        run: |
+          ls -lh Docker/app
+          # 路线 A 的上下文里除了 Dockerfile 就该只有 jar 和 extra/，源码不该出现（那是 multistage 的事）
+          [[ -f Docker/app/im-server.jar ]] || { echo "::error::jar 没取到"; exit 1; }
+
+      - name: 设置 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: needs.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}          # 内置 token 就能推本仓库的包，不需要额外 Secret
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算标签
+        id: metaimg
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.meta.outputs.image }}
+          tags: |
+            # 精确版本：部署与回滚都用它
+            type=raw,value=${{ needs.meta.outputs.version }}
+            # 默认分支再带一个 latest（只给人工排查用，★ 部署绝不用 latest）
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=im-server
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: 构建并按需推送
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Docker/app
+          file: ./Docker/app/Dockerfile
+          tags: ${{ steps.metaimg.outputs.tags }}
+          labels: ${{ steps.metaimg.outputs.labels }}
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          # PR 只构建不推：load:false 避免把镜像塞进 runner 的 docker 守护进程（buildx 默认能省这一步）
+          load: false
+          provenance: false          # 关掉默认 attestation，否则 GHCR 界面多一排 unknown/unknown「镜像」
+          cache-from: type=gha,scope=im-server
+          cache-to: type=gha,scope=im-server,mode=max
+
+      - name: 记下这次要部署的精确 ref
+        id: full
+        run: echo "ref=${{ needs.meta.outputs.image }}:${{ needs.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------- 部署到开放机
+  deploy:
+    needs: [meta, docker-image, build-web]
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: production          # 这里可以配 Required reviewers，变成「点了构建还要人批一下才上线」
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回三个站的 dist
+        if: inputs.deploy_web
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'web-*-${{ github.sha }}'
+          path: deploy-web
+          merge-multiple: false
+
+      # ★ SSH 私钥写成 secret 时要把整段（含首尾空行）原样贴进来；chmod 600 是 ssh 的硬要求
+      - name: 准备 SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          PORT='${{ secrets.DEPLOY_PORT || 22 }}'
+          # || true：keyscan 失败不该把整个部署卡死；真的连不上会在后面那次 ssh 上报错，那时信息更有用
+          ssh-keyscan -p "$PORT" -H '${{ secrets.DEPLOY_HOST }}' >> ~/.ssh/known_hosts 2>/dev/null || true
+          {
+            echo "HOST=${{ secrets.DEPLOY_HOST }}"
+            echo "USER=${{ secrets.DEPLOY_USER }}"
+            echo "PORT=$PORT"
+            echo "DIR=${{ secrets.DEPLOY_DIR || '/opt/im-docker' }}"
+          } >> "$GITHUB_ENV"
+
+      - name: 覆盖前端静态文件（bind mount，不需重启容器）
+        if: inputs.deploy_web
+        run: |
+          set -euo pipefail
+          for app in im-ui im-admin-ui im-website; do
+            SRC="deploy-web/web-${app}-${GITHUB_SHA}/dist"
+            [[ -d "$SRC" ]] || { echo "::notice::跳过 $app（本次没构建）"; continue; }
+            # tar 过 ssh 而不是 scp -r：几千个小文件下 rsync 不一定装得上，tar 一定在
+            tar cz -C "$SRC" . | ssh -i ~/.ssh/id_deploy -p "$PORT" -o BatchMode=yes \
+              "$USER@$HOST" "mkdir -p '$DIR/web/$app' && tar xz -C '$DIR/web/$app'"
+            echo "已同步 $app -> $DIR/web/$app"
+          done
+          # ★ 故意不做 --delete / 清空：误删线上静态文件的代价比留几个旧 hash 文件大得多。
+          #   要彻底清就 ssh 上去手工 rm -rf 那一站再同步。
+
+      - name: 拉新镜像并只重建 im-server
+        run: |
+          set -euo pipefail
+          REF='${{ needs.docker-image.outputs.ref }}'
+          # ★ 目标机必须已经 docker login ghcr.io（私有包拉不下来就在这里报 unauthorized）。
+          #   这一句不写在流程里，是因为登录凭据不该落在 .env / 命令行历史里，由部署机自己维护
+          #   （GHCR 的 PAT 只要 read:packages；公开仓库的公开包则无需登录）
+          ssh -i ~/.ssh/id_deploy -p "$PORT" -o BatchMode=yes "$USER@$HOST" "bash -s" <<EOF
+          set -euo pipefail
+          cd '$DIR'
+          [ -f .env ] || { echo '目标机还没跑过 bootstrap.sh（缺 .env）'; exit 1; }
+          sed -i 's|^IM_SERVER_TAG=.*|IM_SERVER_TAG=$REF|' .env
+          docker compose pull im-server
+          docker compose up -d --no-deps --wait im-server
+          docker compose ps
+          EOF
+
+      - name: 外部探活（nginx 那一层的 200/1002 才算上线成功）
+        run: |
+          set -euo pipefail
+          # 在部署机上 curl 而不是在 runner 上：域名在那台机器的 .env 里，而且服务器自己访问 443
+          # 能避开“runner 出口 IP 被云安全组/防火墙拦住”这种假故障
+          # ★ heredoc 用 'EOF'（不展开），所以部署目录靠 ssh 前面的环境变量传过去
+          ssh -i ~/.ssh/id_deploy -p "$PORT" -o BatchMode=yes "$USER@$HOST" "DEPLOY_DIR=$DIR bash -s" <<'EOF'
+          set -euo pipefail
+          D="$(grep -m1 '^IM_DOMAIN=' "$DEPLOY_DIR/.env" | cut -d= -f2- | tr -d '\r')"
+          CODE="$(curl -sk -o /dev/null -w '%{http_code}' "https://$D/api/auth/me" -H "Origin: https://$D" || echo 000)"
+          echo "https://$D/api/auth/me -> HTTP $CODE"
+          # 200（未登录也会回 200 + body 里 code:1002）才算通过；404/502 说明容器起了但链路没通，
+          # 去部署机跑 bash scripts/health.sh 看五层到哪一层断了
+          [ "$CODE" = "200" ] || { echo "::error::探活返回 $CODE"; exit 1; }
+          EOF

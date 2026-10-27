@@ -1,0 +1,162 @@
+================================================================================
+ IM 系统 · Docker 部署速查（开发/上线都用这一页）
+ 详细原理见 md/部署/Docker部署指南.md，目录里每个文件的注释见 Docker/README.md
+================================================================================
+
+〔0〕最重要的一句话
+  构建和部署都不在这台写代码的机器上。
+    jar / 三份 dist  → GitHub Actions 在 runner 上打
+    镜像             → Actions 推到 ghcr.io
+    运行             → 那台开放机 docker compose pull + up
+  本机只需要能编辑文本，不需要装 JDK/Maven/Node/docker。
+
+
+--------------------------------------------------------------------------------
+〔1〕Docker 部署
+--------------------------------------------------------------------------------
+  服务共 7 个，5 必选 + 2 选装：
+    mysql      mysql:8.0        业务库 im_db（37 表）        不发布端口
+    redis      redis:7-alpine   会话/权限缓存/瞬时态         不发布端口
+    minio      minio/minio      对象存储                     不发布端口
+    im-server  本目录构建        唯一 Java 进程(HTTP+WS+定时) 不发布端口
+    nginx      nginx:1.27-alpine 三站静态 + /api /ws + 直播   发布 80 443
+    live-retention  node:22     删回放分片     —— 开直播就是必选项，compose 里已注释
+    coturn     coturn           TURN 中继     —— 公网跨 NAT 通话才要，需 host 网络
+
+  全新机器上机五步：
+    sudo mkdir -p /opt/im-docker
+    scp -r Docker/  deploy@server:/opt/im-docker/          # 整个目录拷过去
+    cd /opt/im-docker
+    cp .env.example .env  &&  chmod 600 .env  &&  vi .env  # 只有 .env 需要人手填
+    bash scripts/bootstrap.sh
+    docker compose pull && docker compose up -d && bash scripts/health.sh
+
+  bootstrap.sh 干的活（幂等，可反复跑）：
+    校验 .env 里还有没有 <占位符> → 建目录并把 data 下四个可写目录 chown 1000:1000
+    → 由 .example 生成 nginx/conf.d/im.conf、app/extra/application-prod-extra.yml、conf/im.env
+    → 缺证书时补 30 天自签名（只为让 nginx 起得来）→ 放 sql-init 与 live-retention.js
+    → 检查三站 index.html → docker compose config -q 静态校验
+
+  四条红线（破任何一条都是「起来了但不对」）：
+    1) 必须单实例。不要 --scale im-server=N、不要 deploy.replicas：
+       WS 扇出只认本进程连接表，且 12 个 @Scheduled 没有一个 ShedLock。
+    2) 只发布 80/443（按需 8088 推流、3478 TURN）。3306/6379/9000/9001/8080/8081 一律不写 ports:
+       —— Docker 发布的端口绕过 UFW，要按 IP 过滤只能走 DOCKER-USER 链或云安全组。
+    3) 应用连中间件必须用服务名 mysql / redis / minio。容器里的 127.0.0.1 指的是它自己。
+    4) 时区两边一起设：MySQL --default-time-zone=+08:00 + TZ=Asia/Shanghai，只设一个就差 8 小时。
+
+  运维一条命令（升级会先自动备份库）：
+    bash scripts/update.sh 1.0.1
+    bash scripts/update.sh --rollback 1.0.0
+  另有：import-sql.sh（导 migration，★ 用 cp 进容器再 -e source，不要管道）
+        clear-perm-cache.sh（改权限点后必跑，不清要等 TTL 30 分钟）
+        health.sh（五层检查：容器起没起 / healthy / 端口通不通 / 接口回不回 / 静态有没有）
+        im-docker.service（systemd 开机自启，ExecStop 里特意没有 -v）
+
+  ★ 永远不要 docker compose down -v   —— 一字之差就是清库。
+
+
+--------------------------------------------------------------------------------
+〔2〕nginx 前端设置
+--------------------------------------------------------------------------------
+  三站不走镜像，就是静态文件挂进 nginx 容器（compose 里已写好，全部 :ro）：
+    ./web/im-ui        → /usr/share/nginx/html/im-ui        IM_DOMAIN      /api + /ws + /live/
+    ./web/im-admin-ui  → /usr/share/nginx/html/im-admin-ui  ADMIN_DOMAIN   /api（后台不需要长连接）
+    ./web/im-website   → /usr/share/nginx/html/im-website   WEBSITE_DOMAIN  纯静态，/api 那段是注释掉的
+  三个 server 块靠 server_name 分流，都 listen 443 ssl；80 那一块只做 ACME 挑战、/healthz、301。
+
+  放文件上去：
+    把某站的 dist 内容拷进 ./web/<站>/ 即生效 —— bind mount，不用重启容器，浏览器强刷就行。
+    只改 nginx/conf.d/* 才需要：docker compose exec nginx nginx -t && nginx -s reload
+
+  必须存在的三样（bootstrap.sh 会检查并报错指出缺哪个）：
+    web/<站>/index.html                     —— 少了就是 403/空白页
+    nginx/conf.d/im.conf                    —— 由 .example 生成，别手改生成物，改 .example
+    certs/live/<域名>/{fullchain.pem,privkey.pem}   —— Let's Encrypt 或自签
+
+  配置要点（改 im.conf.example 前先看这几条）：
+    · SPA 兜底：location / { try_files $uri $uri/ /index.html; }  缺了刷子路由全站 404
+    · 静态资源 7 天强缓存（文件名带 hash），index.html 不缓存
+    · /ws 必须带 Upgrade 头 + proxy_read_timeout 3600s，否则长连接每隔几十分钟被掐
+    · /api 超时 120s（大文件上传走分片，不靠这里）；client_max_body_size 110m
+    · 直播播放 location /live/ { root /data; } + limit_except 只放 GET/HEAD/OPTIONS
+      index.m3u8 走 secure_link_md5 "${uri}${arg_expire}<密钥>"，密钥与 conf/im.env 的
+      IM_LIVE_SIGN_SECRET 必须逐字一致，不一致的表现是「推流正常、观众黑屏 403」
+    · 反代头与 TLS 参数放 nginx/snippets/，不放 conf.d（conf.d 会被 http 上下文全量 include）
+
+  ★ 域名替换为什么不用 envsubst：它会把 $host / $uri / $remote_addr 一起吃成空串，
+    表现是 Host: 空头发给后端、接口全 404，极难查。所以模板里用 __IM_DOMAIN__ 这种 token，
+    由 bootstrap.sh 做纯字符串替换。
+
+
+--------------------------------------------------------------------------------
+〔3〕打包
+--------------------------------------------------------------------------------
+  后端 jar（产物名写死，三处耦合，改一处要三处一起改）：
+    mvn -B -ntp -DskipTests clean package
+      → im-bootstrap/target/im-server.jar        （im-bootstrap/pom.xml 的 finalName=im-server）
+      → im-remote-agent/target/im-remote-agent.jar（被控端，★ 不进镜像、不在服务器上跑）
+    校验主类：unzip -p im-bootstrap/target/im-server.jar META-INF/MANIFEST.MF | grep Main-Class
+      期望 com.im.bootstrap.ImApplication
+
+  前端 dist（三站各自一份 package-lock.json，用 npm ci 不用 npm install）：
+    cd im-ui        && npm ci && npm run build      → im-ui/dist
+    cd im-admin-ui  && npm ci && npm run build      → im-admin-ui/dist
+    cd im-website   && npm ci && npm run build      → im-website/dist
+    ★ im-ui 绝不能用 build:electron —— 那是 --mode electron，outDir 变 ../electron/dist、
+      base 变 ./，拷到服务器就是刷新 404 + 资源路径全错。Web 部署只认 npm run build。
+
+  镜像（两条路线）：
+    路线 A（日常，推荐） Docker/app/Dockerfile，上下文 = Docker/app，只装运行时
+      docker build -t local/im-server:1.0.0 Docker/app
+      前提：先把 im-server.jar 放进 Docker/app/（Actions 的 download-artifact 就是干这个的）
+    路线 B（兜底，服务器/离线机连不上 GitHub 时用）Docker/app/Dockerfile.multistage，上下文 = 仓库根
+      docker build -f Docker/app/Dockerfile.multistage -t local/im-server:1.0.0 .
+      14 个模块的 COPY 清单与根 pom.xml 的 <modules> 一一对应，加减模块要改这里
+
+  GitHub Actions（.github/workflows/build-and-package.yml，5 个 job）：
+    meta → build-jar / build-web（矩阵三站）→ docker-image（推 GHCR）→ deploy（手动勾选才跑）
+    触发：push main 或 tag v* 出镜像；PR 只构建不推；手动 Run workflow 可勾 deploy
+    tag：镜像带 <版本号> / latest / sha-<短sha> 三种，部署只认精确版本号，★ 绝不用 latest
+    Secret：推 GHCR 不用配（内置 GITHUB_TOKEN 的 packages: write）
+            自动部署要配 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY，可选 DEPLOY_PORT / DEPLOY_DIR
+    改这个文件前必读：artifact 要写 root:（否则 jar 落在 Docker/app/im-bootstrap/target/ 里 COPY 找不到）、
+                      GHCR 镜像名必须全小写、provenance: false、前端覆盖不带 --delete
+
+
+--------------------------------------------------------------------------------
+〔4〕域名设置
+--------------------------------------------------------------------------------
+  四个域名全在 Docker/.env 里（compose 层，不是 im.env）：
+    IM_DOMAIN=im.example.com            网页端，用户访问的主站，也是 WS 与直播播放入口
+    ADMIN_DOMAIN=admin.example.com      后台管理
+    WEBSITE_DOMAIN=www.example.com      官网
+    LIVE_DOMAIN=live.example.com        直播推拉流域名
+  填完值必须重跑 bash scripts/bootstrap.sh，它把 .example 里的 __XX_DOMAIN__ token 换成真值，
+  并同步 7 项凭据进 conf/im.env（改 .env 里的密码而不重跑 = 应用还在用旧密码，是最常见的一次「改了没生效」）。
+
+  四个域名要有各自的 DNS A 记录 + 各自的证书目录 certs/live/<域名>/。
+  IM_LIVE_PLAY_BASE_URL / IM_LIVE_PUSH_BASE_URL 里不能写容器内部地址（http://nginx:8088 主播在公网解析不到），
+  且路径前缀要和 nginx 的 location /live/ 同名。
+
+  只有一个域名 / 拿不到子域名时，两条可行路：
+    A 子域名 + 泛解析（首选，配置零改动）
+    B 同域名不同端口：443 给网页端、8443 给后台、9443 给官网
+      · compose 的 nginx.ports: 加 "8443:8443" "9443:9443"，云安全组同步放行
+      · im.conf.example 里那两块 listen 443 ssl 改成 listen 8443/9443 ssl，server_name 写成同一个域名
+      · 证书不用重签（同一张按域名的证书在非标端口上照样合法）
+      · 代价：部分公司网络/运营商封非 443 出站端口；手机浏览器对带端口的地址不友好
+    ✕ 不建议路径前缀（im.x.com/admin/）：要改 vite base + router base + nginx 改写 + try_files 兜底，
+      四处耦合且每次改构建配置都得想起来一遍，省下的只是半条 DNS 记录。
+
+  ★ CORS 是「第二个必须跟着域名改的地方」，而且它不在环境变量里：
+    application.yml 的允许来源是字面列表，没有占位符，环境变量改不动它。
+    正解是 Docker/app/extra/application-prod-extra.yml（由 .example 生成，bootstrap.sh 会顺带
+    打开 conf/im.env 里的 SPRING_CONFIG_ADDITIONAL_LOCATION），四个 Origin 都要列全。
+    Origin 比对是逐字符的：走「端口方案」时要连端口一起写（https://im.example.com:8443），
+    并带 https://localhost 那组移动端 Capacitor 变体。漏配的表现是浏览器全量 403
+    Invalid CORS request，而 curl 一切正常。
+
+  本地联调想换域名/换 IP，改的依次是：.env 四个域名 → bootstrap.sh → extra 里的 CORS → 证书，
+  少一步就表现为「接口通但页面报错」这类半瘫故障。
+================================================================================

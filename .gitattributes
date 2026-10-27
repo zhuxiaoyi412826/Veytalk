@@ -1,0 +1,41 @@
+# ==============================================================================
+# ★ 存在的首要理由：本机 git 是 core.autocrlf=true，签出来/提交的文本全是 CRLF，
+#   而 Docker/ 这套东西是要在 Ubuntu 上跑的：
+#     - Docker/scripts/*.sh 带 CRLF → bash 报 "syntax error near unexpected token `$'\r''"
+#     - Docker/.env 带 CRLF        → 值尾部藏着 \r，MySQL/Redis 密码对不上却哪儿都不报错
+#     - docker-compose.yml 带 CRLF  → YAML 本身能过，但 env_file 的变量值同样带脏字符
+#   eol=lf 保证「仓库里和工作区里都是 LF」，与 clone 的人怎么配 autocrlf 无关。
+# ==============================================================================
+
+# ---------- 必须在 Linux 上原样为 LF 的 ----------
+Docker/scripts/*.sh          text eol=lf
+Docker/.env.example          text eol=lf
+Docker/conf/*.example        text eol=lf
+Docker/docker-compose.yml    text eol=lf
+Docker/app/Dockerfile*       text eol=lf
+Docker/nginx/**/*.conf       text eol=lf
+Docker/nginx/**/*.example    text eol=lf
+# 开发必备.txt 这页速查：常被 scp 到 Linux 上用 less/cat 看，带 CRLF 会满屏 ^M
+# ★ 注意：.gitattributes 不认行内注释（那一列会被当成属性名，git 直接报 “# is not a valid attribute name”），注释只能整行写
+Docker/*.txt                 text eol=lf
+.dockerignore                text eol=lf
+*.yml                        text eol=lf
+*.yaml                       text eol=lf
+
+# ---------- 前端与脚本源码：统一 LF（vite/node 无所谓，但和上面一致省事） ----------
+*.js                         text eol=lf
+*.mjs                        text eol=lf
+*.css                        text eol=lf
+*.sql                        text eol=lf
+*.md                         text eol=lf
+.github/workflows/*.yml     text eol=lf
+
+# ---------- 二进制：禁止任何换行/文本转换（改一个字节就坏） ----------
+*.jar  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.exe  binary
+*.asar binary

@@ -1,0 +1,168 @@
+# ==============================================================================
+# Nginx 配置模板（对应 Docker部署指南.md §8.2）。
+#
+# ★ 这是 .example：不要直接改它上线。跑 `bash scripts/bootstrap.sh`，
+#   它把下面这些 __TOKEN__ 换成 .env 里的真实域名/密钥，生成同目录的 im.conf：
+#     __IM_DOMAIN__ / __ADMIN_DOMAIN__ / __WEBSITE_DOMAIN__ / __LIVE_DOMAIN__
+#     __LIVE_SIGN_SECRET__
+#   为什么不直接让 nginx 读环境变量：官方镜像的 envsubst 只替换 ${VAR}，
+#   而 nginx 配置里全是 $host / $uri / $proxy_add_x_forwarded_for 这类内置变量，
+#   一视同仁地被替换成空串——配置「看起来正常」但行为全错。用不可能出现的 __X__ 形式最稳。
+#
+# 改完正式文件后的自检与生效：
+#   docker compose exec nginx nginx -t
+#   docker compose exec nginx nginx -s reload      # 若是新建文件，用 restart nginx 更稳（目录项不一定穿透 :ro 挂载）
+# ==============================================================================
+
+# ---------- 80：只做 ACME 挑战、健康探针、跳转 ----------
+server {
+    listen 80;
+    server_name __IM_DOMAIN__ __ADMIN_DOMAIN__ __WEBSITE_DOMAIN__ __LIVE_DOMAIN__;
+
+    # HTTP-01 签发时才用得到（推荐 DNS-01，见指南 §8.4，那样连这里都不用）
+    location /.well-known/acme-challenge/ { root /var/www/acme; }
+
+    # ★ 容器健康检查打这一条。打 / 会被下面的 301 带去 443，健康检查就要处理证书；
+    #   access_log off 是因为它每 30s 一次，不关会把日志刷满。
+    location = /healthz { access_log off; return 200 "ok\n"; }
+
+    location / { return 301 https://$host$request_uri; }
+}
+
+# ---------- 聊天端 im-ui（/api + /ws + 直播播放面）----------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name __IM_DOMAIN__;
+
+    ssl_certificate     /etc/letsencrypt/live/__IM_DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__IM_DOMAIN__/privkey.pem;
+    include /etc/nginx/snippets/ssl.conf;
+
+    # 与 application.yml 的 spring.servlet.multipart.max-request-size(110MB) 对齐；
+    # 设小了 nginx 先回 413，后端日志里一行记录都没有，排查方向会被带偏到「上传接口坏了」
+    client_max_body_size 110m;
+
+    root /usr/share/nginx/html/im-ui;
+    index index.html;
+    location / { try_files $uri $uri/ /index.html; }   # SPA history 路由回退，缺它刷新子页面全 404
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|woff2?)$ {
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+
+    # ★ WebSocket：必须带 Upgrade/Connection 两个头并把读超时拉长（后端有心跳，但 nginx 默认 60s 会先掐）
+    location /ws {
+        proxy_pass http://im-server:8080;              # ★ 服务名，写 127.0.0.1 指的就是 nginx 自己
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_set_header X-Real-IP  $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location /api {
+        proxy_pass http://im-server:8080;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_read_timeout 120s;                        # 大文件分片合并、AI 流式回答都可能慢
+    }
+
+    # 播放面与聊天端同域：观众端少一套 CORS 和一张证书。
+    # ★ location 名必须与 conf/im.env 的 IM_LIVE_PLAY_BASE_URL 最后一段一致（那里是 /live）
+    location /live/ {
+        root /data;                                     # URI /live/... → 磁盘 /data/live/...
+        types { application/vnd.apple.mpegurl m3u8; video/iso.segment m4s; video/mp4 mp4; }
+        limit_except GET HEAD OPTIONS { deny all; }
+
+        # 主清单：唯一做签名校验的入口，且绝不缓存（签名带 ?expire=&sign=，缓存等于把授权期外延）
+        location ~ /index\.m3u8$ {
+            secure_link $arg_sign,$arg_expire;
+            # ★ 这个 secret 必须与 conf/im.env 的 IM_LIVE_SIGN_SECRET 逐字一致（bootstrap.sh 从同一份 .env 灌的）。
+            #   不一致的表现是观众端一律 403 黑屏，而推流、列表、日志全都正常
+            secure_link_md5 "${uri}${arg_expire}__LIVE_SIGN_SECRET__";
+            if ($secure_link = "") { return 403; }
+            if ($secure_link = "0") { return 410; }     # 签名对但已过期
+            add_header Cache-Control "no-store, must-revalidate" always;
+        }
+        # 变体清单（1080p/720p 各自的 m3u8）：★ 不能签——hls.js 按主清单里的相对路径拉它，不会带上 ?expire=&sign=，
+        # 签了就变成「只有主清单能开、画质切换全 403」。但它同样绝不缓存（直播中内容一直在变）。
+        location ~ \.m3u8$ {
+            add_header Cache-Control "no-store, must-revalidate" always;
+        }
+        # 分片：路径里那段不可猜的 streamKey 就是兜底，可以长缓存、可以挂 CDN
+        location ~ \.(m4s|mp4|ts)$ {
+            add_header Cache-Control "public, max-age=3600" always;
+        }
+    }
+}
+
+# ---------- 管理后台（独立 server，别和聊天端共用 root）----------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name __ADMIN_DOMAIN__;
+
+    ssl_certificate     /etc/letsencrypt/live/__ADMIN_DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__ADMIN_DOMAIN__/privkey.pem;
+    include /etc/nginx/snippets/ssl.conf;
+
+    client_max_body_size 110m;                          # 后台也要上传（图标、知识库文档）
+    root /usr/share/nginx/html/im-admin-ui;
+    index index.html;
+    location / { try_files $uri $uri/ /index.html; }
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|woff2?)$ {
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+    location /api {
+        proxy_pass http://im-server:8080;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_read_timeout 120s;
+    }
+    # 后台不建长连接也不播流，所以没有 /ws 与 /live（与 im-admin-ui/vite.config.js 的代理口径一致）。
+    # prod profile 已关 knife4j/springdoc，/doc.html 回 404 是设计如此，别在 nginx 上再给它开洞。
+}
+
+# ---------- 官网（纯静态，无接口调用）----------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name __WEBSITE_DOMAIN__;
+
+    ssl_certificate     /etc/letsencrypt/live/__WEBSITE_DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__WEBSITE_DOMAIN__/privkey.pem;
+    include /etc/nginx/snippets/ssl.conf;
+
+    root /usr/share/nginx/html/im-website;
+    index index.html;
+    location / { try_files $uri $uri/ /index.html; }
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|woff2?|ico)$ {
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+    # 当前 im-website 里没有任何 /api 调用，所以这里不反代后端；将来加了下载页统计再补：
+    # location /api { proxy_pass http://im-server:8080; include /etc/nginx/snippets/proxy.conf; }
+}
+
+# ---------- 直播推流口（开直播才用：取消注释 + compose 里发布 "8088:8088"）----------
+# ★★ 这层「按源 IP 白名单」在容器里天生不可靠：经 Docker NAT 进来的包，$remote_addr
+#     可能是容器网关（172.x）而不是主播的真实 IP。两个正解：
+#       a) daemon.json 设 "userland-proxy": false 后实测 nginx access log 里的 remote_addr；
+#       b) 干脆不在 nginx 上挡，交给云安全组 / iptables DOCKER-USER 链（指南 §8.3 有现成命令）。
+#     裸机那份写 allow 127.0.0.1（同机推流）在这里几乎一定匹配不上，别照抄。
+# server {
+#     listen 8088;
+#     server_name _;
+#     root /data;
+#     location /live/ {
+#         allow <主播出口IP或网段>;      # ← 手工填，bootstrap.sh 不碰这一行
+#         deny all;
+#         limit_except PUT { deny all; }
+#         dav_methods PUT DELETE;
+#         create_full_put_path on;       # {roomId}/{streamKey}/ 多级目录自动创建
+#         dav_access user:rw group:r all:r;
+#         client_max_body_size 32m;      # 单个分片上限
+#         client_body_temp_path /tmp/nginx_body;   # ★ 必须是 nginx 进程可写目录：默认路径在只读挂载下 500
+#     }
+# }

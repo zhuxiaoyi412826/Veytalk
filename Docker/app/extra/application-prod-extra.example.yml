@@ -1,0 +1,54 @@
+# ==============================================================================
+# 外挂配置模板（对应 Docker部署指南.md §8.5）。bootstrap.sh 会把 __IM_DOMAIN__ 等
+# 换成 .env 里的真值，生成同目录的 application-prod-extra.yml。
+#
+# ★★ 为什么需要这份文件：application.yml 里的 im.cors.allowed-origins 是一个字面列表，
+#   没有 ${} 占位符 —— 所以 conf/im.env 改不动它，只能靠外挂配置覆盖。
+#   不改的表现：换域名后所有浏览器请求回 403 Invalid CORS request，而 curl 一切正常（curl 不发 Origin 头）。
+#
+# ★★ 更坑的一点：Spring 绑定 List 属性时，外挂配置是「整体替换」而不是「追加」。
+#   所以这里必须把客户端用的 Origin 一并抄全（tauri / capacitor / localhost 那几条来自客户端本身，
+#   与你的域名无关）；只写三行域名的话，桌面端和安卓端会连不上。
+#
+# 生成后还要在 conf/im.env 里取消注释这一行才生效：
+#   SPRING_CONFIG_ADDITIONAL_LOCATION=file:/app/extra/application-prod-extra.yml
+# 然后 docker compose up -d im-server（env_file 变了必须重建容器，restart 不重读）。
+# ==============================================================================
+im:
+  cors:
+    allowed-origins:
+      # ---------- 你的站点 ----------
+      - https://__IM_DOMAIN__
+      - https://__ADMIN_DOMAIN__
+      - https://__WEBSITE_DOMAIN__
+      # ---------- 桌面端 Tauri：Windows 是 http://tauri.localhost，macOS/Linux 是 tauri://localhost ----------
+      - http://tauri.localhost
+      - tauri://localhost
+      # ---------- 移动端 Capacitor：安卓 https://localhost，iOS capacitor://localhost ----------
+      - https://localhost
+      - http://localhost
+      - capacitor://localhost
+      # ---------- 联调用的 vite dev/preview（生产可整段删掉，但删了本地就联调不了线上后端）----------
+      - http://localhost:5173
+      - http://127.0.0.1:5173
+      - http://localhost:4173
+      - http://127.0.0.1:4173
+      - https://localhost:5173
+      - https://127.0.0.1:5173
+      - https://localhost:4173
+      - https://127.0.0.1:4173
+      - http://localhost:5273
+      - http://127.0.0.1:5273
+      - http://localhost:4273
+      - http://127.0.0.1:4273
+      - https://localhost:5273
+      - https://127.0.0.1:5273
+      - https://localhost:4273
+      - https://127.0.0.1:4273
+      # 局域网真机联调：手机用电脑局域网 IP 打开页面时，vite 代理的 changeOrigin 只改 Host 不改 Origin，
+      # 后端仍会校验白名单。写成 *.*.*.* 而不是 *（* 会把 evil.example.com:5173 一并放行）。
+      # ★ 公网正式上线建议删掉这 4 条。
+      - http://*.*.*.*:5173
+      - http://*.*.*.*:4173
+      - https://*.*.*.*:5173
+      - https://*.*.*.*:4173
