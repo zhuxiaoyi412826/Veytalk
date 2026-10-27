@@ -34,6 +34,9 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class UserQuerySpiImpl implements UserQuerySpi {
 
+    /** 反查 ID 的硬上限，与 {@code UserQuerySpi#searchUserIds} 的注释同口径 */
+    private static final int SEARCH_ID_MAX = 500;
+
     private final UserMapper userMapper;
     private final OnlineStatusSpi onlineStatusSpi;
     private final ThreeLevelCache cache;
@@ -125,6 +128,26 @@ public class UserQuerySpiImpl implements UserQuerySpi {
                 .and(w -> w.eq(User::getUsername, account).or().eq(User::getPhone, account))
                 .last("LIMIT 1"));
         return withOnline(user);
+    }
+
+    @Override
+    public List<Long> searchUserIds(String keyword, int limit) {
+        if (TextUtil.isBlank(keyword) || limit <= 0) {
+            return List.of();
+        }
+        String kw = keyword.trim();
+        // 昵称与账号两个 LIKE 必须用 and(...) 括起来：直接 .or() 会把逻辑删除条件 deleted=0
+        // 顶在括号外面，命出已注销的人（同 findByAccount 里的那条约束）
+        List<User> rows = userMapper.selectList(Wrappers.<User>lambdaQuery()
+                .select(User::getId)
+                .and(w -> w.like(User::getNickname, kw).or().like(User::getUsername, kw))
+                .orderByDesc(User::getId)
+                .last("LIMIT " + Math.min(limit, SEARCH_ID_MAX)));
+        List<Long> ids = new ArrayList<>(rows.size());
+        for (User row : rows) {
+            ids.add(row.getId());
+        }
+        return ids;
     }
 
     private UserBriefDTO withOnline(User user) {

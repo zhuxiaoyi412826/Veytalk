@@ -51,16 +51,24 @@
     </nav>
 
     <main class="main-layout__body">
-      <router-view v-slot="{ Component }">
-        <!--
-          keep-alive 只缓存会话列表页：从好友页点「发消息」跳过去时，
-          列表的滚动位置与已加载数据能留住。
-          聊天窗口不缓存，它需要按路由参数重新绑定会话。
-        -->
-        <keep-alive :include="['ChatHome']">
-          <component :is="Component" />
-        </keep-alive>
-      </router-view>
+      <!--
+        全服公告的常驻横幅：有未确认的公告时才占高度，没公告时这里什么都不渲染。
+        放在 body 而不是 .main-layout 的直接子节点，是为了不改那套「导航条 + 内容」的
+        横排布局与窄屏沉底规则——横幅只需要盖住右侧内容区的顶部，导航条不该被它压下来。
+      -->
+      <AnnouncementBar />
+      <div class="main-layout__page">
+        <router-view v-slot="{ Component }">
+          <!--
+            keep-alive 只缓存会话列表页：从好友页点「发消息」跳过去时，
+            列表的滚动位置与已加载数据能留住。
+            聊天窗口不缓存，它需要按路由参数重新绑定会话。
+          -->
+          <keep-alive :include="['ChatHome']">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
+      </div>
     </main>
 
     <!-- 全局通话浮层：与 useCallStore 联动，切会话/翻页都不打断通话 -->
@@ -85,6 +93,13 @@
       它们统一调 report.openReport({ targetType, targetId, title })，由 store 驱动这一个实例。
     -->
     <ReportDialog />
+
+    <!--
+      公告列表弹窗：全站只挂这一份，与举报弹窗同一思路。
+      横幅的「查看详情」、通知的点击、多条时的「查看 N 条」都开这一个实例——
+      多处各挂一份就会各持一份滚动位置与各关各的确认状态。
+    -->
+    <AnnouncementDialog />
   </div>
 </template>
 
@@ -97,11 +112,14 @@ import CallOverlay from '@/components/CallOverlay.vue'
 import CallFloatWindow from '@/components/CallFloatWindow.vue'
 import GroupCallOverlay from '@/components/GroupCallOverlay.vue'
 import ReportDialog from '@/components/ReportDialog.vue'
+import AnnouncementBar from '@/components/AnnouncementBar.vue'
+import AnnouncementDialog from '@/components/AnnouncementDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useChatStore } from '@/stores/chat'
 import { useReportStore } from '@/stores/report'
+import { useAnnounceStore } from '@/stores/announce'
 import { installWsDispatch, uninstallWsDispatch } from '@/ws/dispatch'
 import { socketState } from '@/ws/socket'
 
@@ -114,6 +132,7 @@ const conversation = useConversationStore()
 const friend = useFriendStore()
 const chat = useChatStore()
 const report = useReportStore()
+const announce = useAnnounceStore()
 
 /**
  * 导航项。
@@ -185,6 +204,21 @@ async function bootstrap() {
   await Promise.allSettled(tasks)
   // 离线消息可能带来新会话与新未读，再对一次服务端真值
   conversation.refreshTotalUnread()
+  // 公告补拉的第二个触发点：跑到这里 auth 已经拉完资料（或确实没登录），userId 必定就绪。
+  // 只靠 WS open 那一路不够——open 可能早于 profile 返回，那种情况下补拉会被整趟跳过
+  announce.pull()
+}
+
+/**
+ * 标签页回到前台时补一次公告。
+ *
+ * 管理员发公告时这个标签页在后台是最常见的场景：后台页的定时器会被浏览器压到分钟级，
+ * WebSocket 也未必断（所以重连那一路不会触发）。用 focus 而不是 visibilitychange，
+ * 是因为同一窗口内切换标签页两边都算 visible，而 focus 能真的分辨出「用户回到这一页」；
+ * 节流写在 store 里，切十次标签页也只有一个静默请求。
+ */
+function onWindowFocus() {
+  announce.syncOnVisible()
 }
 
 onBeforeMount(() => {
@@ -194,12 +228,14 @@ onBeforeMount(() => {
   bootstrap()
   document.addEventListener('dragover', blockRawFileDrop)
   document.addEventListener('drop', blockRawFileDrop)
+  window.addEventListener('focus', onWindowFocus)
 })
 
 onBeforeUnmount(() => {
   uninstallWsDispatch()
   document.removeEventListener('dragover', blockRawFileDrop)
   document.removeEventListener('drop', blockRawFileDrop)
+  window.removeEventListener('focus', onWindowFocus)
 })
 
 /**
@@ -238,10 +274,25 @@ function blockRawFileDrop(event) {
  * body 必须显式 flex: 1：flex 子项默认不伸展，宽度会退化成内容的 max-content，
  * 表现为宽屏下右侧留一大片空白——会话列表加聊天窗口只有内容本身那么宽。
  * min-width: 0 同理，否则长内容会把 body 撑出横向滚动。
+ *
+ * 它自己改成纵向 flex 容器是为了插那条公告横幅：横幅 flex: none 占固定高度，
+ * 剩下的全部高度交给页面本体。原来的规则是 body 直接当容器，现在只是多了一层。
  */
 .main-layout__body {
+  display: flex;
   flex: 1;
   min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/*
+ * 路由页面原本的父级。flex: 1 + min-height: 0 是让它拿到确定高度的关键：
+ * 各页面都写的是 height: 100%，父项高度不定就会退化成内容高度，聊天区再也滚不动。
+ */
+.main-layout__page {
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 

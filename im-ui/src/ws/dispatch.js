@@ -9,6 +9,7 @@ import { useGroupStore } from '@/stores/group'
 import { useCallStore } from '@/stores/call'
 import { useGroupcallStore } from '@/stores/groupcall'
 import { useLinkmicStore } from '@/stores/linkmic'
+import { useAnnounceStore } from '@/stores/announce'
 import { on, connect, send as wsSend } from './socket'
 import { summarize, useConversationStore } from '@/stores/conversation'
 import {
@@ -60,6 +61,7 @@ export function installWsDispatch() {
   const call = useCallStore()
   const groupcall = useGroupcallStore()
   const linkmic = useLinkmicStore()
+  const announce = useAnnounceStore()
 
   // 点系统通知要跳到对应会话。notify 那层不认识 router（它也不该认识），
   // 跳转在这里接回来；重复 install 会覆盖上一个回调，不会叠加
@@ -77,6 +79,10 @@ export function installWsDispatch() {
       // 连上就是「网络可用」的最强信号：先重提交离线待发送队列（内部空队列时几乎零成本），
       // 断网期间攒下的消息按入队顺序补发，clientMsgId 幂等保证不会重复入库
       chat.flushPending()
+      // 公告补拉：首次连接与重连都要打一次。实时那一帧只覆盖发布瞬间在线的连接，
+      // 离线期间发的公告只有这一条路能拿到；store 内部按 ID 判重且只在用户确认后落盘，
+      // 所以重复拉只会多一个静默请求，不会重复弹同一条、也不会把没读过的公告悄悄记成已读
+      announce.pull()
       if (!reconnected) {
         // 首次连接：登录流程里已经拉过一遍列表，不重复请求
         return
@@ -190,7 +196,7 @@ export function installWsDispatch() {
     })
   )
 
-  disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend, group })))
+  disposers.push(on('notify', (packet) => handleNotify(packet.data, { conversation, friend, group, auth })))
 
   // 音视频通话信令：整帧交给通话 store 的状态机裁决（invite/accept/offer/answer/ice/hangup/failed 等）
   //
@@ -233,6 +239,8 @@ export function installWsDispatch() {
       chat.reset()
       conversation.reset()
       friend.reset()
+      // 没确认完的公告也要清：否则下一个账号登录会在自己的界面上看到上一个账号的公告栏
+      announce.reset()
       ElMessageBox.alert(data.reason || '账号已在其他设备登录', '下线通知', {
         confirmButtonText: '重新登录',
         type: 'warning'
@@ -373,10 +381,10 @@ function notifyBody(dto) {
  * 处理 notify 帧。
  *
  * 同一个 type 下有三种形态，且区分字段并不统一：
- * 握手欢迎、举报回执与管理端警告用 action，好友相关用 bizType，群组相关用 biz。
+ * 握手欢迎、举报回执、管理端警告与全服公告用 action，好友相关用 bizType，群组相关用 biz。
  * 这是后端逐步演进留下的现状，前端必须几种都认，只按其中一种判断会静默漏掉另一半通知。
  */
-function handleNotify(data, { conversation, friend, group }) {
+function handleNotify(data, { conversation, friend, group, auth }) {
   if (!data) {
     return
   }
@@ -423,6 +431,13 @@ function handleNotify(data, { conversation, friend, group }) {
         }
       }
     })
+    return
+  }
+
+  // 全服公告：判重、通知、待确认列表都在 stores/announce 里（补拉那一路共用同一个集合），
+  // 这一层只负责把 WS 那一帧交过去，不在这里自己记「弹过没有」——两处各记一份必然漂移
+  if (data.action === 'announce') {
+    announce.ingest([data])
     return
   }
 

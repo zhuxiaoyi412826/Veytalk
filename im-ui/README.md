@@ -231,7 +231,7 @@ im-ui/
    | 前端常量 | 后端配置项 | 值 |
    | --- | --- | --- |
    | `MAX_TEXT_LENGTH` | `im.message.max-text-length` | 5000 |
-   | `MAX_UPLOAD_BYTES` | `im.file.max-size` | 20 MB |
+   | `MAX_UPLOAD_BYTES` | `im.file.upload.max-size` | 2 GB（前端常量已按分片通道上限对齐；单请求通道仍受 `im.file.max-size` = 100 MB 限制，超过 5 MB 阈值后 `uploadFileSmart` 自动改走分片） |
    | `MAX_AVATAR_BYTES` | `im.file.max-avatar-size` | 2 MB |
    | 时限窗口（编辑入口软判） | `im.message.recall-limit-seconds` | 120 秒（2 分钟） |
 

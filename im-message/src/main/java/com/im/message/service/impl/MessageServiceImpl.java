@@ -1025,6 +1025,13 @@ public class MessageServiceImpl implements MessageService {
             log.info("[消息撤回] 已被并发撤回: messageId={}", messageId);
             return;
         }
+        if (force) {
+            // 与 markRecalled 同事务：不允许出现「已经是撤回态，却没有后台痕迹」的半成品行。
+            // 这一笔是后台消息管理屏「今日强制撤回」的唯一数据源，也是向被撤者交代「谁撤的」的凭证。
+            messageMapper.markRecalledByAdmin(messageId);
+            log.info("[消息强制撤回] messageId={}, admin={}, conversation={}",
+                    messageId, operatorId, message.getConversationId());
+        }
         String summary = MessageConvert.recallSummary(
                 force ? ADMIN_RECALL_NICKNAME : nicknameOf(message.getFromUserId()));
         conversationSpi.onMessageRecalled(message.getConversationId(), messageId, summary);

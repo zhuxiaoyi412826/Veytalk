@@ -89,19 +89,39 @@ public class ReportUserTargetSpiImpl implements ReportTargetSpi {
             return ReportDisposeResult.fail("用户模块不能执行动作「" + cmd.getAction() + "」");
         }
         boolean disabled = action == ReportDisposition.BAN_USER;
+        // 时长只在封禁时读：unban_user 传个分钟数进来只能被忽略，与其收一个不读的参数不如不接
+        Long minutes = disabled ? cmd.getDisableMinutes() : null;
         try {
-            if (adminUserSpi.setDisabled(cmd.getTargetId(), disabled, cmd.getOperatorId(), cmd.getRemark()) == null) {
+            if (adminUserSpi.setDisabled(cmd.getTargetId(), disabled, cmd.getOperatorId(), cmd.getRemark(), minutes) == null) {
                 return ReportDisposeResult.fail("该账号不存在或已注销");
             }
         } catch (BusinessException e) {
-            // 护栏（禁自己、禁最后一个管理员）与「用户不存在」都从这里出来，
+            // 护栏（禁自己、禁最后一个管理员、时长非法）与「用户不存在」都从这里出来，
             // 原样回显比抛异常有用：管理员能看懂下一步该换个人操作还是该去修数据
             return ReportDisposeResult.fail(e.getMessage());
         } catch (Exception e) {
             log.warn("[举报处置] 变更账号状态异常: userId={}, err={}", cmd.getTargetId(), e.getMessage());
             return ReportDisposeResult.fail("账号状态变更失败：" + e.getMessage());
         }
-        return ReportDisposeResult.ok(disabled ? "已封禁账号并踢下线" : "已解除封禁（对方需重新登录）");
+        return ReportDisposeResult.ok(disabled
+                ? (minutes == null ? "已永久封禁账号并踢下线" : "已封禁账号 " + durationText(minutes) + "，到期自动解封")
+                : "已解除封禁（对方需重新登录）");
+    }
+
+    /**
+     * 把分钟数说成一句人话，只取一个最大单位（「2 天 6 小时」这种拼接在回执里只会变长不多信息）。
+     *
+     * <p>这里报的是「管理员请求的时长」而不是算出来的绝对到期时间：后者由 im-user 按
+     * 它自己的时钟算，两边各说一件事比一处说两件事然后对不上好。
+     */
+    private String durationText(long minutes) {
+        if (minutes % (60 * 24) == 0) {
+            return minutes / (60 * 24) + " 天";
+        }
+        if (minutes % 60 == 0) {
+            return minutes / 60 + " 小时";
+        }
+        return minutes + " 分钟";
     }
 
     private String format(LocalDateTime time) {

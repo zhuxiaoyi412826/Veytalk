@@ -30,6 +30,22 @@
           <el-icon><VideoPlay /></el-icon>
           <span>直播管理</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:group:manage')" index="groups" :route="{ name: 'groups' }">
+          <el-icon><UserFilled /></el-icon>
+          <span>群组管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:message:manage')" index="messages" :route="{ name: 'messages' }">
+          <el-icon><ChatDotSquare /></el-icon>
+          <span>消息管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:wallet')" index="wallet" :route="{ name: 'wallet' }">
+          <el-icon><Wallet /></el-icon>
+          <span>钱包与礼物</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:interview')" index="interviews" :route="{ name: 'interviews' }">
+          <el-icon><Reading /></el-icon>
+          <span>AI 面试记录</span>
+        </el-menu-item>
         <el-menu-item v-if="auth.can('system:monitor')" index="monitor" :route="{ name: 'monitor' }">
           <el-icon><Odometer /></el-icon>
           <span>监控告警</span>
@@ -37,6 +53,18 @@
         <el-menu-item v-if="auth.can('system:log')" index="logs" :route="{ name: 'logs' }">
           <el-icon><Document /></el-icon>
           <span>日志管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:config')" index="config" :route="{ name: 'config' }">
+          <el-icon><Setting /></el-icon>
+          <span>系统配置</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:remote')" index="remote" :route="{ name: 'remote' }">
+          <el-icon><Connection /></el-icon>
+          <span>远程控制</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:announcement')" index="announcements" :route="{ name: 'announcements' }">
+          <el-icon><Bell /></el-icon>
+          <span>全服公告</span>
         </el-menu-item>
       </el-menu>
       <p class="muted side-note">
@@ -78,6 +106,16 @@ import { useAuthStore } from '@/stores/auth'
  *
  * 菜单用 <code>auth.can(...)</code> 逐条判权限。所有权限点一个都没有的人进不了后台（守卫拦下），
  * 所以这里不存在「整条菜单都是空的」那种中间态；真出现了就只能说明种子数据里角色被改坏了。
+ *
+ * 「系统配置」与「全服公告」是两条而不是合在一条：前者改的是可以立刻改回来的旋钮，
+ * 后者一发就对着全部在线连接喊话、弹出去的通知收不回来。服务端把它们分成两个权限点，
+ * 菜单跟着分——能调开关的人不必能发公告。
+ *
+ * 四期第五批的四条同样与服务端的四个点一一对应，且彼此不顺带：
+ * 「群组管理」与「消息管理」分开，是因为前者只能掐一个群、后者能读到任意两个人的聊天正文；
+ * 「钱包与礼物」单列一条，是因为它是全后台唯一能凭空造出货币的屏；
+ * 「AI 面试记录」单列一条，是因为它读的是候选人的作答原文。
+ * 菜单上多四条不是为了好看，是为了让「给了谁什么」这件事在一个不写 SQL 的人眼中也能看出来。
  */
 const auth = useAuthStore()
 const route = useRoute()

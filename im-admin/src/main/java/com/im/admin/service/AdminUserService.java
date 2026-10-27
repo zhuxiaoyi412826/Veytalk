@@ -85,9 +85,12 @@ public class AdminUserService {
      * 做成一个能点的按钮，后果是「后台再也进不去、只能改数据库」，
      * 而这条路径的恢复成本远高于一次条件判断。
      *
+     * <p>{@code disableMinutes} 不传就是永久封禁。到期时间不在这里算，只把分钟数往下传：
+     * 真正拥有这一列的是 im-user，它得保证「写进去的时间」与「扫出来的时间」用的是同一个时钟。
+     *
      * @param reason 事由，会进服务端日志；是否必填沿用处置说明的配置口径由调用方决定
      */
-    public AdminUserVO setDisabled(Long userId, boolean disabled, Long operatorId, String reason) {
+    public AdminUserVO setDisabled(Long userId, boolean disabled, Long operatorId, String reason, Long disableMinutes) {
         BusinessException.throwIf(userId == null, ResultCode.BAD_REQUEST, "缺少用户 ID");
         BusinessException.throwIf(userId.equals(operatorId), ResultCode.ADMIN_SELF_FORBIDDEN);
         // 禁用必须写事由：它是事后唯一能回答「当时为什么关掉这个人」的东西，
@@ -96,9 +99,10 @@ public class AdminUserService {
             BusinessException.throwIf(reason == null || reason.isBlank(),
                     ResultCode.BAD_REQUEST, "禁用账号必须写明事由");
         }
-        AdminUserDTO user = requireSpi().setDisabled(userId, disabled, operatorId, trimToNull(reason));
-        log.info("[管理后台] 账号状态变更: userId={}, disabled={}, operator={}, reason={}",
-                userId, disabled, operatorId, reason);
+        AdminUserDTO user = requireSpi().setDisabled(userId, disabled, operatorId, trimToNull(reason),
+                disabled ? disableMinutes : null);
+        log.info("[管理后台] 账号状态变更: userId={}, disabled={}, minutes={}, operator={}, reason={}",
+                userId, disabled, disableMinutes, operatorId, reason);
         BusinessException.throwIf(user == null, ResultCode.USER_NOT_FOUND);
         return toVO(user, pendingCounts(List.of(userId)).get(userId));
     }
@@ -133,6 +137,7 @@ public class AdminUserService {
         vo.setAvatar(user.getAvatar());
         vo.setPhone(user.getPhone());
         vo.setStatus(user.getStatus());
+        vo.setDisableUntil(user.getDisableUntil());
         vo.setOnline(user.getOnline());
         vo.setBalance(user.getBalance());
         vo.setCreateTime(user.getCreateTime());

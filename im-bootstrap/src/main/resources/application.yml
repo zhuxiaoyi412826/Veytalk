@@ -365,8 +365,8 @@ im:
     ws-group-call-seconds: 60
 
   file:
-    # local | minio。默认 local，没装 MinIO 也能跑通全部功能；
-    # 改这一行即可切到 MinIO，无需改代码。
+    # local | minio。★ 默认是 minio：MinioFileStorage 连不上桶会抛 IllegalStateException 让启动 fail-fast，
+    # 所以没装 MinIO 必须显式设 IM_FILE_STORAGE=local（否则进程起不来）；切换与排查见 md/MinIO部署指南.md。
     storage: ${IM_FILE_STORAGE:minio}
     access-url-prefix: /api/file/download
     # 是否对图片返回 MinIO 预签名直链。默认 false，走后端受控下载，

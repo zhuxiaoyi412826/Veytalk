@@ -190,7 +190,7 @@
 | `SERVER_PORT`            | `8080`                      |                                                              |
 | `SPRING_PROFILES_ACTIVE` | `dev`                       | `dev` 会在响应里回显验证码明文，**生产必须改成 `prod`**      |
 | `IM_JWT_SECRET`          | 内置开发用长串              | Sa-Token 的 JWT 签名密钥，**生产必须替换**                   |
-| `IM_FILE_STORAGE`        | `local`                     | `local` 或 `minio`                                           |
+| `IM_FILE_STORAGE`        | `minio`                     | `local` 或 `minio`。★ 默认是 `minio`，没装 MinIO 又没改成 `local` 会让启动 fail-fast    |
 | `IM_SMS_PROVIDER`        | `mock`                      | 短信下发通道。`mock` 只写日志不发真短信；接真实服务商时改成对应实现名（如 `aliyun`），**生产必须替换** |
 | `MAIL_USERNAME`          | 空                          | 完整邮箱地址（如 `123456@qq.com`），邮箱验证码的发件人       |
 | `MAIL_PASSWORD`          | 空                          | QQ 邮箱的 **SMTP 授权码**，不是 QQ 登录密码（用登录密码会 535 认证失败）。两者都不配时邮箱登录与邮箱找回密码不可用 |

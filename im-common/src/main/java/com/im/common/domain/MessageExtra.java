@@ -194,6 +194,20 @@ public class MessageExtra implements Serializable {
     private Boolean chainClosed;
 
     /**
+     * 该消息由后台管理员强制撤回，仅写在已撤回的消息上。
+     *
+     * <p>加在这里而不是给 {@code im_message} 补一列，是因为这一批的承诺是<b>零 DDL</b>，
+     * 而 {@code extra} 本来就是 JSON；同时撤回痕迹属于「服务端问责数据」，
+     * {@code MessageConvert} 在撤回后一律不把 {@code extra} 交给端上，所以这个字段
+     * <b>不会被任何客户端读到</b>。
+     *
+     * <p>旧行没有这个键，读出来是 {@code null}，语义为「不是后台撤的」，
+     * 不做回溯猜测——本功能上线以前的强撤本来就没有记录。
+     */
+    @Schema(description = "服务端字段：后台强制撤回标记，不下发给客户端")
+    private Boolean recalledByAdmin;
+
+    /**
      * 是否包含 @ 提醒，供会话模块判断是否需要打破免打扰。
      */
     public boolean hasMention() {

@@ -46,4 +46,22 @@ public interface UserQuerySpi {
      * @return 未找到时返回 {@code null}
      */
     UserBriefDTO findByAccount(String account);
+
+    /**
+     * 按昵称或账号<b>模糊</b>反查用户 ID，给跨模块的后台检索把「名字」变成「ID 集合」。
+     *
+     * <p>存在的理由：后台的检索框里管理员拿到的往往是花名而不是 ID，而资料在
+     * {@code im_user}、待筛的行在别的表（群成员、钱包账本），星型架构下对方读不到用户表，
+     * 就只能由本契约把这一步代办掉。返回的是 ID 而不是 {@code UserBriefDTO}：
+     * 调用方要的是把名字拼进自己的查询条件，昵称它自己会再补一次。
+     *
+     * <p>{@code nickname LIKE '%kw%'} 用不上索引（账号列有唯一键，前缀匹配才用得上），
+     * 所以 {@code limit} 是必需的，调用方不要指望拿到「全部命中行」。同一批人反复撞名时，
+     * 取的是 ID 大的那些（新注册在前）。
+     *
+     * @param keyword 关键词，空白视为无意义调用
+     * @param limit   返回的 ID 个数上限，实现方自己再夹一层
+     * @return 命中的用户 ID，无命中返回空集合，<b>不返回 null</b>
+     */
+    List<Long> searchUserIds(String keyword, int limit);
 }

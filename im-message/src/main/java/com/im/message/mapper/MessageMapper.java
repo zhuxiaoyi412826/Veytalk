@@ -169,6 +169,41 @@ public interface MessageMapper extends BaseMapper<Message> {
     int markRecalled(@Param("messageId") Long messageId, @Param("recallTime") LocalDateTime recallTime);
 
     /**
+     * 在一条已经撤回的消息上补记「这是后台管理员撤的」，只由 {@code recallInternal} 的 force 分支调用。
+     *
+     * <p>为什么往 {@code extra}（JSON 列）里塞一个键，而不是给 {@code im_message} 补一列：
+     * 这一批后台功能的承诺是<b>零 DDL</b>；而 {@code im_message} 是全库最大的一张表，
+     * 为一个人人均可数的布尔标记去 {@code ALTER} 它，代价与收益完全不成比例。
+     *
+     * <p>必须是裸 SQL 的 {@code JSON_SET}，不能写成 {@code lambdaUpdate().set(Message::getExtra, ...)}：
+     * 后者要把整个 JSON 读出来反序列化再整体写回，与接龙追加条目、闪照已阅名单这类
+     * read-modify-write 并发相撞时，会把对方刚写进去的键整段抹掉。
+     * {@code JSON_SET} 只动 {@code $.recalledByAdmin} 这一个键，其余原样保留；
+     * {@code COALESCE} 兜住 {@code extra} 为 NULL 的行（纯文本消息发送时这一列就是空的）。
+     *
+     * <p>与 {@link #markRecalled} 分成两条 UPDATE 而不是合并成一条：撤回主流程是用户侧高频路径，
+     * 不为一个只在后台才用到的标记去改那条已经靠 {@code is_recalled = 0} 兼作并发闸的语句。
+     */
+    @Update("""
+            UPDATE im_message
+            SET extra = JSON_SET(COALESCE(extra, JSON_OBJECT()), '$.recalledByAdmin', true)
+            WHERE id = #{messageId}
+            """)
+    int markRecalledByAdmin(@Param("messageId") Long messageId);
+
+    /**
+     * 现存最早一条消息的发送时间，供后台概览回答「取证窗口有多长」。
+     *
+     * <p>{@code MIN(send_time)} 取的是 {@code idx_send_time} 的最左一项，常数代价，
+     * 不会退成全表扫描——这也是后台敢在概览里给一个「全站维度」数的唯一原因：
+     * 同一个位置上「全站一共多少条」刻意不给，理由写在 {@code AdminMessageOverviewDTO} 的类注释里。
+     *
+     * @return 空表返回 {@code null}
+     */
+    @Select("SELECT MIN(send_time) FROM im_message")
+    LocalDateTime selectOldestSendTime();
+
+    /**
      * 一次查出多个会话各自的未拉取消息 ID，按会话与 seq 升序，总数最多 limit 条。
      *
      * <p>入参是「会话 ID -&gt; 已确认位点」的映射，用 {@code UNION ALL} 把它摊成一张两列的派生表

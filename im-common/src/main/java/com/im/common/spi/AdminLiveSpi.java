@@ -1,6 +1,8 @@
 package com.im.common.spi;
 
 import com.im.common.api.PageResult;
+import com.im.common.domain.AdminGiftRecordDTO;
+import com.im.common.domain.AdminGiftRecordQueryDTO;
 import com.im.common.domain.AdminLiveDTO;
 import com.im.common.domain.AdminLiveQueryDTO;
 
@@ -43,4 +45,23 @@ public interface AdminLiveSpi {
      * @param operatorId 操作管理员，进服务端审计日志
      */
     void forceStop(Long roomId, Long operatorId);
+
+    /**
+     * 送礼流水翻页（后台「钱包与礼物」那一屏的送礼页签）。
+     *
+     * <p>它放在本接口而不是新开一个 {@code AdminGiftRecordSpi}，理由只有一个：
+     * {@code im_gift_record} 就是 im-live 持有的表，而 im-live 已经实现了本接口。
+     * 为一个方法再开一份契约，结果是同一个模块要装两个 bean、后台要拿两个
+     * {@code ObjectProvider}，而两者的生命周期与变更原因一模一样。
+     *
+     * <p><b>这一屏一个写动作都没有</b>：{@code im_gift_record} 是账本性质的只增流水，
+     * 改一笔等于篡改他人之间的交易记录，删一笔会让送礼人对不上账、主播的榜也少一人。
+     * 真要处置（涉诈、未成年打赏）走举报工单，处置动作是封号与冻结钱包，不是回头改历史。
+     * 积分是虚拟道具，送礼即消耗，没有逆向退款通道（账本里那个 {@code refund} 是红包过期退回）。
+     *
+     * <p>每行的送礼人 / 收礼人昵称与房间标题都批量补齐（一页各一次 {@code IN} 查询）；
+     * 用户已注销不影响该行仍然出现，房间已删除则 {@code roomTitle} 为 null。
+     * 排序、单页上限与时间窗都按 {@code AdminGiftRecordQueryDTO} 的类注释执行。
+     */
+    PageResult<AdminGiftRecordDTO> pageGiftRecords(AdminGiftRecordQueryDTO query);
 }

@@ -1,15 +1,15 @@
 # MinIO 部署指南
 
-> 事实来源：`pom.xml`（依赖版本）、`im-bootstrap/src/main/resources/application.yml` L254-274（配置项）、
-> `im-file` 的 `MinioClientConfig` / `MinioFileStorage` / `FileServiceImpl`（运行行为）、根 `README.md` 第十一节。
-> 适用环境：Windows + 本机 MinIO。其他系统仅启动命令不同，配置项完全一致。
+> 事实来源：`pom.xml`（依赖版本）、`im-bootstrap/src/main/resources/application.yml` L367-400（配置项）、
+> `im-file` 的 `MinioClientConfig` / `MinioFileStorage` / `LocalFileStorage` / `FileServiceImpl`（运行行为）、根 `README.md` 第十一节。
+> 适用环境：Windows + 本机 MinIO。其他系统仅启动命令不同，配置项完全一致（Linux / 生产部署见 [`md/部署/服务器部署指南.md`](部署/服务器部署指南.md)）。
 
 ---
 
 ## 目录
 
 - [一、先厘清：两个 MinIO 别搞混](#一先厘清两个-minio-别搞混)
-- [二、这步是可选的](#二这步是可选的)
+- [二、这一步不是可选的（默认就是 minio）](#二这一步不是可选的默认就是-minio)
 - [三、下载 MinIO Server](#三下载-minio-server)
 - [四、启动 MinIO Server](#四启动-minio-server)
 - [五、项目侧配置](#五项目侧配置)
@@ -34,11 +34,23 @@
 
 ---
 
-## 二、这步是可选的
+## 二、这一步不是可选的（默认就是 minio）
 
-**默认 `local` 存储已能跑通上传、下载、头像、附件全部功能**，文件落在 `${user.home}/im-files`，不装 MinIO 也不影响任何业务。
+★ **`im.file.storage` 的默认值是 `minio`**（`application.yml` L370 写的是 `${IM_FILE_STORAGE:minio}`），
+而 `MinioFileStorage` 在初始化时连不上存储桶会抛 `IllegalStateException` **让启动 fail-fast**。
+所以“不想装 MinIO”不是一个可以忽略的选项，而是一个**必须显式声明的决定**：
 
-装 MinIO 的唯一理由是：将来**分布式/多实例部署**时，文件不能绑在某一台机器的本地磁盘上，需要独立的对象存储。若只是本机开发或单机部署验证功能，**可以完全跳过本文档**。
+- **装 MinIO（默认路径）**：什么都不用设，启动时自动建桶（见第四节 + 第七节）。
+- **不装 MinIO**：必须显式设 `IM_FILE_STORAGE=local`，文件落 `${user.home}/im-files`，上传/下载/头像/附件全部功能照常跑通。
+
+两个都不做（既没起 MinIO、又没设 local）的后端根本起不来；日志里那行
+`MinIO 存储桶初始化失败: im-files，请确认服务已启动、endpoint 与凭据正确` 就是这一条。
+
+> 历史口径提醒：本文早期版本与部分文档写的是“默认 local、这步可选”，
+> 那是 `application.yml` 把默认值改成 `minio` 之后没同步的残留，已于 2026-10-27 全部订正。
+> `LocalFileStorage` 上的 `matchIfMissing = true` 也**不等于“不设就走 local”**：yml 恒会提供一个非空值，那个分支永远不生效。
+
+什么时候真的需要 MinIO：将来**分布式 / 多实例部署**时，文件不能绑在某一台机器的本地磁盘上（当前后端其实要求单实例，理由见部署指南第七节）；以及需要给 CDN / 预签名直链留余地时。
 
 ---
 
@@ -80,12 +92,12 @@ D:\minio\minio.exe server D:\minio\data --console-address ":9001"
 
 ## 五、项目侧配置
 
-所有 MinIO 配置项都是 `${环境变量:默认值}` 形式（见 `application.yml` L254-274），因此有两种等效做法：
+所有 MinIO 配置项都是 `${环境变量:默认值}` 形式（见 `application.yml` L367-400），因此有两种做法：
 
 ### 方式 A：设环境变量后重启后端（推荐，不改任何文件）
 
 ```powershell
-$env:IM_FILE_STORAGE = "minio"                       # 唯一必须改的开关：local → minio
+$env:IM_FILE_STORAGE = "minio"                       # 默认已是 minio；设它只是为了显式声明（之前设过 local 的环境靠它盖回来）
 $env:MINIO_ENDPOINT  = "http://127.0.0.1:9000"       # 与第四节 API 端口一致
 $env:MINIO_ACCESS_KEY = "minioadmin"                 # = MINIO_ROOT_USER
 $env:MINIO_SECRET_KEY = "minioadmin"                 # = MINIO_ROOT_PASSWORD
@@ -94,23 +106,12 @@ $env:MINIO_BUCKET     = "im-files"                         # 桶名，启动时�
 java -jar im-bootstrap\target\im-server.jar
 ```
 
-由于这些默认值本就与 MinIO 出厂凭据一致，严格来说**只需设 `IM_FILE_STORAGE=minio` 这一个**，其余不设也能连上本机默认实例。显式写出是为了让你一眼看清全部可调项。
+由于这些默认值本就与 MinIO 出厂凭据一致，严格来说**一个都不设也能连上本机默认实例**（默认值就是 `minio` + `127.0.0.1:9000` + `minioadmin/minioadmin` + `im-files`）。显式写出是为了让你一眼看清全部可调项，也是为了让「凭据已改掉」这件事在部署记录里看得见（公网机器上不能真的用 `minioadmin`）。
 
 ### 方式 B：改配置文件后重新打包
 
-把 `application.yml` L257 的：
-
-```yaml
-storage: ${IM_FILE_STORAGE:local}
-```
-
-改为：
-
-```yaml
-storage: ${IM_FILE_STORAGE:minio}
-```
-
-然后 `mvn package -DskipTests` 重新打包。除非要把 minio 固化为默认，否则优先用方式 A。
+把 `application.yml` L370 那一行的默认值改掉（`storage: ${IM_FILE_STORAGE:local}` ↔ `storage: ${IM_FILE_STORAGE:minio}`），
+然后 `mvn package -DskipTests` 重新打包。除非要把某种存储固化为这台机器的默认，否则优先用方式 A（不改文件、不重新构建）。
 
 ---
 
@@ -167,21 +168,21 @@ MinIO Server 的启动变量与项目配置项**名字不同但值必须一致**
 | 后端启动即失败，提示「MinIO 存储桶初始化失败」 | Server 没启动 / endpoint 写错 / 凭据不匹配 | 确认第四节窗口在运行、`9000` 端口可访问、access-key/secret-key 与 ROOT_USER/PASSWORD 一致 |
 | 日志仍是 `[本地存储] 初始化完成` | `IM_FILE_STORAGE` 未设为 `minio` | 按方式 A 重设环境变量后重启，或按方式 B 改配置重新打包 |
 | 编译/运行报 `cannot access okhttp3.HttpUrl` 或 `NoClassDefFoundError` | OkHttp 5.x 的 Gradle 多平台空壳 jar 问题 | 项目已在 `im-file/pom.xml` 排除空壳 `okhttp`、显式引入 `okhttp-jvm:5.1.0`，正常不会遇到；若自行改动依赖需保留这两处 |
-| 上传报 `MaxUploadSizeExceededException` 而非 `UPLOAD_TOO_LARGE` | 只调了 `im.file.max-size` 没调 multipart 上限 | `im.file.max-size`（默认 20MB）必须与 `spring.servlet.multipart.max-file-size` 一起改，否则请求先被 multipart 拦截 |
+| 上传报 `MaxUploadSizeExceededException` 而非 `UPLOAD_TOO_LARGE` | 只调了 `im.file.max-size` 没调 multipart 上限 | `im.file.max-size`（默认 100MB）必须与 `spring.servlet.multipart.max-file-size` 一起改，否则请求先被 multipart 拦截 |
 | 图片能存但前端显示不出来 | 票据过期或访问未带登录态 | 受控地址靠 URL 上的短时票据渲染 `<img>`，确认 `im.jwt.file-ticket-ttl-seconds`（默认 1800）够用；跨域部署时确认前端能访问 `/api/file/download` |
 
 ---
 
 ## 十、配置项速查表
 
-`application.yml` 中与文件存储相关的全部配置项（L254-274）：
+`application.yml` 中与文件存储相关的全部配置项（L367-400）：
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
-| `im.file.storage` | `IM_FILE_STORAGE` | `local` | 存储实现：`local` \| `minio`，切换总开关 |
+| `im.file.storage` | `IM_FILE_STORAGE` | **`minio`** | 存储实现：`local` \| `minio`。★ 默认是 `minio`，没装 MinIO 又没改成 `local` 会让启动 fail-fast（见第二节） |
 | `im.file.access-url-prefix` | — | `/api/file/download` | 受控下载地址前缀 |
 | `im.file.use-presigned-url` | — | `false` | 是否对图片返回 MinIO 预签名直链 |
-| `im.file.max-size` | — | `20MB` | 聊天附件大小上限，需与 multipart 上限一起改 |
+| `im.file.max-size` | — | `100MB` | 聊天附件大小上限，需与 `spring.servlet.multipart.max-file-size`（同为 100MB）一起改 |
 | `im.file.max-avatar-size` | — | `2MB` | 头像大小上限 |
 | `im.file.local.base-dir` | `IM_FILE_DIR` | `${user.home}/im-files` | 本地存储根目录，按 `yyyy/MM/dd/uuid.ext` 落盘 |
 | `im.file.minio.endpoint` | `MINIO_ENDPOINT` | `http://127.0.0.1:9000` | MinIO API 地址 |
@@ -194,4 +195,4 @@ MinIO Server 的启动变量与项目配置项**名字不同但值必须一致**
 
 ### 一句话流程
 
-**下载 `minio.exe` → 设 ROOT 凭据启动（API 9000 / 控制台 9001）→ 项目设 `IM_FILE_STORAGE=minio` 后重启后端 → 看日志出现 `[MinIO] 存储桶创建成功` 即成功。** 桶自动建，连不上会 fail-fast，默认走受控下载不暴露裸直链。
+**下载 `minio.exe` → 设 ROOT 凭据启动（API 9000 / 控制台 9001）→ 启动后端（`IM_FILE_STORAGE` 默认就是 `minio`，无需显式设；反之不想装 MinIO 就要显式设 `local`）→ 看日志出现 `[MinIO] 存储桶创建成功: im-files`（桶已存在时是 `[MinIO] 存储桶已存在`）即成功。** 桶自动建，连不上会 fail-fast（那就去设 `IM_FILE_STORAGE=local`），默认走受控下载不暴露裸直链。

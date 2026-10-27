@@ -47,4 +47,13 @@ public class ReportDisposeCmd implements Serializable {
 
     /** 处置说明，实现方可用于审计备注 */
     private String remark;
+
+    /**
+     * 封禁时长（分钟），仅 {@code ban_user} 动作读它；{@code null} 或非正数 = 永久封禁。
+     *
+     * <p>四期第三批加的字段（封禁时长）。放在这里而不是给 {@code AdminUserSpi} 开一个新动作：
+     * 工单处置与用户页的禁用本来就是同一条写路径（{@code ReportUserTargetSpiImpl} 直接委派），
+     * 两处都能限时才能保证「剩余时长」在两个页面上读得出同一个数。
+     */
+    private Long disableMinutes;
 }

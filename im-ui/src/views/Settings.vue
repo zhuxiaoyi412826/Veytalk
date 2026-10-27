@@ -408,14 +408,6 @@
           <el-switch v-model="debugLog" />
         </div>
 
-        <div class="settings__row">
-          <div class="settings__label">
-            <span>敏感词过滤（服务端全局）</span>
-            <span class="settings__desc">关闭后全服文本与文件名停止遮蔽，立即生效不需重启；重启后回到配置文件默认值</span>
-          </div>
-          <el-switch v-model="sensitiveFilterEnabled" :loading="sensitiveFilterSaving" @change="onSensitiveFilterChange" />
-        </div>
-
         <div class="settings__row settings__row--stack">
           <div class="settings__label">
             <span>数据备份</span>
@@ -523,7 +515,7 @@ import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
 import { clearMediaCache } from '@/utils/media'
 import { openFilePicker } from '@/utils/picker'
 import { fetchDefaultRecordDir, openRecordDir, pickRecordDir, recordSupported } from '@/utils/recorder'
-import { fetchSensitiveFilter, setSensitiveFilter, exportConversationMessages } from '@/api/message'
+import { exportConversationMessages } from '@/api/message'
 import { cancelAccount } from '@/api/user'
 import { notifyCapability, requestNotifyPermission, previewChime } from '@/utils/notify'
 
@@ -711,38 +703,6 @@ async function onOpenRecordDir() {
     await openRecordDir('', remoteRecordDir.value || recordDefaultDir.value)
   } catch (e) {
     ElMessage.error(e.message || '打开目录失败')
-  }
-}
-
-/* ------------------------------ 敏感词过滤开关（服务端全局） ------------------------------ */
-
-const sensitiveFilterEnabled = ref(true)
-const sensitiveFilterSaving = ref(false)
-
-// 状态存在后端内存里，不是本机 localStorage：进页拉一次回填开关，
-// 拉不到（未登录/后端未起）就保持默认开，不把用户带进错误的初始状态
-onMounted(async () => {
-  try {
-    const vo = await fetchSensitiveFilter()
-    if (vo) {
-      sensitiveFilterEnabled.value = !!vo.enabled
-    }
-  } catch {
-    // 保持默认
-  }
-})
-
-async function onSensitiveFilterChange(value) {
-  sensitiveFilterSaving.value = true
-  try {
-    const vo = await setSensitiveFilter(value)
-    sensitiveFilterEnabled.value = vo ? !!vo.enabled : value
-    ElMessage.success(value ? '已开启敏感词过滤（全服生效）' : '已关闭敏感词过滤（全服生效）')
-  } catch {
-    // 切换失败要把开关拨回去，否则界面状态与服务端不一致
-    sensitiveFilterEnabled.value = !value
-  } finally {
-    sensitiveFilterSaving.value = false
   }
 }
 

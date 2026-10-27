@@ -75,6 +75,20 @@ public class User extends BaseEntity {
     /** 状态：1 正常 0 禁用 */
     private Integer status;
 
+    /**
+     * 封禁到期时间。语义由两个条件共同定义，缺一不可：
+     *
+     * <ul>
+     *   <li>{@code null} 且 {@code status=0} —— <b>永久封禁</b>，自动解封任务不会碰它；
+     *       账号注销也把 {@code status} 置 0，而注销行恰好是 {@code disable_until IS NULL}，
+     *       这是定时任务不会把注销账号「救活」的第一道保险（第二道是 {@code @TableLogic}）；</li>
+     *   <li>非空且 {@code <= NOW()} 且 {@code status=0} —— 到期待解封；</li>
+     *   <li>{@code status=1} 时本列<b>必须为 null</b>：由 {@code setDisabled} 在恢复时显式清空，
+     *       留着旧值会让后台在一个已正常的账号上继续显示一个作废的到期日期。</li>
+     * </ul>
+     */
+    private LocalDateTime disableUntil;
+
     private LocalDateTime lastLoginTime;
 
     private String lastLoginIp;

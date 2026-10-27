@@ -22,6 +22,9 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_announcement`;
+DROP TABLE IF EXISTS `im_sensitive_word`;
+DROP TABLE IF EXISTS `im_config`;
 DROP TABLE IF EXISTS `im_report`;
 DROP TABLE IF EXISTS `im_live_room`;
 DROP TABLE IF EXISTS `im_gift_record`;
@@ -74,6 +77,7 @@ CREATE TABLE `im_user`
     `phone`           VARCHAR(20)           DEFAULT NULL COMMENT '手机号，可空但非空时唯一',
     `email`           VARCHAR(64)           DEFAULT NULL COMMENT '邮箱',
     `status`          TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 正常 0 禁用',
+    `disable_until`   DATETIME              DEFAULT NULL COMMENT '封禁到期时间：NULL 为永久（或未被封禁），仅 status=0 时有意义；到期由定时任务自动解封',
     `last_login_time` DATETIME              DEFAULT NULL COMMENT '最近登录时间',
     `last_login_ip`   VARCHAR(64)           DEFAULT NULL COMMENT '最近登录 IP',
     `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -82,7 +86,8 @@ CREATE TABLE `im_user`
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_username` (`username`),
     UNIQUE KEY `uk_phone` (`phone`),
-    KEY `idx_nickname` (`nickname`)
+    KEY `idx_nickname` (`nickname`),
+    KEY `idx_disable_until` (`disable_until`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='用户表';
 
@@ -787,3 +792,88 @@ CREATE TABLE `im_report`
     KEY `idx_reported_user` (`reported_user_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='举报工单（管理后台的处理队列，只改状态不删行）';
+
+-- =====================================================================================
+--  十三、系统配置与内容过滤（im-admin）
+-- =====================================================================================
+
+-- 后台运行期配置的「覆盖项」表：整表最多 27 行（27 是 AdminConfigKey 枚举里的项数），
+-- 而且**只存被后台改过的那一项**——没改过的配置在库里根本没有行，运行态就是
+-- application.yml 与代码默认值。为什么不在库里存全量、也不存标题与说明：那些元数据
+-- 一旦两边各存一份，迟早漂移成「界面上写的和代码里做的不一样」，所以目录写死在枚举里。
+-- 这张表不是配置中心，是一道白名单：只有 AdminConfigKey 点名的 key 能写，其余一律回
+-- 14010，为的是不让 spring.datasource.password 与 sa-token.jwt-secret-key 变成
+-- 「一个后台账号一句请求」就能改掉的东西。
+-- 不启 deleted：「恢复默认」是把这一行**物理删掉**，软删的行会一直占着 uk_config_key，
+-- 同一个 key 从此再也写不进来，而那正是本表唯一的存在意义。
+CREATE TABLE `im_config`
+(
+    `id`           BIGINT       NOT NULL COMMENT '配置 ID（雪花）',
+    `config_key`   VARCHAR(128) NOT NULL COMMENT '配置键，与 AdminConfigKey 的 key 一一对应（如 message.recall-limit-seconds）；不在白名单里的键服务端直接拒写',
+    `config_value` VARCHAR(255) NOT NULL COMMENT '配置值，一律以字符串存（"true" / "120"），按枚举声明的类型解释：布尔只认 true/false 两个字面量，数字必须落在枚举声明的 [min,max] 内',
+    `update_by`    BIGINT                DEFAULT NULL COMMENT '最后修改人（后台账号 ID）：这一行是谁点出来的，日志之外只有这里查得到',
+    `create_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次被后台覆盖的时刻',
+    `update_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近一次覆盖的时刻（多实例轮询比对的签名里有它）',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_config_key` (`config_key`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='运行期配置覆盖项（只存后台改过的项，恢复默认即物理删行，总行数不超过白名单项数）';
+
+-- 后台在线维护的敏感词：classpath 那份静态词库（im-common 的 wordlists/sensitive_words.txt，
+-- 生效 19643 条）之上的**增量**，不是替代。装载时两者求并集重建字典树，所以删掉这里的一行
+-- 只撤掉后台加的那一个词，文件里的词一个都不会少；反过来想摘掉文件里的某个词（误伤）
+-- 这个页面做不到，那要改词库资源重新打包——这条边界写在实体注释与开发指南里，
+-- 而不是等到有人删了三行发现「还在遮」再来问。
+-- word 存的是**折叠后**的形式（全角转半角、统一小写），与字典树里的键一致：这样 uk_word
+-- 才真挡得住重复——ＵＲ 与 ur 在库里是同一行，而不是两行看着不同、匹配时完全等价的记录。
+-- 不启 deleted：物理删除才立刻释放 uk_word，否则删过的词永远加不回来，界面上还会
+-- 显示成「这个词已经存在」。
+-- 除了唯一键不加别的索引：定时任务每 30 秒一次只读 COUNT(*) 与 MAX(update_time) 拼签名，
+-- 后台列表按主键倒序翻几页，两个都用不上第二份索引，而这表的行数是「加过多少词」的量级。
+CREATE TABLE `im_sensitive_word`
+(
+    `id`          BIGINT      NOT NULL COMMENT '词条 ID（雪花）',
+    `word`        VARCHAR(64) NOT NULL COMMENT '词条：已按过滤器口径折叠，只含汉字与小写字母数字、至少 2 个字符（校验在 im-common 的 SensitiveWordFilter 里，不在这里也不在前端重复一份）',
+    `remark`      VARCHAR(200)         DEFAULT NULL COMMENT '加词原因，可空。词表没有审计表兜底，这一列是唯一能问出「为什么加它」的地方',
+    `create_by`   BIGINT               DEFAULT NULL COMMENT '创建人（后台账号 ID）：词只能加和删，没有改，所以只有创建人',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（签名比对会看它）',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_word` (`word`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='在线敏感词（静态文件词库之上的增量，物理删除才释放唯一键）';
+
+-- =====================================================================================
+--  十四、全服公告（im-admin）
+-- =====================================================================================
+
+-- 公告是后台第一次「主动对所有在线连接喊话」：发布那一刻经 PushSpi.broadcast() 推一帧
+-- notify（data.action=announce），报文不新增 WsMessageType——notify 下面早已是按 action
+-- 分流的形状（connected / report-result / admin-warn / 群事件）。
+-- 为什么必须建表（而不是像红包、PK 那样只进 Redis）：推送只覆盖发布那一刻在线的连接，
+-- 错过的人靠这张表补拉（用户端 GET /api/announcement/active）。Redis Flush 就没了的话，
+-- 「公告」就退化成「正好在线的人才知道的事」。
+-- 状态机只有三条边：草稿 0 → 已发布 1 → 已撤回 2。已发布不可编辑（改一条已广播出去的正文，
+-- 等于让在线的人看旧文本、之后登录的人看新文本），物理删除只允许对草稿，
+-- 已发布与已撤回的行留下——它们是「什么时候说过什么话」的台账。
+-- expire_time 只影响「补拉还能不能拉到」，到期不会自动把状态改成已撤回：
+-- 到期与状态是两件事，库里那行仍然是已发布的历史事实。
+-- 只给 idx_status_publish 一条索引：用户端每次登录都要跑这个查询，而后台那条列表带
+-- LIKE '%关键词%'（用不上索引）、行数就是「运营发过多少条公告」的量级，全扫不亏。
+CREATE TABLE `im_announcement`
+(
+    `id`           BIGINT        NOT NULL COMMENT '公告 ID（雪花）；用户端按它做本地已读去重，所以同一台设备不会重复弹同一条',
+    `title`        VARCHAR(100)  NOT NULL COMMENT '标题：通知的标题位直接用它的原文，不让前端拿正文截断去猜。写入前按敏感词遮罩并截断',
+    `content`      VARCHAR(2000) NOT NULL COMMENT '正文，与后端 @Size(max=2000) 同宽。公告也要过自己那套词库，否则「把敏感词写进公告」就成了绕过过滤器的正门',
+    `tone`         VARCHAR(16)   NOT NULL DEFAULT 'info' COMMENT '通知样式：info / success / warning / error，与举报回执同一口径；收在服务端而不让前端猜，改一句中文文案不该把通知颜色改掉',
+    `status`       TINYINT       NOT NULL DEFAULT 0 COMMENT '状态：0 草稿（只在后台可见） 1 已发布 2 已撤回（已弹出去的通知收不回来）',
+    `publish_time` DATETIME               DEFAULT NULL COMMENT '发布时刻，草稿为空。用户端按它倒序取「当前生效的最新几条」',
+    `expire_time`  DATETIME               DEFAULT NULL COMMENT '失效时刻，空为不失效；只影响补拉，不会自动改 status',
+    `create_by`    BIGINT                 DEFAULT NULL COMMENT '创建人（后台账号 ID）',
+    `update_by`    BIGINT                 DEFAULT NULL COMMENT '最后修改人（后台账号 ID）：发布与撤回都算修改，所以这一列总是比 create_by 新',
+    `create_time`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（草稿时刻）',
+    `update_time`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_status_publish` (`status`, `publish_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='全服公告（后台唯一主动广播通道，状态 0→1→2；无已读回执表，去重记在客户端本地）';

@@ -435,7 +435,7 @@ public class ReportService {
 
         String disposeMessage = action.local()
                 ? executeLocal(action, report, adminId, remark)
-                : executeRemote(action, report, type, adminId, remark);
+                : executeRemote(action, report, type, adminId, remark, request.getDisableMinutes());
 
         Report update = new Report();
         update.setId(reportId);
@@ -480,9 +480,14 @@ public class ReportService {
      *
      * <p>失败原因原样回显（经 {@code BUSINESS_ERROR} 的「业务处理失败：{}」格式化），
      * 管理员看到「消息已被撤回」和「无权执行」是两种完全不同的下一步。
+     *
+     * <p>{@code disableMinutes} 只在 {@code ban_user} 时往下传：其它动作没有「到期」这个概念，
+     * 把前端的残留值一路带到用户模块只会多一条没人读的参数链路。到期时间本身不在本模块算——
+     * 封号的写路径在 im-user，它才知道自己的时钟。上限与非正数由 {@code AdminUserSpiImpl} 拒，
+     * 理由与用户页那侧共用一份：两个入口夹两道，才不会哪天多出一个入口就漏夹。
      */
     private String executeRemote(ReportDisposition action, Report report, ReportTargetType type,
-                                 Long adminId, String remark) {
+                                 Long adminId, String remark, Long disableMinutes) {
         ReportTargetSpi spi = targetResolvers.get(type.getCode());
         BusinessException.throwIf(spi == null, ResultCode.ADMIN_DISPOSITION_UNAVAILABLE);
         ReportDisposeResult result = spi.dispose(ReportDisposeCmd.builder()
@@ -493,6 +498,7 @@ public class ReportService {
                 .action(action.getCode())
                 .operatorId(adminId)
                 .remark(remark)
+                .disableMinutes(action == ReportDisposition.BAN_USER ? disableMinutes : null)
                 .build());
         BusinessException.throwIf(result == null || !result.isSuccess(),
                 ResultCode.BUSINESS_ERROR, result == null ? "归属模块未返回处置结果" : result.getMessage());

@@ -96,6 +96,28 @@ public interface GroupService {
     void dismiss(Long operatorId, Long groupId);
 
     /**
+     * 后台强制解散：与 {@link #dismiss} 走<b>同一条代码</b>，唯一区别是不校验操作人是不是群主。
+     *
+     * <p>开这个口子而不是在后台 SPI 里重抄一遍解散流程，理由是：管理员解散一个群和群主
+     * 解散一个群，对群里那些人看到的东西必须一模一样（一条解散系统通知 + 一个进不去的会话），
+     * 而不是「后台隔空把群拔了，成员还在往里发消息」。
+     *
+     * <p>群内通知的措辞里用的是这个管理员自己的昵称（与群主解散同一套 {@code nameOf}），
+     * 成员因此可以看出是谁散的群——把这句话伪造成「平台」反而更难解释。
+     *
+     * @param adminId 操作管理员用户 ID
+     */
+    void forceDismiss(Long groupId, Long adminId);
+
+    /**
+     * 后台强制开关全员禁言，同样只跳过群内角色校验；群主与管理员仍不受全员禁言影响。
+     *
+     * <p>与群主那一侧不同的是它<b>不吞「群不存在」</b>：{@link #muteAll} 的群对象来自权限
+     * 校验器，拿不到群早就报错了；后台收到的 groupId 可能来自一个已经过期的页面。
+     */
+    void forceMuteAll(Long groupId, boolean muteAll, Long adminId);
+
+    /**
      * 修改我在群内的昵称，留空表示清除并回退展示账号昵称。
      */
     void updateMyNickname(Long operatorId, Long groupId, String nicknameInGroup);

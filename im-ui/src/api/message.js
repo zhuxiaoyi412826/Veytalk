@@ -207,17 +207,3 @@ export function flashViewMessage(messageId) {
 export function forwardMessage(data) {
   return http.post('/message/forward', data)
 }
-
-/**
- * 服务端全局敏感词过滤开关（高级设置-调试入口）。
- *
- * 状态是后端内存里的：关闭后全服文本与文件名都停止遮蔽，立即生效不需重启；
- * 重启后回到配置文件 im.message.sensitive-filter-enabled 的值。
- */
-export function fetchSensitiveFilter() {
-  return http.get('/message/sensitive-filter', { silent: true })
-}
-
-export function setSensitiveFilter(enabled) {
-  return http.put('/message/sensitive-filter', null, { params: { enabled }, silent: true })
-}

@@ -113,6 +113,26 @@ export function reportStatusTag(status) {
   }
 }
 
+/**
+ * 公告状态 → 标签类型。文案取接口里的 statusName（服务端拼好下发的），
+ * 这里只补颜色，与 reportStatusTag 同一条规矩。
+ *
+ * 已撤回给 warning 而不是 info：它跟「草稿」一样不该对用户可见，但两者要能一眼分开——
+ * 前者是「说过又收回」，后者是「还没说」，混在一个颜色里就会让人以为撤回的行也是待发状态。
+ */
+export function announcementStatusTag(status) {
+  switch (status) {
+    case 0:
+      return 'info'
+    case 1:
+      return 'success'
+    case 2:
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
 /** 字节数 → 人话大小（视频文件与日志文件都读这个），取不到显示「—」而不是 0 B */
 export function formatBytes(value) {
   if (value === null || value === undefined || value === '') {

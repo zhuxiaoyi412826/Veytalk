@@ -97,9 +97,11 @@ ORDER BY r.`role_code`, p.`id`;
 --    登录动作本身既不写也不删这两个键。有效的只有下面两条路：
 --      a) 清掉对应缓存键（Redis 只是缓存，可直接执行，不会丢业务数据）：
 --           redis-cli DEL "im:auth:perm:1000" "im:auth:role:1000"
---         给所有后台账号清一遍（不只 admin）：
---           redis-cli --scan --pattern "im:auth:perm:*" | ForEach-Object { redis-cli DEL $_ }
---           redis-cli --scan --pattern "im:auth:role:*" | ForEach-Object { redis-cli DEL $_ }
+--         给所有后台账号清一遍（不只 admin）。做法是三步：① `redis-cli keys "im:auth:*"` 只读列出，
+--         ② 把列出的键名全写进同一条 DEL（空格分隔，返回值即被删的个数），③ 再 keys 一次应为 (empty list or set)。
+--         ★ 不要拿管道去删：`redis-cli --scan | ForEach-Object { redis-cli DEL $_ }` 在 Windows PowerShell
+--         下静默什么都不删（四期第二批实测踩过；后来补的 `redis-cli EVAL "...keys('im:auth:*')...del..." 0`
+--         也被 PowerShell 拆成 wrong number of arguments，第五批实测），所以只认 ①②③ 这种先列出再删的写法。
 --      b) 等 TTL 自然过期（30 分钟）——这期间看起来像「补了没生效」，别误判成脚本没跑上。
 --
 --  不需要重启后端：表名与行内容都是每条 SQL 下发时才在 MySQL 侧解析的，连接池与 MyBatis

@@ -47,6 +47,15 @@ public class AdminUserDTO implements Serializable {
     /** 账号状态：1 正常 0 禁用（与 {@code im_user.status} 同口径） */
     private Integer status;
 
+    /**
+     * 封禁到期时间。为 {@code null} 有两种情况，靠 {@link #status} 区分：
+     * 账号正常时它恒为 {@code null}（恢复时一并清空），账号禁用时它为空代指<b>永久封禁</b>。
+     *
+     * <p>只给时间不给剩余分钟数：剩余是「现在」的函数，服务端算完到响应出门口就旧了，
+     * 而前端本来就要渲染倒计时。
+     */
+    private LocalDateTime disableUntil;
+
     /** 当前是否有活跃 WebSocket 连接（近似「在线」，与聊天在线判定同一个来源） */
     private Boolean online;
 

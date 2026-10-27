@@ -11,6 +11,13 @@ import { resetRedirectFlag } from '@/api/request'
  * 而<b>没有</b>伞权限——所以「能不能进后台」不能再只认 system:manage，得认下面这一组。
  * 三期又加了四个点（视频/直播/监控/日志）：只持有新点的人也该让他进后台，
  * 而不是登录时就报「没有管理后台权限」。
+ * 四期再加 system:config（系统配置）：同理，一个只被配了配置页权限的账号
+ * 也应该能进后台，只是进去后只看到那一屏。
+ * 四期第二批再加 system:remote（远程控制审计）：同一处理方式，不再重复解释。
+ * 四期第四批再加 system:announcement（全服公告）：同理，但它是本批<b>唯一</b>的新权限点
+ * （在线敏感词不另设点，仍走 system:config），所以跑完 SQL 必须清一次 im:auth:* 缓存。
+ * 四期第五批再加四个点（钱包与礼物 / AI 面试记录 / 群组管理 / 消息管理）：这批一次加了四个，
+ * 而不是前几批的一个——四屏各认一个点，谁被给了哪屏就只进得去那一屏，同样不能顺带。
  * 这些串是<b>唯一</b>一份：im-admin 那些 Controller 类上的 {@code @SaCheckPermission(...)} 才是真正的门，
  * 前端拿它只做「要不要显示某个菜单 / 要不要放行某个路由」这件事，藏掉按钮从来不是安全边界。
  */
@@ -23,7 +30,14 @@ const ADMIN_PERMS = [
   'system:video:manage',
   'system:live:manage',
   'system:monitor',
-  'system:log'
+  'system:log',
+  'system:config',
+  'system:remote',
+  'system:announcement',
+  'system:wallet',
+  'system:interview',
+  'system:group:manage',
+  'system:message:manage'
 ]
 
 function permissionList(userInfo) {

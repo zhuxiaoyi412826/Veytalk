@@ -109,6 +109,92 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_LIVE_MANAGE = "system:live:manage";
     public static final String PERM_SYSTEM_MONITOR = "system:monitor";
     public static final String PERM_SYSTEM_LOG = "system:log";
+    /**
+     * 后台权限点（四期）：系统配置。
+     *
+     * <p>来历是一个安全洞：全局敏感词开关原先挂在用户侧 {@code PUT /api/message/sensitive-filter}，
+     * 类上只有 {@code @SaCheckLogin}，而全局拦截器（{@code SaTokenConfigure}）只做
+     * {@code StpUtil.checkLogin()}、权限判定完全靠注解——于是任何一个登录用户一句 curl
+     * 就能把<b>全服</b>的文本遮罩关掉，且立即生效不需重启。它从来就不是个人设置，
+     * 现在它是后台的 {@code /api/admin/config/**}，聊天端「设置 › 高级设置」里的那一行已摘除。
+     *
+     * <p>与二三期同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上
+     * 这一点（见 {@code sql/migration_admin_config.sql}），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_CONFIG = "system:config";
+    /**
+     * 后台权限点（四期第二批）：远程控制审计。
+     *
+     * <p>单独设点而不给已有的 {@code system:live:manage} 或看板顺带管走，理由和
+     * {@code system:log} 是同一条：这一屏读的是 {@code im_remote_audit_log.detail}，
+     * 里面是别人机器上的<b>文件路径与命令行原文</b>，属于最敏感的一类后台数据。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_admin_remote.sql}），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_REMOTE = "system:remote";
+    /**
+     * 后台权限点（四期第四批）：全服公告。
+     *
+     * <p>不并进已有的 {@code system:config}：那一点管的是「改一个全服旋钮」，改错了可以立刻
+     * 改回来；而发公告是<b>对着所有在线连接喊话</b>，弹出去的通知收不回来（撤回只影响之后的
+     * 拉取，已经显示在别人屏幕上的那一条动不了）。两者的可撤销性不是一个量级，
+     * 所以分成两个点，让「能调开关」与「能发公告」可以是两个人。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_admin_system_config.sql}），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_ANNOUNCEMENT = "system:announcement";
+    /**
+     * 后台权限点（四期第五批）：钱包与礼物。
+     *
+     * <p>这一点是<b>本批唯一带钱的写权限</b>：{@code /api/admin/wallet/{userId}/adjust} 能给别人
+     * 加积分，也能扣。不设点而借 {@code system:user:manage} 的理由不成立——管一个人
+     * 的「能不能登录」和管他的「余额是多少」是两种风险：前者错了可以恢复，后者错了
+     * 是凭空造出货币，而充值上限那条配置项（{@code im.wallet.recharge-max}）本来只约束用户自助充值，
+     * 后台这条路绕过它，所以必须单独设点、单独审计。
+     *
+     * <p>礼物目录的上下架也归这一点：下架只是让礼簿里看不见，<b>不停止已下单笔送礼的历史对账</b>
+     * （{@code im_gift_record} 冗余了礼物名与成交单价），所以它的危险度和改价不是一个量级。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_admin_wallet_interview_group_message.sql}），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_WALLET = "system:wallet";
+    /**
+     * 后台权限点（四期第五批）：AI 面试记录。
+     *
+     * <p>单独设点而不并进 {@code system:user:manage}：这一屏读的是 {@code im_interview_message.content}，
+     * 那是<b>候选人的作答原文</b>，还可能被第三方招聘方看到；一个能禁号的人不必能看到应聘者的答案。
+     * 切屏与粘贴计数同理——它们是「这个人考试时作弊了几次」的指控，指控要有出处。
+     *
+     * <p>同一规矩：伞权限不参与判定，admin 角色必须补上这一点（同那份 migration）。
+     */
+    public static final String PERM_SYSTEM_INTERVIEW = "system:interview";
+    /**
+     * 后台权限点（四期第五批）：群组管理。
+     *
+     * <p>本点下挂着两个不可逆或半可逆的动作：<b>强制解散</b>（群与成员关系立即失效，历史消息
+     * 留在会话里但再也进不去）与全员禁言（可逆）。解散不借 {@code system:user:manage}：
+     * 禁一个人的号与关掉一个百人群是两个影响面，后者会把没被举报的人一起挡在门外。
+     *
+     * <p>同一规矩：伞权限不参与判定，admin 角色必须补上这一点（同那份 migration）。
+     */
+    public static final String PERM_SYSTEM_GROUP_MANAGE = "system:group:manage";
+    /**
+     * 后台权限点（四期第五批）：消息管理。
+     *
+     * <p>整个后台最敏感的一点：这一屏能按关键词模糊搜 {@code im_message.content}，
+     * 也就是<b>读任意一个会话的聊天正文</b>。它和 {@code system:log} 同一级对待——
+     * 拿到它就等于拿到全站对话内容，所以即便已经给了某人 {@code system:group:manage}
+     * 或 {@code system:report:handle}，也仍要单独授这一点才看得到这一屏。
+     *
+     * <p>与用户侧的 {@code message:recall:any}（能在撤回时限内撤别人的消息）不是一回事：
+     * 后者是聊天端的功能权限，本点是后台的读 + 强制撤回，两套点各管各的门。
+     *
+     * <p>同一规矩：伞权限不参与判定，admin 角色必须补上这一点（同那份 migration）。
+     */
+    public static final String PERM_SYSTEM_MESSAGE_MANAGE = "system:message:manage";
 
     /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。

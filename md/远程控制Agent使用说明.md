@@ -112,7 +112,27 @@ java -jar im-remote-agent-jar-with-dependencies.jar
 - Agent 掉线后按**指数退避**（1s 起、上限 30s）自动重连并恢复在线状态；杀后端重启，Agent 会自动重新上线。
 - 一台被控机同一时刻只服务一个控制端：会话存续期间收到的新邀请会被直接拒绝。
 
-## 八、常见问题
+## 八、后台的远程控制审计屏（管理员侧）
+
+Agent 上报的流水与控制端的「审计」抽屉不是同一个入口：后台还有一屏 `/remote`（`im-admin-ui` 第十屏），
+管理员在那里能看到**全站**的会话台账与操作流水。它与本档相关的四件事：
+
+- **要权限点 `system:remote`（117）**。存量库先跑 `sql/migration_admin_remote.sql` 再清一次 Redis 权限缓存，
+  否则菜单里不会长出这一屏（缺权限时路由会自动把人送回他能访问的第一屏，而不是报错）。
+  接口全部只读：`/api/admin/remote/page`、`/api/admin/remote/{sessionId}`、`/api/admin/remote/audit/page`、
+  `/api/admin/remote/overview`，一个写动作都没有。
+- **高危动作词表在服务端**：`exec` / `ps-run` / `ps-kill` / `power` / `file-rm` / `file-get` / `file-put`
+  八个会被标红，另收 `danger-denied`——那是**被本档第五节 `security.allowDanger=false` 挡下的尝试**。
+  也就是说：你在本地拒掉的高危指令不是“没发生过”，它在后台审计里留一条尝试记录。反过来，
+  `file-mkdir` / `file-rename`（可逆的整理动作）与 `clip-sync`（只上报 `len=N`，不传内容）不占高危筛选，
+  要看它们得翻全量流水。
+- **后台没有「强制中断会话」按钮，而禁用账号也断不掉已建立的会话**：远程两条 WS 都是**握手期鉴权**，
+  建起来之后不再回查登录态；后台那边的「禁用」只踢聊天长连接。真要立即止损，**只有被控端自己断**：
+  点顶部那条置顶悬浮告警条，或者直接退出 Agent。这条是这一屏最重要的使用约定。
+- **后台响应里不会出现 `accessCode` / `ticket` / `aesKey`**：台账只能看到设备名与 `deviceId` 机器指纹。
+  审计库不是钥匙库——一旦把接入凭证或会话密钥写进可导出的台账，等于给后台多发一把能用的钥匙。
+
+## 九、常见问题
 
 - **启动报 headless / 无法弹窗**：确认没有 `-Djava.awt.headless=true`，且运行在有桌面的会话里。
 - **连不上 / 一直重连**：核对 `server.url` 端口是否可达、账号密码是否正确（识别码模式则核对识别码是否为 6-12 位字母数字）。后端需已加载 `im-remote` 模块且 `im.remote.enabled=true`。

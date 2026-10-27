@@ -62,17 +62,23 @@ public class AdminUserController {
 
     @Operation(summary = "禁用账号",
             description = "置 im_user.status=0 并即时踢掉该用户的全部长连接（不踢的话他手上的连接还能继续收发，"
-                    + "禁用要等下次登录才生效）；必须写事由，进服务端日志。不能禁自己")
+                    + "禁用要等下次登录才生效）；必须写事由，进服务端日志。不能禁自己。"
+                    + "minutes 不传为永久封禁，传了则到期由 im-user 的定时任务自动解封（上限 365 天）；"
+                    + "对已禁用的账号再调一次等于改期")
     @PostMapping("/{userId}/disable")
     public Result<AdminUserVO> disable(@Parameter(description = "用户 ID") @PathVariable("userId") Long userId,
                                       @Parameter(description = "禁用事由，会写进服务端日志")
-                                      @RequestParam(value = "reason", required = false) String reason) {
-        return Result.ok(adminUserService.setDisabled(userId, true, SecurityUtil.getUserId(), reason), "账号已禁用");
+                                      @RequestParam(value = "reason", required = false) String reason,
+                                      @Parameter(description = "封禁时长（分钟）；留空表示永久封禁")
+                                      @RequestParam(value = "minutes", required = false) Long minutes) {
+        return Result.ok(adminUserService.setDisabled(userId, true, SecurityUtil.getUserId(), reason, minutes), "账号已禁用");
     }
 
-    @Operation(summary = "恢复账号", description = "解除禁用；恢复后不会自动重连，需要用户重新登录")
+    @Operation(summary = "恢复账号",
+            description = "解除禁用并一并清空到期时间（提前解封后留着旧日期会在列表里显示成一个作废的时间）；"
+                    + "恢复后不会自动重连，需要用户重新登录")
     @PostMapping("/{userId}/enable")
     public Result<AdminUserVO> enable(@Parameter(description = "用户 ID") @PathVariable("userId") Long userId) {
-        return Result.ok(adminUserService.setDisabled(userId, false, SecurityUtil.getUserId(), null), "账号已恢复");
+        return Result.ok(adminUserService.setDisabled(userId, false, SecurityUtil.getUserId(), null, null), "账号已恢复");
     }
 }

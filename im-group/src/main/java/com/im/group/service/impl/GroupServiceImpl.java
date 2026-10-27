@@ -459,10 +459,32 @@ public class GroupServiceImpl implements GroupService {
     @Transactional(rollbackFor = Exception.class)
     public void dismiss(Long operatorId, Long groupId) {
         permissionChecker.requireOwner(groupId, operatorId);
+        doDismiss(operatorId, groupId, false);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void forceDismiss(Long groupId, Long adminId) {
+        // 后台跳过的只有 requireOwner 那一句，其余与群主亲自解散一字不差
+        doDismiss(adminId, groupId, true);
+    }
+
+    /**
+     * 解散的共用身体。
+     *
+     * @param byAdmin 后台路径。两者对「一条都没改到」的解释不同：群主那一侧的群对象是权限
+     *                校验器刚确认过的，改不到行只能是抢先解散，幂等返回；后台收到的 groupId
+     *                可能来自一个过期页面或干脆是编的，这种情况不能当成功吞下
+     */
+    private void doDismiss(Long operatorId, Long groupId, boolean byAdmin) {
         // 成员列表要在置为已退群之前取，解散通知需要推给这批人
         List<Long> members = groupMemberMapper.selectActiveMemberIds(groupId);
         // dismiss 的条件里带 status = 1，两人同时解散只有一个能改到行，另一个当作已成功
         if (groupMapper.dismiss(groupId) == 0) {
+            if (byAdmin) {
+                // selectById 不看 status，改不到行却没这行只能是根本不存在
+                BusinessException.throwIf(groupMapper.selectById(groupId) == null, ResultCode.GROUP_NOT_FOUND);
+            }
             log.debug("[解散群] 群已被解散，幂等跳过: groupId={}", groupId);
             return;
         }
@@ -478,7 +500,7 @@ public class GroupServiceImpl implements GroupService {
             noticeQuietly(conversationId, nameOf(operatorId) + " 解散了群聊");
             pushQuietlyAll(members, event);
         });
-        log.info("[解散群] groupId={}, 操作人={}, 影响成员={}", groupId, operatorId, members.size());
+        log.info("[解散群] groupId={}, 操作人={}, 影响成员={}, 后台={}", groupId, operatorId, members.size(), byAdmin);
     }
 
     /* ==================== 禁言 ==================== */
@@ -515,7 +537,24 @@ public class GroupServiceImpl implements GroupService {
     @Transactional(rollbackFor = Exception.class)
     public void muteAll(Long operatorId, Long groupId, boolean muteAll) {
         GroupPermissionChecker.GroupContext context = permissionChecker.requireOwnerOrAdmin(groupId, operatorId);
-        if (context.group().isMuteAllOn() == muteAll) {
+        doMuteAll(context.group(), operatorId, groupId, muteAll);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void forceMuteAll(Long groupId, boolean muteAll, Long adminId) {
+        Group group = groupMapper.selectNormalById(groupId);
+        if (group == null) {
+            // 已解散与不存在分开报：前者是「这个群已经没什么可禁的了」，后者是「这个 ID 从哪来的」
+            throw new BusinessException(groupMapper.selectById(groupId) == null
+                    ? ResultCode.GROUP_NOT_FOUND : ResultCode.GROUP_DISMISSED);
+        }
+        doMuteAll(group, adminId, groupId, muteAll);
+    }
+
+    /** 全员禁言的共用身体：群主与管理员不受影响这条豁免规则在 {@code GroupConvert} 里，本方法不重新发明 */
+    private void doMuteAll(Group group, Long operatorId, Long groupId, boolean muteAll) {
+        if (group.isMuteAllOn() == muteAll) {
             return;
         }
         BusinessException.throwIf(groupMapper.updateMuteAll(groupId, muteAll ? 1 : 0) == 0,

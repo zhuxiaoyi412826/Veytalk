@@ -3,6 +3,7 @@ import { useChatStore } from './chat'
 import { useConversationStore } from './conversation'
 import { useFriendStore } from './friend'
 import { useReportStore } from './report'
+import { useAnnounceStore } from './announce'
 
 /**
  * 退出登录的完整流程。
@@ -24,4 +25,7 @@ export async function signOut() {
   useFriendStore().reset()
   // 举报字典与开关也是按账号拿的状态，并且弹窗可能正开着：不清的话换账号会短暂看到上一个人的字典
   useReportStore().reset()
+  // 待确认公告与那个「本会话弹过通知」的内存集合同样按账号存在：本地已确认记录是按 userId 分键的，
+  // 不清只会让下一个人看一眼不该给他的公告栏
+  useAnnounceStore().reset()
 }

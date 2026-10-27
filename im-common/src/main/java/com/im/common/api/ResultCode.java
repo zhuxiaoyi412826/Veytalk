@@ -199,7 +199,7 @@ public enum ResultCode {
     PACKET_SELF_CLAIM_FORBIDDEN(13024, "不能领取自己发出的红包"),
     PACKET_ALREADY_CLAIMED(13025, "你已经领过这个红包了"),
     PACKET_EMPTY(13026, "红包已被领完"),
-    MONEY_MESSAGE_FORBIDDEN(13027, "转账与红包消息发出后不能撑回或转发"),
+    MONEY_MESSAGE_FORBIDDEN(13027, "转账与红包消息发出后不能撤回或转发"),
     
     /* ==================== 14xxx 举报与管理后台 ==================== */
     /* 举报是面对全体用户的入口，所以错误文案直接写给举报人看（能回 14xxx 的都是业务拒绝，不是系统错）；
@@ -213,7 +213,12 @@ public enum ResultCode {
     REPORT_ALREADY_HANDLED(14006, "该举报已处理，不能重复处置"),
     ADMIN_SELF_FORBIDDEN(14007, "不能对自己执行该管理操作（封禁自己会把自己锁在门外）"),
     ADMIN_DISPOSITION_UNAVAILABLE(14008, "该处置动作需要的能力未装配（如直播模块未启用）"),
-    REPORT_DISABLED(14009, "举报功能当前未开启");
+    REPORT_DISABLED(14009, "举报功能当前未开启"),
+    /* 14010~14012 是后台四期第四批（系统配置页）的：配置项与公告都只在管理页面上出现，
+       文案是给管理员看的，可以说「去哪个页面找」这种操作引导（13xxx 那种面向用户的码不能这么写） */
+    ADMIN_CONFIG_KEY_UNKNOWN(14010, "该配置项不允许后台修改（不在服务端白名单里）"),
+    ANNOUNCEMENT_NOT_FOUND(14011, "公告不存在或已被删除"),
+    ANNOUNCEMENT_STATE_FORBIDDEN(14012, "该公告当前状态不允许这个操作（已发布的不能编辑、已撤回的不能再撤回）");
 
     private final int code;
     private final String message;

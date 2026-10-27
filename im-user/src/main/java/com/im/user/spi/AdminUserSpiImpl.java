@@ -29,6 +29,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -59,10 +61,21 @@ import java.util.stream.Collectors;
  *
  * <h2>禁用为什么不带事务</h2>
  *
- * <p>写库只有一条 {@code UPDATE im_user SET status}，它自己就是原子的；
+ * <p>写库只有一条 {@code UPDATE im_user SET status, disable_until}，它自己就是原子的；
  * 后面的踢连接与注销会话是<b>不该回滚也不该被回滚</b>的副作用（把会话清掉失败了，
  * 最坏是他还能用旧 token 撑到过期，回滚数据库反而会让「已发出的封禁」失去依据）。
  * 因此这里刻意不加 {@code @Transactional}，把两步串成「先落库、后尽力断线」。
+ *
+ * <h2>限时封禁的三个口径</h2>
+ *
+ * <ul>
+ *   <li><b>到期时间由服务端算</b>：契约上传的是「多少分钟」而不是一个绝对时间戳，
+ *       管理员浏览器上的时钟不可信，一个偏快的到期时间就是提前解封；</li>
+ *   <li><b>{@code disable_until IS NULL} 就是永久</b>，不用一个极大值代指永久：
+ *       9999-12-31 会被任何「按到期时间排序」的列表当成一条真的待办，也会被自动解封任务扫到；</li>
+ *   <li><b>自动解封不通知本人</b>：那一刻他必然处于离线状态（封禁时已经踢过、
+ *       又登不进来），推送无处可发；他下次登录自然成功，不需要一条通知提前告知。</li>
+ * </ul>
  */
 @Slf4j
 @Service
@@ -75,6 +88,12 @@ public class AdminUserSpiImpl implements AdminUserSpi {
     private static final long PAGE_SIZE_MAX = 100;
     /** 批量取档案的 ID 数上限，超过截断：契约里的「调用方应控住规模」在这里兑现成硬约束 */
     private static final int BATCH_MAX = 200;
+    /** 封禁时长上限（分钟，= 365 天）：比这更久就该用永久封禁，而不是给一个「临时」封禁挂个十年后的到期日 */
+    private static final long BAN_MINUTES_MAX = 365L * 60 * 24;
+    /** 一轮自动解封最多处理多少行：到期时间集中命中时留在下个周期接着做，不在一个循环里长占连接 */
+    private static final int UNBAN_BATCH_MAX = 200;
+    /** 踢下线报文里的到期时间格式：给人读的，到分钟就够（精确到秒只会让人怀疑是不是自己看错了） */
+    private static final DateTimeFormatter KICK_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final UserMapper userMapper;
     private final UserWalletMapper userWalletMapper;
@@ -138,8 +157,15 @@ public class AdminUserSpiImpl implements AdminUserSpi {
     }
 
     @Override
-    public AdminUserDTO setDisabled(Long userId, boolean disabled, Long operatorId, String reason) {
+    public AdminUserDTO setDisabled(Long userId, boolean disabled, Long operatorId, String reason, Long disableMinutes) {
         BusinessException.throwIf(userId == null, ResultCode.BAD_REQUEST, "缺少用户 ID");
+        // 时长在本类再夹一次：调用方有两个（后台用户页与举报处置），只在前端夹等于没夹
+        if (disabled && disableMinutes != null) {
+            BusinessException.throwIf(disableMinutes <= 0, ResultCode.BAD_REQUEST,
+                    "封禁时长必须是正数分钟，永久封禁请不传该参数");
+            BusinessException.throwUnless(disableMinutes <= BAN_MINUTES_MAX, ResultCode.BAD_REQUEST,
+                    "封禁时长最长 " + (BAN_MINUTES_MAX / 60 / 24) + " 天，更久请改用永久封禁");
+        }
         User user = userMapper.selectById(userId);
         if (user == null) {
             return null;
@@ -151,22 +177,106 @@ public class AdminUserSpiImpl implements AdminUserSpi {
             BusinessException.throwUnless(mayDisableAdmin(userId), ResultCode.BUSINESS_ERROR,
                     "这是最后一个可用的管理员账号，禁用后后台将无人可登录");
         }
-        if (disabled != alreadyDisabled) {
-            User patch = new User();
-            patch.setId(userId);
-            patch.setStatus(disabled ? User.STATUS_DISABLED : User.STATUS_NORMAL);
-            userMapper.updateById(patch);
-            log.info("[管理后台] 账号状态变更: userId={}, account={}, disabled={}, operator={}, reason={}",
-                    userId, user.getUsername(), disabled, operatorId, reason);
-        } else if (!disabled) {
-            // 本来就是正常账号，无需重复恢复
-            return detail(userId);
+        LocalDateTime until = disabled && disableMinutes != null
+                ? LocalDateTime.now().plusMinutes(disableMinutes)
+                : null;
+        if (disabled) {
+            // 已经禁用也照写：这一支同时承担「改期」——对封着的人重新下发一个时长就是把到期时间换掉。
+            // 若只在状态翻转时写库，管理员想把 1 天延长到 7 天就只能先恢复再禁用，中间那一秒是真把门打开了
+            userMapper.update(null, Wrappers.<User>lambdaUpdate()
+                    .eq(User::getId, userId)
+                    .set(User::getStatus, User.STATUS_DISABLED)
+                    .set(User::getDisableUntil, until));
+            log.info("[管理后台] 账号已禁用: userId={}, account={}, until={}, operator={}, reason={}",
+                    userId, user.getUsername(), until == null ? "永久" : until, operatorId, reason);
+        } else if (alreadyDisabled) {
+            userMapper.update(null, Wrappers.<User>lambdaUpdate()
+                    .eq(User::getId, userId)
+                    .set(User::getStatus, User.STATUS_NORMAL)
+                    // 提前恢复必须把到期时间一起清掉：留着它，后台会在这个已正常的账号上继续显示一个作废的日期
+                    .set(User::getDisableUntil, null));
+            log.info("[管理后台] 账号已恢复: userId={}, account={}, 原到期时间={}, operator={}",
+                    userId, user.getUsername(),
+                    user.getDisableUntil() == null ? "永久" : user.getDisableUntil(), operatorId);
         }
         if (disabled) {
             // 状态已符合也要再断一次线：上一次禁用可能正好失败在这一步之后，账上已经是禁用而会话还活着
-            evictSessions(userId);
+            evictSessions(userId, kickText(until, reason));
         }
+        // disabled=false 且本来就正常时不进上面任何一支：无变更，直接回档案
         return detail(userId);
+    }
+
+    /**
+     * 到期自动解封：把 {@code status=0} 且 {@code disable_until <= now} 的账号放回正常态。
+     *
+     * <p>由 {@code UserBanExpireTask} 周期调用。它<b>不在 {@code AdminUserSpi} 契约上</b>：
+     * 把一个「批量改账号状态」的方法开到契约上，等于给每个依赖该契约的模块都开了那扇门。
+     *
+     * <h3>为什么条件里必须有 {@code isNotNull}</h3>
+     *
+     * <p>永久封禁与已注销的账号在库里长得一模一样（{@code status=0} 且
+     * {@code disable_until IS NULL}，注销行还额外带 {@code deleted=1}）。少这一条条件，
+     * 任务就会把客服亲手永久封的人一并放出去；对注销账号更糟：注销链路已经把昵称、
+     * 密码、手机号全抹掉了，把它解回 {@code status=1} 得到的是一个不可识别却能登录的空壳。
+     * {@code @TableLogic} 本来就会滤掉注销行，但那属于实现的附带效果，不能当依据；
+     * 所以这里既写了 {@code isNotNull}，也依赖逻辑删除，两道都要在。
+     *
+     * <h3>多实例部署</h3>
+     *
+     * <p>每个节点都会各自扫一遍，不做分布式锁：下面那条 UPDATE 的 WHERE 里带着与扫描完全相同的
+     * 三个条件，后到的节点只会更新 0 行，天然幂等。真上多实例时该担心的是扫描开销，
+     * {@code idx_disable_until} 就是为这条语句加的——绝大多数用户这一列是 NULL，
+     * 走索引的代价与「被封过的人数」成正比，而不是与用户总数成正比。
+     *
+     * @return 本次实际解封的账号数
+     */
+    public int autoUnbanExpired() {
+        LocalDateTime now = LocalDateTime.now();
+        List<User> expired = userMapper.selectList(Wrappers.<User>lambdaQuery()
+                .eq(User::getStatus, User.STATUS_DISABLED)
+                .isNotNull(User::getDisableUntil)
+                .le(User::getDisableUntil, now)
+                .last("LIMIT " + UNBAN_BATCH_MAX));
+        if (expired.isEmpty()) {
+            return 0;
+        }
+        List<Long> ids = expired.stream()
+                .map(User::getId)
+                .filter(Objects::nonNull)
+                .toList();
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        // WHERE 里重复一遍扫描条件：从查出到写回之间管理员可能已经手工恢复或改了到期时间，那时这一行不该被动
+        int changed = userMapper.update(null, Wrappers.<User>lambdaUpdate()
+                .in(User::getId, ids)
+                .eq(User::getStatus, User.STATUS_DISABLED)
+                .isNotNull(User::getDisableUntil)
+                .le(User::getDisableUntil, now)
+                .set(User::getStatus, User.STATUS_NORMAL)
+                .set(User::getDisableUntil, null));
+        if (changed > 0) {
+            log.info("[自动解封] 封禁到期已恢复: count={}, userIds={}", changed, ids.stream().limit(20).toList());
+        }
+        return changed;
+    }
+
+    /**
+     * 踢下线报文里的那句话。
+     *
+     * <p>{@code kickout} 的 reason 是唯一能在这个时刻送达用户的信息（他马上就没有登录态了），
+     * 所以限时封禁要把到期时间写进去：「你被禁了」与「你被禁到 11 月 2 日」是两种体验，
+     * 后者不需要用户去猜该不该来问客服。事由是管理员写给审计看的，这里一并带上；
+     * 为空就只说状态，不硬凑一句「违反社区规定」这种没依据的话。
+     */
+    private String kickText(LocalDateTime until, String reason) {
+        StringBuilder text = new StringBuilder("账号已被平台停用");
+        text.append(until == null ? "（永久）" : "，将于 " + KICK_TIME.format(until) + " 自动解封");
+        if (!TextUtil.isBlank(reason)) {
+            text.append("；事由：").append(reason);
+        }
+        return text.toString();
     }
 
     @Override
@@ -242,11 +352,11 @@ public class AdminUserSpiImpl implements AdminUserSpi {
      *
      * <p>{@code logoutEverywhere} 内部已包含清除在线键与向好友广播下线，这里不重复做。
      */
-    private void evictSessions(Long userId) {
+    private void evictSessions(Long userId, String kickReason) {
         PushSpi pushSpi = pushSpiProvider.getIfAvailable();
         if (pushSpi != null) {
             try {
-                pushSpi.kickOut(userId, null, "账号已被平台停用");
+                pushSpi.kickOut(userId, null, kickReason);
             } catch (Exception e) {
                 log.warn("[管理后台] 停用账号时踢出连接失败: userId={}, err={}", userId, e.getMessage());
             }
@@ -318,6 +428,7 @@ public class AdminUserSpiImpl implements AdminUserSpi {
                     // 手机号是整张表里最值钱的列，出用户表只走脱敏形态
                     .phone(TextUtil.maskPhone(user.getPhone()))
                     .status(user.getStatus())
+                    .disableUntil(user.getDisableUntil())
                     .online(onlineIds.contains(user.getId()))
                     .balance(balances.get(user.getId()))
                     .createTime(user.getCreateTime())

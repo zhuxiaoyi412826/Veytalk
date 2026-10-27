@@ -157,7 +157,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 
 | 依赖 | 何时需要 | 说明 |
 |---|---|---|
-| MinIO | 想用对象存储而非本地磁盘时 | 设 `IM_FILE_STORAGE=minio`；**不装默认走本地** `${user.home}/im-files`，上传下载照常跑通 |
+| MinIO | 想用对象存储而非本地磁盘时 | ★ `im.file.storage` 的默认值是 **`minio`**（`application.yml` L370），而 `MinioFileStorage` 连不上桶会抛 `IllegalStateException` 让启动 fail-fast。因此**要么装 MinIO（不需额外设变量），要么显式设 `IM_FILE_STORAGE=local`**（文件落 `${user.home}/im-files`），两个都不做后端起不来 |
 | ffmpeg | 直播推流 / 远程控制 H.264 硬件编码 | Electron 桌面客户端已内置（`electron/bin`）；被控端 Agent 与本机自测直播需本机可执行 `ffmpeg`（缺失时远控自动回落 JPEG，直播则无法推流） |
 | Android Studio + SDK | 打包安卓 APK 时 | Capacitor 方案，见 [`md/打包/打包为EXE和Android指南.md`](md/打包/打包为EXE和Android指南.md) |
 
@@ -185,7 +185,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 | `SPRING_PROFILES_ACTIVE` | `dev` | `dev` 会在响应里回显验证码明文，**生产必须改成 `prod`** |
 | `IM_JWT_SECRET` | 内置开发用长串 | Sa-Token 的 JWT 签名密钥，**生产必须替换** |
 | `IM_TICKET_SECRET` | 内置开发用长串 | WS 连接票据 / 文件访问票据的签名密钥，**生产必须替换** |
-| `IM_FILE_STORAGE` | `local` | `local` 或 `minio` |
+| `IM_FILE_STORAGE` | `minio` | `local` 或 `minio`。默认是 `minio`，没装 MinIO 又没改成 `local` 会让启动 fail-fast |
 | `IM_SMS_PROVIDER` | `mock` | 短信下发通道。`mock` 只写日志不发真短信；接真实服务商时改成对应实现名（如 `aliyun`），**生产必须替换** |
 | `MAIL_USERNAME` | 空 | 完整邮箱地址（如 `123456@qq.com`），邮箱验证码的发件人 |
 | `MAIL_PASSWORD` | 空 | QQ 邮箱的 **SMTP 授权码**，不是 QQ 登录密码（用登录密码会 535 认证失败）。两者都不配时邮箱登录与邮箱找回密码不可用 |
@@ -318,6 +318,9 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 | `migration_linkmic_gift.sql` | 虚拟积分与礼物四表（`im_user_wallet` `im_gift` `im_wallet_transaction` `im_gift_record`） | 充值 / 签到 / 送礼 / 转账 / 红包接口报缺表（连麦本身的状态走 Redis，不依赖本脚本） |
 | `migration_message_favorite.sql` | 新表 `im_message_favorite` | ⚠️ **不是「只有收藏不好用」，而是消息列表接口整片 500**——历史分页 / 离线拉取 / 消息检索 / 群相册都要走 `toViewList → attachFavorites`，那一步对新表做一次 `IN` 查询，表不存在直接抛 `SQLException` |
 | `migration_report.sql` | 新表 `im_report` | 只影响举报与后台：提交举报、工单队列、看板里的举报分区都报 `Table 'im_db.im_report' doesn't exist`；**聊天、登录、直播等其余功能不受影响**（这张表只有 im-admin 读）——所以没建表也能启动，只是举报不可用 |
+| `migration_user_ban_duration.sql` | 后台四期·第三批：`im_user.disable_until` 列 + `idx_disable_until` 索引（**本批唯一 DDL**，零 RBAC 改动、因此不需清权限缓存） | ★ **不是「少了限时封禁」而是整条登录链路一起挂**：实体 `User` 带上这一列后 MyBatis-Plus 生成的 SELECT 清单就含它，库里没有就报 `Unknown column 'disable_until'`（登录校验、用户列表、举报处置都走这张表）。MySQL 没有 `ADD COLUMN IF NOT EXISTS`，**不能无脑重跑**（重跑报 1060 且会中断后面那条 `ADD KEY`），先跑脚本第 1 段的 `information_schema` 只读预检 |
+| `migration_admin_system_config.sql` | 后台四期·第四批：三张新表 `im_config` / `im_sensitive_word` / `im_announcement` + 权限点 118 `system:announcement`（与 admin 绑定） | 三张表都只被 im-admin 读，**没跑就是「这一屏不能用」而不是功能残缺**：配置页拿不到覆盖信息、在线词库读不到（**文件词库照常生效、聊天不受影响**）、公告页与聊天端补拉都报表不存在；后端不会以失败启动（读取失败只记 warn、按当前运行态接着跑）。★ **与上一批相反，本批必须清一次 `im:auth:*` 权限缓存**（新开了权限点 118，`PermissionProviderImpl` 按用户缓存 30 分钟且登录动作不刷新），不清就是「插了权限行却处处 1003」。建表段用 `CREATE TABLE IF NOT EXISTS`、权限段全 `INSERT IGNORE`，可重跑 |
+| `migration_admin_wallet_interview_group_message.sql` | 后台四期·第五批：四个权限点 119~122（`system:wallet` / `system:interview` / `system:group:manage` / `system:message:manage`）+ admin 绑定 6019~6022。**★ 全批零 DDL**：四屏读的全是早已存在的业务表（`im_user_wallet` / `im_wallet_transaction` / `im_gift` / `im_gift_record` / `im_interview_*` / `im_group*` / `im_message`），连「这条是后台撤的」那个问责标记都没补列——它写在 `im_message.extra` 这个 JSON 列的 `recalledByAdmin` 键上 | 四个新页面整页 1003（HTTP 仍是 200），**其余后台一切如旧**；`im-admin-ui` 的菜单与路由守卫按同一个点判，所以表现是「菜单自动少四项」而不是四项全灰。★ 与第四批同一口径：**跑完必须清一次 `im:auth:*`**（新开四个点，`PermissionProviderImpl` 按用户缓存 30 分钟且登录动作不刷新）。权限段全 `INSERT IGNORE`、可重跑；但脚本第 0 段那条「119~122 / 6019~6022 主键位是否空闲」的只读预检**不能跳**：这几个号若被本库自己占用过（例如手工插过别的点），`INSERT IGNORE` 会静默跳过那一行，得到「跑了但没生效」这种最难查的现象 |
 | `migration_missing_tables.sql` | **对账补丁**：一次补齐 `im_message_reaction` / `im_message_vote` / `im_message_essence` / `im_message_favorite` / `im_group_join_request` / `im_group_robot` / `im_report` 七张表，与 `im_group` 的 `invite_code` + `join_approval` 两列一索引 | ⚠️ 同样**不是「只有这几个功能不好用」**：表情回应 / 投票 / 群精华都挂在 `toViewList` 的末尾，缺任意一张表就会把历史分页 / 离线拉取 / 消息检索 / 群相册一起打成 1007；而 `im_group` 缺 `invite_code` 列会让**所有群查询**报 `Unknown column`（MyBatis-Plus 按实体列生成 SELECT 清单）。这几项当初只更新了全量 `im_schema.sql`、没留增量脚本，而全量那份开头是一串 `DROP TABLE`（跑它等于清库），所以补了这个汇总包。**跑过它之后就不要再去跑上面 `migration_message_favorite.sql` / `migration_report.sql`** |
 | `migration_admin_phase2.sql` | **数据补丁**：补后台二期的四个权限点（`im_permission` 108~111）、给 admin 角色绑定它们（`im_role_permission` 6008~6011），并补上 `moderator` / `operator` 两个示范角色与它们的授权行 | 后台存成一期权限数据的库上，admin 登录会**提示成功却处处 1003**：后端四个控制器已细化到 `system:dashboard` 等四个点，而 Sa-Token 里 `system:manage` 是精确串不是通配，匹配不上；前端却仍认伞权限（它比后端宽），所以菜单四项全部可见、点进去全部被拦。★ 补完**必须清一次 Redis 权限缓存**（`im:auth:perm:{userId}` / `im:auth:role:{userId}`，TTL 30 分钟且登录动作不刷新）—— 退登重登不管用，只能 `redis-cli DEL` 或等 TTL），否则看起来像「补了没生效」；不必重启后端。另注意这个症状可能叠加 `migration_missing_tables.sql` 的缺口（库里也没 `im_report`），那种情形下工单屏补完权限仍会报表不存在 |
 
@@ -703,7 +706,10 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | POST | `/delivered` | 送达上报（点亮单勾，单次 ≤ 200） |
 | POST | `/{id}/flash-view` | 查看闪照（每人各看一次；全员消费后逻辑删原图记录，同一用户幂等） |
 | POST | `/forward` | 转发消息到目标会话（附件复用原文件） |
-| GET · PUT | `/sensitive-filter` | 敏感词过滤状态查询 / 开关 |
+
+> 这里原先还有 `GET · PUT /sensitive-filter`（全局敏感词过滤状态 / 开关），四期已删：它只要求登录，
+> 任何账号都能关掉全服遮罩。这两个端点现在在后台的 `/api/admin/config/sensitive-filter`，
+> 要 `system:config`（见「十八、管理后台 › 7. 四期 · 系统配置」）。
 
 ### 群组 `/api/group` —— 需登录
 
@@ -1008,9 +1014,9 @@ sequenceDiagram
 
 ## 十一、文件存储：local / MinIO 切换
 
-默认 `IM_FILE_STORAGE=local`，文件落在 `${user.home}/im-files`，**不装 MinIO 也能完整跑通上传下载**。
+默认 `IM_FILE_STORAGE=minio`（不是 local）：配了 MinIO 就直接用，没配又没改成 `local` 的话，启动阶段建桶失败会抛 `IllegalStateException`、**进程根本起不来**（刻意 fail-fast，不是 bug）。想不装 MinIO 跑通上传下载，显式设 `IM_FILE_STORAGE=local`，文件落在 `${user.home}/im-files`。
 
-切到 MinIO 只需两步：
+反过来，从 `local` 切回 MinIO 只需两步（默认已是 `minio`，显式设这个变量只是为了盖住你之前设过的 `local`，以及把它连同端点一起写清楚）：
 
 ```powershell
 # 1. 启动 MinIO（Windows）
@@ -1499,6 +1505,78 @@ spring-boot-duomokuia/
     看板显示「数据截至」且 60s 自动刷新（强制刷新才真跑 COUNT）→ 用户页按昵称搜索（keyword **不认用户 ID**）→
     工单页受理 → 处置（封号 / 撤回消息 / 中断直播三个动作会二次确认）→ 举报人聊天端右上角弹出一条系统通知
     （驳回为 `info`、已处理为 `success`；被警告当事人收到 `warning`）
+    四期再两查：① 左侧应多出一屏「系统配置」——库里没跑 `sql/migration_admin_config.sql` 时它自己会隐掉、
+    点进去 1003，这是预期而不是 bug；把开关拨到关，聊天端发一句含敏感词的话应原样不再变 `*`，
+    拨回开又恢复遮蔽（这一步同时验到「后台改的是全服内存态、立即生效不需重启」）；词库没装载成功时
+    卡内应出现黄色告警而不是只显示「已开启」。② 拿一个**普通用户**的 token 直接
+    `curl -X PUT "http://127.0.0.1:8080/api/message/sensitive-filter?enabled=false" -H "token: <普通用户的票>"`
+    应得到 404（端点已删），且该用户的设置页「高级设置」里已没有敏感词那一行——
+    这一条才是本次安全修复的验收线，只点后台那一侧不算验完
+    四期第二批再两查：① 左侧应多出一屏「远程控制」（库里没跑 `sql/migration_admin_remote.sql` 时它自己会隐掉、
+    点进去 1003，这是预期而不是 bug）——台账里进行中的会话应排最前且带「传图中 / 仅 Agent 在线」小标签，
+    而**进行中的会话那一格流量不应是 0 B**（是 0 就是内存 `grandTotalBytes()` 那条口径没走通）；
+    ② 「操作流水」页勾上「只看高危」后应当只回红标行（含 `danger-denied`：被 Agent 本地开关拦下的尝试也要在），
+    拿一个正在进行中的会话点「所属会话」，抽屉里的流水条数应与台账那一格对得上。
+    ★ 这一屏没任何写按钮，不需要二次确认类测试；但**别用「禁用账号」去试能不能掉远程会话**（断不掉，见十八章 §8）
+    四期第三批再两查：① 用户页点「禁用」应弹出一个带时长下拉的框（**默认 1 天而不是永久**，默认值要倒向可逆那一档）——
+    选「10 分钟」确认后状态列应同时出现「剩 X 分钟」标签，拿那个号去登录应回「账号已被禁用，将于 yyyy-MM-dd HH:mm 自动解封」；
+    **等到过了那个点**，`info.log` 里应出现 `[自动解封] 本轮恢复 1 个到期账号`、状态列回「正常」（误差 ≤ 30s；
+    一直没这一行就是定时任务没跑起来，先确认 `@EnableScheduling` 与 im-user 的 `UserBanExpireTask` 都在）。
+    ② 反向验「不会自己开」的两类：选「永久」封一个号 → 过多久都还是「已禁用 + 永久」；
+    已注销的账号（`status=0` 且 `disable_until IS NULL`）不应被这一轮扫描放回 `status=1`
+    ——只读核对 `SELECT id, status, disable_until, deleted FROM im_user WHERE status = 0;`
+    （★ 这一条是本批最要紧的验收线：少了扫描条件里的 `disable_until IS NOT NULL`，注销空壳账号就会被救活）。
+    工单处置里选「封禁账号（限时）」同样应有时长下拉，且回执那句话要带上时长。
+    四期第四批再四查（★ 前提：本批新开了权限点 118，跑完 `sql/migration_admin_system_config.sql` 后**必须清一次 `im:auth:*`**，
+    不清的症状是「权限行明明在库里却处处 1003」，与没插行看起来一模一样而排障方向相反；清法三步：
+    `redis-cli keys "im:auth:*"` 列出 → 把键名全写进同一条 `redis-cli DEL "…" "…"` → 再 keys 一次应为空；
+    管道与 `EVAL` 两种「省事」写法在 PowerShell 下都不成立（见§10 末尾那段））：
+    ① **配置目录卡**应列出 27 项分 9 组（标题 / 说明 / 取值范围全是服务端下发的，前端手里一份副本都没有）→
+    改一个数字（如撤回时限 `120`→`300`）保存后聊天端立刻按新时限走（本节点即时，不重启）；两实例部署时另一台
+    **最迟 30 秒**跟上；点「恢复默认」后只读核对 `SELECT config_key, config_value FROM im_config;`——
+    那一行应当**消失而不是变成默认值**（这就是「物理删行」的验收线）；拿一个不在白名单的键去改
+    `curl -X PUT "http://127.0.0.1:8080/api/admin/config/item?key=spring.datasource.password&value=x" -H "token: <admin 票>"`
+    应回 14010（而不是 500，也不该真的把数据源密码改掉）。
+    ② **在线词库卡**加一个词后「生效词条数」应立刻 +1（那个数字来自重建后的字典树，不是 `INSERT` 的影响行数）→
+    聊天端发含该词的消息应变 `*`；删掉这个词后应立刻恢复原样（这一条验的是「整体重建而不是往树里插节点」，
+    插节点处理不了删词）；文件词库那 19643 条在本页**既看不到也删不掉**，属预期而不是 bug。
+    ③ **公告屏**：草稿行的操作列只有「编辑 / 发布 / 删除」三颗钮（不给「点了必被拒」的控件）→
+    发布后两端在线账号各弹一条，只读核对 `SELECT id, status, publish_time FROM im_announcement;` 应 `status=1` 且 `publish_time` 非空，
+    此时操作列应只剩「撤回」；改已发布的正文应被后端回 14012 拦下；撤回后新登录拉不到（`GET /api/announcement/active` 不再含它），
+    但**已经弹出去的通知收不回**（接口回执那句提示就是这条边界的自白）；拿一个离线账号上线，应经 WS `open` 后的补拉看到这条公告，
+    且同设备重连不重复弹（本地键 `im.announce.read.{userId}`）。
+    ④ **权限边界**：只持 `system:config`（116）的账号能改配置与词库，但「全服公告」那一屏在菜单里就应隐掉、硬敲 URL 回 1003；
+    普通用户 `curl -H "token: <用户票>" http://127.0.0.1:8080/api/announcement/active` 有数据，而 `POST /api/admin/announcement` 被拦——
+    这一对同时验到「用户侧只开一条只读口子」与「写动作全在 `/api/admin/` 那一侧」
+    四期第五批再四查（★ 前提：本批新开了四个权限点 119~122，跑完 `sql/migration_admin_wallet_interview_group_message.sql`
+    后**必须清一次 `im:auth:*`**，清法用上面那段说的三步（`keys` 列出 → 同一条 `DEL` 全删 → `keys` 复核），
+    别用管道也别用 `EVAL`（两者在 PowerShell 下都是实测跑不通的写法）；
+    本批**零 DDL**，所以除了清缓存与重建 `im-admin-ui` 之外不需别的）：
+    ① **钱包屏**：先看顶部「钱包功能已启用」那个标签（关着时台账还能读但调账会被 `WALLET_DISABLED` 拒）；
+    拿一个**从未开过钱包行**的 userId 点「档案」，应看到「未开户」空态而不是「余额 0」（`data=null` 是合法结果）；
+    调一笔 +100（事由必填）后台账那一行应就地变成新余额，而只读核对
+    `SELECT type, amount, balance_after, remark FROM im_wallet_transaction ORDER BY id DESC LIMIT 1;` 应看到一条
+    `adjust` 且 `remark` 里带「（后台：昵称 #ID）」；再调一笔 -100 回去——★ **两条流水都应在**（调账不可撤销，
+    只能再调回去，这是预期而不是 bug）；拿一个余额不够的人负数扣减，应被 `balance >= ?` 那条兜底拦下而不是扣成负数。
+    礼物目录把某个礼物下架，聊天端送礼面板应看不到它，而**历史送礼流水那一行仍带完整名字与单价**。
+    ② **面试屏**：三个端点全只读，页面上应一个写按钮都没有（勾「只看有违规」后应只回 `violationCount > 0` 的行，
+    违规率那一格应是百分数而不是 0.05 这种小数）；点开一场抽屉里的问答原文与事件表要能看到，
+    且事件行同时显 `eventTime` 与落库时间（两者之差就是上报延迟 / 改系统时间的证据）；
+    `info.log` 里应新增一条含该 `sessionId` 的后台读取日志（这一屏交作答原文，所以留痕）。
+    ③ **群屏**：对一个正常群点「全员禁言」后，群里普通成员发消息应被拒而**群主自己照发不误**（豁免规则沿用群内禁言），
+    台账那一行应出现「全员禁言」红标签且再点一次可解除；点「解散」后只读核对
+    `SELECT status FROM im_group WHERE id = <groupId>;` 应 `status=0`，且群里每个在线账号应看到一条「群已被解散」的系统通知
+    （★ 那句话里用的是你这个管理员的昵称而不是「平台」）；对已解散的群重复点解散应幂等返回而不是报错；
+    「群成员」页签不填群 ID 时应是空表格加一句人话，而不是一条红色 1001。
+    ④ **消息屏**：只输一个关键词不选任何范围时，查询按钮应置灰且页顶出现 warning（★ 拿 curl 只带 `keyword` 直接打
+    `/api/admin/message/page` 应回 400「按关键词检索消息必须同时限定会话、发送者或时间范围」——那才是真闸，
+    界面提示只是把失败提前）；带范围命中后勾一条非文字消息看详情，扩展摘要里应有文件名 / 尺寸 / 时长而
+    **没 `fileUrl`**；对一条普通消息点「强撤」应二次确认并在确认后变「已撤回」（只读核对
+    `SELECT JSON_EXTRACT(extra, '$.recalledByAdmin') FROM im_message WHERE id = <messageId>;` 应为 `true`），
+    而对一条**转账 / 红包**消息点强撤应被后端拒（13027），且概览「其中后台强撤」应 +1；
+    已撤回行应**照常显示正文**（后台不是当事人）而不被抹成空。
+    ★ 反向验权限：拿一个只持 `system:group:manage`（121）的账号，「消息管理」应在菜单里隐掉而硬敲 URL 回 1003
+    ——这一条是本批权限拆分是否真生效的验收线（四个点彼此不顺带）。
 15. **官网** — `cd im-website; npm install; npm run dev` → `http://localhost:5373` → 应看到产品介绍、8 张特性卡、
     三张下载卡（Windows 安装版 / 免安装版 / Android）与 GitHub / 文档 / Releases 三个链接；下载直链要先把产物投放到
     `public/downloads/`（`npm run fetch:downloads` 自动从 `electron/release` 收集改名），未投放时直链 404 属预期
@@ -1520,7 +1598,9 @@ spring-boot-duomokuia/
 ## 十八、管理后台与举报闭环（im-admin / im-admin-ui）
 
 一期范围就一句话：**举报 → 工单 → 人工处置 → 结论回执**这条链跑通，另加一个看板与一个用户管理页。
-不是「完整后台」：系统配置页、机审复审、后台自身操作审计都不在本期（缺什么见「路线图 › 🔴 关键短板」）。
+二、三期补齐了多角色分级与视频 / 直播 / 监控 / 日志四屏；四期已连出四批：系统配置（§7）、
+远程控制审计（§8）、封禁时长与自动解封（§9）、系统配置页完整体（§10：配置项落库 + 在线词库 + 公告推送）。
+仍未做：机审复审、后台自身操作审计（用户明确暂不做）。（此处原文指向的「路线图 › 🔴 关键短板」是个不存在的分组，已改为就地列明。）
 
 ### 1. 一张新表：`im_report`
 
@@ -1553,6 +1633,11 @@ spring-boot-duomokuia/
 | 用户侧 | `GET /api/report/config`、`POST /api/report`、`GET /api/report/mine` | 任何登录用户，**无 `@SaCheckPermission`** |
 | 后台侧 | `GET /api/admin/dashboard`；`GET /api/admin/user/page`、`GET /api/admin/user/{userId}`、`POST /api/admin/user/{userId}/disable`、`/enable`；`GET /api/admin/report/page`、`GET /api/admin/report/{id}`、`POST /api/admin/report/{id}/accept`、`/reject`、`/handle`；`GET /api/admin/role/list`、`GET`/`PUT /api/admin/role/user/{userId}` | 二期按屏分四个点：看板 `system:dashboard`（108）、用户 `system:user:manage`（109）、工单 `system:report:handle`（110）、角色 `system:role:manage`（111）；种子数据里只有 admin（role 1）全持，`system:manage`（107）保留作向后兼容的伞权限但**不再被任何控制器引用**（Sa-Token 里它是精确串不是通配，拿着它匹配不上任何细化后的点） |
 | 后台侧（三期） | `GET /api/admin/video/page`、`POST /api/admin/video/{id}/offline`、`/online`、`DELETE /api/admin/video/{id}`；`GET /api/admin/live/page`、`GET /api/admin/live/{roomId}`、`POST /api/admin/live/{roomId}/stop`；`GET /api/admin/monitor/overview`、`/slow`；`GET /api/admin/log/files`、`GET /api/admin/log/content` | 按屏再分四个点：视频 `system:video:manage`（112）、直播 `system:live:manage`（113）、监控 `system:monitor`（114）、日志 `system:log`（115）。`system:log` 单独设点而不并入监控：日志原文可能含手机号、审核命中记录等敏感内容，能看指标曲线的人不必能看日志正文 |
+| 后台侧（四期） | `GET /api/admin/config/sensitive-filter`、`PUT /api/admin/config/sensitive-filter?enabled=` | 新权限点 `system:config`（116）。这一屏不是「又加了四个点」而是**补一个洞**：这两个端点原先在用户侧 `/api/message/sensitive-filter` 上只校登录，而全局拦截器 `SaTokenConfigure` 只做 `checkLogin()`、权限完全靠注解，于是任何登录用户一句请求就能关掉全服遮罩（聊天端「设置 › 高级设置」里那个 switch 就是这么做的）。现在用户侧两个端点已删、im-ui 那一行摘掉，配置只在 `/api/admin/config/**` 里改 |
+| 后台侧（四期第二批） | `GET /api/admin/remote/page`、`GET /api/admin/remote/{sessionId}`、`GET /api/admin/remote/audit/page`、`GET /api/admin/remote/overview` | 新权限点 `system:remote`（117）。**四个端点全是 GET，一个写动作都没有**：这一屏只读 `im_remote_session` / `im_remote_audit_log`（三期就建好的表，本批零 DDL）。单设一点而不并入看板或直播，理由与 `system:log`（115）同源：审计流水的 `detail` 里是别人机器上的文件路径与命令行原文 |
+| 后台侧（四期第三批） | **无新端点**：`POST /api/admin/user/{userId}/disable` 多一个可选 query 参数 `minutes`；`POST /api/admin/report/{id}/handle` 的请求体多一个可选字段 `disableMinutes` | **零新权限点**——还是走 `system:user:manage`（109）与 `system:report:handle`（110），所以这一批**不用清 `im:auth:*` 缓存**（前两批都得清，这批是唯一不用的）。★ 但本批有一处 DDL（`im_user.disable_until`）：不跑 `sql/migration_user_ban_duration.sql` 不是「少个新功能」，而是 MyBatis 带上这个列后登录链路与用户列表一起报 1054 |
+| 后台侧（四期第四批） | 配置目录 `GET /api/admin/config/item`、`PUT /api/admin/config/item?key=&value=`、`DELETE /api/admin/config/item?key=`（+ 第一批保留的 `GET/PUT /api/admin/config/sensitive-filter`）；在线词库 `GET /api/admin/sensitive-word/page`、`POST /api/admin/sensitive-word`、`DELETE /api/admin/sensitive-word/{id}`；公告 `GET /api/admin/announcement/page`、`GET /api/admin/announcement/{id}`、`POST /api/admin/announcement`、`PUT /api/admin/announcement/{id}`、`POST .../{id}/publish`、`POST .../{id}/revoke`、`DELETE .../{id}`；**用户侧只一条** `GET /api/announcement/active` | 配置与词库沿用 `system:config`（116——那一点管的就是「调全服内容过滤与旋钮」，加一个词与改一个开关是同一类动作）；**公告单开 `system:announcement`（118）**：改旋钮改错了可以立刻改回来，发公告则弹出去的通知收不回来，可撤销性不是一个量级，分开才能让「能调开关」与「能发公告」是两个人。★ 因为是新点，**跑完 SQL 必须清 `im:auth:*`**（上一批封禁时长零 RBAC 改动、明确不用清，不能照抄那一句）。用户侧那一条类上**没有任何权限注解**（只靠全局拦截器保证登录），`/api/admin/announcement/**` 才是要 118 的那一边；`PUT /item` 的值一律以字符串传（`true` / `120`），不在白名单的 key 回 14010、超范围回 400 |
+| 后台侧（四期第五批） | 钱包 `GET /api/admin/wallet/overview`、`/page`、`/{userId}`、`/tx/page`、`/gifts`、`/gift-record/page`，`POST /api/admin/wallet/{userId}/adjust?delta=&reason=`、`POST /api/admin/wallet/gift/{giftId}/status?onShelf=`；面试（**三个端点全 GET**）`GET /api/admin/interview/page`、`/{sessionId}`、`/overview`；群 `GET /api/admin/group/page`、`/{groupId}`、`/member/page`，`POST /api/admin/group/{groupId}/dismiss`、`/mute-all?muteAll=`；消息 `GET /api/admin/message/page`、`/{messageId}`、`/overview`，`POST /api/admin/message/{messageId}/recall` | **一次四个点（119~122），四期以来唯一一批加不止一个点的**：四屏是四种不同能力——119 是全后台唯一能凭空造出货币的写权限（`adjust` 不受 `im.wallet.recharge-max` 约束，那条只管用户自助充值）、120 读的是候选人作答原文、121 挂着「关掉一个百人群」、122 能读任意两个人的聊天正文（与 115 `system:log` 同级）。**互不顺带**：给了 121 不等于给 122，给了 109（能禁号）也不等于给 119——「管一个人能不能登录」与「管他余额是多少」是两种风险。**★ 零新错误码**：拒绝全用既有的 `BAD_REQUEST`(400) / `MESSAGE_NOT_FOUND`(5001) / `GROUP_NOT_FOUND`(6001) / `AI_INTERVIEW_NOT_FOUND`(10001) / `GIFT_NOT_FOUND`(13003) / `WALLET_DISABLED`。四个 `POST` 的标量入参一律 `@RequestParam`（`delta` / `reason` / `onShelf` / `muteAll`），前端因此必须 `http.post(url, null, { params })`——发 JSON body 会被当成空值 |
 
 聊天端**不调 `/api/admin/**` 里的任何一个**，后台也只调 `/api/report/config`（拿处置动作字典）而不调 `/api/report`——路径前缀就是那道墙，真正的把关在 service 里（举报人只取登录态、`/mine` 只查自己那部分）。`POST /api/report` 有两道闸：按用户 10 次/分钟的限流（防脚本空转）与服务端每日配额（防把队列刷满）。
 
@@ -1591,7 +1676,339 @@ spring-boot-duomokuia/
 四处共用一个弹窗（只挂 `MainLayout`）与一份字典缓存（`stores/report.js`）。弹窗里的理由列表、必填红星、描述字数上限**全部来自服务端**；
 `enabled` 拿不到配置时按「开」显示（网络抖一下四个入口同时消失看起来像功能被撤），而只有服务端明确回 `enabled=false` 才真隐去。
 
-### 7. 已知边界（诚实清单）
+### 7. 四期 · 系统配置（`im-admin-ui` 第九屏）
+
+本批只有一项：全服敏感词开关。它是从用户侧搬过来的，不是新增能力，所以值得单独交代三件事
+（★ 后两条里各有一句已被第四批推翻，这里保留当时的口径并标出去向，完整体见 §10）：
+
+- **开关本身当时不入库**。第四批之前改的还是 `SensitiveWordFilter` 里那个 `volatile boolean`，重启回到
+  `im.message.sensitive-filter-enabled` 的值——那是刻意的：本批要堵的是洞，一旦落库就长出「DB 与 yml 谁是权威」
+  这道双账本题。**第四批起这一笔进了 `im_config`**（键 `message.sensitive-filter-enabled`），重启后由库内那一行盖回来，
+  而「恢复默认」是**删行**而不是写回默认值（双账本题的解法见 §10）。
+- **`enabled` 不等于「在过滤」**。`mask()` 要求 `enabled && ready` 两个都为真，词库装载失败时开关看着是开的
+  而一个词都不遮，所以 `SensitiveFilterVO` 把 `ready` 与 `wordCount` 一并回给页面，并在 `ready=false` 时给黄色告警。
+  词库来源在第四批变成「classpath 静态文件 ∪ `im_sensitive_word`」，后台加词 / 删词当场重建字典树、本节点立即生效（见 §10）；
+  静态文件里那 19643 条仍然只能改资源重打包，后台页面动不了它们。
+- **切换会记操作人**。`AdminConfigService` 那条 `[后台配置]` 日志带上 operatorId 与旧值→新值；
+  后台审计台账（一张 `im_admin_audit_log` + 切面）用户已明确暂不做，所以到第四批这一条仍是唯一的日志留痕
+  （数据留痕则在库里：配置改动的 `im_config.update_by`、公告的 `im_announcement.update_by`）。
+
+配套 SQL 与新页面见 `sql/migration_admin_config.sql`（116 + admin 绑定 6016）与
+`im-admin-ui/src/views/ConfigView.vue`。
+
+### 8. 四期第二批 · 远程控制审计（`im-admin-ui` 第十屏）
+
+后台读一遍「谁在什么时候控了谁的哪台机器、在那台机器上做了什么」。**零 DDL**：取的是三期就建好的
+`im_remote_session` 与 `im_remote_audit_log`（只增不删），新代码一行写库动作都没有——
+`RemoteAdminSpiImpl` 里没有一条 UPDATE / DELETE，也不碰 `RemoteRelayService` 的绑定通道。
+跨模块取数仍是星型约束那一套：`AdminRemoteSpi`（im-common）→ `RemoteAdminSpiImpl`（im-remote）
+→ `AdminRemoteService`（`ObjectProvider` 薄封装，没装 im-remote 时回一句「远程控制模块未装配」）
+→ `AdminRemoteController`。
+
+五条值得写下来的口径：
+
+- **没有「强制中断会话」按钮**，也不是漏做：① 被控端随时能自己断，后台那个按钮不是唯一的闸门；
+  ② 真要阻断一个人的远程控制，正确的路是举报工单处置（有事由、有操作人、有回执）；
+  ③ 中断要向下发控制帧，属写侧，与本批「纯读」的承诺相冲。与其放一个会让人误以为能止损的空按钮，不如不放。
+- **★禁用账号断不掉进行中的远程会话**（最容易搞错的一条）：`AdminUserSpiImpl#setDisabled` 走的是
+  `PushSpi.kickOut` → `WsSessionManager.kickOut`，那只管聊天长连接；远程的 Agent 通道与控制端通道
+  都是**握手期鉴权**，之后不再回查 Sa-Token，中继绑定活在内存里。所以上线后别把「先封号再说」当止损手段，
+  要么让被控端把 Agent 退出，要么等空闲超时回收。
+- **进行中的 `bytes` 不在库里**：`im_remote_session.bytes` 只在会话收尾时落库一次（每帧都 UPDATE
+  会把中继热路径变成写数据库），所以进行中的会话照读那一列永远是 0。`RemoteAdminSpiImpl#toView`
+  在 `status=active` 且能拿到绑定时改读 `binding.grandTotalBytes()`（**仅当前实例**口径）。
+- **全局流水检索是本页唯一的重查询**：`im_remote_audit_log` 只有 `idx_session_time` 一条索引，
+  不带 `sessionId` 的过滤取页可靠主键倒扫（雪花 ID 递增，倒着走主键等于倒着走时间），但分页
+  仍要付一次 `COUNT(*)`。因此单页夹 50、页面**不做任何自动轮询**（后端也没有缓存层挡着，轮询就
+  是把 COUNT 直接打到库上）；审计量长起来以后的解法是补一条 `idx_action_time`，属未来 DDL、本批不做。
+- **高危判定只在服务端一份**：`DANGEROUS_ACTIONS`（`exec` / `ps-run` / `ps-kill` / `power` /
+  `file-rm` / `file-get` / `file-put` / `danger-denied`）写在 `RemoteAdminSpiImpl`，每行带一个
+  `dangerous` 给前端。不收 `file-mkdir` / `file-rename`（可逆的整理动作，收进来会淹掉真信号）与
+  `clip-sync`（隐私向、Agent 只上报 `len=N`）；收 `danger-denied` 是因为它是「想做但被本地开关挡下」
+  的尝试，不收就分不清「没人试过」与「试了没成功」。
+
+另外两条与用户端同一口径的红线：响应里**绝不出现 `accessCode` / `ticket` / `aesKey`**（台账有设备名与
+机器指纹就够定位，多带一个字段等于多发一把钥匙）；后台**两端身份都给**（`inviterName` + `inviteeName`）
+而不是像用户端只有一个 `peerName`——后台要追责。识别码接入的会话 `inviteeUserId=0`，那不是账号，
+页面显示「匿名设备」而不是「已注销用户」。
+
+配套 SQL 与新页面见 `sql/migration_admin_remote.sql`（117 + admin 绑定 6017）与
+`im-admin-ui/src/views/RemoteView.vue`。
+
+### 9. 四期第三批 · 封禁时长与自动解封（唯一 DDL：`im_user.disable_until`）
+
+「禁用」以前只有开和关：一旦关掉，要么人自己来开，要么就一直关着。本批给它加时长，
+两个入口（用户页「禁用」、工单处置 `ban_user`）**共用同一条写路径** `AdminUserSpiImpl#setDisabled`，
+时长参数沿同一条链下发，护栏（不能禁自己 / 不能禁最后一个可用管理员 / 时长非法）自然共用。
+
+**这一列的语义由两个条件共同定义，单独看它会读错**：
+
+| `status` | `disable_until` | 含义 |
+|---|---|---|
+| 1 | 必为 NULL | 正常（恢复时代码显式清空，不留一个作废的日期在列表里） |
+| 0 | NULL | **永久封禁**：不会自动解封，只能管理员手动恢复 |
+| 0 | `> NOW()` | 限时封禁中，列表显示「剩 X」 |
+| 0 | `<= NOW()` | 已到期、等任务扫（分钟级误差），页面回「解封处理中」而不回显那个过去的时刻 |
+
+不用 `9999-12-31` 之类极大值代指永久：那会让永久封禁被排序排到最后、被自动解封任务扫到，还会在列表里显示成一个假日期。
+
+六条值得写下来的口径：
+
+- **到期时间由服务端时钟算**。契约上传的是 `Long disableMinutes` 而不是绝对时间戳：管理员浏览器时钟不可信，
+  一个偏快的到期时间等于提前解封。因此前端弹框里那句预览标的是「**预计**…（以服务端时间为准）」而不是「将于」——
+  不写「预计」两个字，管理员就会拿它去回答用户的「我几时能登」。
+- **★自动解封的扫描条件必须含 `disable_until IS NOT NULL`**（本批最险的一条）：
+  `UserServiceImpl#cancel`（用户自己注销账号）也把 `status` 置成 `STATUS_DISABLED`，而永久封禁与已注销的行
+  在库里长得一模一样（`status=0` 且该列 NULL）。少这一条条件，任务就会把客服亲手永久封的人一并放出去；
+  对注销账号更糟：那条链已经把昵称、密码、手机号全抹掉了，解回 `status=1` 得到的是一个不可识别却能登录的空壳。
+  `@TableLogic(deleted)` 本来也会滤掉注销行，但那是实现的附带效果、不能当依据，两道都要在。
+- **禁用与改期是同一条写路径**。对封着的人再点一次「禁用」就是改期，而不是报错也不是先恢复再禁用
+  （中间那一秒是真把门打开了）。因此用 `Wrappers.<User>lambdaUpdate().set(...)` 而不用 `updateById(patch)`
+  ——后者受字段策略限制**写不进 NULL**（恢复时要把到期时间清成 NULL，这是一条必须能成立的写）。
+- **不新增 SPI 方法**：`AdminUserSpi#setDisabled` 加一个可空参数并**保留四参 `default` 重载**，
+  存量调用方一行不改（举报处置旧路径传的就是不传=永久）；而 `autoUnbanExpired()` **刻意不上契约**——
+  把一个「批量改账号状态」的方法开到 SPI 上，等于给每个依赖该契约的模块都开了那扇门；
+  `UserBanExpireTask` 因此直接注入实现类 `AdminUserSpiImpl`，不绕契约。
+- **到期解封不推通知**：他此刻必然离线（禁用时已经踢过），发一条 `admin-warn` 只会进离线队列、
+  登录时一股脑倒出来，反而像「封完了又莫名弹一句」。真正能在那个瞬间送达的只有 kickout 报文里的 `reason`（
+  `WsSessionManager#kickOut` 先发包再关闭），所以限时封禁把到期时间写进那句话；下次登录时的提示则由
+  `AuthServiceImpl#checkUsable` 三分支给出（永久 / 到什么时候 / 解封处理中）。
+- **多实例不加分布式锁也不选主**：下面那条 UPDATE 的 WHERE 把三个条件原样重复一遍，
+  后到的节点更新 0 行，天然幂等；真正要省的是扫描开销，`idx_disable_until` 就是为它加的
+  ——绝大多数行该列是 NULL，走索引的代价与「被封过的人数」成正比而不是与用户总数成正比；单轮上限 200 行。
+
+**档位是便利而不是约束**：`im-admin-ui/src/utils/ban.js` 里那一份 `BAN_DURATIONS`（两屏共用，否则早晚长出
+「用户页能封 6 小时而工单页不能」这种没人解释得清的差别）最短给 10 分钟而非 1 分钟——任务 30 秒一轮，
+1 分钟一档的真实到期时间会在 55 到 90 秒之间浮动，而这么短的封禁本来就是误操作温床。
+但自定义档必须存在：后端只认「正数分钟、上限 365 天」这一条，预设覆盖不全时不给自定义
+等于逼管理员绕到数据库去 `UPDATE`。
+
+配套 SQL 与新页面：`sql/migration_user_ban_duration.sql`（**本批有 DDL、不跑就 1054**；零 RBAC 改动、因此不需清权限缓存）
+与 `im-admin-ui` 的 `UsersView.vue`（禁用弹框 + 状态列「剩 X / 永久」）。
+
+### 10. 四期第四批 · 系统配置页完整体（三张新表：`im_config` / `im_sensitive_word` / `im_announcement`）
+
+§7 那一批只把开关从用户侧搬进后台，本批给它配上完整体：**可改的运行期配置目录（落库）+ 在线敏感词库 + 全服公告**。
+三张表都归 im-admin 持有（与 `im_report` 同一个先例），**零新 SPI、零 pom 改动**；`im-admin/pom.xml` 仍然只依 `im-common`。
+
+**三份数据各有各的主人**，`RuntimeConfigService` 只当中转、自己一个值都不存（除一份启动快照）：
+
+| 哪一份 | 在谁手里 | 内容 |
+|---|---|---|
+| **目录** | `AdminConfigKey`（只有代码） | 有哪些项、叫什么、属于哪一组、能填多少、改了会有什么后果 |
+| **状态** | `im_config`（只有库） | 谁把哪一项改成了什么值；**没被后台改过的项在库里根本没有行** |
+| **运行态** | `ImProperties` 的单例字段 + `SensitiveWordFilter` 的内存标志 | 此刻全服按哪个值办事 |
+
+九条口径：
+
+- **白名单是唯一那道门**：不在枚举里的 key 一律回 14010 `ADMIN_CONFIG_KEY_UNKNOWN`。不做成「任意 `im.*` 都能改」
+  是因为那条路会把 `spring.datasource.password`、`sa-token.jwt-secret-key` 变成「一个后台账号一句请求」就能改的东西。
+  写入目标也是 `ImProperties` 的字段而不是 Spring 的 `Environment`：后者对任意 key 开放（等于绕开白名单），
+  且改它会牵动 `@ConfigurationProperties` 重新绑定（别的 bean 可能正拿着旧值）。
+- **元数据只写代码、不入库**：库里再存一份标题与说明，迟早漂移成「界面上讲的和代码里做的不一样」；
+  取值范围同理——它决定服务端拒绝什么，必须和校验代码在一起，不能是「一行数据」。
+  目录共 **27 项 / 9 组**：内容过滤 1、消息 3、缓存 1、限流 5、图片审核 2、智能能力 1、音视频通话 5、钱包与礼物 7、直播连麦 2。
+- **加一个旋钮要做三件事**：① 在 `AdminConfigKey` 加常量；② 在 `RuntimeConfigService` 的 `reader()` 与 `writer()`
+  两个 **switch 表达式**里各补一个分支（它们是表达式而不是语句、没有 `default`，缺一个分支编译直接不过——
+  「加了目录但改了不生效」是这类功能最容易漏的一半，用编译器兜住而不是靠人核对）；
+  ③ 确认目标字段是**每次调用现取**的，而不是启动时被抄进了某个 final 字段（那样改库不会有任何效果，界面会骗人）。
+- **校验只在服务端一份**：布尔只认 `true` / `false` 两个字面量，数字必须是整数且落在枚举声明的 `[min, max]` 内。
+  前端那些框的 min/max 是从 `GET /item` 里拿的同一份，但前端拦不住的人照样能直接调接口，所以真正的门只能在这里。
+- **先落库、后改运行态**（与举报处置那一批的「先改状态、后推送」刻意相反）：库写失败（连接断、表还没建）时
+  运行态一动没动，管理员收到报错、界面维持原值，账实相符；反过来先改运行态，报错那一瞬间全服其实已按新值跑，
+  而后台显示「失败」——这种「其实生效了但告诉用户没生效」是最难复现的一类问题。
+- **「恢复默认」是物理删行，这张表不启 `deleted`**：把值写成默认值会留下那一行，「这项跟随配置文件」的语义就
+  永久丢了（以后改 yml 初值它不再跟着变，而界面上看不出差别）；软删的行会永远占着 `uk_config_key`，
+  那个 key 从此再也写不进来。同理 `AdminConfigKey.of()` 找不到时**返回 null 而不是抛异常**：
+  写入侧 null 即拒，而启动读取侧「跳过并告警」，否则代码里删一个功能会让老库残留的一行把后端带不起来。
+- **收敛靠轮询而不是 Redis 发布订阅**：本仓库至今没有任何 `convertAndSend` / `MessageListener`，为这一个后台功能
+  引进订阅通道、监听容器、断线重订阅不划算，而它换来的只是把「最迟 30 秒后另一个节点生效」缩到毫秒级。
+  `RuntimeConfigSyncTask` 挂 `ApplicationReadyEvent`（不是 `@PostConstruct`：那时本模块之外的 bean 可能还没装配完，
+  而覆盖运行态必须发生在所有读取方各就各位之后）跑一次全量，之后 `fixedDelay=30s` 比一次签名；
+  **两条链路（配置 / 词库）分开设 try/catch**：`im_config` 读失败（表还没建）不该连带把词库收敛也停掉。
+  表不存在时只记 warn 并跳过：配置项都是增强，拿配置文件的值跑总比启动失败强。
+- **两个指纹都不是 `MAX(id)`**：配置的指纹是「全部 `key=value` 排序后拼串」，敏感词的是 `条数|MAX(update_time)`
+  （`SensitiveWordMapper#selectSignature`）。`MAX(id)` 只认新增，删掉中间任意一行时它根本不变，
+  表示成「后台把词删了、那个词却还在遮用户的消息且无人知道」；而 `MAX(update_time)` 单用在配置表上也不行
+  （删掉最大那一行它会退回次大值）。收敛是**全目录覆盖式**（每一轮把 27 项全搬一遍：库里有就用库里的、
+  没有就回到启动默认值），因为「恢复默认」是删行，只应库里现有的行会让另一个节点继续按旧覆盖值跑、
+  而界面已显示「已恢复默认」。代价是一次读二十几行加 27 次 setter，只在指纹真变过时跑。
+- **运行态只允许从 `RuntimeConfigService` 这里改**：这是「全目录覆盖式」成立的前提。以后谁加了一条绕过本类
+  改 `ImProperties` 的路，这一轮会把它写回去。
+
+**在线敏感词库**（`SensitiveWordService`）：
+
+- **它是文件词库之上的增量，不是替代**：删掉这里的一行只撤掉后台加的那一个词，classpath 那 19643 条一条都不会少；
+  反过来想摘掉文件里的某个词（误伤），本页面做不到，那要改词库资源重打包。这条边界写在实体注释与控制器注释里。
+- **★ 那份文件词库并不在版本库里**：`.gitignore` 第 16 行的全局 `*.txt` 把 `wordlists/sensitive_words.txt` 与源文件
+  `md/txt/关键词屏蔽41326.txt` 一起挡掉了（`git ls-files` 对这两个路径都数到 0）。两个后果都要知道：
+  ① 从干净克隆打包的 jar **没有词库**，`ready=false`、一个词都不遮，而后台开关看着还是「已开启」——这正是第一批
+  要把 `ready` 与 `wordCount` 一并回给页面的理由，看到黄色告警先查这个文件在不在；② 反过来说，**仓库里（含全部注释与
+  文档）不留任何敏感词原文**，原文只在部署机的这一份资源文件里。要让它随仓库走，得给 `.gitignore` 加一条
+  `!im-common/src/main/resources/wordlists/*.txt` 例外——**这是一个需要单独拍板的决定**（把词库原文收进版本库与
+  「文档与注释里不出现原文」这条口径直接冲突），本批没有擅自改它。
+- **存的是折叠后的词**（全角转半角、统一小写）：`ＡＢＣ`/`ABC`/`abc` 在字典树里是同一个键，原样入库则 `uk_word`
+  挡不住变体，会长出三条行为完全一样的记录，而「删了 `abc` 结果 `ＡＢＣ` 还在遮」没人能解释。后台列表的 keyword 也先折叠再 LIKE。
+- **合法性判定复用过滤器那一份 `isValidWord`**（至少 2 字符、只含汉字与小写字母数字），不在 service 里重写：
+  重写迟早与那边漂移成「同一个词文件里装不进去、后台能装进去」这类谁也说不清的现象。
+- **重建而不是插节点**：`reload()` 拿「库里全部词条 ∪ 文件词条」整棵重建。插节点无法处理删词——
+  一个词在树上往往是另一个词的中间路径，摘 `end` 标志时稍不留意就把另一个词一起弄没了。一万九千余条重建只要几十毫秒。
+- **一次最多 500 个词**（防一句请求把字典树重建几十次），**一个都没入库就不重建**（近两万条的重建不该由「全是重复词」触发）；
+  回执带回 `total/added/duplicated/invalid` 与重建后的生效总数，**不包事务**（每个词都是独立一行、彼此无业务关联，
+  而 `reloadFromDb()` 读的是库里全部行，就算中途抛错字典树仍与库一致）。
+- **改词当场重建，定时任务只是兜底**：所以改动在**本节点**即时生效。如果只靠轮询，管理员加完词刷新页面看到
+  「生效词条数」没变就会重试一遍——那与「没加上」是同一种体验，而实际已经加上了。
+
+**全服公告**（`AnnouncementService`）：状态机只有三条边，**编辑与删除只对草稿开放**：
+
+| `status` | 能做的动作 | 对应端点 |
+|---|---|---|
+| 0 草稿（只在后台可见） | 编辑 / 发布 / 删除 | `PUT /{id}`、`POST /{id}/publish`、`DELETE /{id}` |
+| 1 已发布 | 只能撤回 | `POST /{id}/revoke`（改或删回 14012） |
+| 2 已撤回 | 什么都做不了（行留下当台账） | — |
+
+- **为什么不能改已发布的正文**：那等于让在线的人看旧文本、之后登录的人看新文本，而两批人都会以为
+  自己是「看到公告的那个人」。已发布与已撤回的行都不物理删，它们是「什么时候说过什么话」的台账。
+- **零新 WS 报文类型**：复用 `WsMessageType.NOTIFY` + `data.action="announce"`，形状 `{action,id,title,message,tone}`
+  （notify 下面早已是按 action 分流的形状：connected / report-result / admin-warn / 群事件）。
+  `PushSpi.broadcast()` 返 void，所以后台**不显示「N 人收到」**。
+- **也是先落库、后广播**：广播失败只记日志、状态仍是已发布，离线与之后登录的人靠补拉拿到。
+- **必须建表而不能像红包、PK 那样只进 Redis**：广播只覆盖发布那一刻在线的连接，错过的人靠
+  `GET /api/announcement/active` 补拉（最多 5 条、按发布时刻倒序）；Redis Flush 就没了的话，「公告」就退化成
+  「正好在线的人才知道的事」。`expire_time` **只影响补拉、不会自动把状态改成已撤回**（到期与状态是两件事，
+  库里那行仍是已发布的历史事实）。
+- **公告也过自己那套词库**：标题与正文都先 `sanitize` 再 `mask`（标题另截 100），否则「把敏感词写进公告」
+  就成了绕过过滤器的正门；`tone` 收在服务端的 `TONES` 白名单（info / success / warning / error），
+  不让前端猜——改一句中文文案不该把通知颜色改掉。
+- **用户侧只开一条只读口子**：`AnnouncementController` 映射 `/api/announcement/active`、类上**没有任何权限注解**
+  （登录即可读），后台五个写动作全在 `/api/admin/announcement/**`。代码放 im-admin 而不是业务模块：这张表的
+  归属模块就是它（与一期把用户侧 `ReportController` 放这里同一先例），换个模块就得为一个查询在 SPI 上
+  多开一条只有一个实现方的契约。
+- **前端两条送达路径在一个文件里归一**（`im-ui/src/utils/announce.js`）：WS 帧带 `message`、补拉 VO 带 `content`，
+  `applyAnnouncements` 一处 `item.message ?? item.content` 抹平，`ws/dispatch.js` 不必知道自己走的是哪条路。
+  **已读集合按 userId 分键**（`im.announce.read.{userId}`，上限 200 按插入序剪枝）：换账号不互相污染、
+  退出登录不必清、localStorage 不会只增不减；没 ID 的行不记（记了就是一把空键，之后同类全被当已读）。
+  补拉挂在 WS `open` 上（首次与重连都打），走 `silent: true` + 整体 try/catch——**后端没执行本批 SQL 只能
+  退化成「没公告」，不能把聊天界面打成故障源**。通知 `duration=12s` 而不是 `0`（五条关不掉的通知叠在屏幕上没人读）。
+
+**新权限点 118 `system:announcement`——本批与上一批结论相反的那一条**：词库与配置仍走 `system:config`（116），
+而公告单开一点：改旋钮改错了可以立刻改回来，发公告则是对着所有在线连接喊话、**弹出去的通知收不回来**，
+两者的可撤销性不是一个量级，分开才能让「能调开关」与「能发公告」是两个人。也正因为它是个新点，
+**执行 `sql/migration_admin_system_config.sql` 后必须清一次 `im:auth:*`**（第三批封禁时长零 RBAC 改动、明确不用清，
+不能照抄那一句），否则 admin 角色在缓存到期前仍然看不到这个点、进来就报无权限。
+清法实测只认三步：① `redis-cli keys "im:auth:*"` 只读列出、② 把列出的键名全写进同一条
+`redis-cli DEL "im:auth:perm:1000" "im:auth:role:1000" …`（返回值即被删的个数，本仓库 dbsize 才几百所以 `KEYS` 可以直接用）、
+③ 再 `keys` 一次应为 `(empty list or set)`。**两种「省事」写法都跑不通，都是实测踩过的坑**：
+`--scan | ForEach-Object { redis-cli DEL $_ }` 在 PowerShell 下静默什么都不删（第二批实测），
+而后补的那条 `redis-cli EVAL "...keys('im:auth:*')...del..." 0` 会被 PowerShell 拆成多个参数、直接回
+`ERR wrong number of arguments for 'eval' command`（第五批清缓存时实测——这条原本就是为了绕开前一个坑写进文档的，
+结果它自己也没跑过）。另：`--scan --pattern "im:auth:*" | Measure-Object -Line` 数出 0 **不代表清干净了**（管道吞输出），
+复核残留只认 `keys`。
+
+配套 SQL 与新页面：`sql/migration_admin_system_config.sql`（三张表 + 118 与 admin 绑定 + **清缓存**）与
+`im-admin-ui` 的 `ConfigView.vue`（一卡扩成三卡）、`AnnounceView.vue`（第十一屏）。
+
+### 11. 四期第五批 · 钱包与礼物 / AI 面试记录 / 群组管理 / 消息管理（`im-admin-ui` 第十二至十五屏，★ 全批零 DDL）
+
+后台缺口清单的第 6 项，一次交四屏。四个权限点、**零新表零新列零新索引零新错误码**，
+代码侧新增的全是 SPI 契约与只读查询，两个写动作（调账、强撤）与一个半写动作（解散 / 禁言）全部交回业务模块既有实现。
+
+- **为什么是四个点而不是一个**：四屏是四种不同能力，不是一个后台页面的四个 tab。`system:wallet`（119）是
+  全后台**唯一能凭空造出货币**的写权限——`adjust` 不受 `im.wallet.recharge-max` 约束（那条配置项管的是「用户能自己
+  往口袋里塞多少」，后台这条路绕过它），所以它不能并给 `system:user:manage`：管一个人的「能不能登录」与管他的
+  「余额是多少」是两种风险，前者错了可以恢复。`system:interview`（120）读的是 `im_interview_message.content`
+  ——**候选人的作答原文**，还可能被第三方招聘方看到；能禁号的人不必能看到应聘者的答案。`system:group:manage`（121）
+  挂着「关掉一个百人群」，禁一个人的号与关掉一个群是两个影响面（后者会把没被举报的人一起挡在门外）。
+  `system:message:manage`（122）能按关键词模糊搜 `im_message.content`，也就是**读任意两个人的聊天正文**，
+  与 115（`system:log`）同一级对待，且给了 110（举报处置）或 121 都不会顺带得到它。
+  同一屏内部不再拆点（台账 / 档案 / 概览 / 写动作共用一点）：拆只会让授权表变长，不会让边界变清楚。
+- **★零 DDL 下「后台强撤」的问责标记只能落在 JSON 里**：`MessageExtra` 新增 `recalledByAdmin` 字段（`im_message.extra`
+  本来就是 JSON 列），由 `MessageServiceImpl#recallInternal` 的 force 分支**与 `markRecalled` 同事务**写入
+  （`MessageMapper#markRecalledByAdmin` 走 `JSON_SET`）——不允许出现「已是撤回态却没有后台痕迹」的半成品行。
+  它不会泄露给端上：`MessageConvert` 在消息已撤回时一律不下发 `extra`，所以这个键**只进后台**。
+  旧行没这个键，读作「不是后台撤的」，**不做回溯猜测**，所以上线以前的强撤无记录、概览的「今日后台强撤」从部署当天起算。
+  ★ 另一个口径提醒：`AdminMessageDTO` 里**没有**对应布尔字段，这一笔只以 `extraSummary` 那句文案的形式出现，
+  前端不得凭 `recalled===1` 就画一个「后台强制撤回」标签。
+- **一屏三页签跨两个模块，装配在 im-admin 一侧**：`im_gift` 在 im-user（礼物目录）而 `im_gift_record` 在 im-live（送礼流水）。
+  `AdminWalletService` 因此拿**两个 `ObjectProvider`**（`AdminWalletSpi` + `AdminLiveSpi`）而不是合并成一个契约：
+  合并就得让 im-user 去读 `im_gift_record`，那是星型架构明确不允许的横向依赖；把送礼流水挂到直播屏入口下，
+  又会让「有 119 没 113」的人看不到本该属于钱包视图的东西。`AdminLiveSpi` 缺席时给一句「直播模块未装配」
+  而**不是空列表**——空列表会让人以为「今天没人送礼」，那是个假答案（与看板「模块缺席就少一个分区」同口径）。
+- **钱的写路径不在 SPI 里写 SQL**：`WalletAdminSpiImpl#adjust` 把入账与扣款都交回 `WalletService.credit/debit`
+  （用户侧充值 / 送礼用的同一具身体：条件 UPDATE 带 `balance >= ?` 兜底 + 同事务补一条带 `balance_after` 的流水）。
+  在这里重抄一遍 `UPDATE balance = balance + ?` 能少写十行，代价是账本与余额两套口径。`delta == 0` 直接拒
+  （「要不变就别提交」）、钱包总开关关着拒 `WALLET_DISABLED`；事由必填、截 80 字、拼上「（后台：昵称 #ID）」后按列宽 128 再截，
+  所以流水里那一行天然带着「谁替谁动的钱」。返回的是**调整后的最新档案**（含新余额与刚写进去那条流水），前端就地刷行。
+- **三个重查询就三条边界**：`im_user_wallet` 除主键无索引，所以概览那几个 `SUM` 是一条聚合扫全表（扫一遍与扫三遍同样代价）、
+  随用户数线性变慢；`im_wallet_transaction` 只有 `idx_user_time`，所以带 `userId` 时单页 100、**全站流水检索夹 50**；
+  `im_message` 是全库最大的一张表且无全文索引，所以单页 50、**带 `keyword` 必须同时带会话 / 发送者 / 时间范围**（否则 400）。
+  四屏因此**一律不轮询、不自动刷新**：后端没有缓存层，轮询就是把 COUNT 直接打到库上（与第二批同一取向）。
+- **群的两个写动作交回 `GroupService` 的 `force` 分支**：`doDismiss(operatorId, groupId, byAdmin)` 与 `doMuteAll(...)`
+  是从群主路径里抽出的共用身体，后台只跳过 `requireOwner` 那一句，其余（置状态、成员批量退群、失效群缓存、
+  发群内系统通知、WebSocket 广播）一字不改。否则两边行为迟早分叉，而分叉的第一现场永远是「群没了但人还能发消息」。
+  `byAdmin` 唯一影响的是「一行都没改到」的解释：群主那侧的群对象是权限校验器刚确认过的，改不到行只能是抢先解散（幂等返回）；
+  后台收到的 `groupId` 可能来自过期页面，也可能干脆是编的，所以解散先用 `selectById` 分一次——**根本不存在报 `GROUP_NOT_FOUND`，确实已解散仍幂等返回**（对已解散的群再点一次解散不该报错）；
+  而**全员禁言那条路径**把两种情形分开报（`GROUP_NOT_FOUND` vs `GROUP_DISMISSED`）：那里「这个群已经没什么可禁的了」与「这个 ID 从哪来的」是两句有用的话。
+  群内通知的措辞用的是这个管理员自己的昵称（与群主解散同一具 `nameOf`）——成员能看出是谁散的群，
+  把这句伪造成「平台」反而更难解释。全员禁言的豁免规则（群主与管理员不受影响）仍在 `GroupConvert` 里，后台不重新发明。
+  **没有「撤销解散」**：成员关系要重新生成，那是造数据而不是撤销。
+- **面试屏三个端点全只读**：没有删除场次、没有清零计数、也没有「中止这一场」。那些违规计数是判罚依据，
+  「违规达阈值强制结束」这句话成立的前提就是这些数字由写侧在当时一口气加出来、事后没人碰过
+  （`im_interview_event` 的注释自己写死只增不改不删）。真要中止一场正在作弊的面试，正当路径是去用户管理禁用那个候选人；
+  ★ 而**禁用账号不会让那一屏立刻停下**（面试页是纯前端的，它只会在下一次上报时被鉴权拦住，承 §8 同一结论）。
+  `staleOngoing`（开始时间超合理时长但状态仍为 0 的僵尸行）**只报数不改状态**——改状态是写侧的事；
+  `violationRate` 的分母只含已结束场次（把刚开考的算进去会在每个面试高峰虚假跳水），且服务端回的是 0..1 的比率而不是百分数。
+- **消息屏能收的口子都收**：响应不给 `fileUrl`（图片 / 文件 / 语音的 `content` 存的是文件 ID 而不是可读文本，
+  要看的是扩展摘要里的文件名 / 尺寸 / 时长）；列表正文截 2000 字并带 `contentTruncated`，全文只在单条档案里给；
+  **已撤回行照常给出原文与 `recallTime`**（与用户侧视图相反：后台不是当事人，管理员来这一屏查的正是
+  「他发过什么、后来撤了什么」）——代价是这个视图**永不下发客户端**，所以它单独走 `AdminMessageDTO` 而不复用 `MessageVO`。
+  群聊行的 `readCount` 不填（要逐成员推算位点，那一页不值那个钱），前端显示「—」而不是 0。
+  强制撤回无视时限与发送者身份，但**转账 / 红包与系统通知仍被拒**（那两条拦的不是权限，而是「撤回会把已经生效的资金凭证抹掉」）。
+- **昵称反查走新增的 `UserQuerySpi#searchUserIds(keyword, limit)`**：后台检索框里管理员拿到的往往是花名而不是 ID，
+  而资料在 `im_user`、待筛的行在别的表（群成员 / 钱包台账），星型下对方读不到用户表，就只能由契约代办这一步。
+  返回的是**纯 ID 集合而不是 `UserBriefDTO`**（调用方要的是把名字拼进自己的条件，昵称它自己会再补一次）；
+  `nickname LIKE '%kw%'` 用不上索引所以 `limit` 是必需的（实现侧再夹一次），取 ID 大的那些（新注册在前），无命中返空集合不返 null。
+- **礼物下架 ≠ 停止历史对照**：`im_gift_record` 冗余了礼物名与成交单价，所以改状态不会让已有流水失去含义；
+  目录全量返回（**含已下架的**，后台要能看到它并把它重新上架），按 `sort` 升序；这里没有改价 / 改名 / 删行的入口，后端也不给。
+- **前端四屏各自顶部一条 `el-alert`，把「这一屏为什么没有那个按钮」写给人看**（调账不可撤销只能再调回去 / 要中止面试去禁号 /
+  解散不可逆 / 带关键词必须带范围）。除了 `MessageView` 那个 `scopeMissing` 预闸（禁用查询按钮 + 一条 warning）外，
+  **真正的闸都在服务端**：提示会被绕过而 curl 不读注释，预闸只是把失败提前到还没发请求那一刻。
+  四个写动作一律 `ElMessageBox.confirm` 二次确认并在文案里重述一遍后果；响应带回处置后的最新档案就 `Object.assign(row, updated)`
+  就地刷行，不重拉整页。非默认页签首次点开才取数（`onTabChange` + 三个 loaded flag）。
+
+配套 SQL 与新页面：`sql/migration_admin_wallet_interview_group_message.sql`（预检 / 插点 / 绑定 / 核对 /
+**清 `im:auth:*`** / 回滚六段，★ 零 DDL，回滚只删本脚本加的 8 行 RBAC）与 `im-admin-ui` 的
+`WalletView.vue`（第十二屏，四页签）、`InterviewView.vue`（第十三屏，纯读 + 抽屉）、`GroupView.vue`（第十四屏，两页签 + 两个写动作）、
+`MessageView.vue`（第十五屏，含前端预闸）。四屏菜单图标分别 `<Wallet />` / `<Reading />` / `<UserFilled />` / `<ChatDotSquare />`
+（★ 本批最初用的是 `<Education />`，而这个图标在当前 `@element-plus/icons-vue` 里**根本不存在**——Vite 构建不报错，
+只在运行时静默不显，已用 `node -e "require('@element-plus/icons-vue')"` 逐个核过 19 个图标名）。
+
+### 12. 已知边界（诚实清单）
+
+- **四屏概览那几个 SUM / COUNT 没有缓存层，且三处是全表或近全表扫**（§11）：所以页面不轮询、只有手点「刷新数字」；
+  `im_user_wallet` 的全表 SUM 随用户数线性变慢，真解法是补一条日汇总表或索引——那属未来 DDL，本批明确不做。
+- **`recalledByAdmin` 只对本版后端上线以后的强撤有效**：旧行读作「不是后台撤的」，不回溯猜测；
+  「今日后台强撤」这个问责指标因此从部署当天开始算。它也不在 `AdminMessageDTO` 上成为布尔字段，只在 `extraSummary` 文案里。
+- **后台强撤仍拒转账 / 红包与系统通知**（13027 那条既有码）：资金凭证不能靠一个后台按钮抹掉；退款路径走红包自己的逻辑。
+  调账**不可撤销**（只有「再调一笔回去」这一条路，而那会多出一条流水而不是抹掉旧的那条）；群解散**不可逆**。
+- **禁用账号不会立刻停下正在进行的那一场 AI 面试，也断不掉进行中的远程会话**（§8 / §11）：两条都是
+  「写侧鉴权只在请求那一刻生效」的同一条边界，面试页只会在下一次上报时被拦住。
+
+- **系统配置与词库改动在本节点即时、其他节点最迟 30 秒**（§10）：靠轮询而非发布订阅，所以多实例部署下
+  存在这个窗口；同理**在线词库只能加词不能减掉文件词库里的词**（增量不是替代），而 `im_config` 只存覆盖项，
+  「这一项目前到底按哪个值跑」得同时看库与 yml（界面把两者都显出来：当前值 + 启动默认值 + 是否已覆盖）。
+- **公告的撤回收不回已经弹出去的那条通知**：撤回只影响之后的补拉（已知边界，页面上那句话直接写在二次确认里）；
+  **没有已读回执表**，去重记在客户端 localStorage，所以换设备 / 无痕模式会重看一遍——这是这条链路上
+  唯一被明确放弃的精确性（建一张 `im_announcement_read` 意味着每次登录都写 N 行，而公告不是需要统计的东西）。
+- **公告不显示送达人数**：`PushSpi.broadcast()` 返 void，要这个数字就得给广播加回执统计，属未来改动。
+
+- **限时封禁管不着远程会话（承 §8）**：`disable` 踢的是聊天长连接，远程两条 WS 是握手期鉴权、不再回查 Sa-Token；
+  封号后进行中远程会话照常跑，到期自动解封也不会替他重建任何连接（**解封后需要用户自己重新登录**）。
+- **到期与扫到之间有一个 ≤30 秒的窗口**：这一行里用户 `status` 仍旧、`disable_until` 已过期，
+  既登不上（提示为「解封处理中」）也在列表里显示为已禁用——这是预期而不是 bug（前端那一格标签也不会显示负数剩余）。
+- **存量已禁用账号升级后全部成为「永久封禁」**：`ADD COLUMN ... DEFAULT NULL` 不动数据，
+  而 NULL + `status=0` 正好是永久——与升级前的实际行为一致（旧代码根本没有自动解封，他们本来就不会自己开）。
+  要给他们定时就在新版后台对他再点一次「禁用」（即改期），不需要先恢复。
 
 - **两个 keyword 口径不同**：`/api/admin/user/page` 的 keyword 只认 `username / nickname / phone`，**不认用户 ID**；
   `/api/admin/report/page` 的 keyword 是纯数字时按 `target_id / reported_user_id / reporter_id` 精确匹配。所以看板「被举报榜」
@@ -1603,6 +2020,14 @@ spring-boot-duomokuia/
   而 `im-admin-ui` 的 `hasAdminPermission()` / `can()` 还额外放行伞权限 `system:manage`。库里若只有 `system:manage`（一期种子就是这种），
   admin 就会「提示登录成功、四个菜单全部可见、点进去全部 1003」。修法是跑 `sql/migration_admin_phase2.sql`（全 `INSERT IGNORE`、可重跑），
   三期同理：库里停在二期数据时老页面正常、四个新页面全 1003，修法是再跑 `sql/migration_admin_phase3.sql`（112~115 + admin 绑定 6012~6015）；
+  四期同理：新出现的「系统配置」屏要 `system:config`（116 + 绑定 6016），跑 `sql/migration_admin_config.sql`；
+  但不跑它漏洞也已堵住（用户侧端点是代码删的），只是后台暂时开不了这个关；
+  四期第二批同理：「远程控制」屏要 `system:remote`（117 + 绑定 6017），跑 `sql/migration_admin_remote.sql`；
+  这一屏不跑就是整页 1003（四个端点全在同一个 `@SaCheckPermission` 下），不存在「少一半功能」；
+  四期第四批同理：「全服公告」屏要 `system:announcement`（118），跑 `sql/migration_admin_system_config.sql`（这批还顺带建了三张表）；
+  同一屏里的「配置目录」与「在线词库」两卡仍只要 116，所以只插 118 不补的话是公告那屏进不去、另两卡照常用；
+  四期第五批同理，但**这批一次四个点**（119~122）：四屏要 `sql/migration_admin_wallet_interview_group_message.sql`，
+  且不跑它就是四个菜单项自动隐掉、新屏整页 1003（★ 零 DDL，不跑也不影响任何既有功能与启动）；
   跑完**必须删掉 `im:auth:perm:{userId}` / `im:auth:role:{userId}`** —— `PermissionProviderImpl` 把权限码按用户缓存 30 分钟，
   **且登录动作不会刷新它**（`logout` 只做 `StpUtil.logout()`、不碰这两个键，而回源只在「未命中」时发生，所以「退出再登录」不管用 ——
   已实测：补完数据后再登一次仍回旧 7 个权限串，`redis-cli DEL` 掉两个键后立即回 11 个、四个端点从 1003 变 200；

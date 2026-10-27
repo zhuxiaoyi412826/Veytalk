@@ -33,6 +33,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 
@@ -46,6 +48,9 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class AuthServiceImpl implements AuthService {
+
+    /** 封禁到期时间在登录报错里的格式：与踢下线报文同口径，到分钟就够 */
+    private static final DateTimeFormatter BAN_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final UserService userService;
     private final CaptchaService captchaService;
@@ -328,9 +333,28 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
+    /**
+     * 账号不可用时的拦截。限时封禁要把到期时间写进提示：
+     * 「账号已被禁用」与「将于周五 18:00 自动解封」是两个完全不同的下一步，
+     * 前者让人去找客服，后者让人自己等。
+     *
+     * <p>到期时间已过期但还没被扫到时不回显那个旧时间（自动解封任务每 30 秒一轮，
+     * 中间存在一个短暂窗口），否则用户看到一个过去的时刻只会反复重试登录。这里也不因为「时间已过」就直接放行：
+     * 解封是定时任务的事实，登录路径去抢这个活会把「谁解的封」变成两处都能做的写操作。
+     */
     private void checkUsable(User user) {
-        if (user.getStatus() == null || user.getStatus() != User.STATUS_NORMAL) {
-            throw new BusinessException(ResultCode.USER_DISABLED);
+        if (user.getStatus() != null && user.getStatus() == User.STATUS_NORMAL) {
+            return;
         }
+        LocalDateTime until = user.getDisableUntil();
+        String message;
+        if (until == null) {
+            message = "账号已被禁用（永久），请联系管理员";
+        } else if (until.isAfter(LocalDateTime.now())) {
+            message = "账号已被禁用，将于 " + BAN_TIME.format(until) + " 自动解封";
+        } else {
+            message = "账号已被禁用，解封处理中，请稍后重试";
+        }
+        throw new BusinessException(ResultCode.USER_DISABLED.getCode(), message);
     }
 }

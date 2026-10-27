@@ -16,6 +16,10 @@ import java.util.List;
  * <b>后台改不了昵称、改不了密码、也读不到手机号全号</b>——一期没有这个需求，
  * 多开一个方法就多一条能把用户资料改坏的路径，收紧比事后删接口容易。
  *
+ * <p>四期第三批把「封禁时长」加进来时，<b>没有</b>新增方法而是给 {@code setDisabled} 加了
+ * 一个可空参数并留了一个四参 {@code default} 重载：既没打断存量调用方（举报处置那侧继续传
+ * {@code null} 就是永久），也没在本契约上多开一个能改账号状态的口子。
+ *
  * <p>实现方的三条硬约束（写在接口上而不是只写在 im-user 的实现注释里，因为换个人实现也要守）：
  * <ul>
  *   <li>分页大小与关键词长度要自己夹上限，调用方（后台）传来的参数不可信；</li>
@@ -50,22 +54,37 @@ public interface AdminUserSpi {
     List<AdminUserDTO> listByIds(Collection<Long> userIds);
 
     /**
+     * 禁用 / 恢复账号（不限时，即<b>永久封禁</b>）。给不关心时长的调用方用，
+     * 等价于 {@code setDisabled(userId, disabled, operatorId, reason, null)}。
+     */
+    default AdminUserDTO setDisabled(Long userId, boolean disabled, Long operatorId, String reason) {
+        return setDisabled(userId, disabled, operatorId, reason, null);
+    }
+
+    /**
      * 禁用 / 恢复账号。
      *
-     * <p>禁用即把 {@code im_user.status} 置 0（<b>零 DDL：这一列本来就有</b>），
-     * 同时踢掉该用户的全部 WebSocket 连接：不踢的话，他手上那条长连接还能继续收发消息，
-     * 「禁用」要等到下次登录才生效，那是个会说谎的按钮。
+     * <p>禁用即把 {@code im_user.status} 置 0，同时踢掉该用户的全部 WebSocket 连接：
+     * 不踢的话，他手上那条长连接还能继续收发消息，「禁用」要等到下次登录才生效，
+     * 那是个会说谎的按钮。
      *
      * <p>实现方应保证幂等（重复禁用返回当前状态即可），并拒绝两种危险调用：
      * 禁用自己、禁用最后一个管理员账号。
      *
-     * @param userId     目标用户
-     * @param disabled   {@code true} 禁用，{@code false} 恢复
-     * @param operatorId 操作管理员，用于审计日志与自我豁免判定
-     * @param reason     事由，会写进服务端日志
+     * <p>关于 {@code disableMinutes}：到期时间由<b>服务端时钟</b>算，不把绝对时间当参数传——
+     * 管理员浏览器上的时间不可信，而一个提前一小时的「到期」就是提前解封。
+     * 到期后的自动解封由 im-user 自己的定时任务完成，<b>不经过本契约</b>：
+     * 把一个「批量改账号状态」的方法开到 SPI 上，等于给每个依赖这个契约的模块都开了那扇门。
+     *
+     * @param userId         目标用户
+     * @param disabled       {@code true} 禁用，{@code false} 恢复
+     * @param operatorId     操作管理员，用于审计日志与自我豁免判定
+     * @param reason         事由，会写进服务端日志
+     * @param disableMinutes 封禁时长（分钟）；{@code null} 或非正数表示永久封禁。
+     *                       仅在 {@code disabled=true} 时有意义，恢复时本列会被清空
      * @return 处置后的用户档案
      */
-    AdminUserDTO setDisabled(Long userId, boolean disabled, Long operatorId, String reason);
+    AdminUserDTO setDisabled(Long userId, boolean disabled, Long operatorId, String reason, Long disableMinutes);
 
     /* ==================== 后台角色分配（二期） ==================== */
 

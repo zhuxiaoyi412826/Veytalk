@@ -62,6 +62,30 @@ const routes = [
         meta: { title: '直播管理', perm: 'system:live:manage' }
       },
       {
+        path: 'groups',
+        name: 'groups',
+        component: () => import('@/views/GroupView.vue'),
+        meta: { title: '群组管理', perm: 'system:group:manage' }
+      },
+      {
+        path: 'messages',
+        name: 'messages',
+        component: () => import('@/views/MessageView.vue'),
+        meta: { title: '消息管理', perm: 'system:message:manage' }
+      },
+      {
+        path: 'wallet',
+        name: 'wallet',
+        component: () => import('@/views/WalletView.vue'),
+        meta: { title: '钱包与礼物', perm: 'system:wallet' }
+      },
+      {
+        path: 'interviews',
+        name: 'interviews',
+        component: () => import('@/views/InterviewView.vue'),
+        meta: { title: 'AI 面试记录', perm: 'system:interview' }
+      },
+      {
         path: 'monitor',
         name: 'monitor',
         component: () => import('@/views/MonitorView.vue'),
@@ -72,6 +96,24 @@ const routes = [
         name: 'logs',
         component: () => import('@/views/LogsView.vue'),
         meta: { title: '日志管理', perm: 'system:log' }
+      },
+      {
+        path: 'config',
+        name: 'config',
+        component: () => import('@/views/ConfigView.vue'),
+        meta: { title: '系统配置', perm: 'system:config' }
+      },
+      {
+        path: 'remote',
+        name: 'remote',
+        component: () => import('@/views/RemoteView.vue'),
+        meta: { title: '远程控制', perm: 'system:remote' }
+      },
+      {
+        path: 'announcements',
+        name: 'announcements',
+        component: () => import('@/views/AnnounceView.vue'),
+        meta: { title: '全服公告', perm: 'system:announcement' }
       }
     ]
   },
@@ -105,11 +147,32 @@ router.beforeEach(async (to) => {
     auth.teardown()
     return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
   }
-  // 进了后台不代表能看每一屏：二三期按细粒度权限点逐路由放行。
+  // 进了后台不代表能看每一屏：二三四期按细粒度权限点逐路由放行。
   // 缺这一屏权限时送回他能访问的第一屏（而不是弹回登录页——他确实是合法的后台用户，只是不该看到这一页）。
   // 没有 meta.perm 的路由（如根路径 redirect）不拦。
+  //
+  // 下面这个兜底顺序是有意义的：把「只看数字」的看板放最前，把能动手的屏放后面，
+  // 于是只持低风险点的账号不会刚进后台就落在一个带危险按钮的页面上。
+  // 四期第五批的四项插在直播之后、监控之前：群组与消息是「治理」，钱包与面试是「经营与招聘」，
+  // 它们都比那四张运维表更接近业务现场，也更接近需要被单独授权的那一档。
   if (to.meta.perm && !auth.can(to.meta.perm)) {
-    const fallback = ['dashboard', 'reports', 'users', 'roles', 'videos', 'lives', 'monitor', 'logs'].find((name) => {
+    const fallback = [
+      'dashboard',
+      'reports',
+      'users',
+      'roles',
+      'videos',
+      'lives',
+      'groups',
+      'messages',
+      'wallet',
+      'interviews',
+      'monitor',
+      'logs',
+      'config',
+      'remote',
+      'announcements'
+    ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)
     })

@@ -221,6 +221,30 @@
                 下拉里只有<b>提交那一刻</b>归属模块报上来的可执行动作；执行失败时工单停在原状态，原因会原样回显。
               </span>
             </el-form-item>
+            <!-- 只在选择「封禁账号」时才出现：其它动作没有「到期」这个概念，
+                 摆一个平时隐藏的时长下拉比永远摆着不让人误会强 -->
+            <el-form-item v-if="form.action === 'ban_user'" label="封禁时长（到期自动解封）">
+              <div class="ban-row">
+                <el-select v-model="form.minutes" class="ban-pick" placeholder="选择时长">
+                  <el-option
+                    v-for="opt in BAN_DURATIONS"
+                    :key="String(opt.value)"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
+                <el-input-number
+                  v-if="form.minutes === CUSTOM"
+                  v-model="form.customMinutes"
+                  :max="CUSTOM_MAX_MINUTES"
+                  :min="1"
+                  :step="60"
+                  class="ban-custom"
+                  controls-position="right"
+                />
+              </div>
+              <span class="muted action-note">{{ banPreview }}</span>
+            </el-form-item>
             <el-form-item label="说明（回显给举报人并留档）">
               <el-input
                 v-model="form.remark"
@@ -261,6 +285,8 @@ import {
 import AvatarCell from '@/components/AvatarCell.vue'
 import { fetchMedia } from '@/api/request'
 import { accountStatusTag, formatDateTime, formatListTime, reportStatusTag } from '@/utils/format'
+import { BAN_DURATIONS, CUSTOM, CUSTOM_MAX_MINUTES, durationText } from '@/utils/ban'
+import dayjs from 'dayjs'
 
 /**
  * 举报工单队列。
@@ -283,7 +309,29 @@ const config = ref(null)
 const drawer = ref(false)
 const current = ref(null)
 const submitting = ref(false)
-const form = reactive({ action: '', remark: '' })
+const form = reactive({ action: '', remark: '', minutes: 1440, customMinutes: 1440 })
+
+/**
+ * 本次要下发的封禁分钟数（null = 永久）。
+ *
+ * 只在 {@code action === 'ban_user'} 时被读：切到其它动作后这里仍会算出一个数，
+ * 但后端不读它（ReportDisposeCmd.disableMinutes 在服务端那侧就被按动作筛过一遍），
+ * 所以管理员「选了时长又改成只警告」不会意外封掉任何人。
+ */
+const banMinutes = computed(() => {
+  if (form.minutes === CUSTOM) {
+    return form.customMinutes > 0 ? form.customMinutes : null
+  }
+  return form.minutes
+})
+
+const banPreview = computed(() => {
+  const minutes = banMinutes.value
+  if (!minutes) {
+    return '永久封禁：不会自动解封，需要回到用户管理手动恢复'
+  }
+  return `预计 ${dayjs().add(minutes, 'minute').format('YYYY-MM-DD HH:mm')} 自动解封（以服务端时间为准）`
+})
 
 const query = reactive({
   keyword: '',
@@ -349,6 +397,8 @@ async function openDetail(row) {
   }
   form.action = ''
   form.remark = ''
+  form.minutes = 1440
+  form.customMinutes = 1440
   drawerSize.value = window.innerWidth < 900 ? '100%' : '620px'
   drawer.value = true
   loadEvidenceMedia(current.value)
@@ -402,12 +452,18 @@ async function onHandle() {
   }
   const label = dispositionName(form.action)
   const dangerous = ['ban_user', 'recall_message', 'close_room'].includes(form.action)
-  if (dangerous && !(await confirm(`「${label}」会直接作用于线上对象（封号会踢下线、撤回会消失、中断直播会断流），确定执行？`))) {
-    return
+  if (dangerous) {
+    // 封号时把时长写进确认语：同一个「封禁账号」按钮，封 10 分钟与封永久是两个量级的决定，
+    // 只在事后才在回执里看到「已永久封禁」已经晚了
+    const scope = form.action === 'ban_user' ? `（${durationText(banMinutes.value)}）` : ''
+    if (!(await confirm(`「${label}${scope}」会直接作用于线上对象（封号会踢下线、撤回会消失、中断直播会断流），确定执行？`))) {
+      return
+    }
   }
   submitting.value = true
   try {
-    const message = await handleReport(current.value.id, form.action, form.remark.trim())
+    const message = await handleReport(current.value.id, form.action, form.remark.trim(),
+      form.action === 'ban_user' ? banMinutes.value : undefined)
     ElMessage.success(message || '处置完成')
     drawer.value = false
     await load()
@@ -568,6 +624,20 @@ onMounted(async () => {
 
 .action-pick {
   width: 220px;
+}
+
+.ban-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.ban-pick {
+  width: 160px;
+}
+
+.ban-custom {
+  width: 130px;
 }
 
 .action-note {

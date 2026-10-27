@@ -39,6 +39,15 @@ public class AdminUserVO implements Serializable {
     @Schema(description = "账号状态：1 正常 0 已禁用")
     private Integer status;
 
+    /**
+     * 封禁到期时间。{@code null} 有两种意思，靠 {@link #status} 分辨：
+     * 正常账号恒为 null（恢复时已清空），禁用账号上 null 代表<b>永久封禁</b>。
+     * 前端渲染成「剩余 X」还是「永久」就是这个判断，不是「时间为空 = 没被禁」。
+     */
+    @Schema(description = "封禁到期时间；为空时：status=0 表示永久封禁，status=1 表示未被封禁",
+            example = "2026-11-02T18:00:00")
+    private LocalDateTime disableUntil;
+
     @Schema(description = "是否在线")
     private Boolean online;
 
