@@ -368,10 +368,37 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 
 # 非 root 运行：uid 1000 与宿主机 ./data/* 的 chown 对齐（第二节）
-RUN groupadd --system --gid 1000 im \
-    && useradd  --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
-    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra \
-    && chown -R 1000:1000 /app
+# ★ 踩过的坑（CI 首次构建真挂在这）：不能写裸的 `groupadd --system --gid 1000 im`，
+#   Ubuntu 24.04 底座预置了一行 `gro:x:1000:`（adduser 用来占住这段 GID），指定 gid 会让
+#   groupadd 以退出码 4「GID already exists」把构建打断。下面是四级阶梯：
+#   ① 组已存在→复用 ② 直建 gid=1000 ③ 占用者是 gro→改名让位（gro 不挂文件，改名安全）
+#   ④ 被别的组占着→自动分配兜底、不拦构建。续行里一律不要投行内注释：行尾反斜杠会把换行
+#   吃掉，注释会连它后面那一行一起注掉（这个错我也犯过，症状是命令凭空少一截）。
+ARG IM_UID=1000
+ARG IM_GID=1000
+RUN set -eu; \
+    if getent group im >/dev/null 2>&1; then \
+      echo "[im] group im 已存在，复用"; \
+    elif groupadd --system --gid "${IM_GID}" im 2>/dev/null; then \
+      echo "[im] group im gid=${IM_GID}"; \
+    elif occ=$(getent group "${IM_GID}" | head -1 | cut -d: -f1); [ -n "$occ" ] && [ "$occ" = gro ] \
+         && groupmod -n im gro; then \
+      echo "[im] GID ${IM_GID} 被占位组 gro 拿着，改名让位"; \
+    elif groupadd --system im; then \
+      echo "[im] !! GID ${IM_GID} 被其它组拿着，im 改用自动分配的 gid（不影响运行，只是组属主不再等于宿主机目录的 1000）"; \
+    else \
+      echo "[im] !! 建组失败，上面有 groupadd 的原始报错"; exit 1; \
+    fi; \
+    gid=$(getent group im | head -1 | cut -d: -f3); \
+    if id -u im >/dev/null 2>&1; then \
+      echo "[im] user im 已存在，复用"; \
+    elif useradd --system --uid "${IM_UID}" --gid "${gid:-0}" --create-home --home-dir /app im; then \
+      echo "[im] user im uid=${IM_UID}"; \
+    else \
+      echo "[im] !! 建用户失败（多半是 UID ${IM_UID} 已被别的用户占用，比如带 ubuntu 用户的底座镜像）"; exit 1; \
+    fi; \
+    mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra; \
+    chown -R "$(id -u im)":"$(id -g im)" /app
 
 COPY --chown=1000:1000 im-server.jar /app/im-server.jar
 
@@ -413,8 +440,15 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -q clean package -DskipTests
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-RUN groupadd --system --gid 1000 im && useradd --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
-    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra && chown -R 1000:1000 /app
+# 建组建用户与 4.1 完全一致（那节有 groupadd 不能指定 --gid 的原因和四级阶梯），这里略成紧凑版：
+RUN set -eu; \
+    getent group im >/dev/null 2>&1 \
+      || groupadd --system --gid 1000 im 2>/dev/null \
+      || groupadd --system im; \
+    gid=$(getent group im | head -1 | cut -d: -f3); \
+    useradd --system --uid 1000 --gid "${gid}" --create-home --home-dir /app im; \
+    mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra; \
+    chown -R "$(id -u im)":"$(id -g im)" /app
 COPY --from=build --chown=1000:1000 /src/im-bootstrap/target/im-server.jar /app/im-server.jar
 ENV TZ=Asia/Shanghai JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8" SPRING_PROFILES_ACTIVE=prod
 EXPOSE 8080
@@ -1263,6 +1297,7 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 | 大文件上传 413 | nginx 先拦了 | `client_max_body_size 110m`（单请求通道）；分片通道单片 6MB，走 `/api/file/upload/*` 不受 100MB 限 |
 | 推流口 PUT 返回 500，nginx 日志 `client body temp ... failed` | `client_body_temp_path` 不可写 | 指到 `/tmp/nginx_body` 或把该 server 的挂载改读写 |
 | 改了 `sql-init/` 里的 SQL，重启 mysql 没生效 | `initdb.d` 只在空卷跑一次 | 7.1 手工导；或试用环境 `down -v` 重建（★ 数据全没） |
+| 镜像构建报 `groupadd: GID '1000' already exists`（退出码 4） | Ubuntu 24.04 底座预置了占位组 `gro:x:1000:`，裸写 `groupadd --gid 1000` 必失败 | 4.1 的四级阶梯；急着过可以先 `--build-arg IM_GID=1001`，或把 gro 改名让位 |
 | `/app/logs` 是空的，`docker compose logs` 却很多 | 目录 uid 不对，logback **不拦启动只静默丢** | `chown -R 1000:1000 data/logs upload-tmp`；或 `docker compose logs im-server \| grep -i logback` |
 | 时间差 8 小时（含定时任务不到点跑：红包退款、消息过期清理） | MySQL 容器默认 UTC 而 JDBC 钉了 +08 | 第五节 `--default-time-zone=+08:00` + 应用容器 `TZ=Asia/Shanghai`；12 个 `@Scheduled` 的 cron 按 JVM 时区解释 |
 | 中文与 emoji 存进去变 `?` | 管道导入 / 服务端字符集退回 latin1 | 7.1 的 `cp` + `-e "source"`；6.2 的 `SELECT @@character_set_server` |

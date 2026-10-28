@@ -42,10 +42,34 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -q clean package -DskipTests
 # 两条路线的差别只有「jar 从哪来」——不一致会让「本机能跑线上不能跑」这类问题极难定位。
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-RUN groupadd --system --gid 1000 im \
-    && useradd  --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
-    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra \
-    && chown -R 1000:1000 /app
+# 与 Dockerfile（路线 A）那段完全一致：不能写裸的 groupadd --gid 1000，
+# Ubuntu 24.04 底座预置了占位组 gro:x:1000:，指定 gid 会让 groupadd 退出码 4 把构建打断。
+# 四级阶梯与逐条说明见 Dockerfile 里同位置的注释。
+ARG IM_UID=1000
+ARG IM_GID=1000
+RUN set -eu; \
+    if getent group im >/dev/null 2>&1; then \
+      echo "[im] group im 已存在，复用"; \
+    elif groupadd --system --gid "${IM_GID}" im 2>/dev/null; then \
+      echo "[im] group im gid=${IM_GID}"; \
+    elif occ=$(getent group "${IM_GID}" | head -1 | cut -d: -f1); [ -n "$occ" ] && [ "$occ" = gro ] \
+         && groupmod -n im gro; then \
+      echo "[im] GID ${IM_GID} 被占位组 gro 拿着，改名让位"; \
+    elif groupadd --system im; then \
+      echo "[im] !! GID ${IM_GID} 被其它组拿着，im 改用自动分配的 gid（不影响运行，只是组属主不再等于宿主机目录的 1000）"; \
+    else \
+      echo "[im] !! 建组失败，上面有 groupadd 的原始报错"; exit 1; \
+    fi; \
+    gid=$(getent group im | head -1 | cut -d: -f3); \
+    if id -u im >/dev/null 2>&1; then \
+      echo "[im] user im 已存在，复用"; \
+    elif useradd --system --uid "${IM_UID}" --gid "${gid:-0}" --create-home --home-dir /app im; then \
+      echo "[im] user im uid=${IM_UID}"; \
+    else \
+      echo "[im] !! 建用户失败（多半是 UID ${IM_UID} 已被别的用户占用，比如带 ubuntu 用户的底座镜像）"; exit 1; \
+    fi; \
+    mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra; \
+    chown -R "$(id -u im)":"$(id -g im)" /app
 
 # 产物名来自 im-bootstrap/pom.xml 的 <finalName>im-server</finalName>
 COPY --from=build --chown=1000:1000 /src/im-bootstrap/target/im-server.jar /app/im-server.jar

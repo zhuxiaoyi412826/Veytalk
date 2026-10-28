@@ -130,6 +130,15 @@
     路线 B（兜底，服务器/离线机连不上 GitHub 时用）Docker/app/Dockerfile.multistage，上下文 = 仓库根
       docker build -f Docker/app/Dockerfile.multistage -t local/im-server:1.0.0 .
       14 个模块的 COPY 清单与根 pom.xml 的 <modules> 一一对应，加减模块要改这里
+    ★ 两份 Dockerfile 里建组建用户那段不能写回裸的 `groupadd --system --gid 1000 im`：
+      Ubuntu 23.04+/Debian 12+（含 24.04，也就是 eclipse-temurin:21-jre 的底）在 /etc/group 里
+      预置了一行 `gro:x:1000:` —— adduser 拿它占住 1000 这段 GID，指定 gid 会让 groupadd 以
+      退出码 4「GID '1000' already exists」把整个镜像构建打断（Actions 第二次就挂在这）。
+      现在是一条四级阶梯：组已存在→复用 / 直建 1000 / 占用者是 gro→groupmod -n im gro 让位
+      （gro 不挂任何文件，改名安全，结果仍是 1000）/ 被别的组占着→自动分配 gid 兜底不拦构建。
+      uid/gid 都能用 --build-arg IM_UID / IM_GID 覆盖。四条路径本机用 stub 命令实测过。
+    ★ 同一段里 RUN 的续行不能投行内注释：行尾反斜杠会把换行吃掉，注释会连它后面那一行一起
+      注掉，症状是命令凭空少一截且报「command not found」——这个错我也犯过一次。
 
   GitHub Actions（.github/workflows/build-and-package.yml，5 个 job）：
     meta → build-jar / build-web（矩阵三站）→ docker-image（推 GHCR）→ deploy（手动勾选才跑）
@@ -137,7 +146,9 @@
     tag：镜像带 <版本号> / latest / sha-<短sha> 三种，部署只认精确版本号，★ 绝不用 latest
     Secret：推 GHCR 不用配（内置 GITHUB_TOKEN 的 packages: write）
             自动部署要配 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY，可选 DEPLOY_PORT / DEPLOY_DIR
-    改这个文件前必读：产物校验看 Start-Class 而不是 Main-Class、artifact 要写 root:
+    改这个文件前必读：产物校验看 Start-Class 而不是 Main-Class（MANIFEST 行尾是 CRLF，
+      精确匹配前先 tr -d '\r'）、lock 有缺 version 的条目时 npm ci 只报「Invalid Version: 」、
+      artifact 要写 root:
       （否则 jar 落在 Docker/app/im-bootstrap/target/ 里 COPY 找不到）、
                       GHCR 镜像名必须全小写、provenance: false、前端覆盖不带 --delete
 
