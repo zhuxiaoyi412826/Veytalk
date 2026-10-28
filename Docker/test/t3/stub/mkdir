@@ -1,0 +1,4 @@
+#!/bin/bash
+D="${ST:?}"
+for a in "$@"; do case "$a" in -*) ;; /*) mkdir -p "$a" 2>/dev/null || true;; esac; done
+exit 0
