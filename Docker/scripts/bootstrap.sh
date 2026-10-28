@@ -8,7 +8,7 @@
 #
 # 它做五件事：
 #   ① 校验 .env 填全了（拦下所有还留着 <...> 占位符的项）
-#   ② 建目录 + 把 data/ 下要写的目录 chown 成 uid 1000（与镜像里的 im 用户对齐）
+#   ② 建目录 + 把 data/ 下要写的目录 chown 成 uid 1000（与容器内 USER 1000:1000 运行身份对齐）
 #   ③ 由 example 生成 nginx/conf.d/im.conf、app/extra/application-prod-extra.yml，
 #      并把 .env 里的域名与直播签名密钥灌进占位符
 #   ④ 由 conf/im.env.example 生成 conf/im.env，并把 .env 的密码/密钥同步进去（两边逐字一致这条红线由脚本保证）
