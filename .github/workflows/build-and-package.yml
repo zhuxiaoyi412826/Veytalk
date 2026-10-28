@@ -326,39 +326,50 @@ jobs:
         include:
           - { name: mysql, src: "docker.io/library/mysql:8.0" }
           - { name: redis, src: "docker.io/library/redis:7-alpine" }
-          # ★ minio 用 quay.io 而非 docker.io：MinIO 已于 2026-09-11 把 minio/minio 从 Docker Hub 整仓删除
-          #   （所有 tag 返回 404 / pull access denied，skopeo 源初始化即 fatal）。历史镜像只有
-          #   quay.io/minio/minio 还拉得到，且用的是同一个 tag，桶数据格式一致（不是升级，零行为变更）。
-          - { name: minio, src: "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z" }
           - { name: nginx, src: "docker.io/library/nginx:1.27-alpine" }
+          # ★ minio 已从 CI 镜像流程移出：MinIO 于 2026-09-11 从 Docker Hub 整仓删除（404/denied），
+          #   quay.io/minio/minio 又拒 GitHub runner 共享 IP 的匿名拉（401）。
+          #   minio 改由部署机单独拉起（不在本栈的 compose pull 范围内）；im-server 连它的方式见 compose 与文档。
     steps:
       - name: 装 skopeo
         run: sudo apt-get update && sudo apt-get install -y skopeo
-
-      - name: 登录 GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 同步 ${{ matrix.name }} → ghcr.io/…/im-deps（digest 相同则跳过）
         env:
           SRC: ${{ matrix.src }}
           NAME: ${{ matrix.name }}
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUAY_USER: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_PASSWORD }}
         run: |
           set -euo pipefail
+          # 全部 skopeo 调用共用一份 authfile：目标 ghcr 带写权限，源站（quay）带读权限。
+          # ★ 用显式 --authfile 而非依赖 docker/login-action 写的 ~/.docker/config.json：
+          #   skopeo 只在多个候选路径里挑「第一个存在的」、跨文件不合并，显式一份最稳。
+          AUTH="$(mktemp)"
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$GH_USER" --password-stdin --authfile "$AUTH"
+          # 源站是 quay.io 且配了 QUAY_USERNAME/QUAY_PASSWORD → 登录绕开「匿名 / runner 共享 IP 被限流(401)」。
+          #   不配就匿名拉：GitHub Actions 那批共享 IP 常被 Quay 拒 401（minio 这一步就是这么挂的）。
+          case "$SRC" in
+            quay.io/*)
+              if [[ -n "${QUAY_USER:-}" && -n "${QUAY_TOKEN:-}" ]]; then
+                printf '%s' "$QUAY_TOKEN" | skopeo login quay.io -u "$QUAY_USER" --password-stdin --authfile "$AUTH"
+              else
+                echo "ℹ 未配 QUAY_USERNAME/QUAY_PASSWORD secret：quay 走匿名拉取，runner 共享 IP 可能被限流(401)"
+              fi ;;
+          esac
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           TAG="${SRC##*:}"
           DEST="ghcr.io/${OWNER}/im-deps/${NAME}:${TAG}"
           # 幂等：--override-arch 是原样搬那个 amd64 manifest，digest 不变 → 源与目标一致就不重传
-          SRC_D="$(skopeo inspect --override-os linux --override-arch amd64 --format '{{.Digest}}' "docker://${SRC}" 2>/dev/null || true)"
-          DST_D="$(skopeo inspect --format '{{.Digest}}' "docker://${DEST}" 2>/dev/null || true)"
+          SRC_D="$(skopeo inspect --authfile "$AUTH" --override-os linux --override-arch amd64 --format '{{.Digest}}' "docker://${SRC}" 2>/dev/null || true)"
+          DST_D="$(skopeo inspect --authfile "$AUTH" --format '{{.Digest}}' "docker://${DEST}" 2>/dev/null || true)"
           if [[ -n "$SRC_D" && "$SRC_D" == "$DST_D" ]]; then
             echo "✅ ${DEST} 已是最新（digest ${SRC_D}），跳过"; exit 0
           fi
           echo "⬇ ${SRC}  →  ${DEST}"
-          skopeo copy --override-os linux --override-arch amd64 --retry-times 3 \
+          skopeo copy --authfile "$AUTH" --override-os linux --override-arch amd64 --retry-times 3 \
             "docker://${SRC}" "docker://${DEST}"
 
   # ---------------------------------------------------------------- 部署到开放机

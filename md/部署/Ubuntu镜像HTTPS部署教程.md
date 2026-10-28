@@ -10,9 +10,12 @@
 
 ## 〇、先建立一个正确认知：端口与"三站"是怎么对外提供的
 
-- 整个栈 5 个容器（mysql / redis / minio / im-server / nginx），但**对外只发布 nginx 的 80 和 443**。
-  其余端口（3306/6379/9000/8080/8081…）都只在容器内部网络可达，**不映射到宿主机**——这是刻意的安全约束
+- 主栈 4 个容器（mysql / redis / im-server / nginx），**对外只发布 nginx 的 80 和 443**。
+  其余端口（3306/6379/8080/8081…）都只在容器内部网络可达，**不映射到宿主机**——这是刻意的安全约束
   （Docker 发布的端口会绕过 UFW）。
+- **minio 不属主栈、单独一个容器**：因 MinIO 已从 Docker Hub 删除、quay 又拒 CI 匿名拉，它脱离流水线，
+  由你在部署机上单独起（见第八节 8.1）。它会**发布宿主 9000/9001** 供 im-server 经 `host.docker.internal` 连入，
+  这两个口务必靠云安全组/防火墙限制来源，别裸奔公网。
 - 前端 / 管理后台 / 官网是**同一个 nginx、同一对 80/443**，靠**域名（`server_name`）分流**：
   `IM_DOMAIN` → im-ui，`ADMIN_DOMAIN` → 管理后台，`WEBSITE_DOMAIN` → 官网。
   所以你需要的是**多个域名/子域名解析到同一台机器的同一个 443**，而不是多个端口。
@@ -143,9 +146,11 @@ openssl rand -base64 24 | tr -d '=+/\n' | head -c 24; echo
 ```
 
 **（可选）让依赖镜像也不碰 Docker Hub**：国内服务器拉 Docker Hub 慢/失败时，CI 的 `mirror-images` job
-会把 mysql/redis/minio/nginx 原样搬到 `ghcr.io/<owner小写>/im-deps/*`。`.env` 里这四行默认就是 GHCR 路径，
+会把 **mysql/redis/nginx** 三个原样搬到 `ghcr.io/<owner小写>/im-deps/*`。`.env` 里这三行默认就是 GHCR 路径，
 `<owner小写>` 占位符 **不用手改**——`bootstrap.sh` 会从 `IM_SERVER_TAG` 里取同一个 owner 自动回填。
-若你的机器能正常访问 Docker Hub，也可把值改回官方直连：`mysql` / `redis` / `nginx` 用 Docker Hub 短名；但 **`minio` 必须写 `quay.io/minio/minio`**——MinIO 已于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓删除，那个短名现在拉会报 404 / access denied（同一个 `RELEASE.2025-04-22T22-12-26Z` 在 quay.io 上仍拉得到）。
+若你的机器能正常访问 Docker Hub，也可把值改回官方短名 `mysql` / `redis` / `nginx`。
+> ★ **minio 不在这三个里**：它已从 CI 的同步矩阵摘出（MinIO 2026-09-11 从 Docker Hub 整仓删除、quay 又拒 CI 匿名拉），
+> `.env` 里 `MINIO_IMAGE` 直接写 `quay.io/minio/minio`、不参与 owner 回填，由第八节的 `minio/docker-compose.yml` 单独部署。
 
 ---
 
@@ -227,7 +232,26 @@ cp im.example.com-key.pem /opt/im-docker/certs/live/im.example.com/privkey.pem
 
 ---
 
-## 八、启动（一键）
+## 八、启动
+
+### 8.1 先单独拉起 minio（必须在主栈之前）
+
+minio 不在主 `docker-compose.yml` 里，得用它自己的那份单独起。它靠 `--env-file .env` 复用同一份凭据
+（`MINIO_ROOT_USER/PASSWORD` 与主栈、`conf/im.env` 里的那对逐字一致）：
+
+```bash
+# 首次可先登录 quay（公开镜像，任意免费账号即可抬高匿名限流；不登也能拉，只是可能被限）
+docker login quay.io
+
+docker compose -f minio/docker-compose.yml --env-file .env up -d
+docker compose -f minio/docker-compose.yml --env-file .env ps   # 等 minio 变 healthy 再起主栈
+```
+
+> ★ 为什么要先起它：主 compose 已去掉对 minio 的 `depends_on`（compose 无法跨两个项目做 service_healthy）。
+> 若 minio 没先起来，im-server 会因连不上桶 fail-fast 反复崩重启。忘了顺序就先 `docker compose down` 再按 8.1→8.3 重来。
+> minio 发布的 9000/9001 对宿主所有网卡开放（供 `host.docker.internal` 访问），**靠云安全组/防火墙限制来源**。
+
+### 8.2 登录 GHCR
 
 先登录 GHCR（**镜像是私有包才需要**；public 包可跳过）：
 
@@ -235,10 +259,12 @@ cp im.example.com-key.pem /opt/im-docker/certs/live/im.example.com/privkey.pem
 echo '<GitHub PAT（只需 read:packages）>' | docker login ghcr.io -u <你的用户名> --password-stdin
 ```
 
-拉起整栈——**这一条命令就够了，端口映射来自 compose 文件（80/443），命令里不用写**：
+### 8.3 拉起主栈
+
+拉起主栈——**这一条命令就够了，端口映射来自 compose 文件（80/443），命令里不用写**：
 
 ```bash
-docker compose pull              # 拉 5 个镜像（im-server + 依赖；全走 GHCR 则不碰 Docker Hub）
+docker compose pull              # 拉主栈 4 个镜像（im-server + mysql/redis/nginx；全走 GHCR 则不碰 Docker Hub）
 docker compose up -d             # 后台启动；首次要等 mysql initdb + 后端冷启，约 1~2 分钟
 docker compose ps                # 看状态：等 im-server 变 healthy（冷启 40~80s 正常）
 ```
@@ -318,7 +344,7 @@ sudo systemctl enable --now im-docker
 |---|---|
 | nginx 起不来、`nginx -t` 报证书文件不存在 | `certs/live/<域名>/` 缺 fullchain/privkey。跑 `bootstrap.sh` 补自签名，或按 §七 放真证书 |
 | 浏览器 `NET::ERR_CERT_COMMON_NAME_INVALID` | 证书 CN/SAN 与访问域名不一致（§七 末尾） |
-| im-server「起来→崩→无限重启」，日志同一句 | 连不上 minio/mysql：`depends_on` 未满足或 `conf/im.env` 里密码与 `.env` 不一致 |
+| im-server「起来→崩→无限重启」，日志同一句 | 连不上 minio/mysql。mysql 看 `depends_on` 健性；**minio 已移出主栈，先确认 §8.1 单独那套 healthy**（没先起就连不上桶 fail-fast）；或 `conf/im.env` 密码与 `.env` 不一致 |
 | 点通话/摄像头没反应、拿不到媒体权限 | 页面是 http（非安全上下文）。必须走 HTTPS（§〇） |
 | 日志目录 `data/logs` 空的 | 没挂卷或 uid 不是 1000（`bootstrap.sh` 第③步；必要时 `sudo chown -R 1000:1000 data/*`） |
 | 浏览器全量 403 `Invalid CORS request`，curl 正常 | 没启用外挂 CORS 配置（`app/extra/application-prod-extra.yml`，见指南 §8.5） |
@@ -344,9 +370,12 @@ bash scripts/bootstrap.sh
 
 # 4 真证书（生产）：certbot DNS-01 后拷进 certs/live/（见 §七 方案 A / 指南 §8.4）
 
-# 5 一键起（端口 80/443 由 compose 文件决定，命令行不写端口）
+# 5 先单独起 minio（主栈前，它不在主 compose 里）
+docker compose -f minio/docker-compose.yml --env-file .env up -d
+
+# 6 一键起主栈（端口 80/443 由 compose 文件决定，命令行不写端口）
 docker compose pull && docker compose up -d
 
-# 6 验证
+# 7 验证
 docker compose ps && bash scripts/health.sh && curl -kI https://im.example.com
 ```

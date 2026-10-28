@@ -16,12 +16,13 @@ hr() { printf '\n\033[1;36m—— %s ——————————————�
 
 hr "① 编排层：谁没 healthy"
 docker compose ps
+docker compose -f minio/docker-compose.yml --env-file .env ps   # minio 已移出主栈，单独一个项目，单独看
 echo "   → 有 unhealthy 就先看它的 logs（下一步），别直接 restart 反复试"
 
 hr "② 应用层：最近 10 分钟的报错"
 docker compose logs --since=10m --tail=120 im-server 2>&1 | tail -n 120
 echo "   → 常见三种：IllegalStateException（配置缺 / Bean 起不来）、Communications link failure（连不上 mysql）、"
-echo "     Unable to connect to MinIO（没等 minio healthy 或凭据不对，见 compose 里那条 depends_on）"
+echo "     Unable to connect to MinIO（minio 已移出主栈、无 depends_on：先确认 minio/docker-compose.yml 那套已 healthy，再查凭据/网络）"
 
 hr "③ 容器内自问：Actuator 是否 UP"
 # ★ 这里是 bash 不是 sh：/dev/tcp 是 bash 特性，而 eclipse-temurin 镜像的 /bin/sh 是 dash，dash 不认

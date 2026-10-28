@@ -30,14 +30,16 @@ backup_mysql() {
 }
 
 backup_minio() {
-  # MinIO 数据在命名卷 im-docker_minio-data 里（不是 ./data 下），所以要用一个临时容器挂卷来 tar。
+  # ★ minio 已移出主栈，是 minio/docker-compose.yml 单独一个项目（name: im-minio），
+  #   数据在命名卷 im-minio_minio-data 里（不是 ./data 下），所以用一个临时容器挂卷来 tar。
+  #   停/起都走它自己的 compose（带 --env-file .env），主栈目录里已没有 minio 服务，直接 `docker compose stop minio` 会报 no such service。
   # ★ 停容器再 tar：桶运行中打包会漏掉 in-flight 的分片上传，恢复出来的对象大小对不上。
   echo "== ② 对象存储 -> backup/minio-${STAMP}.tar.gz（会短暂停 minio 容器）"
-  docker compose stop minio
-  docker run --rm -v im-docker_minio-data:/data -v "$PWD/backup":/backup alpine \
+  docker compose -f minio/docker-compose.yml --env-file .env stop minio
+  docker run --rm -v im-minio_minio-data:/data -v "$PWD/backup":/backup alpine \
     tar czf "/backup/minio-${STAMP}.tar.gz" -C /data .
-  docker compose start minio
-  # 卷名 = <项目名>_minio-data，项目名是 compose 顶层的 name: im-docker。
+  docker compose -f minio/docker-compose.yml --env-file .env start minio
+  # 卷名 = <项目名>_minio-data，minio compose 顶层 name: im-minio。
   # 换了目录名又不想改 name 的话，用 docker volume ls 确认实际名字
 }
 

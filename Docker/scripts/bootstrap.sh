@@ -117,12 +117,14 @@ done
 case "$IM_SERVER_TAG" in *"local/im-server"*|*"localhost"*) warn "IM_SERVER_TAG 是本地构建 tag（$IM_SERVER_TAG）：compose 会走 build: 而不是 pull";; esac
 say "IM_SERVER_TAG=$IM_SERVER_TAG / IM_DOMAIN=$IM_DOMAIN"
 
-# ---------- 依赖镜像 owner 对齐：把 .env 里 MYSQL_IMAGE 等四行的 <owner小写> 换成真 owner ----------
-# 单一事实来源：owner 只在 IM_SERVER_TAG 填一次，这里灌进四个依赖镜像路径，免得五处各填各的写歪。
+# ---------- 依赖镜像 owner 对齐：把 .env 里 MYSQL_IMAGE 等三行的 <owner小写> 换成真 owner ----------
+# 单一事实来源：owner 只在 IM_SERVER_TAG 填一次，这里灌进三个依赖镜像路径，免得四处各填各的写歪。
+# ★ minio 不在此列：它已移出 CI/GHCR，.env 里 MINIO_IMAGE 直接写 quay.io/minio/minio（不含 <owner小写>），
+#   由 minio/docker-compose.yml 单独起，本循环用 case 匹配不到占位符、自然跳过它。
 say "①.5 依赖镜像来源（GHCR 镜像站）owner 对齐"
 DEPS_OWNER="$(printf '%s' "$IM_SERVER_TAG" | sed -n 's#^ghcr\.io/\([^/]*\)/.*#\1#p')"
 if [[ -n "$DEPS_OWNER" ]]; then
-  for k in MYSQL_IMAGE REDIS_IMAGE MINIO_IMAGE NGINX_IMAGE; do
+  for k in MYSQL_IMAGE REDIS_IMAGE NGINX_IMAGE; do
     v="$(read_env "$k")"
     [[ -n "$v" ]] || continue
     case "$v" in
@@ -133,7 +135,7 @@ if [[ -n "$DEPS_OWNER" ]]; then
     esac
   done
 else
-  warn "IM_SERVER_TAG 不是 ghcr.io 形式（$IM_SERVER_TAG），无法自动推导 owner：若 .env 里 MYSQL_IMAGE 等仍留着 <owner小写>，请手改成真 owner，或改回 Docker Hub 官方短名（mysql / redis / minio/minio / nginx）"
+  warn "IM_SERVER_TAG 不是 ghcr.io 形式（$IM_SERVER_TAG），无法自动推导 owner：若 .env 里 MYSQL_IMAGE 等仍留着 <owner小写>，请手改成真 owner，或改回 Docker Hub 官方短名（mysql / redis / nginx）"
 fi
 
 # ==============================================================================
@@ -249,10 +251,11 @@ else
   warn "本机没有 docker：跳过 compose 校验（这台只是写文件的机器时，属正常）"
 fi
 
-say "完成。下一步："
+say "完成。下一步（★ 先单独起 minio，再起主栈，否则 im-server 连不上桶会反复重启）："
 cat <<'EOF'
+  docker compose -f minio/docker-compose.yml --env-file .env up -d    # ① minio 不在主栈，先单独拉起并等它 healthy
   docker compose pull            # 从 CI 推的镜像拉；若 tag 是 local/... 就 docker compose build im-server
-  docker compose up -d           # 首次会等 mysql initdb（约 1~2 分钟）
+  docker compose up -d           # ② 主栈（mysql/redis/im-server/nginx），首次会等 mysql initdb（约 1~2 分钟）
   docker compose ps              # 全 healthy 再往外看
-  bash scripts/health.sh         # 五层检查（指南 §11.1）
+  bash scripts/health.sh         # 多层检查（指南 §11.1）
 EOF
