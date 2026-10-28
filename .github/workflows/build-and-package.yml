@@ -326,7 +326,10 @@ jobs:
         include:
           - { name: mysql, src: "docker.io/library/mysql:8.0" }
           - { name: redis, src: "docker.io/library/redis:7-alpine" }
-          - { name: minio, src: "docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z" }
+          # ★ minio 用 quay.io 而非 docker.io：MinIO 已于 2026-09-11 把 minio/minio 从 Docker Hub 整仓删除
+          #   （所有 tag 返回 404 / pull access denied，skopeo 源初始化即 fatal）。历史镜像只有
+          #   quay.io/minio/minio 还拉得到，且用的是同一个 tag，桶数据格式一致（不是升级，零行为变更）。
+          - { name: minio, src: "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z" }
           - { name: nginx, src: "docker.io/library/nginx:1.27-alpine" }
     steps:
       - name: 装 skopeo

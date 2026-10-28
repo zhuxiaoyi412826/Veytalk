@@ -90,7 +90,9 @@ services:
   minio:
     # ★ 不要把 latest 留成 latest：换成具体 RELEASE 标签（docker inspect 看当前跑的是哪个），
     #   否则回滚失去目标，而且某天拉下来会发现桶数据格式不兼容
-    image: ${MINIO_IMAGE:-minio/minio}:${MINIO_TAG:-RELEASE.2025-04-22T22-12-26Z}
+    # ★ 默认走 GHCR 镜像站（MINIO_IMAGE，由 CI 从 quay 同步）；兜底用 quay.io/minio/minio 而非 minio/minio——
+    #   MinIO 已于 2026-09-11 把 minio/minio 从 Docker Hub 整仓删除，那个短名现在是 404
+    image: ${MINIO_IMAGE:-quay.io/minio/minio}:${MINIO_TAG:-RELEASE.2025-04-22T22-12-26Z}
     container_name: im-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]

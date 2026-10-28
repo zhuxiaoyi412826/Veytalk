@@ -473,14 +473,14 @@ docker build -t local/im-server:1.0.0 .
 ### 4.3 镜像体积 & compose 栈到底涉及几个镜像
 
 **先分清一个容易混的点：上面两条路线构建的都是 `im-server` 这一个单一镜像（只装后端 Java 应用），不是「把整个项目打成一个镜像」。**
-`docker compose up` 起来的是**一栈 5 个镜像**，其中只有 `im-server` 由本仓库构建并推 GHCR，其余 4 个都是**官方现成镜像**，`docker compose pull` 直接从 Docker Hub 拉，不经过本项目的 Dockerfile：
+`docker compose up` 起来的是**一栈 5 个镜像**，其中只有 `im-server` 由本仓库构建并推 GHCR，其余 4 个都是**官方现成镜像**，本项目的 Dockerfile 不参与它们的构建（CI 的 `mirror-images` job 会把这 4 个原样搬到 GHCR `im-deps/*` 供 `compose pull`；注意 minio 的官方源现为 quay.io，Docker Hub 的 `minio/minio` 已于 2026-09-11 整仓删除）：
 
 | 服务 | 镜像 | 来源 | 谁负责构建 |
 |---|---|---|---|
 | `im-server` | `ghcr.io/<owner>/im-server:<tag>` | **本仓库 Dockerfile 构建** | CI（build-and-package.yml 的 docker-image job） |
 | `mysql` | `mysql:8.0` | Docker Hub 官方 | 不构建，直接 pull |
 | `redis` | `redis:7-alpine` | Docker Hub 官方 | 不构建，直接 pull |
-| `minio` | `minio/minio:RELEASE.*` | Docker Hub 官方 | 不构建，直接 pull |
+| `minio` | `quay.io/minio/minio:RELEASE.*` | **quay.io**（Docker Hub `minio/minio` 已于 2026-09-11 删除） | 不构建，直接 pull |
 | `nginx` | `nginx:1.27-alpine` | Docker Hub 官方 | 不构建，直接 pull |
 
 （compose 里还留了 `node`/`coturn` 两个注释掉的服务，放开直播媒体面/TURN 时才多拉对应镜像。）
@@ -504,7 +504,7 @@ docker build -t local/im-server:1.0.0 .
 | `im-server` | 330–360 MB | 120–160 MB | 本仓库唯一自建镜像（拆解见上表） |
 | `mysql:8.0` | 约 600 MB | 约 160 MB | 官方，**栈里最大头** |
 | `redis:7-alpine` | 约 45 MB | 约 15 MB | 官方 alpine 版，很小 |
-| `minio/minio:RELEASE.*` | 约 60–150 MB | 约 40 MB | 官方（Go 静态二进制 + 精简底） |
+| `quay.io/minio/minio:RELEASE.*` | 约 60–150 MB | 约 40 MB | 官方（Go 静态二进制 + 精简底），源在 quay.io |
 | `nginx:1.27-alpine` | 约 50 MB | 约 15 MB | 官方 alpine 版 |
 | **整栈合计** | **约 1.1–1.2 GB** | **约 350–400 MB** | 首次 `compose pull` 落盘量级 |
 
@@ -624,7 +624,7 @@ services:
 
   # ---------------------------------------------------------------- MinIO
   minio:
-    image: minio/minio:latest        # ★ 生产请把 latest 换成具体 RELEASE 标签（docker inspect 看当前跑的是哪个），latest 让回滚失去意义
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z   # ★ 用具体 RELEASE 标签（latest 让回滚失去意义）；MinIO 已从 Docker Hub 删除，官方镜像现走 quay.io
     container_name: im-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]

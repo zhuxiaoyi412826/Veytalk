@@ -145,7 +145,7 @@ openssl rand -base64 24 | tr -d '=+/\n' | head -c 24; echo
 **（可选）让依赖镜像也不碰 Docker Hub**：国内服务器拉 Docker Hub 慢/失败时，CI 的 `mirror-images` job
 会把 mysql/redis/minio/nginx 原样搬到 `ghcr.io/<owner小写>/im-deps/*`。`.env` 里这四行默认就是 GHCR 路径，
 `<owner小写>` 占位符 **不用手改**——`bootstrap.sh` 会从 `IM_SERVER_TAG` 里取同一个 owner 自动回填。
-若你的机器能正常访问 Docker Hub，也可把值改回官方短名：`mysql` / `redis` / `minio/minio` / `nginx`。
+若你的机器能正常访问 Docker Hub，也可把值改回官方直连：`mysql` / `redis` / `nginx` 用 Docker Hub 短名；但 **`minio` 必须写 `quay.io/minio/minio`**——MinIO 已于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓删除，那个短名现在拉会报 404 / access denied（同一个 `RELEASE.2025-04-22T22-12-26Z` 在 quay.io 上仍拉得到）。
 
 ---
 
