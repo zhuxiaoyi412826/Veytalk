@@ -47,6 +47,10 @@ on:
         description: '是否构建官网 im-website（纯展示站，不构建就沿用服务器上现有的）'
         type: boolean
         default: true
+      mirror_images:
+        description: '同步 mysql/redis/minio/nginx 官方镜像到 GHCR 的 im-deps（首次部署或升级依赖版本时勾；已同步则按 digest 秒跳过）'
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -306,6 +310,53 @@ jobs:
       - name: 记下这次要部署的精确 ref
         id: full
         run: echo "ref=${{ needs.meta.outputs.image }}:${{ needs.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------- 依赖镜像站（把官方镜像搬到 GHCR，目标机不碰 Docker Hub）
+  # ★ 为什么需要：国内服务器 docker compose pull 拉 Docker Hub 经常超时/失败，而 mysql/redis/minio/nginx
+  #   是官方镜像、本仓库不构建它们。用 skopeo 原样（仅 linux/amd64）复制到 ghcr.io/<owner>/im-deps/*，
+  #   compose 默认就改从 GHCR 拉（见 .env.example 的 MYSQL_IMAGE 等），实现整栈一键。
+  mirror-images:
+    needs: meta
+    # PR 不推（push=false）；main/tag 总跑，手动跑受 mirror_images 勾选控制；内部按 digest 比对，已同步就秒跳过
+    if: needs.meta.outputs.push == 'true' && (github.event_name != 'workflow_dispatch' || inputs.mirror_images)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: mysql, src: "docker.io/library/mysql:8.0" }
+          - { name: redis, src: "docker.io/library/redis:7-alpine" }
+          - { name: minio, src: "docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z" }
+          - { name: nginx, src: "docker.io/library/nginx:1.27-alpine" }
+    steps:
+      - name: 装 skopeo
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 同步 ${{ matrix.name }} → ghcr.io/…/im-deps（digest 相同则跳过）
+        env:
+          SRC: ${{ matrix.src }}
+          NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          TAG="${SRC##*:}"
+          DEST="ghcr.io/${OWNER}/im-deps/${NAME}:${TAG}"
+          # 幂等：--override-arch 是原样搬那个 amd64 manifest，digest 不变 → 源与目标一致就不重传
+          SRC_D="$(skopeo inspect --override-os linux --override-arch amd64 --format '{{.Digest}}' "docker://${SRC}" 2>/dev/null || true)"
+          DST_D="$(skopeo inspect --format '{{.Digest}}' "docker://${DEST}" 2>/dev/null || true)"
+          if [[ -n "$SRC_D" && "$SRC_D" == "$DST_D" ]]; then
+            echo "✅ ${DEST} 已是最新（digest ${SRC_D}），跳过"; exit 0
+          fi
+          echo "⬇ ${SRC}  →  ${DEST}"
+          skopeo copy --override-os linux --override-arch amd64 --retry-times 3 \
+            "docker://${SRC}" "docker://${DEST}"
 
   # ---------------------------------------------------------------- 部署到开放机
   deploy:

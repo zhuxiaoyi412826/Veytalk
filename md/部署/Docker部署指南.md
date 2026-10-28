@@ -470,6 +470,86 @@ docker build -t local/im-server:1.0.0 .
 > 与《服务器部署指南》§2.3「不要把 Maven 装到服务器上」的口径一致；
 > 路线 B 只在「没有独立构建机」时用。★ 无论哪条，**服务器都不该装 Maven**——构建发生在容器里，不进宿主机。
 
+### 4.3 镜像体积 & compose 栈到底涉及几个镜像
+
+**先分清一个容易混的点：上面两条路线构建的都是 `im-server` 这一个单一镜像（只装后端 Java 应用），不是「把整个项目打成一个镜像」。**
+`docker compose up` 起来的是**一栈 5 个镜像**，其中只有 `im-server` 由本仓库构建并推 GHCR，其余 4 个都是**官方现成镜像**，`docker compose pull` 直接从 Docker Hub 拉，不经过本项目的 Dockerfile：
+
+| 服务 | 镜像 | 来源 | 谁负责构建 |
+|---|---|---|---|
+| `im-server` | `ghcr.io/<owner>/im-server:<tag>` | **本仓库 Dockerfile 构建** | CI（build-and-package.yml 的 docker-image job） |
+| `mysql` | `mysql:8.0` | Docker Hub 官方 | 不构建，直接 pull |
+| `redis` | `redis:7-alpine` | Docker Hub 官方 | 不构建，直接 pull |
+| `minio` | `minio/minio:RELEASE.*` | Docker Hub 官方 | 不构建，直接 pull |
+| `nginx` | `nginx:1.27-alpine` | Docker Hub 官方 | 不构建，直接 pull |
+
+（compose 里还留了 `node`/`coturn` 两个注释掉的服务，放开直播媒体面/TURN 时才多拉对应镜像。）
+
+**im-server 单镜像体积（估算，以实测为准）**：
+
+| 组成 | 未压缩 | 依据 |
+|---|---|---|
+| 底座 `eclipse-temurin:21-jre`（Ubuntu 24.04 + JRE21） | 约 250–280 MB | 官方 JRE 版，比 JDK 版小近一半 |
+| `im-server.jar`（Spring Boot fat jar，含全部依赖） | 约 73 MB | 即 CI Artifacts 里那个 `im-server-jar`（实测 72.7 MB） |
+| `/app` 下几个空目录 + ENV/ENTRYPOINT | 可忽略 | 运行时被 bind mount 覆盖 |
+| **合计** | **约 330–360 MB**（未压缩） | GHCR 存/`docker pull` 传的是压缩态，约 **120–160 MB**（jar 已是 zip 压不动多少） |
+
+> 整栈首次 `docker compose pull` 落盘远大于此（光 `mysql:8.0` 未压缩就近 600 MB，minio/redis/nginx 各几十到一两百 MB），
+> 但那些是官方镜像、与本项目构建无关，本仓库只对该体积负责。**别为省体积换 `-alpine` 底座**：理由见 4.1 顶部注释（busybox/dash 不认 `/dev/tcp`，健康检查会静默失效）。
+
+**整个 compose 栈的体积估算（5 个服务，均为约值，以实测为准）：**
+
+| 服务 / 镜像 | 未压缩（约） | 压缩 pull（约） | 说明 |
+|---|---|---|---|
+| `im-server` | 330–360 MB | 120–160 MB | 本仓库唯一自建镜像（拆解见上表） |
+| `mysql:8.0` | 约 600 MB | 约 160 MB | 官方，**栈里最大头** |
+| `redis:7-alpine` | 约 45 MB | 约 15 MB | 官方 alpine 版，很小 |
+| `minio/minio:RELEASE.*` | 约 60–150 MB | 约 40 MB | 官方（Go 静态二进制 + 精简底） |
+| `nginx:1.27-alpine` | 约 50 MB | 约 15 MB | 官方 alpine 版 |
+| **整栈合计** | **约 1.1–1.2 GB** | **约 350–400 MB** | 首次 `compose pull` 落盘量级 |
+
+> 上表只算镜像本身，**不含数据卷**（`mysql-data`/`redis-data`/minio 存储等运行时才增长）。若把 §五 里注释的 `node`（直播媒体面）与 `coturn`（TURN）放开，再各加几十到上百 MB。
+
+**整栈精确实测（拉完/起完后跑，别信估算）：**
+
+```bash
+# 列出本 compose 会用到的镜像及其 SIZE（未拉取的显示 0）
+docker compose images
+# 看真实落盘（按服务名过滤）
+docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' | grep -E 'im-server|mysql|redis|minio|nginx'
+# 本机全部镜像/容器/卷的总占用概览
+docker system df
+```
+
+**im-server 单镜像精确实测（拉完/起完后跑，别信估算）：**
+
+```bash
+# 本地已 build 的镜像未压缩总字节数
+docker image inspect local/im-server:1.0.0 --format '{{.Size}}'
+# 逐层看谁占地方（应就是 base + jar 两块）
+docker history --human local/im-server:1.0.0
+# GHCR 上压缩后的真实传输体积（读 manifest 各层 size 求和，public 包无需登录）
+docker buildx imagetools inspect ghcr.io/<owner>/im-server:<tag> --raw \
+  | grep -o '"size":[0-9]*' | awk -F: '{s+=$2} END{printf "%.1f MB\n", s/1024/1024}'
+```
+
+> CI 已在 build-push-action 里设 `provenance: false`（见 §10.5），省掉默认 attestation 那两条 `unknown/unknown` 记录，GHCR 版本列表更干净（不影响体积本身）。
+
+### 4.4 整栈一键：把依赖镜像也扫到 GHCR（目标机不碰 Docker Hub）
+
+国内服务器 `docker compose pull` 拉 Docker Hub 经常超时/失败，而 mysql/redis/minio/nginx 是官方镜像、本仓库不构建它们。所以让 CI 把这四个也镜像到 GHCR，compose 默认改从 GHCR 拉，实现整栈一键。四处改动配合：
+
+1. **CI**（`build-and-package.yml` 的 `mirror-images` job）：用 `skopeo copy --override-arch amd64` 把四个官方镜像原样复制到 `ghcr.io/<owner>/im-deps/{mysql,redis,minio,nginx}:<同官方 tag>`；先 `skopeo inspect` 比 digest，已同步就秒跳过，不会每次 push 重传 mysql 那 ~160 MB。PR 不跑；main/tag 总跑；手动跑受 `mirror_images` 勾选控制。
+2. **compose**：四个依赖镜像改为 `${MYSQL_IMAGE:-mysql}:${MYSQL_TAG:-8.0}` 这种「变量 + Docker Hub 默认值」写法（minio 默认 `minio/minio`）。**不设变量时行为与以前完全一致**，向后兼容。
+3. **`.env.example`**：把 `MYSQL_IMAGE`/`REDIS_IMAGE`/`MINIO_IMAGE`/`NGINX_IMAGE` 默认值填成 `ghcr.io/<owner小写>/im-deps/*`，并新增 `MINIO_TAG`。
+4. **`bootstrap.sh`**（①.5 步）：从 `IM_SERVER_TAG` 里提取 owner，自动回填上面四行的 `<owner小写>`——**owner 只在一处填，五处不会各写各的**。
+
+部署侧流程不变（§二）：`cp .env.example .env` → 填密码与 `IM_SERVER_TAG` 的真 owner → `bash scripts/bootstrap.sh`（自动对齐依赖镜像 owner）→ `docker compose pull && docker compose up -d`，全程只访问 GHCR。
+
+> ★ **首次部署前需先有镜像站**：`im-deps/*` 是由 CI 同步的。若 GHCR 上还没有，先手动跑一次 Actions（Run workflow，勾上 `mirror_images`）把四个镜像推上去；或者临时把 `.env` 里那四个 `*_IMAGE` 改回官方短名先走 Docker Hub。
+> ★ **想回落 Docker Hub**：删掉 `.env` 里那四行 `*_IMAGE`（或改回 `mysql`/`redis`/`minio/minio`/`nginx`）即可，compose 默认值就是官方短名。
+> ★ **升级依赖版本**：改 `.env` 里对应的 `*_TAG`（如 `MYSQL_TAG=8.4`）**同时**改 `mirror-images` job 矩阵里的 `src` tag，两边一致；下次 CI 跑就会把新版本同步上去。
+
 ---
 
 ## 五、docker-compose.yml 全文
@@ -1160,6 +1240,7 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 | `build-jar` | `setup-java@temurin 21` + Maven 缓存 → `mvn -B -DskipTests clean package` → 验 MANIFEST 里的 **`Start-Class`**（★ 不是 `Main-Class`，见下面坑单最后一条） | artifact `im-server-jar-<sha>`（已用 `root:` 收窄到只剩 jar）+ `im-remote-agent-jar-<sha>` |
 | `build-web` | 矩阵跑 `im-ui` / `im-admin-ui` / `im-website`：先过一道 **lockfile 自检** → `npm ci` → `npm run build` | artifact `web-<站>-<sha>`，里面就是干净的 `dist/**` |
 | `docker-image` | download jar 到 `Docker/app` → buildx + metadata → build **并 push 到 GHCR** | `ghcr.io/<owner>/im-server:<版本>` / `:latest` / `:sha-<短sha>` |
+| `mirror-images` | 用 **skopeo** 把 `mysql`/`redis`/`minio`/`nginx` 四个官方镜像原样（仅 linux/amd64）复制到 GHCR；先 `skopeo inspect` 比 digest，已同步就秒跳过不重传 | `ghcr.io/<owner>/im-deps/{mysql,redis,minio,nginx}:<同官方 tag>`（让目标机 `compose pull` 不碰 Docker Hub） |
 | `deploy` | **只在手动触发且勾了 `deploy` 时跑**：`workflow_dispatch`。把三份 dist 打包走 ssh 覆盖到服务器 `web/`，再改远端 `.env` 的 `IM_SERVER_TAG` + `docker compose pull/up -d --no-deps --wait im-server` + 在部署机上 curl 探活 | —— |
 
 需要在仓库 Settings → Secrets and variables → Actions 里配的（**推 GHCR 不需要任何 Secret**，用内置 `GITHUB_TOKEN` 的 `packages: write` 权限）：

@@ -8,8 +8,9 @@
 #   1) 把 Docker/ 整个目录拷到服务器 /opt/im-docker（compose 里的相对路径都以该目录为基准）
 #   2) cp .env.example .env && 填三份密码            ← compose 自己插值用的
 #   3) bash scripts/bootstrap.sh                     ← 建目录、摆权限、从 example 生成 im.conf / im.env
+#      （并把 .env 里依赖镜像的 <owner小写> 从 IM_SERVER_TAG 自动回填，实现全程不碰 Docker Hub）
 #   4) docker compose config -q                      ← 先静态校验（插值、缩进、未声明的卷）
-#   5) docker compose pull im-server && docker compose up -d
+#   5) docker compose pull && docker compose up -d    ← 一次拉起整栈（5 个服务）
 #
 # ★ 三条不能破的约束，改这个文件前先读 Docker部署指南.md 第〇节：
 #   ① 单实例：不要 --scale im-server=N，不要加 deploy.replicas（WS 扇出只认本进程连接表，
@@ -24,7 +25,8 @@ name: im-docker            # 卷名前缀（im-docker_mysql-data）。改了等�
 services:
   # ---------------------------------------------------------------- MySQL
   mysql:
-    image: mysql:${MYSQL_TAG:-8.0}
+    # ★ 默认走 CI 的 GHCR 镜像站（.env 里 MYSQL_IMAGE 指定）；删掉该变量则回落 Docker Hub 官方 mysql
+    image: ${MYSQL_IMAGE:-mysql}:${MYSQL_TAG:-8.0}
     container_name: im-mysql
     restart: unless-stopped
     command:
@@ -63,7 +65,7 @@ services:
 
   # ---------------------------------------------------------------- Redis
   redis:
-    image: redis:${REDIS_TAG:-7-alpine}
+    image: ${REDIS_IMAGE:-redis}:${REDIS_TAG:-7-alpine}
     container_name: im-redis
     restart: unless-stopped
     # ★ 镜像没有「从环境变量读密码」这回事，只能走命令行；命令行会出现在 docker inspect 里，
@@ -88,7 +90,7 @@ services:
   minio:
     # ★ 不要把 latest 留成 latest：换成具体 RELEASE 标签（docker inspect 看当前跑的是哪个），
     #   否则回滚失去目标，而且某天拉下来会发现桶数据格式不兼容
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ${MINIO_IMAGE:-minio/minio}:${MINIO_TAG:-RELEASE.2025-04-22T22-12-26Z}
     container_name: im-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
@@ -164,7 +166,7 @@ services:
 
   # ---------------------------------------------------------------- Nginx（三站静态 + /api /ws 反代 + 直播媒体面）
   nginx:
-    image: nginx:${NGINX_TAG:-1.27-alpine}
+    image: ${NGINX_IMAGE:-nginx}:${NGINX_TAG:-1.27-alpine}
     container_name: im-nginx
     restart: unless-stopped
     depends_on:

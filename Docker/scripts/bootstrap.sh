@@ -117,6 +117,25 @@ done
 case "$IM_SERVER_TAG" in *"local/im-server"*|*"localhost"*) warn "IM_SERVER_TAG 是本地构建 tag（$IM_SERVER_TAG）：compose 会走 build: 而不是 pull";; esac
 say "IM_SERVER_TAG=$IM_SERVER_TAG / IM_DOMAIN=$IM_DOMAIN"
 
+# ---------- 依赖镜像 owner 对齐：把 .env 里 MYSQL_IMAGE 等四行的 <owner小写> 换成真 owner ----------
+# 单一事实来源：owner 只在 IM_SERVER_TAG 填一次，这里灌进四个依赖镜像路径，免得五处各填各的写歪。
+say "①.5 依赖镜像来源（GHCR 镜像站）owner 对齐"
+DEPS_OWNER="$(printf '%s' "$IM_SERVER_TAG" | sed -n 's#^ghcr\.io/\([^/]*\)/.*#\1#p')"
+if [[ -n "$DEPS_OWNER" ]]; then
+  for k in MYSQL_IMAGE REDIS_IMAGE MINIO_IMAGE NGINX_IMAGE; do
+    v="$(read_env "$k")"
+    [[ -n "$v" ]] || continue
+    case "$v" in
+      *"<owner小写>"*)
+        set_kv .env "$k" "${v//<owner小写>/$DEPS_OWNER}"
+        say "$k ← $DEPS_OWNER"
+        ;;
+    esac
+  done
+else
+  warn "IM_SERVER_TAG 不是 ghcr.io 形式（$IM_SERVER_TAG），无法自动推导 owner：若 .env 里 MYSQL_IMAGE 等仍留着 <owner小写>，请手改成真 owner，或改回 Docker Hub 官方短名（mysql / redis / minio/minio / nginx）"
+fi
+
 # ==============================================================================
 say "② 建目录与权限"
 mkdir -p data/logs data/upload-tmp data/files data/knowledge data/live \

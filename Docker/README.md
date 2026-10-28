@@ -6,6 +6,9 @@
 
 > ★ **只想速查「docker 部署 / nginx 前端 / 打包 / 域名」这四件事**，看 [`开发必备.txt`](开发必备.txt)，那一页是本目录的结论版。
 
+> ★ **要在 Ubuntu 服务器上跑 HTTPS 部署**（GHCR 镜像 + `docker compose` 一键 + 80/443 + 三站域名分流 + 证书），
+> 照着 [`../md/部署/Ubuntu镜像HTTPS部署教程.md`](../md/部署/Ubuntu镜像HTTPS部署教程.md) 从上往下做即可，那份是本目录的可执行操作流程版。
+
 > ★ **这台写文件的机器上不执行任何构建与部署**。
 > jar、前端 dist、镜像都由 GitHub Actions 在 runner 上产出（[`.github/workflows/build-and-package.yml`](../.github/workflows/build-and-package.yml)），
 > 部署由 Actions 通过 SSH 推到那台开放机，或者你手工把本目录拷过去执行下面的步骤。
