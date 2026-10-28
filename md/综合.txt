@@ -102,3 +102,12 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 
 
+cd Docker
+cp .env.example .env && chmod 600 .env
+systemctl is-active minio || sudo systemctl start minio   # 二进制 minio，minioadmin/minioadmin
+docker login ghcr.io                                      # 私有包才需要；PAT 只需 read:packages
+bash scripts/bootstrap.sh                                  # 生成 conf/im.env、nginx 配置、自签证书
+docker compose pull                                        # ★ 先拉，避开本地 build
+docker compose up -d
+docker compose ps                                          # 等 im-server / nginx healthy
+bash scripts/health.sh

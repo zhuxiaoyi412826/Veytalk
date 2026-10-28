@@ -1,15 +1,18 @@
 # ==============================================================================
 # MinIO —— 独立部署栈（不在主 docker-compose.yml 里）
 #
-# 为什么单拎出来：MinIO 于 2026-09-11 把 minio/minio 从 Docker Hub 整仓删除（404/denied），
-# quay.io/minio/minio 又拒 GitHub Actions runner 那批共享 IP 的匿名拉取（401）——CI 的
-# mirror-images job 把不到源，也就同步不到 GHCR。既然流水线这条路走不通，minio 就脱离
-# 流水线、在部署机上直接拉 quay.io 单独起一个容器。im-server 经 host.docker.internal:9000 连它。
+# ★★★ 首选不是这份！ MinIO 官方镜像已于 2026-09-11 从 Docker Hub 整仓下架（minio/minio 拉取 404/denied），
+#   quay.io/minio/minio 又拒共享 IP 的匿名拉（401），因此本项目部署口径统一改为【用官方二进制跑 MinIO】：
+#   下载 https://dl.min.io/server/minio/release/linux-amd64/minio + systemd 常驻，不依赖任何镜像仓库。
+#   步骤见 md/MinIO部署指南.md 第三/四节与 md/部署/Ubuntu镜像HTTPS部署教程.md §8.1 方案一。
+#   本文件仅作“部署机能连上 quay 时”的可选退路保留。
+#
+# 为什么单拎出来（而非回到主栈）：上面那两段原因使 minio 无法进 CI 镜像同步，im-server 经 host.docker.internal:9000 连它。
 #
 # 用法（★ 在主栈的同一台机器上，且务必在主栈 up 之前先起好本栈）：
 #   1) cd 到 Docker/ 目录（与主 compose 同一个 .env，凭据共用）
 #   2) 若从未登录过 quay：docker login quay.io
-#      （公开镜像用任意免费 quay 账号登录即可抬高匿名限流；不登录常常 429/401）
+#      （公开镜像用任意登录身份即可抬高匿名限流；不登录常常 429/401）
 #   3) docker compose -f minio/docker-compose.yml --env-file .env up -d
 #   4) docker compose -f minio/docker-compose.yml --env-file .env ps   ← 确认 healthy 再起主栈
 #

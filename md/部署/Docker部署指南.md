@@ -475,7 +475,8 @@ docker build -t local/im-server:1.0.0 .
 **先分清一个容易混的点：上面两条路线构建的都是 `im-server` 这一个单一镜像（只装后端 Java 应用），不是「把整个项目打成一个镜像」。**
 `docker compose up` 起来的是**主栈 4 个镜像**（mysql/redis/im-server/nginx），其中只有 `im-server` 由本仓库构建并推 GHCR，其余 3 个都是**官方现成镜像**，本项目的 Dockerfile 不参与它们的构建（CI 的 `mirror-images` job 会把这 3 个原样搬到 GHCR `im-deps/*` 供 `compose pull`）：
 
-> ★ **minio 不在这个表里、也不属主栈**：MinIO 于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓删除，`quay.io/minio/minio` 又拒 GitHub runner 共享 IP 的匿名拉（401），CI 镜像同步这条路走不通。因此 minio 已从 `mirror-images` 矩阵摘出，改由部署机用 `minio/docker-compose.yml` 直连 quay 单独拉起（首次先 `docker login quay.io`），im-server 经 `host.docker.internal:9000` 连它。
+> ★ **minio 不在这个表里、也不属主栈**：MinIO 于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓下架（拉取 404/denied），`quay.io/minio/minio` 又拒 GitHub runner 共享 IP 的匿名拉（401），CI 镜像同步这条路走不通。因此 minio 已从 `mirror-images` 矩阵摘出。
+> **★ 首选直接用官方二进制跑 minIO**（`https://dl.min.io/server/minio/release/linux-amd64/minio` + systemd 常驻，不依赖任何镜像仓库），见 [`MinIO部署指南.md`](../MinIO部署指南.md) 第三/四节；im-server 经 `host.docker.internal:9000` 连它。仓库里 `minio/docker-compose.yml` 仅保留作“能连上 quay 时”的可选退路。
 
 | 服务 | 镜像 | 来源 | 谁负责构建 |
 |---|---|---|---|

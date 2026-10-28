@@ -20,7 +20,7 @@
 | 路径 | 进版本库 | 作用 |
 |---|---|---|
 | `docker-compose.yml` | ✅ | 四个必选服务（mysql / redis / im-server / nginx）+ 两个注释掉的选装（live-retention / coturn）。★ minio 不在此栈，见下一行 |
-| `minio/docker-compose.yml` | ✅ | 单独部署的 MinIO（因 MinIO 2026-09-11 从 Docker Hub 删除、quay 又拒 CI 匿名拉，CI 镜像同步搬不动它，改部署机直连 quay 起）；发布宿主 9000/9001 |
+| `minio/docker-compose.yml` | ✅ | **可选退路**：单独部署的 MinIO 容器。★ 因官方镜像 2026-09-11 从 Docker Hub 下架、quay 又拒匿名拉，**首选改用官方二进制+systemd**（见 `md/MinIO部署指南.md` 三/四节）；本件仅当部署机能连上 quay 时用。发布宿主 9000/9001 |
 | `.env.example` | ✅ | compose 层参数模板：镜像 tag、密码、域名。`cp .env.example .env` 后填 |
 | `conf/im.env.example` | ✅ | 应用层环境变量模板：37 个键，逐个与 `application.yml` 的 `${}` 占位符对过账 |
 | `app/Dockerfile` | ✅ | **路线 A**（推荐）：只装运行时，jar 由 CI 放进 `app/` |
@@ -53,8 +53,10 @@ cp .env.example .env && chmod 600 .env && vi .env
 # 4. 编排：建目录、摆 uid 1000 权限、由 example 生成 im.conf / application-prod-extra.yml / conf/im.env
 bash scripts/bootstrap.sh
 
-# 5. 先单独起 minio（主栈前，它不在 docker-compose.yml 里）
-docker compose -f minio/docker-compose.yml --env-file .env up -d
+# 5. 先起 minio（主栈前，它不在 docker-compose.yml 里）
+#    ★ 首选官方二进制+systemd（镜像已下架，见 md/MinIO部署指南.md 三/四节）：
+sudo systemctl enable --now minio
+#    退路（能连 quay 时）：docker compose -f minio/docker-compose.yml --env-file .env up -d
 
 # 6. 拉主栈镜像并起来（首次要等 mysql initdb + 后端冷启，约 2 分钟）
 docker compose pull
