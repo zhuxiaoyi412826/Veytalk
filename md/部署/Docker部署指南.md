@@ -41,7 +41,7 @@
 | `redis` | `redis:7-alpine` | 会话 / 权限缓存 / 直播与通话瞬时态 | ❌ 不发布 |
 | `im-server` | 本目录 `Dockerfile` 构建 | 唯一的 Java 进程（HTTP + WebSocket + 定时任务） | ❌ 不发布（只给 nginx 反代） |
 | `nginx` | `nginx:1.27-alpine` | 三份前端静态站 + `/api` `/ws` 反代 + 直播推流/播放口 | ✅ `80` `443`，按需 `8088` |
-| `minio` | `quay.io/minio/minio` | 对象存储（文件、头像、附件）——**★ 已移出主栈，由 `minio/docker-compose.yml` 单独起** | ✅ 单独发布 `9000` `9001`（供 `host.docker.internal`，靠防火墙限源） |
+| `minio` | 官方二进制（非镜像） | 对象存储（文件、头像、附件）——**★ 不在主栈、也不进 CI；用 systemd 跑官方二进制，见 §8.1** | ✅ 宿主监听 `9000` `9001`（供 `host.docker.internal`，需放行 docker 子网并限源） |
 | `live-retention` | `node:22-alpine` | **只在开直播时**要：按保留期删回放分片目录 | ❌ |
 | `coturn` | `coturn/coturn` | **只在公网跨 NAT 通话时**要：STUN/TURN 中继 | ✅ `3478` + 中继端口段 |
 
@@ -476,7 +476,7 @@ docker build -t local/im-server:1.0.0 .
 `docker compose up` 起来的是**主栈 4 个镜像**（mysql/redis/im-server/nginx），其中只有 `im-server` 由本仓库构建并推 GHCR，其余 3 个都是**官方现成镜像**，本项目的 Dockerfile 不参与它们的构建（CI 的 `mirror-images` job 会把这 3 个原样搬到 GHCR `im-deps/*` 供 `compose pull`）：
 
 > ★ **minio 不在这个表里、也不属主栈**：MinIO 于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓下架（拉取 404/denied），`quay.io/minio/minio` 又拒 GitHub runner 共享 IP 的匿名拉（401），CI 镜像同步这条路走不通。因此 minio 已从 `mirror-images` 矩阵摘出。
-> **★ 首选直接用官方二进制跑 minIO**（`https://dl.min.io/server/minio/release/linux-amd64/minio` + systemd 常驻，不依赖任何镜像仓库），见 [`MinIO部署指南.md`](../MinIO部署指南.md) 第三/四节；im-server 经 `host.docker.internal:9000` 连它。仓库里 `minio/docker-compose.yml` 仅保留作“能连上 quay 时”的可选退路。
+> **★ 统一用官方二进制跑 minIO**（`https://dl.min.io/server/minio/release/linux-amd64/minio` + systemd 常驻，不依赖任何镜像仓库），见 [`MinIO部署指南.md`](../MinIO部署指南.md) 第三/四节与本文 §8.1；im-server 经 `host.docker.internal:9000` 连它。（已不再保留容器退路：`minio/docker-compose.yml` 已删除。）
 
 | 服务 | 镜像 | 来源 | 谁负责构建 |
 |---|---|---|---|
@@ -540,12 +540,12 @@ docker buildx imagetools inspect ghcr.io/<owner>/im-server:<tag> --raw \
 
 ### 4.4 整栈一键：把依赖镜像也扫到 GHCR（目标机不碰 Docker Hub）
 
-国内服务器 `docker compose pull` 拉 Docker Hub 经常超时/失败，而 mysql/redis/minio/nginx 是官方镜像、本仓库不构建它们。所以让 CI 把这四个也镜像到 GHCR，compose 默认改从 GHCR 拉，实现整栈一键。四处改动配合：
+国内服务器 `docker compose pull` 拉 Docker Hub 经常超时/失败，而 mysql/redis/nginx 是官方镜像、本仓库不构建它们。所以让 CI 把这三个也镜像到 GHCR，compose 默认改从 GHCR 拉，实现整栈一键（minio 不在其中，走宿主二进制）。四处改动配合：
 
-1. **CI**（`build-and-package.yml` 的 `mirror-images` job）：用 `skopeo copy --override-arch amd64` 把四个官方镜像原样复制到 `ghcr.io/<owner>/im-deps/{mysql,redis,minio,nginx}:<同官方 tag>`；先 `skopeo inspect` 比 digest，已同步就秒跳过，不会每次 push 重传 mysql 那 ~160 MB。PR 不跑；main/tag 总跑；手动跑受 `mirror_images` 勾选控制。
-2. **compose**：四个依赖镜像改为 `${MYSQL_IMAGE:-mysql}:${MYSQL_TAG:-8.0}` 这种「变量 + Docker Hub 默认值」写法（minio 默认 `minio/minio`）。**不设变量时行为与以前完全一致**，向后兼容。
-3. **`.env.example`**：把 `MYSQL_IMAGE`/`REDIS_IMAGE`/`MINIO_IMAGE`/`NGINX_IMAGE` 默认值填成 `ghcr.io/<owner小写>/im-deps/*`，并新增 `MINIO_TAG`。
-4. **`bootstrap.sh`**（①.5 步）：从 `IM_SERVER_TAG` 里提取 owner，自动回填上面四行的 `<owner小写>`——**owner 只在一处填，五处不会各写各的**。
+1. **CI**（`build-and-package.yml` 的 `mirror-images` job）：用 `skopeo copy --override-arch amd64` 把三个官方镜像原样复制到 `ghcr.io/<owner>/im-deps/{mysql,redis,nginx}:<同官方 tag>`；先 `skopeo inspect` 比 digest，已同步就秒跳过，不会每次 push 重传 mysql 那 ~160 MB。★ minio 不在此列（官方镜像已下架、quay 拒 CI 匿名拉，改用宿主二进制，见 §8.1）。PR 不跑；main/tag 总跑；手动跑受 `mirror_images` 勾选控制。
+2. **compose**：三个依赖镜像改为 `${MYSQL_IMAGE:-mysql}:${MYSQL_TAG:-8.0}` 这种「变量 + Docker Hub 默认值」写法。**不设变量时行为与以前完全一致**，向后兼容。
+3. **`.env.example`**：把 `MYSQL_IMAGE`/`REDIS_IMAGE`/`NGINX_IMAGE` 默认值填成 `ghcr.io/<owner小写>/im-deps/*`（minio 无镜像变量，改用 `MINIO_DATA_DIR` 指向宿主二进制数据目录）。
+4. **`bootstrap.sh`**（①.5 步）：从 `IM_SERVER_TAG` 里提取 owner，自动回填上面三行的 `<owner小写>`——**owner 只在一处填，四处不会各写各的**。
 
 部署侧流程不变（§二）：`cp .env.example .env` → 填密码与 `IM_SERVER_TAG` 的真 owner → `bash scripts/bootstrap.sh`（自动对齐依赖镜像 owner）→ `docker compose pull && docker compose up -d`，全程只访问 GHCR。
 
@@ -627,9 +627,9 @@ services:
 
   # ---------------------------------------------------------------- MinIO —— 已移出本栈
   # minio 不再写在主 compose 里：因 MinIO 2026-09-11 从 Docker Hub 整仓删除、quay 又拒 CI 匿名拉（401），
-  # CI 搬不动它，遂改由部署机单独起：docker compose -f minio/docker-compose.yml --env-file .env up -d（见仓库里那份）。
+  # CI 搬不动它，遂改由宿主机官方二进制跑（systemd 服务 minio，监听 0.0.0.0:9000/9001，见 §8.1 / MinIO部署指南.md）。
   # 它发布宿主 9000/9001，im-server 经 extra_hosts 的 host.docker.internal:9000 连它（MINIO_ENDPOINT 见 conf/im.env）。
-  # ★ 因为跨了两个 compose 项目，主栈无法对它做 depends_on: service_healthy——务必先起 minio、确认 healthy，再起主栈。
+  # ★ minio 在栈外，主栈无法对它做 depends_on: service_healthy——务必先确认二进制 minio 在跑（systemctl is-active minio、curl 127.0.0.1:9000/minio/health/live），再起主栈。
 
   # ---------------------------------------------------------------- 后端
   im-server:
@@ -743,7 +743,7 @@ services:
 # compose 对「服务里用了但顶层没声明」的卷是直接报错的：
 #   service "mysql" refers to undefined volume mysql-data: invalid compose project
 # 声明为空体即可，卷名会带上项目名前缀（im-docker_mysql-data），驱动与选项由 Docker 默认
-# （minio 的卷随它移出本栈，改在 minio/docker-compose.yml 里单独声明 im-minio_minio-data）
+# （minio 已移出本栈改用宿主二进制，数据在宿主目录 .env 的 MINIO_DATA_DIR，不在 compose 卷里）
 volumes:
   mysql-data:
   redis-data:
@@ -1023,7 +1023,7 @@ docker compose exec nginx nginx -s reload   # 或直接 docker compose restart n
 ### 8.3 ★ 容器形态下「谁在监听、怎么挡」这件事的正确答案
 
 - 主栈只发布 `80` / `443`（按需 `8088`、TURN 的 `3478` 与中继端口段、以及 `8947/udp`）。**主栈里 8080/8081/3306/6379 一律不发布**。
-  （minio 已移出主栈，在 `minio/docker-compose.yml` 里单独发布 `9000`/`9001` 供 `host.docker.internal` 访问——那两个口同样会被 Docker 发布、绕过 UFW，靠下面的 `DOCKER-USER` 链或云安全组限来源。）
+  （minio 不在主栈而是宿主二进制：它的 `9000`/`9001` 是**宿主机自己监听的端口，走 UFW 的 INPUT 链**（不像 Docker 发布端口那样绕过 UFW）。容器经 `host.docker.internal`（网桥网关 IP，如 `172.17.0.1`）访问它，所以要放行 docker 子网：`ufw allow from 172.16.0.0/12 to any port 9000 proto tcp`；对外来源继续靠云安全组挡在公网之外。）
 - 要按源 IP 过滤已发布的端口，**UFW 不管用**（Docker 直接动 `DOCKER` 链，绕过 `ufw` 的 `INPUT`）。
   官方给的口子是 `DOCKER-USER` 链：
 
@@ -1173,11 +1173,10 @@ cd /opt/im-docker && mkdir -p backup
 # ① 数据库（逻辑备份，唯一能跨镜像版本恢复的路子）
 docker compose exec -T mysql mysqldump -uim -p"$MYSQL_PASSWORD" \
   --single-transaction --routines --default-character-set=utf8mb4 im_db | gzip > backup/im-$(date +%F-%H%M).sql.gz
-# ② 对象存储：minio 已移出主栈、单独一个项目（name: im-minio），停/起走它自己的 compose、卷名是 im-minio_minio-data
-docker compose -f minio/docker-compose.yml --env-file .env stop minio
-docker run --rm -v im-minio_minio-data:/data -v "$PWD/backup":/backup alpine \
-  tar czf /backup/minio-$(date +%F).tar.gz -C /data .
-docker compose -f minio/docker-compose.yml --env-file .env start minio
+# ② 对象存储：minio 是宿主二进制，停服务后直接 tar 它的数据目录（MINIO_DATA_DIR，默认 /data/minio）
+sudo systemctl stop minio
+sudo tar czf backup/minio-$(date +%F).tar.gz -C "${MINIO_DATA_DIR:-/data/minio}" .
+sudo systemctl start minio
 # ③ 编排与配置（这三份丢了等于整套环境重建）
 tar czf backup/im-docker-conf-$(date +%F).tar.gz docker-compose.yml .env conf app/extra nginx
 # ④ Redis：已开 appendonly，AOF 在卷里；要快照就：
@@ -1218,7 +1217,7 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 
 ### 10.4 别随手 `docker system prune -a --volumes`
 
-`--volumes` 会把当前没被容器引用的卷一起删掉（主栈的 `im-docker_mysql-data` / `im-docker_redis-data`，以及单独部署的 `im-minio_minio-data`）；`-a` 会删掉所有「当前没被容器引用」的镜像，包括你留着回滚的旧 tag。
+`--volumes` 会把当前没被容器引用的卷一起删掉（主栈的 `im-docker_mysql-data` / `im-docker_redis-data`；minio 已改用宿主二进制，数据不在卷里、不受此影响）；`-a` 会删掉所有「当前没被容器引用」的镜像，包括你留着回滚的旧 tag。
 要清理就用精确命令：`docker image prune`（只删悬空层）、`docker builder prune`（删构建缓存）。
 
 ### 10.5 用 GitHub Actions 把 10.2 自动化（仓库里已给现成 workflow）

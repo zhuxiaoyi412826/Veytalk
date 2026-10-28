@@ -30,17 +30,20 @@ backup_mysql() {
 }
 
 backup_minio() {
-  # ★ minio 已移出主栈，是 minio/docker-compose.yml 单独一个项目（name: im-minio），
-  #   数据在命名卷 im-minio_minio-data 里（不是 ./data 下），所以用一个临时容器挂卷来 tar。
-  #   停/起都走它自己的 compose（带 --env-file .env），主栈目录里已没有 minio 服务，直接 `docker compose stop minio` 会报 no such service。
-  # ★ 停容器再 tar：桶运行中打包会漏掉 in-flight 的分片上传，恢复出来的对象大小对不上。
-  echo "== ② 对象存储 -> backup/minio-${STAMP}.tar.gz（会短暂停 minio 容器）"
-  docker compose -f minio/docker-compose.yml --env-file .env stop minio
-  docker run --rm -v im-minio_minio-data:/data -v "$PWD/backup":/backup alpine \
-    tar czf "/backup/minio-${STAMP}.tar.gz" -C /data .
-  docker compose -f minio/docker-compose.yml --env-file .env start minio
-  # 卷名 = <项目名>_minio-data，minio compose 顶层 name: im-minio。
-  # 换了目录名又不想改 name 的话，用 docker volume ls 确认实际名字
+  # ★ minio 现在是宿主机上的官方二进制（systemd 服务名 minio），数据在宿主目录、不在 docker 卷里。
+  #   数据目录优先取 .env 的 MINIO_DATA_DIR；没配就回落到 systemd 的 /etc/default/minio 里 MINIO_VOLUMES；再兜底 /data/minio。
+  #   ★ 停服务再 tar：桶运行中打包会漏掉 in-flight 的分片上传，恢复出来的对象大小对不上。
+  #   ★ 需要 root（数据目录与 systemctl 都要）；放 cron 就给 minio 的 stop/start + tar 配 NOPASSWD，或整个脚本用 root 跑。
+  local DATA_DIR
+  DATA_DIR="$(grep -m1 '^MINIO_DATA_DIR=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r')"
+  [[ -z "$DATA_DIR" || "$DATA_DIR" == *"<"* ]] && DATA_DIR="$(grep -m1 '^MINIO_VOLUMES=' /etc/default/minio 2>/dev/null | cut -d= -f2- | tr -d '\r"')"
+  DATA_DIR="${DATA_DIR:-/data/minio}"
+  [[ -d "$DATA_DIR" ]] || { echo "!! 找不到 minio 数据目录：$DATA_DIR（在 .env 里设 MINIO_DATA_DIR）" >&2; return 1; }
+  echo "== ② 对象存储 -> backup/minio-${STAMP}.tar.gz（会短暂停 minio 服务，数据目录 $DATA_DIR）"
+  sudo systemctl stop minio
+  sudo tar czf "backup/minio-${STAMP}.tar.gz" -C "$DATA_DIR" .
+  sudo systemctl start minio
+  # 恢复：sudo systemctl stop minio && sudo tar xzf backup/minio-xxx.tar.gz -C "$DATA_DIR" && sudo systemctl start minio
 }
 
 backup_conf() {

@@ -19,8 +19,7 @@
 
 | 路径 | 进版本库 | 作用 |
 |---|---|---|
-| `docker-compose.yml` | ✅ | 四个必选服务（mysql / redis / im-server / nginx）+ 两个注释掉的选装（live-retention / coturn）。★ minio 不在此栈，见下一行 |
-| `minio/docker-compose.yml` | ✅ | **可选退路**：单独部署的 MinIO 容器。★ 因官方镜像 2026-09-11 从 Docker Hub 下架、quay 又拒匿名拉，**首选改用官方二进制+systemd**（见 `md/MinIO部署指南.md` 三/四节）；本件仅当部署机能连上 quay 时用。发布宿主 9000/9001 |
+| `docker-compose.yml` | ✅ | 四个必选服务（mysql / redis / im-server / nginx）+ 两个注释掉的选装（live-retention / coturn）。★ minio 不在此栈：改用宿主机官方二进制+systemd（见 `md/MinIO部署指南.md` 三/四节、`md/部署/Ubuntu镜像HTTPS部署教程.md` §8.1），im-server 经 host.docker.internal:9000 连它 |
 | `.env.example` | ✅ | compose 层参数模板：镜像 tag、密码、域名。`cp .env.example .env` 后填 |
 | `conf/im.env.example` | ✅ | 应用层环境变量模板：37 个键，逐个与 `application.yml` 的 `${}` 占位符对过账 |
 | `app/Dockerfile` | ✅ | **路线 A**（推荐）：只装运行时，jar 由 CI 放进 `app/` |
@@ -53,10 +52,8 @@ cp .env.example .env && chmod 600 .env && vi .env
 # 4. 编排：建目录、摆 uid 1000 权限、由 example 生成 im.conf / application-prod-extra.yml / conf/im.env
 bash scripts/bootstrap.sh
 
-# 5. 先起 minio（主栈前，它不在 docker-compose.yml 里）
-#    ★ 首选官方二进制+systemd（镜像已下架，见 md/MinIO部署指南.md 三/四节）：
+# 5. 先起 minio（主栈前，它不在 docker-compose.yml 里）——官方二进制+systemd（镜像已下架，见 md/MinIO部署指南.md 三/四节）：
 sudo systemctl enable --now minio
-#    退路（能连 quay 时）：docker compose -f minio/docker-compose.yml --env-file .env up -d
 
 # 6. 拉主栈镜像并起来（首次要等 mysql initdb + 后端冷启，约 2 分钟）
 docker compose pull
@@ -94,9 +91,9 @@ bash scripts/update.sh 1.0.1          # 或 bash scripts/update.sh --rollback 1.
 1. **单实例**。不要 `--scale im-server=N`、不要加 `deploy.replicas`：WebSocket 扇出只认本进程的连接表，
    且那 12 个 `@Scheduled` 任务没有一个 ShedLock —— 起两个副本等于消息半丢 + 定时任务跑两遍。
 2. **主栈只发布 80/443**（按需 8088、3478、8947/udp）。主栈里 3306/6379/8080/8081 一律不写 `ports:`；
-   minio 的 9000/9001 在独立的 `minio/docker-compose.yml` 里发布（供 host.docker.internal），靠安全组/`DOCKER-USER` 限源。
+   minio 的 9000/9001 由宿主机二进制监听（供 host.docker.internal）；宿主机自己的端口受 UFW 管，需放行 docker 子网访问 9000，并靠安全组/`DOCKER-USER` 限源。
    Docker 发布的端口**绕过 UFW**，要按源 IP 过滤得走 `DOCKER-USER` 链或云安全组（指南 §8.3）。
-3. **应用连栈内中间件必须用服务名**（`mysql` / `redis`）；minio 已移出本栈，走 `host.docker.internal:9000`。容器里的 `127.0.0.1` 指的是它自己。
+3. **应用连栈内中间件必须用服务名**（`mysql` / `redis`）；minio 不在本栈（而是宿主二进制），走 `host.docker.internal:9000`。容器里的 `127.0.0.1` 指的是它自己。
 4. **两边时钟与时区要一起设**：MySQL 的 `--default-time-zone=+08:00` 与 `TZ=Asia/Shanghai` 只设一个，
    就会出现「应用写的时间」和 `DEFAULT CURRENT_TIMESTAMP` 兜底写的时间差 8 小时。
 
@@ -104,7 +101,7 @@ bash scripts/update.sh 1.0.1          # 或 bash scripts/update.sh --rollback 1.
 
 | 症状 | 位置 |
 |---|---|
-| 容器起来了→崩→无限重启，日志同一句 | 单独部署的 minio 没先起（主栈已无对它的 `depends_on`）：先 `docker compose -f minio/docker-compose.yml --env-file .env up -d` 等 healthy，再起主栈 |
+| 容器起来了→崩→无限重启，日志同一句 | 宿主机二进制 minio 没先起（主栈已无对它的 `depends_on`）：先 `systemctl is-active minio`、`curl 127.0.0.1:9000/minio/health/live` 确认，再起主栈 |
 | 日志目录空的，宿主机看不到日志 | `data/logs` 没挂或 uid 不是 1000（`bootstrap.sh` 第 ② 步） |
 | 观众端黑屏 403，推流和列表都正常 | `IM_LIVE_SIGN_SECRET` 与 nginx `secure_link_md5` 不一致（`.env` 只填一次就是为防这个） |
 | 浏览器全量 403 `Invalid CORS request`，curl 正常 | 没启用外挂 CORS 配置（`app/extra`，指南 §8.5） |

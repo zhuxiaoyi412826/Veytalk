@@ -149,8 +149,8 @@ openssl rand -base64 24 | tr -d '=+/\n' | head -c 24; echo
 会把 **mysql/redis/nginx** 三个原样搬到 `ghcr.io/<owner小写>/im-deps/*`。`.env` 里这三行默认就是 GHCR 路径，
 `<owner小写>` 占位符 **不用手改**——`bootstrap.sh` 会从 `IM_SERVER_TAG` 里取同一个 owner 自动回填。
 若你的机器能正常访问 Docker Hub，也可把值改回官方短名 `mysql` / `redis` / `nginx`。
-> ★ **minio 不在这三个里**：它已从 CI 的同步矩阵摘出（MinIO 2026-09-11 从 Docker Hub 整仓删除、quay 又拒 CI 匿名拉），
-> `.env` 里 `MINIO_IMAGE` 直接写 `quay.io/minio/minio`、不参与 owner 回填，由第八节的 `minio/docker-compose.yml` 单独部署。
+> ★ **minio 不在这三个里**：它已从 CI 的同步矩阵摘出、也不再走容器（MinIO 2026-09-11 从 Docker Hub 整仓删除、quay 又拒 CI 匿名拉），
+> 改由第八节用官方二进制 + systemd 部署（`.env` 里用 `MINIO_DATA_DIR` 指定数据目录，没有 `MINIO_IMAGE` 一说）。
 
 ---
 
@@ -234,14 +234,14 @@ cp im.example.com-key.pem /opt/im-docker/certs/live/im.example.com/privkey.pem
 
 ## 八、启动
 
-### 8.1 先起 minio（必须在主栈之前）—— ★ 官方镜像已下架，首选二进制
+### 8.1 先起 minio（必须在主栈之前）—— ★ 官方镜像已下架，统一用官方二进制
 
 > ★★ **MinIO 官方 Docker 镜像已于 2026-09-11 从 Docker Hub 整仓下架**（`minio/minio` 现在拉取报 404/denied），
 > 迁到 `quay.io/minio/minio` 后 Quay 又拒共享 IP 的匿名拉（401），CI 镜像同步这条路走不通。
-> 因此 **minio 首选直接用官方二进制跑**（不依赖任何镜像仓库）；仓库里 `minio/docker-compose.yml` 只作“能连上 quay 时”的可选退路。
-> 无论哪种方式，im-server 都经 `http://host.docker.internal:9000` 连它（主 compose 已配 `extra_hosts`），`conf/im.env` 不用改。
+> 因此 **minio 统一用官方二进制跑**（不依赖任何镜像仓库）；`minio/docker-compose.yml` 已删除，不再保留容器退路。
+> im-server 经 `http://host.docker.internal:9000` 连它（主 compose 已配 `extra_hosts`），`conf/im.env` 不用改。
 
-**方案一（推荐）：官方二进制 + systemd 常驻**
+**部署方式：官方二进制 + systemd 常驻**
 
 ```bash
 # 1) 下 Linux amd64 二进制（免安装，单个可执行文件）
@@ -271,16 +271,7 @@ curl -sf http://127.0.0.1:9000/minio/health/live && echo "  minio-live"   # 健�
 > 二进制默认监听 0.0.0.0，所以容器能经 `host.docker.internal` 到；9000/9001 靠云安全组/防火墙限源。
 > 桶不用手建：im-server 启动时 `ensureBucket()` 会自动创建 `im-files`。
 
-**方案二（可选退路）：容器（仅当部署机能连上 quay）**
-
-```bash
-# 首次可先登录 quay（公开镜像，任意免费账号即可抬高匿名限流；不登也能拉，只是可能被限）
-docker login quay.io
-docker compose -f minio/docker-compose.yml --env-file .env up -d
-docker compose -f minio/docker-compose.yml --env-file .env ps   # 等 minio 变 healthy 再起主栈
-```
-
-> ★ 为什么要先起它（无论哪个方案）：主 compose 已去掉对 minio 的 `depends_on`（compose 无法跨两个项目/跨形态做 service_healthy）。
+> ★ 为什么必须先起它：主 compose 已去掉对 minio 的 `depends_on`（compose 无法对栈外的宿主二进制做 service_healthy）。
 > 若 minio 没先起来，im-server 会因连不上桶 fail-fast 反复崩重启。忘了顺序就先 `docker compose down` 再按 8.1→8.3 重来。
 
 ### 8.2 登录 GHCR
@@ -402,9 +393,8 @@ bash scripts/bootstrap.sh
 
 # 4 真证书（生产）：certbot DNS-01 后拷进 certs/live/（见 §七 方案 A / 指南 §8.4）
 
-# 5 先起 minio（主栈前；★ 官方镜像已下架，首选二进制，见 §8.1 方案一）
-sudo systemctl enable --now minio        # 若走 §8.1 方案一的二进制+systemd
-# （退路，能连 quay 时：docker compose -f minio/docker-compose.yml --env-file .env up -d）
+# 5 先起 minio（主栈前；★ 官方镜像已下架，统一用官方二进制，见 §8.1）
+sudo systemctl enable --now minio        # 二进制+systemd；curl http://127.0.0.1:9000/minio/health/live 确认就绪
 
 # 6 一键起主栈（端口 80/443 由 compose 文件决定，命令行不写端口）
 docker compose pull && docker compose up -d

@@ -119,8 +119,7 @@ say "IM_SERVER_TAG=$IM_SERVER_TAG / IM_DOMAIN=$IM_DOMAIN"
 
 # ---------- 依赖镜像 owner 对齐：把 .env 里 MYSQL_IMAGE 等三行的 <owner小写> 换成真 owner ----------
 # 单一事实来源：owner 只在 IM_SERVER_TAG 填一次，这里灌进三个依赖镜像路径，免得四处各填各的写歪。
-# ★ minio 不在此列：它已移出 CI/GHCR，.env 里 MINIO_IMAGE 直接写 quay.io/minio/minio（不含 <owner小写>），
-#   由 minio/docker-compose.yml 单独起，本循环用 case 匹配不到占位符、自然跳过它。
+# ★ minio 不在此列：它走宿主机官方二进制（不在 CI/GHCR、也不再走容器），数据目录见 .env 的 MINIO_DATA_DIR，部署步骤见文档 §8.1。
 say "①.5 依赖镜像来源（GHCR 镜像站）owner 对齐"
 DEPS_OWNER="$(printf '%s' "$IM_SERVER_TAG" | sed -n 's#^ghcr\.io/\([^/]*\)/.*#\1#p')"
 if [[ -n "$DEPS_OWNER" ]]; then
@@ -251,10 +250,10 @@ else
   warn "本机没有 docker：跳过 compose 校验（这台只是写文件的机器时，属正常）"
 fi
 
-say "完成。下一步（★ 先单独起 minio，再起主栈，否则 im-server 连不上桶会反复重启）："
+say "完成。下一步（★ 先确认宿主机上的二进制 minio 在跑，再起主栈，否则 im-server 连不上桶会反复重启）："
 cat <<'EOF'
-  docker compose -f minio/docker-compose.yml --env-file .env up -d    # ① minio 不在主栈，先单独拉起并等它 healthy
-  docker compose pull            # 从 CI 推的镜像拉；若 tag 是 local/... 就 docker compose build im-server
+  systemctl is-active minio || sudo systemctl start minio   # ① minio 是官方二进制（不在本栈），curl http://127.0.0.1:9000/minio/health/live 确认；数据目录见 .env 的 MINIO_DATA_DIR
+  docker compose pull            # im-server 从 CI 推的 GHCR 拉、mysql/redis/nginx 从 Docker Hub 拉；若 tag 是 local/... 就 docker compose build im-server
   docker compose up -d           # ② 主栈（mysql/redis/im-server/nginx），首次会等 mysql initdb（约 1~2 分钟）
   docker compose ps              # 全 healthy 再往外看
   bash scripts/health.sh         # 多层检查（指南 §11.1）

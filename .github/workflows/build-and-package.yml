@@ -347,7 +347,12 @@ jobs:
           # 全部 skopeo 调用共用一份 authfile：目标 ghcr 带写权限，源站（quay）带读权限。
           # ★ 用显式 --authfile 而非依赖 docker/login-action 写的 ~/.docker/config.json：
           #   skopeo 只在多个候选路径里挑「第一个存在的」、跨文件不合并，显式一份最稳。
+          # ★★ 踩过的坑：mktemp 造的是 0 字节空文件，而 skopeo 的第一条命令（连 login 也算）会先把
+          #   authfile 当 JSON 读进来再写回；空文件不是合法 JSON → 报
+          #   "get credentials: reading JSON file ...: unexpected end of JSON input" 直接 fatal，
+          #   mysql/redis/nginx 三个矩阵条目全部挂在这里（跟 quay/minio 无关）。先塞一份合法空壳。
           AUTH="$(mktemp)"
+          printf '%s' '{"auths":{}}' > "$AUTH"
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$GH_USER" --password-stdin --authfile "$AUTH"
           # 源站是 quay.io 且配了 QUAY_USERNAME/QUAY_PASSWORD → 登录绕开「匿名 / runner 共享 IP 被限流(401)」。
           #   不配就匿名拉：GitHub Actions 那批共享 IP 常被 Quay 拒 401（minio 这一步就是这么挂的）。
