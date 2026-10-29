@@ -56,6 +56,12 @@ const routes = [
         meta: { title: '视频管理', perm: 'system:video:manage' }
       },
       {
+        path: 'articles',
+        name: 'articles',
+        component: () => import('@/views/ArticlesView.vue'),
+        meta: { title: '文章管理', perm: 'system:article:manage' }
+      },
+      {
         path: 'lives',
         name: 'lives',
         component: () => import('@/views/LivesView.vue'),
@@ -162,6 +168,7 @@ router.beforeEach(async (to) => {
       'users',
       'roles',
       'videos',
+      'articles',
       'lives',
       'groups',
       'messages',

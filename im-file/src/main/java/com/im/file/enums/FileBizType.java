@@ -73,6 +73,18 @@ public enum FileBizType {
     VIDEO_COVER("video_cover", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp")),
 
     /**
+     * 文章板块封面图。之所以与 {@link #VIDEO_COVER} 分开而不是复用，是为了让「文章封面」在
+     * im_file 里自成一种 bizType，便于后续按业务归档与清理；扩展名口径与视频封面一致。
+     */
+    ARTICLE_COVER("article_cover", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp")),
+
+    /**
+     * 文章正文内嵌图片（Markdown 里 {@code ![](url)} 引用的图）。必须公开：文章广场面向所有
+     * 登录用户渲染，正文里的图不可能逐篇校验作者关系。多放行 avif（截图常见格式）。
+     */
+    ARTICLE_IMG("article_img", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif")),
+
+    /**
      * 音视频通话录制产物（桌面端录屏 / 录音）。与 {@link #CHAT_VOICE} 分开：那是语音留言，
      * 这是一次实时通话的录制，且多为带画面的容器。
      *
@@ -130,6 +142,7 @@ public enum FileBizType {
      * {@code FileServiceImpl#canAccess} 据此放行，不再走会话可见性判定。
      */
     public boolean isPublic() {
-        return this == AVATAR || this == VIDEO || this == VIDEO_COVER;
+        return this == AVATAR || this == VIDEO || this == VIDEO_COVER
+                || this == ARTICLE_COVER || this == ARTICLE_IMG;
     }
 }

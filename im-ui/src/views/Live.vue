@@ -69,6 +69,7 @@ import { useReportStore } from '@/stores/report'
 import { useSettingsStore } from '@/stores/settings'
 import UserAvatar from '@/components/UserAvatar.vue'
 import AnchorStatsDialog from '@/components/AnchorStatsDialog.vue'
+import ArticlePanel from '@/components/ArticlePanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -2442,6 +2443,7 @@ watch(() => route.params.roomId, () => syncRoute())
         <el-radio-group v-model="activeTab" size="large">
           <el-radio-button value="live">直播</el-radio-button>
           <el-radio-button value="video">视频</el-radio-button>
+          <el-radio-button value="article">文章</el-radio-button>
         </el-radio-group>
       </div>
 
@@ -2559,7 +2561,7 @@ watch(() => route.params.roomId, () => syncRoute())
       </template>
 
       <!-- ===== 视频板块：短视频信息流 ===== -->
-      <template v-else>
+      <template v-else-if="activeTab === 'video'">
         <div class="live-video__head">
           <span class="live-video__count">共 {{ videoQuery.total }} 个视频</span>
           <el-button type="primary" @click="openUpload">上传视频</el-button>
@@ -2610,6 +2612,11 @@ watch(() => route.params.roomId, () => syncRoute())
             @current-change="(p) => { videoQuery.current = p; loadVideos() }"
           />
         </div>
+      </template>
+
+      <!-- ===== 文章板块：Markdown 文章 + 审核 ===== -->
+      <template v-else-if="activeTab === 'article'">
+        <ArticlePanel />
       </template>
     </div>
 

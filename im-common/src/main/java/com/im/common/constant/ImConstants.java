@@ -107,6 +107,16 @@ public final class ImConstants {
      */
     public static final String PERM_SYSTEM_VIDEO_MANAGE = "system:video:manage";
     public static final String PERM_SYSTEM_LIVE_MANAGE = "system:live:manage";
+    /**
+     * 后台权限点：文章管理（Markdown 文章的检索、新建/编辑、审核通过/驳回、上下架与删除）。
+     *
+     * <p>与视频/直播各设一点同一口径：这一屏挂着「代写发布」与「审核放行」两种能对外可见的写动作，
+     * 危险度与治理动作不同档，单独设点才能让「能下架视频」的人不必然「能发文章」。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/im_data.sql} 种子），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_ARTICLE_MANAGE = "system:article:manage";
     public static final String PERM_SYSTEM_MONITOR = "system:monitor";
     public static final String PERM_SYSTEM_LOG = "system:log";
     /**

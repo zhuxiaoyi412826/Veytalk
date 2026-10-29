@@ -508,3 +508,50 @@ export function fetchMessageOverview() {
 export function recallMessage(messageId) {
   return http.post(`/admin/message/${messageId}/recall`)
 }
+
+/* ==================== 文章管理 ==================== */
+
+/** 文章列表：含全状态（草稿/待审/已发布/驳回/已下架）；关键词按标题模糊，纯数字额外认作者 ID；列表项不含正文 */
+export function fetchArticlePage(params) {
+  return http.get('/admin/article/page', { params })
+}
+
+/** 文章详情：含正文，供后台预览与编辑回填 */
+export function fetchArticleDetail(id) {
+  return http.get(`/admin/article/${id}`)
+}
+
+/** 代写文章：publishNow=true 直接发布（免审），false 落待审；dto 含 title/summary/content/coverUrl/authorId */
+export function createArticle(dto, publishNow) {
+  return http.post('/admin/article', dto, { params: { publishNow } })
+}
+
+/** 编辑文章：改标题/摘要/正文/封面，不动状态 */
+export function updateArticle(id, dto) {
+  return http.put(`/admin/article/${id}`, dto)
+}
+
+/** 审核通过：待审(1)→已发布(2)，reason 走 query 进审计日志 */
+export function approveArticle(id, reason) {
+  return http.post(`/admin/article/${id}/approve`, null, { params: { reason } })
+}
+
+/** 审核驳回：待审(1)→驳回(3) 并写 rejectReason */
+export function rejectArticle(id, reason) {
+  return http.post(`/admin/article/${id}/reject`, null, { params: { reason } })
+}
+
+/** 下架：已发布(2)→已下架(4)，广场不再展示但记录保留 */
+export function offlineArticle(id, reason) {
+  return http.post(`/admin/article/${id}/offline`, null, { params: { reason } })
+}
+
+/** 恢复上架：已下架(4)→已发布(2)，幂等 */
+export function onlineArticle(id) {
+  return http.post(`/admin/article/${id}/online`)
+}
+
+/** 逻辑删除，不可自助恢复——前端必须二次确认 */
+export function deleteArticle(id) {
+  return http.delete(`/admin/article/${id}`)
+}
