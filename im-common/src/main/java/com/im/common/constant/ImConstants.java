@@ -220,6 +220,17 @@ public final class ImConstants {
      * <p>同一规矩：伞权限不参与判定，admin 角色必须补上这一点（同那份 migration）。
      */
     public static final String PERM_SYSTEM_MESSAGE_MANAGE = "system:message:manage";
+    /**
+     * 后台权限点（四期第六批）：AI 用量管控。
+     *
+     * <p>这一点下挂着本批唯一的写动作——<b>封禁/解封某人的 AI 功能</b>，以及读
+     * 全员的模型调用台账（谁在烧钱、烧了多少）。不并进 {@code system:interview}：
+     * 那一屏是只读的面试档案，本屏能停掉一个付费能力的入口，两种风险不同档。
+     *
+     * <p>同一规矩：伞权限不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_ai_guard.sql}），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_AI_GUARD = "system:ai:guard";
 
     /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。

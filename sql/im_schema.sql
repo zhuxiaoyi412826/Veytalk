@@ -33,6 +33,8 @@ DROP TABLE IF EXISTS `im_gift`;
 DROP TABLE IF EXISTS `im_user_wallet`;
 DROP TABLE IF EXISTS `im_live_video`;
 DROP TABLE IF EXISTS `im_article`;
+DROP TABLE IF EXISTS `im_ai_guard`;
+DROP TABLE IF EXISTS `im_ai_usage`;
 DROP TABLE IF EXISTS `im_interview_event`;
 DROP TABLE IF EXISTS `im_interview_message`;
 DROP TABLE IF EXISTS `im_interview_session`;
@@ -613,6 +615,40 @@ CREATE TABLE `im_interview_event`
     KEY `idx_session_violation` (`session_id`, `violation`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试操作与违规事件流水（只增不改不删）';
+
+-- =====================================================================================
+--  九之二、AI 用量护栏（im-ai · 四期第六批）
+-- =====================================================================================
+
+CREATE TABLE `im_ai_usage`
+(
+    `id`          BIGINT       NOT NULL COMMENT '主键（雪花）',
+    `user_id`     BIGINT       NOT NULL COMMENT '发起人用户 ID',
+    `scene`       VARCHAR(32)  NOT NULL COMMENT '计费场景：interview_chat 面试对话 / interview_asr 面试语音转文字 / interview_tts 文字合成朗读 / message_to_text 聊天语音转文字',
+    `duration_ms` BIGINT       NOT NULL DEFAULT 0 COMMENT '模型调用实际耗时（毫秒，服务端单调时钟）：护栏的计费口径',
+    `success`     TINYINT      NOT NULL DEFAULT 1 COMMENT '是否成功：1 成功（扣预算） 0 失败（只留痕不扣）',
+    `error_msg`   VARCHAR(255)          DEFAULT NULL COMMENT '失败原因摘要（成功为空），写入前截到 255',
+    `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '调用完成时间',
+    `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（流水不更，列形同虚设，与面试事件表同构）',
+    PRIMARY KEY (`id`),
+    -- 按人重建 Redis 预算计数器与后台聚合：WHERE user_id=? [AND success=1] SUM(duration_ms)
+    KEY `idx_user_time` (`user_id`, `create_time`),
+    -- 明细页按场景筛
+    KEY `idx_scene_time` (`scene`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 付费模型调用用量流水（只增不改不删）';
+
+CREATE TABLE `im_ai_guard`
+(
+    `user_id`     BIGINT      NOT NULL COMMENT '被管控的用户 ID，同时是主键：一行一人，没封禁的人根本没有这一行',
+    `banned`      TINYINT     NOT NULL DEFAULT 1 COMMENT '是否封禁 AI 功能：0 未封禁（解封写 0 不删行，留 reason 供追溯） 1 已封禁',
+    `reason`      VARCHAR(200)         DEFAULT NULL COMMENT '封禁原因（展示给被封者与管理台）',
+    `update_by`   BIGINT               DEFAULT NULL COMMENT '最后一次封/解操作的后台操作人 ID（问责用）',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次封禁时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后一次封/解时间',
+    PRIMARY KEY (`user_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 功能封禁状态表（只停付费模型调用，不动账号登录）';
 
 -- =====================================================================================
 --  十、直播（im-live）

@@ -7,6 +7,7 @@ import com.im.ai.rag.KnowledgeBaseService;
 import com.im.common.api.ResultCode;
 import com.im.common.exception.BusinessException;
 import com.im.common.util.JsonUtil;
+import com.im.common.util.SecurityUtil;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,6 +50,7 @@ public class InterviewService {
     private final KnowledgeBaseService knowledgeBaseService;
     private final DashScopeChatClient chatClient;
     private final AudioService audioService;
+    private final AiGuardService aiGuardService;
     private final JsonUtil jsonUtil;
 
     /** 推流线程池：每个 SSE 请求一条虚拟线程，阻塞读上游不心疼 */
@@ -88,13 +90,17 @@ public class InterviewService {
     /**
      * 异步执行一轮流式对话。参数校验在调用线程完成，
      * 这里进入虚拟线程后不再有 Servlet 上下文可用。
+     *
+     * <p>护栏检查也压在这一层：虚拟线程里读不到 satoken 登录态，封禁/预算判定必须在
+     * 请求线程做完，把 {@code checkAllowed} 返回的 userId 一路带进推流任务记账。
      */
     public void chatAsync(List<InterviewChatRequest.Message> messages, SseEmitter emitter) {
         if (!aiProperties.isEnabled()) {
             throw new BusinessException(ResultCode.BUSINESS_ERROR, "AI 面试官未启用");
         }
+        long userId = aiGuardService.checkAllowed(AiGuardService.SCENE_INTERVIEW_CHAT);
         List<Map<String, String>> history = sanitize(messages);
-        streamExecutor.execute(() -> doChat(history, emitter));
+        streamExecutor.execute(() -> doChat(userId, history, emitter));
     }
 
     /** 知识库与模型概况，前端状态条展示用 */
@@ -109,12 +115,15 @@ public class InterviewService {
         audio.put("asrModel", modelProperties.getAudio().getAsrModel());
         audio.put("ttsModel", modelProperties.getAudio().getTtsModel());
         status.put("audio", audio);
+        // 体验配额概况：前端据此显示「体验剩余 xx 秒」，admin 或护栏关闭时 unlimited=true
+        status.put("quota", aiGuardService.quotaView(SecurityUtil.getUserId()));
         return status;
     }
 
     /* ==================== 内部实现 ==================== */
 
-    private void doChat(List<Map<String, String>> history, SseEmitter emitter) {
+    private void doChat(long userId, List<Map<String, String>> history, SseEmitter emitter) {
+        long begin = System.nanoTime();
         try {
             String query = history.isEmpty() ? "开始面试 项目经历 技术选型 Java 并发 MySQL Redis 分布式"
                     : history.get(history.size() - 1).get("content");
@@ -127,16 +136,26 @@ public class InterviewService {
             chatClient.streamChat(payload, delta -> sendDelta(emitter, delta));
             emitter.send(SseEmitter.event().name("done").data("{}"));
             emitter.complete();
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_CHAT, elapsedMillis(begin), true, null);
         } catch (ClientAbortException e) {
-            // 浏览器已断开（用户点了停止或关页面），静默收尾，不再读上游
+            // 浏览器已断开（用户点了停止或关页面），静默收尾，不再读上游。
+            // 断开前模型已经在生成、厂商已经在计费，所以照常记一笔成功消耗
             log.debug("AI 面试对话被客户端中断");
             emitter.complete();
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_CHAT, elapsedMillis(begin), true, null);
         } catch (BusinessException e) {
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_CHAT, elapsedMillis(begin), false, e.getMessage());
             sendError(emitter, e.getMessage());
         } catch (Exception e) {
             log.warn("AI 面试对话失败: {}", e.getMessage(), e);
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_CHAT, elapsedMillis(begin), false, e.getMessage());
             sendError(emitter, "AI 服务异常，请稍后重试");
         }
+    }
+
+    /** 单调时钟毫秒数：改系统时间绕不过预算 */
+    private static long elapsedMillis(long beginNanos) {
+        return (System.nanoTime() - beginNanos) / 1_000_000L;
     }
 
     private String buildSystemPrompt(String query) {

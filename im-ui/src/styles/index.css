@@ -33,12 +33,15 @@
   --im-radius: 8px;
 
   /*
-   * 下面两个由 settings store 在运行时写到 documentElement 上，
+   * 下面由 settings store 在运行时写到 documentElement 上，
    * 这里给一份默认值兜底：store 还没初始化（或首屏 SSR）时界面不至于错乱。
-   * --im-font-scale 消息字号缩放倍率；--im-bubble-radius 气泡圆角（简约风格会调小）。
    */
   --im-font-scale: 1;
   --im-bubble-radius: 8px;
+  --im-global-font-px: 14;
+  --im-bubble-font-px: 14;
+  --im-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --im-chat-bg-opacity: 1;
 }
 
 /*
@@ -70,6 +73,19 @@ html.im-bubble-simple .bubble__box::before {
   display: none;
 }
 
+/*
+ * 聊天背景蒙层：当用户设置了自定义背景图时，在 .chat-home__main 内插入此 div，
+ * 以 --im-chat-bg-opacity 控制不透明度，使用户的气泡内容不受透明度影响。
+ */
+.chat-bg-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--im-bg);
+  opacity: calc(1 - var(--im-chat-bg-opacity));
+}
+
 * {
   box-sizing: border-box;
 }
@@ -83,8 +99,8 @@ body,
 }
 
 body {
-  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
-  font-size: 14px;
+  font-family: var(--im-font-family);
+  font-size: calc(var(--im-global-font-px) * 1px);
   color: var(--im-text);
   background: var(--im-bg);
   /* 聊天窗口里大量绝对定位的气泡与拖拽选择容易触发横向滚动，这里从根上禁掉 */

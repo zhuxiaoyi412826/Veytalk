@@ -451,6 +451,33 @@ export function fetchInterviewOverview() {
   return http.get('/admin/interview/overview')
 }
 
+/* ==================== AI 用量管控（四期第六批，权限点 system:ai:guard） ==================== */
+
+/** 护栏运行态（开关/预算）+ 全历史与今日的次数/耗时/人数 + 烧钱榜前 10 人 */
+export function fetchAiOverview() {
+  return http.get('/admin/ai/overview')
+}
+
+/** 按人聚合翻页：累计耗时倒序；params: userId / bannedOnly / current / size */
+export function fetchAiUserPage(params) {
+  return http.get('/admin/ai/users', { params })
+}
+
+/** 调用明细翻页：params: userId / scene / success / current / size */
+export function fetchAiUsagePage(params) {
+  return http.get('/admin/ai/usage', { params })
+}
+
+/** 封禁 AI 功能：只停付费模型调用不动登录，即时生效；reason 走 query 进审计日志 */
+export function banAiUser(userId, reason) {
+  return http.post(`/admin/ai/${userId}/ban`, null, { params: { reason } })
+}
+
+/** 解除 AI 封禁，幂等：没封过也回成功 */
+export function unbanAiUser(userId) {
+  return http.post(`/admin/ai/${userId}/unban`)
+}
+
 /* ==================== 群组管理（四期第五批，权限点 system:group:manage） ==================== */
 
 /** 群台账：<b>默认含已解散的群</b>（这是台账不是收件箱，「这群什么时候没的」也得查得到） */

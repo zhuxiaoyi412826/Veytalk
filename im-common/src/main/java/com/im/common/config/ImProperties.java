@@ -32,6 +32,7 @@ public class ImProperties {
     private Intelligence intelligence = new Intelligence();
     private Wallet wallet = new Wallet();
     private LinkMic linkmic = new LinkMic();
+    private AiGuard aiGuard = new AiGuard();
 
     @Data
     public static class Jwt {
@@ -496,6 +497,33 @@ public class ImProperties {
          * 存量在飞红包的到期时间跟着变；它是运维旋钮而不是业务约定，不要拿它做对账依据。
          */
         private int packetExpireHours = 24;
+    }
+
+    /**
+     * 大模型用量护栏（四期第六批）：约束一切按调用量计费的 AI 能力
+     * （面试对话 / 按住说话 ASR / 电话面试 TTS / 聊天语音转文字）。
+     *
+     * <p>计费用量以「模型调用实际耗时（毫秒）」为口径：token 数只有厂商知道
+     * （响应里的 usage 字段在流式下经常缺失），而耗时与账单同向且服务端自己量得出来，
+     * 不信任任何客户端上报。预算只扣成功调用：失败多半不扣费或只扣零头，
+     * 拿系统故障惩罚用户会把「体验限制」变成「投诉入口」。
+     *
+     * <p>admin 角色不受预算与封禁限制（内部开发与演示要用真链路），
+     * 判定走 {@code SecurityUtil.isAdmin()}，每次现取不缓存：角色变更要立刻反映到护栏上。
+     *
+     * <p>两个字段都是「每次调用现取」的写法（护栏服务直接读本单例），
+     * 所以进了 {@code AdminConfigKey} 白名单，后台改完即生效不需重启。
+     */
+    @Data
+    public static class AiGuard {
+        /** 护栏总开关：关掉后所有账号不限预算也不查封禁（只剩限流兜底），仅供运维应急放行 */
+        private boolean enabled = true;
+        /**
+         * 非 admin 账号的累计模型调用预算（秒），默认 180 即「3 分钟体验」。
+         * 是累计口径而不是每日重置：预算花完的人本来就不是目标用户，按天刷新等于白送。
+         * 调成 0 即对所有非 admin 一刀切停用付费 AI 能力（比关掉护栏更安全）。
+         */
+        private long trialSeconds = 180;
     }
 
     /**

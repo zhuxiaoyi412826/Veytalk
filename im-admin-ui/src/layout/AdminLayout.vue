@@ -50,6 +50,10 @@
           <el-icon><Reading /></el-icon>
           <span>AI 面试记录</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:ai:guard')" index="ai-guard" :route="{ name: 'ai-guard' }">
+          <el-icon><Coin /></el-icon>
+          <span>AI 用量管控</span>
+        </el-menu-item>
         <el-menu-item v-if="auth.can('system:monitor')" index="monitor" :route="{ name: 'monitor' }">
           <el-icon><Odometer /></el-icon>
           <span>监控告警</span>

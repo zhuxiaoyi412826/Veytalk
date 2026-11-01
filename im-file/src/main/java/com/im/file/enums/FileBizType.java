@@ -56,8 +56,12 @@ public enum FileBizType {
     /**
      * 聊天语音。opus 是现在录音与网络语音的默认编码之一（装在 Ogg 容器里），
      * Chrome / Firefox 的 {@code <audio>} 原生能播，不必再要用户转成 mp3。
+     *
+     * <p>webm 是网页端（im-ui 文件传输助手）MediaRecorder 的兜底容器：前端已优先选
+     * mp4/ogg 两种白名单内格式，但部分浏览器只支持 webm，不放行会让网页语音直接发不出去；
+     * 与 {@link #CALL_RECORD} 放行 webm 的同一口径。
      */
-    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus")),
+    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus", "webm")),
 
     /**
      * 直播页视频板块的视频（短视频信息流）。与 {@link #CHAT_FILE} 分开：聊天视频只有同会话成员

@@ -46,14 +46,28 @@
 
         <div class="settings__row">
           <div class="settings__label">
-            <span>字体大小</span>
-            <span class="settings__desc">消息气泡文字的缩放</span>
+            <span>全局字号</span>
+            <span class="settings__desc">{{ globalFontPx }}px</span>
           </div>
-          <el-radio-group v-model="fontSize">
-            <el-radio-button value="small">小</el-radio-button>
-            <el-radio-button value="default">默认</el-radio-button>
-            <el-radio-button value="large">大</el-radio-button>
-          </el-radio-group>
+          <el-slider v-model="globalFontPx" :min="8" :max="22" :step="1" class="settings__slider" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>气泡字号</span>
+            <span class="settings__desc">{{ bubbleFontPx }}px</span>
+          </div>
+          <el-slider v-model="bubbleFontPx" :min="8" :max="22" :step="1" class="settings__slider" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>字体种类</span>
+            <span class="settings__desc">全局字体族</span>
+          </div>
+          <el-select v-model="fontFamily" style="width: 200px">
+            <el-option v-for="f in fontFamilies" :key="f.value" :label="f.label" :value="f.value" />
+          </el-select>
         </div>
 
         <div class="settings__row settings__row--stack">
@@ -77,6 +91,11 @@
               <el-button v-if="chatBgValue" size="small" link type="danger" @click="settings.clearChatBackground()">
                 清除
               </el-button>
+              <span v-if="chatBgValue" class="settings__opacity">
+                不透明度
+                <el-slider v-model="chatBgOpacity" :min="10" :max="100" :step="5" size="small" style="width: 120px; display: inline-flex; vertical-align: middle; margin-left: 8px" />
+                {{ chatBgOpacity }}%
+              </span>
             </template>
             <input ref="bgInputRef" type="file" accept="image/*" class="settings__file" @change="onBgPicked" />
           </div>
@@ -115,6 +134,19 @@
             <el-radio-button value="rounded">圆角</el-radio-button>
             <el-radio-button value="simple">简约</el-radio-button>
           </el-radio-group>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>气泡颜色</span>
+            <span class="settings__desc">我方 / 对方气泡底色</span>
+          </div>
+          <div class="settings__colors">
+            <span class="settings__color-label">我方</span>
+            <el-color-picker v-model="bubbleColorSelf" size="small" />
+            <span class="settings__color-label">对方</span>
+            <el-color-picker v-model="bubbleColorOther" size="small" />
+          </div>
         </div>
       </section>
 
@@ -338,6 +370,28 @@
           </div>
           <el-switch v-model="remoteRecordAudit" :disabled="!recordAvailable" />
         </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>
+              直播录制
+              <el-tag v-if="!recordAvailable" size="small" type="info" effect="plain">需桌面版</el-tag>
+            </span>
+            <span class="settings__desc">开启后直播播放页显示“录制”按钮，手动录制并保存到本地</span>
+          </div>
+          <el-switch v-model="liveRecordEnabled" :disabled="!recordAvailable" />
+        </div>
+
+        <div class="settings__row" v-if="liveRecordEnabled">
+          <div class="settings__label">
+            <span>直播录制目录</span>
+            <span class="settings__desc">{{ liveRecordDir || '默认（与远控录屏同目录）' }}</span>
+          </div>
+          <div class="settings__bg">
+            <el-input class="settings__dir" :model-value="liveRecordDir" placeholder="默认目录" readonly :disabled="!recordAvailable" />
+            <el-button :icon="FolderOpened" :disabled="!recordAvailable" @click="onPickLiveRecordDir">选择目录</el-button>
+          </div>
+        </div>
       </section>
 
       <!-- ==================== 六、本地缓存 ==================== -->
@@ -396,7 +450,58 @@
         </div>
       </section>
 
-      <!-- ==================== 七、高级设置 ==================== -->
+      <!-- ==================== 七、桌面端设置（仅 Electron） ==================== -->
+      <section v-if="isDesktop" class="settings__card">
+        <div class="settings__card-title">桌面端设置</div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>文件下载路径</span>
+            <span class="settings__desc">{{ downloadDir || '每次询问保存位置' }}</span>
+          </div>
+          <div class="settings__bg">
+            <el-button size="small" @click="pickDownloadDir">选择目录</el-button>
+            <el-button v-if="downloadDir" size="small" link type="danger" @click="downloadDir = ''">清除</el-button>
+          </div>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>网络代理</span>
+            <span class="settings__desc">开启后所有请求走代理（格式 http://host:port 或 socks5://host:port）</span>
+          </div>
+          <div class="settings__bg">
+            <el-switch v-model="proxyEnabled" />
+            <el-input v-if="proxyEnabled" v-model="proxyUrl" placeholder="http://127.0.0.1:7890" style="width: 220px; margin-left: 10px" size="small" />
+          </div>
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>全局快捷键：最小化</span>
+            <span class="settings__desc">{{ shortcutMinimize || '未设置' }}</span>
+          </div>
+          <el-input v-model="shortcutMinimize" placeholder="按下组合键" size="small" style="width: 180px" @keydown.capture="captureShortcut($event, 'shortcutMinimize')" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>全局快捷键：窗口置顶</span>
+            <span class="settings__desc">{{ shortcutAlwaysOnTop || '未设置' }}</span>
+          </div>
+          <el-input v-model="shortcutAlwaysOnTop" placeholder="按下组合键" size="small" style="width: 180px" @keydown.capture="captureShortcut($event, 'shortcutAlwaysOnTop')" />
+        </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>全局快捷键：显示/隐藏</span>
+            <span class="settings__desc">{{ shortcutToggleVisible || '未设置' }}</span>
+          </div>
+          <el-input v-model="shortcutToggleVisible" placeholder="按下组合键" size="small" style="width: 180px" @keydown.capture="captureShortcut($event, 'shortcutToggleVisible')" />
+        </div>
+      </section>
+
+      <!-- ==================== 八、高级设置 ==================== -->
       <section class="settings__card">
         <div class="settings__card-title">高级设置</div>
 
@@ -507,7 +612,7 @@ import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, To
 import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
 import { canDebug, sourceLabel, sourceTagType } from '@/utils/servercfg'
 import { signOut } from '@/stores'
-import { useSettingsStore, THEME_COLORS } from '@/stores/settings'
+import { useSettingsStore, THEME_COLORS, FONT_FAMILIES } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { dbStats, dbClearAllMessages, dbExportAll, localDbEnabled } from '@/utils/localdb'
@@ -540,6 +645,7 @@ const chat = useChatStore()
 const conversations = useConversationStore()
 
 const themeColors = THEME_COLORS
+const fontFamilies = FONT_FAMILIES
 
 /** 背景图以 data URL 存进 localStorage，过大易撞配额，这里限 2MB */
 const MAX_BG_BYTES = 2 * 1024 * 1024
@@ -558,11 +664,17 @@ function setting(key) {
 const themeMode = setting('themeMode')
 const themeColor = setting('themeColor')
 const fontSize = setting('fontSize')
+const globalFontPx = setting('globalFontPx')
+const bubbleFontPx = setting('bubbleFontPx')
+const fontFamily = setting('fontFamily')
 const chatBgType = setting('chatBgType')
 const chatBgValue = setting('chatBgValue')
+const chatBgOpacity = setting('chatBgOpacity')
 const listWidth = setting('listWidth')
 const avatarSize = setting('avatarSize')
 const bubbleStyle = setting('bubbleStyle')
+const bubbleColorSelf = setting('bubbleColorSelf')
+const bubbleColorOther = setting('bubbleColorOther')
 const sendKey = setting('sendKey')
 const autoLoadHistory = setting('autoLoadHistory')
 const showPreview = setting('showPreview')
@@ -584,6 +696,50 @@ const notifyEnabled = setting('notifyEnabled')
 const notifySound = setting('notifySound')
 const notifyDesktop = setting('notifyDesktop')
 const notifyUnreadPoll = setting('notifyUnreadPoll')
+const downloadDir = setting('downloadDir')
+const proxyEnabled = setting('proxyEnabled')
+const proxyUrl = setting('proxyUrl')
+const shortcutMinimize = setting('shortcutMinimize')
+const shortcutAlwaysOnTop = setting('shortcutAlwaysOnTop')
+const shortcutToggleVisible = setting('shortcutToggleVisible')
+const liveRecordEnabled = setting('liveRecordEnabled')
+const liveRecordDir = setting('liveRecordDir')
+
+/** 桌面端标记：仅 Electron 环境为 true */
+const isDesktop = typeof window !== 'undefined' && !!window.imBridge
+
+/** 选择下载目录 */
+async function pickDownloadDir() {
+  if (!window.imBridge?.desktop) return
+  const dir = await window.imBridge.desktop.pickDownloadDir()
+  if (dir) downloadDir.value = dir
+}
+
+/** 快捷键捕获：把 keydown 事件转为 Electron accelerator 格式 */
+function captureShortcut(e, key) {
+  e.preventDefault()
+  e.stopPropagation()
+  const parts = []
+  if (e.ctrlKey) parts.push('CommandOrControl')
+  if (e.altKey) parts.push('Alt')
+  if (e.shiftKey) parts.push('Shift')
+  if (e.metaKey && navigator.platform !== 'Win32') parts.push('Super')
+  const code = e.code
+  if (!['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight'].includes(code)) {
+    let label = e.key.toUpperCase()
+    if (code.startsWith('Key')) label = code.slice(3)
+    else if (code.startsWith('Digit')) label = code.slice(5)
+    else if (label === 'SPACE') label = 'Space'
+    else if (label === 'ARROWUP') label = 'Up'
+    else if (label === 'ARROWDOWN') label = 'Down'
+    else if (label === 'ARROWLEFT') label = 'Left'
+    else if (label === 'ARROWRIGHT') label = 'Right'
+    parts.push(label)
+  }
+  if (parts.length >= 2) {
+    settings.update({ [key]: parts.join('+') })
+  }
+}
 
 /* ------------------------------ 消息提醒 ------------------------------ */
 
@@ -703,6 +859,18 @@ async function onOpenRecordDir() {
     await openRecordDir('', remoteRecordDir.value || recordDefaultDir.value)
   } catch (e) {
     ElMessage.error(e.message || '打开目录失败')
+  }
+}
+
+async function onPickLiveRecordDir() {
+  try {
+    const picked = await pickRecordDir(liveRecordDir.value || recordDefaultDir.value)
+    if (picked) {
+      settings.update({ liveRecordDir: picked })
+      ElMessage.success('直播录制目录已更新')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '选择目录失败')
   }
 }
 
@@ -1115,6 +1283,20 @@ async function onCancelAccount() {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.settings__color-label {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.settings__opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  margin-left: 12px;
 }
 
 .settings__swatch {

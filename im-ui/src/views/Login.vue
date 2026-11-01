@@ -159,7 +159,7 @@
         <el-link type="primary" :underline="false" @click="openReset">忘记密码</el-link>
         <span class="login__tip-sep">|</span>
         <!-- 用 APP 扫码进入「文件传输助手 · 网页版」，电脑与手机互传文件 -->
-        <el-link type="primary" :underline="false" @click="$router.push({ name: 'file-helper' })">文件传输助手</el-link>
+        <el-link type="primary" :underline="false" @click="goFileHelper">文件传输助手</el-link>
         <!-- 桌面端专属：后端地址不对的时候，这里是唯一的自救入口，所以必须挂在登录页
              而不是设置页（后端不通就登不进去，永远进不到设置页）。Web 部署同源，不显。 -->
         <template v-if="canServerDebug">
@@ -622,6 +622,12 @@ async function submitEmail() {
 
 function openRegister() {
   registerVisible.value = true
+}
+
+function goFileHelper() {
+  // 盖会话级标记：本标签页内已登录则直进传文件界面；关标签即失效，需重新扫码
+  sessionStorage.setItem('im-fh-session', '1')
+  router.push({ name: 'file-helper' })
 }
 
 async function submitRegister() {

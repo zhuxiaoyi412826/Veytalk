@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, dialog, ipcMain, Notification, Tray, nativeImage } = require('electron')
+const { app, BrowserWindow, Menu, session, dialog, ipcMain, Notification, Tray, nativeImage, globalShortcut } = require('electron')
 const path = require('path')
 const os = require('os')
 const fs = require('fs')
@@ -277,6 +277,13 @@ function setupNotify() {
  */
 function setupDownload() {
   session.defaultSession.on('will-download', (event, item) => {
+    // 如果用户配置了固定下载目录，静默下载到那里（跳过对话框）
+    if (desktopSettings.downloadDir) {
+      const fileName = item.getFilename() || 'download'
+      const savePath = path.join(desktopSettings.downloadDir, fileName)
+      item.setSavePath(savePath)
+      return
+    }
     const savePath = dialog.showSaveDialogSync({
       title: '保存文件',
       defaultPath: item.getFilename() || 'download'
@@ -286,6 +293,79 @@ function setupDownload() {
       return
     }
     item.setSavePath(savePath)
+  })
+  // IPC：渲染进程选择下载目录
+  ipcMain.handle('im:pick-download-dir', () => {
+    const dir = dialog.showOpenDialogSync({ properties: ['openDirectory'] })
+    return dir && dir[0] ? dir[0] : null
+  })
+}
+
+/* ======================= 桌面端统一配置应用（代理 + 快捷键） =======================
+ * 渲染进程在启动和设置变更时通过 im:apply-desktop-settings 把当前设置推送过来，
+ * 主进程据此调整代理、注册/注销快捷键。
+ */
+const desktopSettings = {
+  downloadDir: '',
+  proxyEnabled: false,
+  proxyUrl: '',
+  shortcutMinimize: '',
+  shortcutAlwaysOnTop: '',
+  shortcutToggleVisible: ''
+}
+
+let shortcutsRegistered = false
+
+function applyDesktopSettings(payload) {
+  if (!payload) return
+  Object.assign(desktopSettings, payload)
+  // 代理
+  applyProxy()
+  // 快捷键
+  registerShortcuts()
+}
+
+function applyProxy() {
+  const ses = session.defaultSession
+  if (desktopSettings.proxyEnabled && desktopSettings.proxyUrl) {
+    ses.setProxy({ mode: 'fixed_servers', rules: desktopSettings.proxyUrl })
+      .then(() => ses.resolveProxy('http://connectivitycheck.gstatic.com'))
+      .then((result) => console.log('[proxy] active:', result))
+      .catch((e) => console.warn('[proxy] error:', e))
+  } else {
+    ses.setProxy({ mode: 'system' })
+      .then(() => console.log('[proxy] system default'))
+      .catch(() => {})
+  }
+}
+
+function registerShortcuts() {
+  // 先全部注销再重新注册（幂等）
+  globalShortcut.unregisterAll()
+  shortcutsRegistered = false
+  const win = mainWindow
+  if (!win || win.isDestroyed()) return
+
+  const map = [
+    { key: desktopSettings.shortcutMinimize, action: () => win.minimize() },
+    { key: desktopSettings.shortcutAlwaysOnTop, action: () => win.setAlwaysOnTop(!win.isAlwaysOnTop()) },
+    { key: desktopSettings.shortcutToggleVisible, action: () => {
+      if (win.isVisible() && !win.isMinimized()) { win.hide() } else { win.show(); win.focus() }
+    }}
+  ]
+  for (const { key, action } of map) {
+    if (!key) continue
+    try {
+      globalShortcut.register(key, action)
+      shortcutsRegistered = true
+    } catch { /* 被其它应用占用时忽略 */ }
+  }
+}
+
+function setupDesktopConfig() {
+  ipcMain.handle('im:apply-desktop-settings', (event, payload) => {
+    applyDesktopSettings(payload)
+    return { ok: true }
   })
 }
 
@@ -463,6 +543,42 @@ function setupContentProtection() {
   })
 }
 
+/* ======================= 应用调试日志落盘 (app.log) =======================
+ * 渲染进程通过 IPC 把日志条目发过来，主进程追加写入 userData/app.log。
+ * 关闭时由渲染进程发 im:log-clear 清空文件（而非删除），保证下次开启是干净的。
+ */
+let appLogFd = null
+
+function setupAppLog() {
+  const logPath = path.join(app.getPath('userData'), 'app.log')
+  // 启动时以追加模式打开（文件不存在则创建）
+  try {
+    appLogFd = fs.openSync(logPath, 'a')
+  } catch { /* 无写入权限时静默跳过 */ }
+
+  ipcMain.handle('im:log-write', (event, entry) => {
+    if (appLogFd === null) return
+    try {
+      const line = `${new Date(entry.timestamp).toISOString()} [${(entry.level || 'debug').toUpperCase()}] ${entry.message}\n`
+      fs.writeSync(appLogFd, line)
+    } catch { /* 忽略单次写入失败 */ }
+  })
+
+  ipcMain.handle('im:log-clear', () => {
+    if (appLogFd === null) return
+    try {
+      fs.ftruncateSync(appLogFd, 0)
+    } catch { /* ignore */ }
+  })
+}
+
+function closeAppLog() {
+  if (appLogFd !== null) {
+    try { fs.closeSync(appLogFd) } catch { /* ignore */ }
+    appLogFd = null
+  }
+}
+
 /* ======================= 被控端 Agent 随桌面端自启 =======================
  * 打包安装包经 extraResources 内置了被控端 Agent（resources/agent/im-remote-agent.jar）
  * 与裁剪 JRE（resources/jre）。桌面端启动时后台拉起 Agent，被控机装完包无需再手动
@@ -575,6 +691,8 @@ app.whenReady().then(() => {
   setupRecorder()
   setupLive()
   setupContentProtection()
+  setupAppLog()
+  setupDesktopConfig()
   setupNotify()
   setupAgentAutostart()
   createWindow()
@@ -591,6 +709,7 @@ app.whenReady().then(() => {
 // 托盘菜单的「退出」与系统登出都走 quit：先置位再关窗口，否则下面的 close 会把退出拆在原地
 app.on('before-quit', () => {
   quitting = true
+  globalShortcut.unregisterAll()
   if (tray) {
     tray.destroy()
     tray = null
@@ -602,6 +721,7 @@ app.on('window-all-closed', () => {
   closeDirectLink()
   // 录制文件同步收口：关窗时渲染进程已经没了，没人再调 record-stop，fd 不收就丢尾巴
   closeRecording('window-closed')
+  closeAppLog()
   // 直播推流同理收口：关窗即停 ffmpeg 并清理临时分片目录，不留一个没人管的推流进程
   closeLivePush('window-closed')
   if (process.platform !== 'darwin') {

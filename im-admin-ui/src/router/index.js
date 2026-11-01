@@ -92,6 +92,12 @@ const routes = [
         meta: { title: 'AI 面试记录', perm: 'system:interview' }
       },
       {
+        path: 'ai-guard',
+        name: 'ai-guard',
+        component: () => import('@/views/AiGuardView.vue'),
+        meta: { title: 'AI 用量管控', perm: 'system:ai:guard' }
+      },
+      {
         path: 'monitor',
         name: 'monitor',
         component: () => import('@/views/MonitorView.vue'),
@@ -174,6 +180,7 @@ router.beforeEach(async (to) => {
       'messages',
       'wallet',
       'interviews',
+      'ai-guard',
       'monitor',
       'logs',
       'config',

@@ -187,7 +187,23 @@ public enum AdminConfigKey {
             "单房间同时在麦嘉宾数",
             "不含主播。超限回 LIVE_LINK_FULL。每一路麦都是观众端的一路上行，"
                     + "调大之前先确认主播那边的带宽。",
-            1L, 16L);
+            1L, 16L),
+
+    /* ==================== AI 护栏 ==================== */
+
+    AI_GUARD_ENABLED("ai-guard.enabled", Group.AI_GUARD, Type.BOOLEAN,
+            "AI 用量护栏总开关",
+            "关掉后所有账号（含非 admin）不限预算、不查封禁，只剩接口限流兜底。"
+                    + "这是应急旋钮：「护栏误拦了正常用户」时用它放行，而不是拿预算调大凑数。"
+                    + "想一刀切停用非 admin 的付费 AI 能力，应该把下面的预算调成 0，而不是关这里。",
+            null, null),
+    AI_GUARD_TRIAL_SECONDS("ai-guard.trial-seconds", Group.AI_GUARD, Type.NUMBER,
+            "非 admin 累计体验预算（秒）",
+            "付费模型调用（面试对话/语音转文字/朗读/聊天转文字）按实际耗时扣这一份累计预算，"
+                    + "默认 180 秒即「3 分钟体验」；admin 角色永远豁免。花完即拒（10007），"
+                    + "封禁个体去 AI 用量管控页。调成 0 = 对所有非 admin 停用。"
+                    + "上调直接放大账单上限，下调不会追扣已经花出去的部分。",
+            0L, 864000L);
 
     /** 值类型：决定服务端怎么校验这一串字符，也决定前端用开关还是数字框 */
     public enum Type {
@@ -212,7 +228,8 @@ public enum AdminConfigKey {
         INTELLIGENCE("intelligence", "智能能力"),
         CALL("call", "音视频通话"),
         WALLET("wallet", "钱包与礼物"),
-        LINKMIC("linkmic", "直播连麦");
+        LINKMIC("linkmic", "直播连麦"),
+        AI_GUARD("aiGuard", "AI 护栏");
 
         private final String code;
         private final String label;

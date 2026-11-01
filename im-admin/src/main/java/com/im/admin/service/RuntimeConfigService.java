@@ -323,6 +323,8 @@ public class RuntimeConfigService {
             case WALLET_PACKET_EXPIRE_HOURS -> () -> imProperties.getWallet().getPacketExpireHours();
             case LINKMIC_ENABLED -> () -> imProperties.getLinkmic().isEnabled();
             case LINKMIC_MAX_SLOTS -> () -> imProperties.getLinkmic().getMaxSlots();
+            case AI_GUARD_ENABLED -> () -> imProperties.getAiGuard().isEnabled();
+            case AI_GUARD_TRIAL_SECONDS -> () -> imProperties.getAiGuard().getTrialSeconds();
         };
     }
 
@@ -380,6 +382,9 @@ public class RuntimeConfigService {
             case LINKMIC_ENABLED -> value -> imProperties.getLinkmic().setEnabled((Boolean) value);
             case LINKMIC_MAX_SLOTS ->
                     value -> imProperties.getLinkmic().setMaxSlots(number(key, value).intValue());
+            case AI_GUARD_ENABLED -> value -> imProperties.getAiGuard().setEnabled((Boolean) value);
+            case AI_GUARD_TRIAL_SECONDS ->
+                    value -> imProperties.getAiGuard().setTrialSeconds(number(key, value).longValue());
         };
     }
 
