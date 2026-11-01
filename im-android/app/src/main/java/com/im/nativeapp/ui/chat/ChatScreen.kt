@@ -1,6 +1,7 @@
 package com.im.nativeapp.ui.chat
 
 import android.Manifest
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -34,12 +35,15 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -51,6 +55,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,12 +83,15 @@ import com.im.nativeapp.core.network.MessageVO
 import com.im.nativeapp.ui.components.Avatar
 import com.im.nativeapp.ui.components.formatBubbleTime
 import com.im.nativeapp.ui.theme.WxColors
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
-/** 聊天页（对齐 Chat.vue + ChatWindow）：文字/图片/语音/文件、历史分页、撤回、回执、失败重发 */
+/** 聊天页（对齐 Chat.vue + ChatWindow）：文字/图片/语音/文件、历史分页、撤回、回执、失败重发、引用回复、群@提醒 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     onBack: () -> Unit,
+    onOpenGroupManage: (String) -> Unit = {},
     vm: ChatViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
@@ -118,6 +126,9 @@ fun ChatScreen(
     LaunchedEffect(Unit) {
         vm.toast.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
     }
+
+    // 群聊：拉一次成员列表（@ 选人面板与提及解析共用）
+    LaunchedEffect(conversation?.type) { vm.loadMembersIfGroup() }
 
     // 滚动到顶部（reverseLayout 下是列表尾部 index）时加载更早历史
     LaunchedEffect(listState, hasMore) {
@@ -160,6 +171,12 @@ fun ChatScreen(
                             Icon(Icons.Default.Videocam, contentDescription = "视频通话")
                         }
                     }
+                    // 群聊：群管理入口（成员/公告/群昵称，对齐 Web 端 GroupSettings）
+                    if (conversation?.type == 2) {
+                        IconButton(onClick = { conversation?.targetId?.let(onOpenGroupManage) }) {
+                            Icon(Icons.Default.Settings, contentDescription = "群管理")
+                        }
+                    }
                 }
             )
         }
@@ -185,6 +202,7 @@ fun ChatScreen(
                         MessageRow(
                             msg = msg,
                             vm = vm,
+                            onReply = { vm.setReply(msg) },
                             onRetry = { vm.resend(msg) },
                             onRecall = { vm.recall(msg) },
                             onDelete = { vm.deleteMessage(msg) },
@@ -231,6 +249,7 @@ private fun LinearUploadingHint(modifier: Modifier = Modifier) {
 private fun MessageRow(
     msg: MessageVO,
     vm: ChatViewModel,
+    onReply: () -> Unit,
     onRetry: () -> Unit,
     onRecall: () -> Unit,
     onDelete: () -> Unit,
@@ -323,6 +342,10 @@ private fun MessageRow(
                 }
 
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    // 回复：已落库且未撤回的普通消息可引用（对齐 ChatWindow 的 reply 菜单）
+                    if (msg.messageId != null && msg.recalled != true) {
+                        DropdownMenuItem(text = { Text("回复") }, onClick = { menuOpen = false; onReply() })
+                    }
                     // 图内文字：发送端 OCR 的识别结果（已过敏感词），有才给入口（对齐 Web 端 ocr-text 菜单）
                     if (msg.msgType == 2 && !msg.extra?.ocrText.isNullOrBlank()) {
                         DropdownMenuItem(text = { Text("图内文字") }, onClick = { menuOpen = false; showOcrText = true })
@@ -438,7 +461,27 @@ private fun BubbleContent(
     isPlaying: Boolean,
     onPreviewImage: (String) -> Unit
 ) {
-    when (msg.msgType) {
+    Column {
+        // 引用块：只认 message.quote（占位阶段本地拼、回包服务端权威覆盖，对齐 ChatWindow）
+        msg.quote?.let { q ->
+            val qRecalled = q["recalled"]?.jsonPrimitive?.contentOrNull == "true"
+            val qNick = q["fromNickname"]?.jsonPrimitive?.contentOrNull ?: ""
+            val qContent = if (qRecalled) "[引用内容已撤回]" else q["content"]?.jsonPrimitive?.contentOrNull ?: ""
+            if (qContent.isNotEmpty()) {
+                Text(
+                    "$qNick: $qContent",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.65f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(start = 8.dp, end = 8.dp, top = 6.dp)
+                        .background(contentColor.copy(alpha = 0.08f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                )
+            }
+        }
+        when (msg.msgType) {
         2 -> {
             // 图片：宽高分按照 extra.width/height，未带时给 4:3 兜底
             val url = vm.resolveUrl(msg.extra?.fileUrl)
@@ -458,11 +501,14 @@ private fun BubbleContent(
         }
         3 -> {
             // 文件卡片：点击换票据直链交给系统下载管理器（M2 下载管理）
+            // 高风险格式：常驻警示标签 + 下载前再确认（对齐 MessageBubble 需求 2）
+            val risk = RiskFile.categoryOf(msg.extra?.fileName)
+            var confirmDownload by remember { mutableStateOf(false) }
             Row(
                 modifier = Modifier
                     .padding(12.dp)
                     .widthIn(max = 240.dp)
-                    .clickable { vm.downloadFile(msg) },
+                    .clickable { if (risk != null) confirmDownload = true else vm.downloadFile(msg) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(Icons.Default.AttachFile, contentDescription = null, tint = contentColor)
@@ -475,6 +521,13 @@ private fun BubbleContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (risk != null) {
+                        Text(
+                            "高风险 · ${risk.first}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     Text(
                         buildString {
                             append(formatSize(msg.extra?.fileSize))
@@ -485,6 +538,22 @@ private fun BubbleContent(
                         color = contentColor.copy(alpha = 0.7f)
                     )
                 }
+            }
+            if (confirmDownload && risk != null) {
+                AlertDialog(
+                    onDismissRequest = { confirmDownload = false },
+                    title = { Text("高风险文件提醒") },
+                    text = { Text("${msg.extra?.fileName ?: "该文件"} 属于「${risk.first}」。${risk.second}。确认仍要下载？") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmDownload = false
+                            vm.downloadFile(msg)
+                        }) { Text("仍要下载") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmDownload = false }) { Text("取消") }
+                    }
+                )
             }
         }
         4 -> {
@@ -518,6 +587,7 @@ private fun BubbleContent(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
         }
+        }
     }
 }
 
@@ -543,6 +613,48 @@ private fun callRecordText(msg: MessageVO): String {
 
 // ============================== 输入栏 ==============================
 
+/**
+ * 高风险文件判定（对齐 im-ui/src/utils/riskFile.js，需求 2）。
+ *
+ * 名单与后端 FileBizType.CHAT_FILE 白名单配套，只提示不拦截：
+ * 发送前确认 + 气泡常驻警示 + 下载前再确认，让接收方在知情前提下继续。
+ */
+private object RiskFile {
+    private val categories = listOf(
+        Triple(
+            "安装包 / 可执行文件",
+            "接收方下载后运行有中毒或被勒索的风险，请确认来源可信",
+            setOf("apk", "apks", "exe", "msi", "appx", "msix", "deb", "rpm", "jar", "scr", "vbs", "bat", "cmd")
+        ),
+        Triple(
+            "证书 / 私钥文件",
+            "私钥与证书一旦泄露等同于交出对应身份，请确认必须通过聊天通道传输",
+            setOf("cer", "crt", "pem", "key", "p12", "pfx", "jks", "keystore", "truststore")
+        ),
+        Triple(
+            "凭据库 / 系统配置文件",
+            "这类文件通常装着密码或系统设置，泄露会直接扩大影响面",
+            setOf("kdbx", "reg")
+        )
+    )
+
+    /** 命中返回 (类别标签, 风险说明)，未命中返回 null */
+    fun categoryOf(fileName: String?): Pair<String, String>? {
+        val ext = fileName?.substringAfterLast('.', "")?.lowercase()?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val hit = categories.firstOrNull { ext in it.third } ?: return null
+        return hit.first to hit.second
+    }
+}
+
+/** 读 content:// Uri 的显示文件名（发送前风险判定要用扩展名） */
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+    }
+}.getOrNull()
+
 @Composable
 private fun ChatInputBar(vm: ChatViewModel) {
     val context = LocalContext.current
@@ -550,18 +662,105 @@ private fun ChatInputBar(vm: ChatViewModel) {
     var voiceMode by remember { mutableStateOf(false) }
     var panelOpen by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
+    val replyTarget by vm.replyTarget.collectAsStateWithLifecycle()
+    val members by vm.members.collectAsStateWithLifecycle()
+    val isGroup = vm.conversation.collectAsStateWithLifecycle().value?.type == 2
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) vm.sendImage(uri)
     }
+    // 高风险文件发送前确认（对齐 ChatWindow stageFile 的风险格式确认）
+    var pendingRiskFile by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) vm.sendFile(uri)
+        if (uri != null) {
+            val name = queryDisplayName(context, uri)
+            if (RiskFile.categoryOf(name) != null) pendingRiskFile = uri to (name ?: "该文件")
+            else vm.sendFile(uri)
+        }
+    }
+    pendingRiskFile?.let { (uri, name) ->
+        val risk = RiskFile.categoryOf(name)
+        AlertDialog(
+            onDismissRequest = { pendingRiskFile = null },
+            title = { Text("高风险文件提醒") },
+            text = { Text("$name 属于「${risk?.first ?: ""}」。${risk?.second ?: ""}。确认仍要发送？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRiskFile = null
+                    vm.sendFile(uri)
+                }) { Text("仍要发送") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRiskFile = null }) { Text("取消") }
+            }
+        )
     }
     val audioPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) Toast.makeText(context, "需要录音权限才能发送语音", Toast.LENGTH_SHORT).show()
     }
 
+    // @ 提及面板（对齐 ChatWindow watch(draft)）：取最后一个 @ 后的文本做过滤词，含空白即关闭
+    val mentionQuery = if (!isGroup) null else {
+        val lastAt = text.lastIndexOf('@')
+        if (lastAt < 0) null else {
+            val afterAt = text.substring(lastAt + 1)
+            if (afterAt.any { it.isWhitespace() }) null else afterAt
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
+        // 回复横幅（对齐 ChatWindow 的 reply-banner）：发送或点 × 后消失
+        replyTarget?.let { target ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "回复 ${target.fromNickname ?: ""}：${vm.quoteSummaryText(target)}",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "取消回复",
+                    modifier = Modifier.size(16.dp).clickable { vm.cancelReply() },
+                    tint = MaterialTheme.colorScheme.secondary
+                )
+            }
+        }
+
+        // @ 选人面板：过滤成员（排除自己），点选把 @昵称 写回草稿
+        if (mentionQuery != null) {
+            val kw = mentionQuery.lowercase()
+            val candidates = members.filter { m ->
+                m.userId != vm.myUserId &&
+                    (kw.isEmpty() || (m.nicknameInGroup ?: m.displayName ?: m.nickname ?: "").lowercase().contains(kw))
+            }
+            val showAll = "所有人".contains(mentionQuery)
+            if (candidates.isNotEmpty() || showAll) {
+                androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
+                    if (showAll) {
+                        item(key = "__all") {
+                            MentionRow(name = "所有人", subtitle = "提醒全部成员", avatarUrl = null, vm = vm) {
+                                val lastAt = text.lastIndexOf('@')
+                                text = text.substring(0, lastAt) + "@所有人 "
+                            }
+                        }
+                    }
+                    items(candidates.take(20), key = { it.userId ?: it.hashCode().toString() }) { m ->
+                        val name = m.nicknameInGroup ?: m.displayName ?: m.nickname ?: "成员"
+                        MentionRow(name = name, subtitle = m.roleDesc, avatarUrl = vm.resolveUrl(m.avatar), vm = vm) {
+                            val lastAt = text.lastIndexOf('@')
+                            text = text.substring(0, lastAt) + "@$name "
+                        }
+                    }
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
@@ -644,6 +843,26 @@ private fun ChatInputBar(vm: ChatViewModel) {
                     filePicker.launch(arrayOf("*/*"))
                 }
             }
+        }
+    }
+}
+
+/** @ 选人面板的成员行（对齐 ChatWindow mention 面板项） */
+@Composable
+private fun MentionRow(name: String, subtitle: String?, avatarUrl: String?, vm: ChatViewModel, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Avatar(url = avatarUrl, name = name, size = 28.dp)
+        Spacer(Modifier.width(8.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (!subtitle.isNullOrEmpty()) {
+            Spacer(Modifier.width(6.dp))
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
         }
     }
 }
