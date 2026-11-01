@@ -4,8 +4,11 @@ Vite 默认开发端口就是 `5173`，这个地址给同一 WiFi / 局域网里
 Get-NetIPAddress -AddressFamily IPv4|Where-Object{$_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'}|Select-Object -ExpandProperty IPAddress|ForEach-Object{Write-Host "Vite局域网地址：http://$_:5173"}
 列出所有内网链接IP地址
 
-
-
+1. im-ui — 用户端（Vue3 + Vite + Element Plus + Pinia，同时用于 Electron/Tauri/Capacitor 打包）
+2. im-admin-ui — 管理后台（对应后端 im-admin 模块）
+3. im-website — 官网
+4. electron — 桌面壳（im-desktop）  它把 im-ui 构建出的 dist 包成 Windows 桌面端
+5. im-ui/src/views/FileHelper.vue  微信文件传输助手页面
 
 
 电脑换 IP 重签 = 只换服务器证书，手机 CA 不用更新；只有看到"根 CA：重新签发"那行输出时才需要重装 ca.pem

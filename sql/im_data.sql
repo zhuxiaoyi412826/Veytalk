@@ -187,7 +187,10 @@ VALUES (6301, 4, 108),
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_user` (`id`, `username`, `password`, `nickname`, `avatar`, `gender`, `signature`, `phone`, `email`,
                        `status`)
-VALUES (1000, 'admin',
+VALUES (1, 'service', '!NO_PASSWORD!', '客服', NULL, 0, '官方客服', NULL, NULL, 1),
+       -- 保留账号：1 客服 / 2 文件传输助手。password 写 NO_PASSWORD 哨兵，不可密码登录，仅作消息收发端
+       (2, 'filehelper', '!NO_PASSWORD!', '文件传输助手', NULL, 0, '手机发这里，电脑收', NULL, NULL, 1),
+       (1000, 'admin',
         '$argon2id$v=19$m=16384,t=2,p=1$Sf5L7MQjD4P12TiiFtHtEw$0U0n0WoV1+Oovrb2CumTshLOYPBSwd+zZQSjF+uKR1I',
         '系统管理员', NULL, 1, '保持系统稳定运行', '13800000000', 'admin@im.local', 1),
        (1001, 'alice',
@@ -210,7 +213,20 @@ VALUES (5001, 1000, 1),
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_friend` (`id`, `user_id`, `friend_id`, `remark`, `group_name`, `status`)
 VALUES (7001, 1001, 1002, NULL, '默认分组', 1),
-       (7002, 1002, 1001, 'Alice', '同事', 1);
+       (7002, 1002, 1001, 'Alice', '同事', 1),
+       -- 保留账号与演示用户的双向好友行（新用户由注册钩子自动装配，这里只回填种子用户）
+       (7101, 1000, 1, NULL, '默认分组', 1),
+       (7102, 1, 1000, NULL, '默认分组', 1),
+       (7103, 1000, 2, NULL, '默认分组', 1),
+       (7104, 2, 1000, NULL, '默认分组', 1),
+       (7105, 1001, 1, NULL, '默认分组', 1),
+       (7106, 1, 1001, NULL, '默认分组', 1),
+       (7107, 1001, 2, NULL, '默认分组', 1),
+       (7108, 2, 1001, NULL, '默认分组', 1),
+       (7109, 1002, 1, NULL, '默认分组', 1),
+       (7110, 1, 1002, NULL, '默认分组', 1),
+       (7111, 1002, 2, NULL, '默认分组', 1),
+       (7112, 2, 1002, NULL, '默认分组', 1);
 
 INSERT INTO `im_friend_request` (`id`, `from_user_id`, `to_user_id`, `verify_message`, `source`, `status`,
                                  `handle_time`)

@@ -6,6 +6,7 @@ import com.im.admin.dto.vo.AdminUserVO;
 import com.im.admin.mapper.ReportMapper;
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
+import com.im.common.constant.ImConstants;
 import com.im.common.domain.AdminUserDTO;
 import com.im.common.domain.AdminUserQueryDTO;
 import com.im.common.exception.BusinessException;
@@ -93,6 +94,9 @@ public class AdminUserService {
     public AdminUserVO setDisabled(Long userId, boolean disabled, Long operatorId, String reason, Long disableMinutes) {
         BusinessException.throwIf(userId == null, ResultCode.BAD_REQUEST, "缺少用户 ID");
         BusinessException.throwIf(userId.equals(operatorId), ResultCode.ADMIN_SELF_FORBIDDEN);
+        // 保留账号（客服/文件传输助手）是系统功能载体，禁用会让所有用户的这两个会话失效，一律挡住
+        BusinessException.throwIf(disabled && ImConstants.SYSTEM_CONTACT_IDS.contains(userId),
+                ResultCode.BAD_REQUEST, "系统保留账号不可禁用");
         // 禁用必须写事由：它是事后唯一能回答「当时为什么关掉这个人」的东西，
         // 而它只进日志不进表（一期没有操作审计表），下次重启就没了，所以宁可在入口就拦住
         if (disabled) {

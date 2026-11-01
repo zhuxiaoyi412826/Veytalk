@@ -21,14 +21,6 @@
             <artifactId>im-common</artifactId>
         </dependency>
 
-        <!-- 群邀请二维码：ZXing core + javase（矩阵 → PNG 字节） -->
-        <dependency>
-            <groupId>com.google.zxing</groupId>
-            <artifactId>core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.google.zxing</groupId>
-            <artifactId>javase</artifactId>
-        </dependency>
+        <!-- 群邀请二维码所需 ZXing 由 im-common 传递引入（com.im.common.util.QrCodeUtil），此处不再重复声明 -->
     </dependencies>
 </project>

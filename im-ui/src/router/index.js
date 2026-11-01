@@ -20,6 +20,20 @@ const routes = [
     component: () => import('@/views/Login.vue'),
     meta: { public: true, title: '登录' }
   },
+  // 网页端扫码登录 + 文件传输助手：公开整屏页，本机出码轮询，登录成功后跳进助手会话
+  {
+    path: '/transfer',
+    name: 'file-transfer',
+    component: () => import('@/views/FileTransfer.vue'),
+    meta: { public: true, title: '文件传输助手' }
+  },
+  // 独立的「文件传输助手 · 网页版」：扫码后原地进入专用传文件页（拖拽上传/列表/下载），不进整套 IM
+  {
+    path: '/filehelper',
+    name: 'file-helper',
+    component: () => import('@/views/FileHelper.vue'),
+    meta: { public: true, title: '文件传输助手' }
+  },
   {
     path: '/',
     component: () => import('@/layout/MainLayout.vue'),
