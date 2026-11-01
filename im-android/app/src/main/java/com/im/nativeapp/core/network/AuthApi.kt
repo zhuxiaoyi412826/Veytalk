@@ -46,4 +46,18 @@ interface AuthApi {
     /** 换取 WebSocket 连接票据（一次性短票，握手时放查询参数） */
     @POST("ws/ticket")
     suspend fun wsTicket(@Query("deviceId") deviceId: String): ApiEnvelope
+
+    /**
+     * 扫码登录-标记已扫码（APP 登录态调用）。
+     * 让网页从「待扫码」推进到「已扫码，请在手机确认」。二维码过期返回 code=1001。
+     */
+    @POST("auth/qr-login/scanned")
+    suspend fun qrScanned(@Body body: QrSceneRequest): ApiEnvelope
+
+    /**
+     * 扫码登录-确认授权（APP 登录态调用）。
+     * 后端以当前 APP 登录用户为网页签发 web 设备令牌；请求体刻意不含 userId，无法替他人授权。
+     */
+    @POST("auth/qr-login/authorize")
+    suspend fun qrAuthorize(@Body body: QrSceneRequest): ApiEnvelope
 }

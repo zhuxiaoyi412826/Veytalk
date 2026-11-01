@@ -28,9 +28,8 @@ import com.im.nativeapp.ui.live.LiveTab
 import com.im.nativeapp.ui.profile.ProfileTab
 
 /**
- * 登录后的主容器：底部四 Tab（消息 / 好友 / 直播 / 我的）。
- * 群聊并入好友页内双板块切换（对齐 Web 端 FriendList 的 好友|群聊 tabs）；
- * 手机端只观看不开播，直播页对齐 Web /live 的 直播|视频 双板块。
+ * 登录后的主容器：底部四 Tab（消息 / 好友 / 视频 / 我的）。
+ * 群聊并入好友页的「群聊」入口（对齐微信通讯录）；直播列表已下线，仅保留视频板块。
  * 各 Tab 内容保活：用 when 切换会把离开的组合销毁，这里用「全部常驻 + 显隐」保住滚动位置与输入态。
  */
 @Composable
@@ -40,6 +39,7 @@ fun MainScreen(
     onOpenAddFriend: () -> Unit,
     onOpenCreateGroup: () -> Unit,
     onOpenLiveRoom: (String) -> Unit,
+    onOpenScan: () -> Unit = {},
     onOpenVideoPlayer: (com.im.nativeapp.core.network.VideoVO) -> Unit = {},
     onOpenAi: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
@@ -106,7 +106,12 @@ fun MainScreen(
     ) { padding ->
         androidx.compose.foundation.layout.Box(modifier = Modifier.padding(padding)) {
             when (tab) {
-                0 -> ConversationTab(onOpenChat = onOpenChat)
+                0 -> ConversationTab(
+                    onOpenChat = onOpenChat,
+                    onOpenScan = onOpenScan,
+                    onOpenAddFriend = onOpenAddFriend,
+                    onOpenCreateGroup = onOpenCreateGroup
+                )
                 1 -> FriendTab(
                     onOpenChat = onOpenChat,
                     onOpenRequests = onOpenFriendRequests,

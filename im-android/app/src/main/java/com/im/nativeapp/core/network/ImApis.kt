@@ -21,6 +21,14 @@ interface UserApi {
     /** 更新本人资料（对齐 im-ui/src/api/user.js updateProfile）；只传要改的字段 */
     @PUT("user/profile")
     suspend fun updateProfile(@Body body: Map<String, String>): ApiEnvelope
+
+    /** 修改密码（PUT /user/password）：logoutAll=true 时后端会踢掉全部终端 */
+    @PUT("user/password")
+    suspend fun changePassword(@Body body: ChangePasswordRequest): ApiEnvelope
+
+    /** 账号注销（POST /user/cancel）：密码二次确认后匿名化并逻辑删除，不可恢复 */
+    @POST("user/cancel")
+    suspend fun cancelAccount(@Body body: CancelAccountRequest): ApiEnvelope
 }
 
 interface ConversationApi {
@@ -33,6 +41,14 @@ interface ConversationApi {
     /** 打开与某人的单聊，幂等：已存在则返回原会话 ID */
     @POST("conversation/single")
     suspend fun createSingle(@Body body: SingleConversationRequest): ApiEnvelope
+
+    /**
+     * 定位「文件传输助手」单聊（userId=2 的系统账号），幂等。
+     * 走 getOrCreateSingle 而非严格的 createSingle：存量用户没回填好友关系时也能懒建会话。
+     * data = conversationId（按字符串解析）。
+     */
+    @POST("conversation/assistant")
+    suspend fun assistant(): ApiEnvelope
 
     @PUT("conversation/{id}/read")
     suspend fun markRead(@Path("id") id: String, @Body body: Map<String, String>): ApiEnvelope

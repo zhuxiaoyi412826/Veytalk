@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -29,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -67,14 +70,14 @@ import com.im.nativeapp.core.network.VideoVO
 import com.im.nativeapp.ui.components.Avatar
 
 /**
- * 直播大厅：直播|视频 双板块（对齐 Web 端 /live）。
- * 手机端只观看不开播（定案「本地软件开播、浏览器与 App 观看」），因此没有开播按钮；
- * 视频板块与 Web 一致：网格 + 内联播放 + 上传 + 删自己的视频。
+ * 直播/视频页（对齐 Web /live）：顶部只保留「直播|视频」板块切换条，不再有「直播」标题栏；
+ * 直播列表与视频列表都保留，列表整体上移一屏。
+ * 视频板块：网格 + 上传 + 删自己的视频。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveTab(
-    onOpenRoom: (String) -> Unit,
+    onOpenRoom: (String) -> Unit = {},
     onOpenVideoPlayer: (VideoVO) -> Unit = {},
     vm: LiveViewModel = hiltViewModel()
 ) {
@@ -98,67 +101,56 @@ fun LiveTab(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("直播") })
+    Column(modifier = Modifier.fillMaxSize()) {
+        androidx.compose.material3.TabRow(selectedTabIndex = tab) {
+            androidx.compose.material3.Tab(
+                selected = tab == 0,
+                onClick = { tab = 0 },
+                text = { Text("直播") }
+            )
+            androidx.compose.material3.Tab(
+                selected = tab == 1,
+                onClick = { tab = 1; vm.loadVideosIfNeeded() },
+                text = { Text("视频") }
+            )
         }
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            // 顶层双板块切换：直播 | 视频（对齐 live-lobby__tabs）
-            androidx.compose.material3.TabRow(selectedTabIndex = tab) {
-                androidx.compose.material3.Tab(
-                    selected = tab == 0,
-                    onClick = { tab = 0 },
-                    text = { Text("直播") }
-                )
-                androidx.compose.material3.Tab(
-                    selected = tab == 1,
-                    onClick = { tab = 1; vm.loadVideosIfNeeded() },
-                    text = { Text("视频") }
-                )
-            }
-
-            if (tab == 0) {
-                // ============================== 直播板块 ==============================
-                if (loading && list.isEmpty()) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
-                    }
-                } else if (list.isEmpty()) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("暂无直播，去 PC 端开一场吧", color = MaterialTheme.colorScheme.secondary)
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)
-                    ) {
-                        items(list, key = { it.id ?: it.hashCode().toString() }) { room ->
-                            val roomId = room.id
-                            if (roomId != null) {
-                                LiveRoomCard(room = room, onClick = { onOpenRoom(roomId) })
-                            }
+        if (tab == 0) {
+            if (loading && list.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (list.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("暂无直播，去 PC 端开一场吧", color = MaterialTheme.colorScheme.secondary)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)
+                ) {
+                    items(list, key = { it.id ?: it.hashCode().toString() }) { room ->
+                        val roomId = room.id
+                        if (roomId != null) {
+                            LiveRoomCard(room = room, onClick = { onOpenRoom(roomId) })
                         }
                     }
                 }
-            } else {
-                // ============================== 视频板块 ==============================
-                // 头行：总数 + 上传按钮（对齐 live-video__head）
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "共 $videoTotal 个视频",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(onClick = { uploadDialog = true }) { Text("上传视频") }
-                }
-
-                // 点卡片跳全屏播放页（横版横屏/竖版竖屏沉浸播放）
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "共 $videoTotal 个视频",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(onClick = { uploadDialog = true }) { Text("上传视频") }
+            }
+        // 视频列表：卡片即入口，点击进全屏播放页（横版横屏/竖版竖屏沉浸播放）
                 if (videoLoading && videos.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
@@ -186,7 +178,6 @@ fun LiveTab(
                 }
             }
         }
-    }
 
     if (uploadDialog) {
         VideoUploadDialog(

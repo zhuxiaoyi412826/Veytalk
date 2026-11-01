@@ -1,5 +1,7 @@
 package com.im.nativeapp.ui.profile
 
+import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,22 +13,26 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -34,10 +40,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.im.nativeapp.core.config.SessionStore
 import com.im.nativeapp.core.config.SettingsStore
+import com.im.nativeapp.core.network.ApiClient
+import com.im.nativeapp.core.network.ApiError
+import com.im.nativeapp.core.network.CancelAccountRequest
+import com.im.nativeapp.core.network.ChangePasswordRequest
+import com.im.nativeapp.core.network.UserApi
+import com.im.nativeapp.core.network.unwrapUnit
 import com.im.nativeapp.data.AuthRepository
 import com.im.nativeapp.ui.components.Avatar
 import com.im.nativeapp.ui.theme.ThemeEvents
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -45,10 +59,14 @@ import javax.inject.Inject
 class ProfileViewModel @Inject constructor(
     private val auth: AuthRepository,
     private val session: SessionStore,
-    private val settings: SettingsStore
+    private val settings: SettingsStore,
+    private val apiClient: ApiClient
 ) : ViewModel() {
 
     val user = auth.currentUser
+
+    private val _toast = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val toast: SharedFlow<String> = _toast
 
     fun server(): String = session.currentServer()
     fun media(): String = session.mediaBase()
@@ -86,6 +104,50 @@ class ProfileViewModel @Inject constructor(
             onDone()
         }
     }
+
+    /**
+     * 修改密码：成功后退出全部终端（后端 logoutAll 默认 true），本端也要清登录态回登录页。
+     * oldPassword 允许留空：验证码登录自动建号、从未设过密码的账号首次设置密码时后端接受空值。
+     */
+    fun changePassword(oldPassword: String, newPassword: String, onDone: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                apiClient.service(UserApi::class.java)
+                    .changePassword(
+                        ChangePasswordRequest(
+                            oldPassword = oldPassword.ifBlank { null },
+                            newPassword = newPassword,
+                            logoutAll = true
+                        )
+                    )
+                    .unwrapUnit()
+                auth.logout()
+                _toast.tryEmit("密码已修改，请用新密码重新登录")
+                onDone()
+            } catch (e: Exception) {
+                _toast.tryEmit(errorText(e, "修改密码失败"))
+            }
+        }
+    }
+
+    /** 账号注销：不可逆，成功后清本地登录态回登录页 */
+    fun cancelAccount(password: String, onDone: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                apiClient.service(UserApi::class.java)
+                    .cancelAccount(CancelAccountRequest(password))
+                    .unwrapUnit()
+                auth.logout()
+                _toast.tryEmit("账号已注销")
+                onDone()
+            } catch (e: Exception) {
+                _toast.tryEmit(errorText(e, "注销失败"))
+            }
+        }
+    }
+
+    private fun errorText(e: Exception, fallback: String): String =
+        if (e is ApiError) e.message ?: fallback else "$fallback：${e.message ?: ""}"
 }
 
 /** 「我的」页：资料 + 编辑入口 + 设置（对齐 Web 端 /settings） + 服务器地址 + 登出 */
@@ -102,27 +164,31 @@ fun ProfileTab(
     var themeMode by remember { mutableStateOf(vm.themeMode()) }
     var liveQuality by remember { mutableStateOf(vm.liveQuality()) }
     var notifySound by remember { mutableStateOf(vm.notifySound()) }
+    var pwdDialog by remember { mutableStateOf(false) }
+    var logoutDialog by remember { mutableStateOf(false) }
+    var cancelDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // 改密/注销结果提示（后端失败原因直接在 Toast 里展示）
+    LaunchedEffect(Unit) {
+        vm.toast.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("我的") },
-            actions = {
-                // 对齐 Settings.vue 头部「编辑个人信息」入口
-                TextButton(onClick = onOpenProfile) { Text("编辑个人信息") }
-            }
-        )
+        // 不设顶部标题栏：内容整体上移，资料卡本身就是「编辑个人信息」入口（同微信「我」）
         Column(
             modifier = Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenProfile)) {
                 Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Avatar(url = vm.resolveUrl(user.avatar), name = user.nickname.ifEmpty { user.username }, size = 56.dp)
                     Spacer(Modifier.width(12.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(user.nickname.ifEmpty { user.username }, style = MaterialTheme.typography.titleLarge)
                         Text("@${user.username}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                     }
+                    Text("编辑", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                 }
             }
 
@@ -201,10 +267,25 @@ fun ProfileTab(
                 }
             }
 
-            Spacer(Modifier.weight(1f))
-            Button(onClick = { vm.logout(onLogout) }, modifier = Modifier.fillMaxWidth()) {
-                Text("退出登录")
+            // ==================== 账号与安全：编辑资料 / 修改密码 / 退出 / 注销 ====================
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                    Text(
+                        "账号与安全",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    AccountRow("编辑资料", onClick = onOpenProfile)
+                    HorizontalDivider()
+                    AccountRow("修改密码", onClick = { pwdDialog = true })
+                    HorizontalDivider()
+                    AccountRow("退出账号", onClick = { logoutDialog = true })
+                    HorizontalDivider()
+                    AccountRow("注销账号", danger = true, onClick = { cancelDialog = true })
+                }
             }
+
+            Spacer(Modifier.weight(1f))
         }
     }
 
@@ -234,6 +315,127 @@ fun ProfileTab(
             dismissButton = { TextButton(onClick = { serverDialog = false }) { Text("取消") } }
         )
     }
+
+    if (pwdDialog) {
+        var oldPwd by remember { mutableStateOf("") }
+        var newPwd by remember { mutableStateOf("") }
+        var confirmPwd by remember { mutableStateOf("") }
+        val ready = newPwd.length >= 6 && newPwd == confirmPwd
+        AlertDialog(
+            onDismissRequest = { pwdDialog = false },
+            title = { Text("修改密码") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PwdField(oldPwd, { oldPwd = it }, "原密码（从未设过密码可留空）")
+                    PwdField(newPwd, { newPwd = it }, "新密码（6-32 位）")
+                    PwdField(confirmPwd, { confirmPwd = it }, "确认新密码")
+                    if (newPwd.isNotEmpty() && newPwd.length < 6) {
+                        Text(
+                            "新密码至少 6 位",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else if (confirmPwd.isNotEmpty() && newPwd != confirmPwd) {
+                        Text(
+                            "两次输入的新密码不一致",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Text(
+                        "修改成功后所有设备都要用新密码重新登录",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pwdDialog = false
+                        vm.changePassword(oldPwd, newPwd, onLogout)
+                    },
+                    enabled = ready
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { pwdDialog = false }) { Text("取消") } }
+        )
+    }
+
+    if (logoutDialog) {
+        AlertDialog(
+            onDismissRequest = { logoutDialog = false },
+            title = { Text("退出账号") },
+            text = { Text("退出后需要重新登录，聊天记录仍保留在服务器。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    logoutDialog = false
+                    vm.logout(onLogout)
+                }) { Text("退出") }
+            },
+            dismissButton = { TextButton(onClick = { logoutDialog = false }) { Text("取消") } }
+        )
+    }
+
+    if (cancelDialog) {
+        var pwd by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { cancelDialog = false },
+            title = { Text("注销账号") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "注销后账号将被永久删除：好友关系、群组、会话与消息都会清除，且无法恢复。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    PwdField(pwd, { pwd = it }, "登录密码")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        cancelDialog = false
+                        vm.cancelAccount(pwd, onLogout)
+                    },
+                    enabled = pwd.isNotBlank()
+                ) { Text("确认注销", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { cancelDialog = false }) { Text("取消") } }
+        )
+    }
+}
+
+/** 账号操作行：左标题，右侧「›」指示；注销用危险色 */
+@Composable
+private fun AccountRow(title: String, danger: Boolean = false, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.weight(1f))
+        Text("›", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+    }
+}
+
+/** 密码输入框：掩码 + 密码键盘 */
+@Composable
+private fun PwdField(value: String, onChange: (String) -> Unit, label: String) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+    )
 }
 
 /** 设置行：标题 + 说明在左，控制件在右（对齐 Settings.vue 的 settings__row） */

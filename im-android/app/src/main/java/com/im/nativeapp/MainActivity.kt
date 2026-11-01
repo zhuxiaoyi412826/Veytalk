@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity() {
                             onOpenAddFriend = { nav.navigate("add-friend") },
                             onOpenCreateGroup = { nav.navigate("group-create") },
                             onOpenLiveRoom = { roomId -> nav.navigate("live/$roomId") },
+                            onOpenScan = { nav.navigate("scan") },
                             onOpenVideoPlayer = { v ->
                                 // 点击即预建播放器缓冲，导航转场期间完成首帧 → 无缝切入
                                 videoPlayerHolder.prepare(v.fileUrl)
@@ -174,6 +175,10 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("ai") {
                         com.im.nativeapp.ui.ai.AiScreen(onBack = { nav.popBackStack() })
+                    }
+                    // 扫一扫：识别电脑网页上的登录二维码，确认后让网页免密登录
+                    composable("scan") {
+                        com.im.nativeapp.ui.scan.QrScanScreen(onBack = { nav.popBackStack() })
                     }
                     composable(
                         route = "video-player?url={url}&title={title}&cover={cover}&w={w}&h={h}",

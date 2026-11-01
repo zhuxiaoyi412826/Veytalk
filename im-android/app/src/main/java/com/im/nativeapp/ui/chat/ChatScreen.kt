@@ -489,15 +489,35 @@ private fun BubbleContent(
             val h = msg.extra?.height ?: 3
             val maxWidth = 220.dp
             val height = maxWidth * h.toFloat() / w.toFloat()
+            var saveDialog by remember { mutableStateOf(false) }
             AsyncImage(
                 model = url,
                 contentDescription = "图片",
                 modifier = Modifier
                     .width(maxWidth)
                     .height(height.coerceIn(80.dp, 320.dp))
-                    .clickable { url?.let(onPreviewImage) },
+                    .combinedClickable(
+                        onClick = { url?.let(onPreviewImage) },
+                        onLongClick = { saveDialog = true }
+                    ),
                 contentScale = ContentScale.Crop
             )
+            if (saveDialog) {
+                AlertDialog(
+                    onDismissRequest = { saveDialog = false },
+                    title = { Text("保存图片") },
+                    text = { Text("将这张图片保存到手机相册？") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            saveDialog = false
+                            vm.saveImage(msg)
+                        }) { Text("保存") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { saveDialog = false }) { Text("取消") }
+                    }
+                )
+            }
         }
         3 -> {
             // 文件卡片：点击换票据直链交给系统下载管理器（M2 下载管理）

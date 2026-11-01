@@ -71,6 +71,10 @@ data class ConversationVO(
 @Serializable
 data class SingleConversationRequest(val targetUserId: String)
 
+/** 扫码登录：scene 是网页二维码里的登录会话标识，原样回传即可 */
+@Serializable
+data class QrSceneRequest(val scene: String)
+
 @Serializable
 data class ConvReadRequest(val conversationId: String, val maxSeq: String? = null)
 
@@ -374,3 +378,17 @@ data class VideoCreateRequest(
  * 手机端只观看不开播（定案「本地软件开播、浏览器与 App 观看」），
  * LiveStartRequest/LiveStartVO 已随开播链路一并移除。
  */
+
+// ============================== 账号安全（user.js changePassword/cancelAccount 事实源） ==============================
+
+/** 修改密码：oldPassword 可空（验证码建号、从未设过密码的账号首次设置时留空） */
+@Serializable
+data class ChangePasswordRequest(
+    val oldPassword: String? = null,
+    val newPassword: String,
+    val logoutAll: Boolean = true
+)
+
+/** 账号注销：登录密码二次确认，不可逆 */
+@Serializable
+data class CancelAccountRequest(val password: String)
