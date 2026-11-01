@@ -448,8 +448,10 @@ fun LiveRoomScreen(
     }
     val playUrl = room?.playUrl
     LaunchedEffect(playUrl) {
-        if (!playUrl.isNullOrEmpty()) {
-            player.setMediaItem(MediaItem.fromUri(playUrl))
+        // playUrl 是后端下发的相对路径（/hls/...），必须拼 8088 流媒体 host 才是合法 URI
+        val src = vm.resolvePlayUrl(playUrl)
+        if (!src.isNullOrEmpty()) {
+            player.setMediaItem(MediaItem.fromUri(src))
             player.prepare()
         }
     }

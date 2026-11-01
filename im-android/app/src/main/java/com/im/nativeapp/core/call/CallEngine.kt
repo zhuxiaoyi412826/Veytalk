@@ -108,10 +108,15 @@ class CallEngine(
         val observer = object : PeerConnection.Observer {
             override fun onIceCandidate(candidate: IceCandidate) {
                 // candidate 为 null 的收集结束事件在 native 回调里不会出现，无需判空
+                // candidate 必须是嵌套对象（RTCIceCandidate.toJSON 形状），与 Web 端
+                // utils/webrtc.js 的 onLocalSignal('ice', { candidate: toJSON() }) 对齐——
+                // 打平成字符串会让对端 new RTCIceCandidate(candidate) 构造失败、候选全被丢弃
                 onLocalSignal("ice", buildJsonObject {
-                    put("candidate", candidate.sdp)
-                    put("sdpMid", candidate.sdpMid ?: "0")
-                    put("sdpMLineIndex", candidate.sdpMLineIndex)
+                    put("candidate", buildJsonObject {
+                        put("candidate", candidate.sdp)
+                        put("sdpMid", candidate.sdpMid ?: "0")
+                        put("sdpMLineIndex", candidate.sdpMLineIndex)
+                    })
                 })
             }
 

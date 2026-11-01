@@ -1,6 +1,7 @@
 package com.im.nativeapp.ui.chat
 
 import android.Manifest
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -53,6 +55,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -498,11 +501,14 @@ private fun BubbleContent(
         }
         3 -> {
             // 文件卡片：点击换票据直链交给系统下载管理器（M2 下载管理）
+            // 高风险格式：常驻警示标签 + 下载前再确认（对齐 MessageBubble 需求 2）
+            val risk = RiskFile.categoryOf(msg.extra?.fileName)
+            var confirmDownload by remember { mutableStateOf(false) }
             Row(
                 modifier = Modifier
                     .padding(12.dp)
                     .widthIn(max = 240.dp)
-                    .clickable { vm.downloadFile(msg) },
+                    .clickable { if (risk != null) confirmDownload = true else vm.downloadFile(msg) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(Icons.Default.AttachFile, contentDescription = null, tint = contentColor)
@@ -515,6 +521,13 @@ private fun BubbleContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (risk != null) {
+                        Text(
+                            "高风险 · ${risk.first}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     Text(
                         buildString {
                             append(formatSize(msg.extra?.fileSize))
@@ -525,6 +538,22 @@ private fun BubbleContent(
                         color = contentColor.copy(alpha = 0.7f)
                     )
                 }
+            }
+            if (confirmDownload && risk != null) {
+                AlertDialog(
+                    onDismissRequest = { confirmDownload = false },
+                    title = { Text("高风险文件提醒") },
+                    text = { Text("${msg.extra?.fileName ?: "该文件"} 属于「${risk.first}」。${risk.second}。确认仍要下载？") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmDownload = false
+                            vm.downloadFile(msg)
+                        }) { Text("仍要下载") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmDownload = false }) { Text("取消") }
+                    }
+                )
             }
         }
         4 -> {
@@ -584,6 +613,48 @@ private fun callRecordText(msg: MessageVO): String {
 
 // ============================== 输入栏 ==============================
 
+/**
+ * 高风险文件判定（对齐 im-ui/src/utils/riskFile.js，需求 2）。
+ *
+ * 名单与后端 FileBizType.CHAT_FILE 白名单配套，只提示不拦截：
+ * 发送前确认 + 气泡常驻警示 + 下载前再确认，让接收方在知情前提下继续。
+ */
+private object RiskFile {
+    private val categories = listOf(
+        Triple(
+            "安装包 / 可执行文件",
+            "接收方下载后运行有中毒或被勒索的风险，请确认来源可信",
+            setOf("apk", "apks", "exe", "msi", "appx", "msix", "deb", "rpm", "jar", "scr", "vbs", "bat", "cmd")
+        ),
+        Triple(
+            "证书 / 私钥文件",
+            "私钥与证书一旦泄露等同于交出对应身份，请确认必须通过聊天通道传输",
+            setOf("cer", "crt", "pem", "key", "p12", "pfx", "jks", "keystore", "truststore")
+        ),
+        Triple(
+            "凭据库 / 系统配置文件",
+            "这类文件通常装着密码或系统设置，泄露会直接扩大影响面",
+            setOf("kdbx", "reg")
+        )
+    )
+
+    /** 命中返回 (类别标签, 风险说明)，未命中返回 null */
+    fun categoryOf(fileName: String?): Pair<String, String>? {
+        val ext = fileName?.substringAfterLast('.', "")?.lowercase()?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val hit = categories.firstOrNull { ext in it.third } ?: return null
+        return hit.first to hit.second
+    }
+}
+
+/** 读 content:// Uri 的显示文件名（发送前风险判定要用扩展名） */
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+    }
+}.getOrNull()
+
 @Composable
 private fun ChatInputBar(vm: ChatViewModel) {
     val context = LocalContext.current
@@ -598,8 +669,31 @@ private fun ChatInputBar(vm: ChatViewModel) {
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) vm.sendImage(uri)
     }
+    // 高风险文件发送前确认（对齐 ChatWindow stageFile 的风险格式确认）
+    var pendingRiskFile by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) vm.sendFile(uri)
+        if (uri != null) {
+            val name = queryDisplayName(context, uri)
+            if (RiskFile.categoryOf(name) != null) pendingRiskFile = uri to (name ?: "该文件")
+            else vm.sendFile(uri)
+        }
+    }
+    pendingRiskFile?.let { (uri, name) ->
+        val risk = RiskFile.categoryOf(name)
+        AlertDialog(
+            onDismissRequest = { pendingRiskFile = null },
+            title = { Text("高风险文件提醒") },
+            text = { Text("$name 属于「${risk?.first ?: ""}」。${risk?.second ?: ""}。确认仍要发送？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRiskFile = null
+                    vm.sendFile(uri)
+                }) { Text("仍要发送") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRiskFile = null }) { Text("取消") }
+            }
+        )
     }
     val audioPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) Toast.makeText(context, "需要录音权限才能发送语音", Toast.LENGTH_SHORT).show()

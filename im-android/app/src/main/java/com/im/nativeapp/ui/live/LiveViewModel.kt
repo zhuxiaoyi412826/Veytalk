@@ -79,6 +79,27 @@ class LiveViewModel @Inject constructor(
 
     fun mediaUrl(path: String?): String = session.resolveUrl(path) ?: ""
 
+    /**
+     * playUrl 可能是相对路径（/hls/{roomId}/{streamKey}/index.m3u8?...，走 8088 流媒体口），
+     * 直接喂 ExoPlayer 不是合法 URI 必挂。对齐 Web 端 Live.vue setupPlayer：
+     * /^https?:/ 直接用，否则 livePlayBase() + playUrl（= 后端 host + 8088，见 env.js）。
+     */
+    fun resolvePlayUrl(playUrl: String?): String? {
+        if (playUrl.isNullOrEmpty()) return null
+        if (playUrl.startsWith("http://") || playUrl.startsWith("https://")) return playUrl
+        val base = session.mediaBase()
+        return if (playUrl.startsWith("/")) "$base$playUrl" else "$base/$playUrl"
+    }
+
+    /** danmakuWs 同样是相对路径（/ws/live?roomId=X）：拼 ws host + satoken（对齐 Web connectDanmaku） */
+    private fun resolveDanmakuWs(path: String): String {
+        if (path.startsWith("ws://") || path.startsWith("wss://")) return path
+        val p = if (path.startsWith("/")) path else "/$path"
+        val sep = if (p.contains('?')) "&" else "?"
+        val token = java.net.URLEncoder.encode(session.currentToken(), "UTF-8")
+        return "${session.wsBase()}$p${sep}satoken=$token"
+    }
+
     /* ------------------------------ 大厅 ------------------------------ */
 
     fun refreshList() {
@@ -358,8 +379,8 @@ class LiveViewModel @Inject constructor(
         _ended.value = false
     }
 
-    private fun connectDanmaku(url: String) {
-        danmakuSocket.connect(url)
+    private fun connectDanmaku(path: String) {
+        danmakuSocket.connect(resolveDanmakuWs(path))
         viewModelScope.launch {
             danmakuSocket.frames.collect { frame -> consumeFrame(frame) }
         }

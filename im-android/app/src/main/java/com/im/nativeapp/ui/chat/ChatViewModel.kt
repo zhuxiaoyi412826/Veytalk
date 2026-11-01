@@ -107,9 +107,13 @@ class ChatViewModel @Inject constructor(
         val fileName = msg.extra?.fileName ?: "file-${fileId}"
         viewModelScope.launch {
             try {
-                val url: String = apiClient.service(FileApi::class.java)
+                val signed: String = apiClient.service(FileApi::class.java)
                     .signedUrl(fileId)
                     .unwrap(apiClient.json)
+                // 后端票据直链是受控相对地址（/api/file/download/{id}?ticket=…）。
+                // DownloadManager 跑在系统进程里，只认 http(s) 绝对地址，相对地址会抛
+                // "Can only handle HTTP or HTTPS"，表现就是所有文件都点着下不了
+                val url = session.resolveUrl(signed) ?: throw ApiError(-1, "下载地址为空")
                 val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
                 val request = android.app.DownloadManager.Request(Uri.parse(url))
                     .setTitle(fileName)

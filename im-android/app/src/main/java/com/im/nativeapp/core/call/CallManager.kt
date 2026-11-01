@@ -185,7 +185,9 @@ class CallManager @Inject constructor(
         val s = _state.value
         if (s.status != Status.RINGING) return
         scope.launch {
-            val cfg = config
+            // 与 dial 同口径走 ensureConfig：invite 到达时那次拉取若恰逢网络抖动失败，
+            // 直接读缓存会把「可重试的null」当成「已关闭」，点接听永远变成拒接
+            val cfg = ensureConfig()
             if (cfg == null || !cfg.first) {
                 signal("reject")
                 teardown(finalize = false)

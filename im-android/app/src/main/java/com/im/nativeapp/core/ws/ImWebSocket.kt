@@ -17,8 +17,10 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -223,13 +225,15 @@ class ImWebSocket @Inject constructor(
     fun send(type: String, data: JsonObject? = null, clientMsgId: String? = null): Boolean {
         val socket = ws ?: return false
         if (_status.value != Status.OPEN) return false
-        val packet = buildString {
-            append("""{"type":""").append(type).append('"')
-            if (clientMsgId != null) append(""","clientMsgId":""").append(clientMsgId).append('"')
-            if (data != null) append(""","data":""").append(data.toString())
-            append('}')
+        // 整帧交给 kotlinx.serialization 组装：字符串拼 JSON 时原始串无法以引号结尾
+        // （"""...":""" 的尾引号会被并入闭合分隔符），曾产出 {"type":call" 这种非法帧，
+        // 后端整条解析失败、只回 error，导致带 data 的上行（call/read/delivered）全部静默丢失
+        val packet = buildJsonObject {
+            put("type", type)
+            if (clientMsgId != null) put("clientMsgId", clientMsgId)
+            if (data != null) put("data", data)
         }
-        return send(socket, packet)
+        return send(socket, packet.toString())
     }
 
     private fun send(socket: WebSocket, text: String): Boolean {
