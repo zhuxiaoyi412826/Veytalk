@@ -33,15 +33,15 @@
 
 ## 〇、先看结论
 
-**这套 compose 里跑七个服务**（前五个必装，后两个按需）：
+**这套主 compose 跑四个必装服务**（`mysql`/`redis`/`im-server`/`nginx`），下面表格另列了两个「按需」和一个「单独部署」的 minio：
 
 | 服务 | 镜像 | 干什么 | 对外发布端口 |
 |---|---|---|---|
 | `mysql` | `mysql:8.0` | 业务库 `im_db`（37 张表） | ❌ 不发布 |
 | `redis` | `redis:7-alpine` | 会话 / 权限缓存 / 直播与通话瞬时态 | ❌ 不发布 |
-| `minio` | `minio/minio` | 对象存储（文件、头像、附件） | ❌ 不发布 |
 | `im-server` | 本目录 `Dockerfile` 构建 | 唯一的 Java 进程（HTTP + WebSocket + 定时任务） | ❌ 不发布（只给 nginx 反代） |
 | `nginx` | `nginx:1.27-alpine` | 三份前端静态站 + `/api` `/ws` 反代 + 直播推流/播放口 | ✅ `80` `443`，按需 `8088` |
+| `minio` | 官方二进制（非镜像） | 对象存储（文件、头像、附件）——**★ 不在主栈、也不进 CI；用 systemd 跑官方二进制，见 §8.1** | ✅ 宿主监听 `9000` `9001`（供 `host.docker.internal`，需放行 docker 子网并限源） |
 | `live-retention` | `node:22-alpine` | **只在开直播时**要：按保留期删回放分片目录 | ❌ |
 | `coturn` | `coturn/coturn` | **只在公网跨 NAT 通话时**要：STUN/TURN 中继 | ✅ `3478` + 中继端口段 |
 
@@ -132,11 +132,14 @@ sudo systemctl restart docker && docker info | grep -E "Storage Driver|Logging D
 ### 1.5 镜像加速（国内服务器拉不动 Docker Hub 时才需要）
 
 ```bash
-sudo mkdir -p /etc/docker && sudo tee -a /etc/docker/daemon.json <<'EOF'
-EOF
-# 在 daemon.json 里加："registry-mirrors": ["https://<你的加速地址>"]，然后 systemctl restart docker
+sudo mkdir -p /etc/docker
+# 用编辑器打开 daemon.json，在已有的 JSON 对象里加一行：
+#   "registry-mirrors": ["https://<你的加速地址>"]
+sudo systemctl restart docker
 docker pull mysql:8.0     # 能拉下来才算配好；拉不动就先去云厂商控制台开「容器镜像加速」
 ```
+
+> 别用 `echo ... >> daemon.json` 往文件里追加——那会写出两个 `{}` 拼接的非法 JSON，`dockerd` 直接起不来（第十二节有条对应的故障）。
 
 > 更快的路子是**离线导入**：在能联网的机器上 `docker save` 六个镜像 → 拷到服务器 `docker load`。
 > 内网机、以及「上线窗口只有十分钟」的场合，这条路比调镜像源可靠得多（第十二节速查表里有一条相关的失败表现）。
@@ -144,6 +147,28 @@ docker pull mysql:8.0     # 能拉下来才算配好；拉不动就先去云厂�
 ---
 
 ## 二、目录结构（先把骨架摆出来）
+
+> **★ 本份文档已经不再是「只有文档」了：仓库里的 [`Docker/`](../../Docker/) 目录就是下面这棵树的成品，可以整体拷到服务器上。**
+> 文档与文件的对应关系（照文档改文件、或照文件回查文档，都从这张表进）：
+>
+> | 文档章节 | 仓库里的文件 | 落地后在服务器上的路径 |
+> |---|---|---|
+> | §2 骨架 | `Docker/{data,web,certs,sql-init}/.gitkeep` | 目录本体（内容不进库） |
+> | §3.1 `.env` | `Docker/.env.example` | `/opt/im-docker/.env`（复制后填值，不进库） |
+> | §3.2 `conf/im.env` | `Docker/conf/im.env.example` | `conf/im.env`（`bootstrap.sh` 生成并同步凭据） |
+> | §4 Dockerfile | `Docker/app/Dockerfile`（路线 A：拷 jar）<br>`Docker/app/Dockerfile.multistage`（路线 B：容器内构建） | `app/Dockerfile` |
+> | §5 compose 全文 | `Docker/docker-compose.yml` | `docker-compose.yml` |
+> | §6 SQL 初始化 | `Docker/sql-init/`（空，由 `bootstrap.sh` 从 `sql/` 拷入并重命名为 `01_/02_`） | `sql-init/` |
+> | §7 权限缓存清理 | `Docker/scripts/clear-perm-cache.sh` | `scripts/` |
+> | §8 nginx | `Docker/nginx/conf.d/im.conf.example` + `Docker/nginx/snippets/{proxy,ssl}.conf`<br>`Docker/app/extra/application-prod-extra.example.yml` | `nginx/conf.d/im.conf`（token 替换生成） |
+> | §9 sidecar / TURN | `Docker/scripts/live-retention.js`（`bootstrap.sh` 从 `electron/` 拷入） | `scripts/` |
+> | §10 备份升级 | `Docker/scripts/{import-sql,backup,update}.sh` | `scripts/` |
+> | §11 健康检查与自启 | `Docker/scripts/{health.sh,im-docker.service}` | `scripts/` + `/etc/systemd/system/` |
+> | §10.5 CI/CD | [`.github/workflows/build-and-package.yml`](../../.github/workflows/build-and-package.yml) | 跑在 GitHub Actions 上，产物推 GHCR |
+>
+> **落地只需要三步**（细节见 `Docker/README.md`）：把整个 `Docker/` 拷到 `/opt/im-docker` → `cp .env.example .env` 填值 → `bash scripts/bootstrap.sh`。
+> `bootstrap.sh` 干的就是本节下面这些「手工摆目录、抄域名、拼凭据」的活，并且**幂等**（重复跑只会覆盖生成物，不会重复追加行）。
+> 它不启动容器、不联网、不碰数据库；没装 docker 的机器（比如写这些文件的开发机）也能跑通，只是跳过最后 `docker compose config` 的静态校验。
 
 约定部署根目录 `/opt/im-docker`。**`docker-compose.yml` 里的相对路径全部以它为基准**，别换目录再抄配置。
 
@@ -264,7 +289,7 @@ TZ=Asia/Shanghai                             # 与 MySQL 的 default-time-zone �
 
 # ===== 文件存储：装 MinIO（默认）=====
 IM_FILE_STORAGE=minio
-MINIO_ENDPOINT=http://minio:9000             # ★ 裸机 http://127.0.0.1:9000
+MINIO_ENDPOINT=http://host.docker.internal:9000   # ★ minio 已移出主栈、单独发布宿主 9000；裸机直跑写 http://127.0.0.1:9000
 MINIO_ACCESS_KEY=<同 MINIO_ROOT_USER>
 MINIO_SECRET_KEY=<同 MINIO_ROOT_PASSWORD>
 MINIO_BUCKET=im-files
@@ -316,6 +341,10 @@ MANAGEMENT_ADDRESS=127.0.0.1                 # ★ 容器里的 loopback 只有�
 产物只有一个可执行 fat jar（`im-bootstrap/target/im-server.jar`，主类 `com.im.bootstrap.ImApplication`）。
 两条路线：
 
+> ★ 两个文件都已在仓库里：[`Docker/app/Dockerfile`](../../Docker/app/Dockerfile)（路线 A）与 [`Docker/app/Dockerfile.multistage`](../../Docker/app/Dockerfile.multistage)（路线 B）。
+> 路线 A 的构建上下文就是 `Docker/app`（jar 由 CI 的 `download-artifact` 直接丢进去），路线 B 的上下文是仓库根，两个 `-f` 不要写反。
+> 路线 A 的「构建机」在本项目里就是 **GitHub Actions 的 runner**（见 §10.5），不是你手上这台开发机。
+
 ### 4.1 路线 A：jar 由构建机产出，镜像只做运行时（**推荐**）
 
 构建机（有 JDK 21 + Maven，不需要 Docker）：
@@ -331,16 +360,38 @@ scp im-bootstrap/target/im-server.jar deploy@server:/opt/im-docker/app/im-server
 ```dockerfile
 # 基础镜像固定到 21-jre（Ubuntu 系）。★ 别用 -alpine 版：那是 busybox sh，
 # 本文件后面的健康检查用 bash 的 /dev/tcp，busybox 不支持（要改写成 wget）。
+# ★ 另一个半边同类的坑：Ubuntu 底镜像的 /bin/sh 是 dash，它也不认 /dev/tcp，
+#   所以 compose 里那条健康检查必须写 CMD ["bash", "-c", …]，不能用 CMD-SHELL（详见第五节）。
 FROM eclipse-temurin:21-jre
 
 # 镜像里没有 curl 的可靠保证，健康检查依赖 bash（Ubuntu 基础镜像自带），不额外装包
 WORKDIR /app
 
-# 非 root 运行：uid 1000 与宿主机 ./data/* 的 chown 对齐（第二节）
-RUN groupadd --system --gid 1000 im \
-    && useradd  --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
-    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra \
-    && chown -R 1000:1000 /app
+# 非 root 运行：数字 uid/gid 1000 与宿主机 ./data/* 的 chown 对齐（第二节）
+# ★★ 这段被真实构建打挂两次才改对，教训是：需要的只是「镜像里存在 uid/gid 1000 这两个数字」，
+#   数字背后叫什么名字无关 —— USER 1000:1000、chown -R 1000:1000、COPY --chown=1000:1000 全是数字，
+#   不查 /etc/passwd。而 eclipse-temurin:21-jre 的底（Ubuntu 24.04）自带一个 ubuntu 用户（uid 1000）
+#   和它的同名组（gid 1000）。所以别再新建一个叫 im 的用户去抢 1000：
+#     · `groupadd --gid 1000 im` → 退出码 4（GID 已存在；占用者不是网传 adduser 的 gro 占位组，
+#       实测就是 ubuntu 组，所以「改名让位 gro」那条分支根本不触发）
+#     · 跳过建组后再 `useradd --uid 1000 im` → `useradd: UID 1000 is not unique`
+#   正解：数字已存在就复用，不存在才补建（getent 支持按数字查 passwd/group，glibc 特性）。
+#   另：RUN 续行里不要投行内注释——行尾反斜杠会把换行吃掉，注释连后一行一起被注掉（症状是命令凭空少一截）。
+ARG IM_UID=1000
+ARG IM_GID=1000
+RUN set -eu; \
+    if getent group "${IM_GID}" >/dev/null 2>&1; then \
+      echo "[im] gid ${IM_GID} 已存在（$(getent group "${IM_GID}" | head -1 | cut -d: -f1)），复用"; \
+    else \
+      groupadd --system --gid "${IM_GID}" im; \
+    fi; \
+    if getent passwd "${IM_UID}" >/dev/null 2>&1; then \
+      echo "[im] uid ${IM_UID} 已存在（$(getent passwd "${IM_UID}" | head -1 | cut -d: -f1)），复用，不建 im 用户"; \
+    else \
+      useradd --system --uid "${IM_UID}" --gid "${IM_GID}" --home-dir /app im; \
+    fi; \
+    mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra; \
+    chown -R "${IM_UID}:${IM_GID}" /app
 
 COPY --chown=1000:1000 im-server.jar /app/im-server.jar
 
@@ -382,8 +433,12 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -q clean package -DskipTests
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-RUN groupadd --system --gid 1000 im && useradd --system --uid 1000 --gid 1000 --create-home --home-dir /app im \
-    && mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra && chown -R 1000:1000 /app
+# 建组建用户与 4.1 完全一致（那节有「只复用数字 1000、不新建 im 用户」的原因），这里略成紧凑版：
+RUN set -eu; \
+    getent group 1000 >/dev/null 2>&1 || groupadd --system --gid 1000 im; \
+    getent passwd 1000 >/dev/null 2>&1 || useradd --system --uid 1000 --gid 1000 --home-dir /app im; \
+    mkdir -p /app/logs /app/upload-tmp /app/files /app/knowledge /app/extra; \
+    chown -R 1000:1000 /app
 COPY --from=build --chown=1000:1000 /src/im-bootstrap/target/im-server.jar /app/im-server.jar
 ENV TZ=Asia/Shanghai JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8" SPRING_PROFILES_ACTIVE=prod
 EXPOSE 8080
@@ -415,11 +470,100 @@ docker build -t local/im-server:1.0.0 .
 > 与《服务器部署指南》§2.3「不要把 Maven 装到服务器上」的口径一致；
 > 路线 B 只在「没有独立构建机」时用。★ 无论哪条，**服务器都不该装 Maven**——构建发生在容器里，不进宿主机。
 
+### 4.3 镜像体积 & compose 栈到底涉及几个镜像
+
+**先分清一个容易混的点：上面两条路线构建的都是 `im-server` 这一个单一镜像（只装后端 Java 应用），不是「把整个项目打成一个镜像」。**
+`docker compose up` 起来的是**主栈 4 个镜像**（mysql/redis/im-server/nginx），其中只有 `im-server` 由本仓库构建并推 GHCR，其余 3 个都是**官方现成镜像**，本项目的 Dockerfile 不参与它们的构建（CI 的 `mirror-images` job 会把这 3 个原样搬到 GHCR `im-deps/*` 供 `compose pull`）：
+
+> ★ **minio 不在这个表里、也不属主栈**：MinIO 于 2026-09-11 把 `minio/minio` 从 Docker Hub 整仓下架（拉取 404/denied），`quay.io/minio/minio` 又拒 GitHub runner 共享 IP 的匿名拉（401），CI 镜像同步这条路走不通。因此 minio 已从 `mirror-images` 矩阵摘出。
+> **★ 统一用官方二进制跑 minIO**（`https://dl.min.io/server/minio/release/linux-amd64/minio` + systemd 常驻，不依赖任何镜像仓库），见 [`MinIO部署指南.md`](../MinIO部署指南.md) 第三/四节与本文 §8.1；im-server 经 `host.docker.internal:9000` 连它。（已不再保留容器退路：`minio/docker-compose.yml` 已删除。）
+
+| 服务 | 镜像 | 来源 | 谁负责构建 |
+|---|---|---|---|
+| `im-server` | `ghcr.io/<owner>/im-server:<tag>` | **本仓库 Dockerfile 构建** | CI（build-and-package.yml 的 docker-image job） |
+| `mysql` | `mysql:8.0` | Docker Hub 官方（CI 同步到 GHCR） | 不构建，直接 pull |
+| `redis` | `redis:7-alpine` | Docker Hub 官方（CI 同步到 GHCR） | 不构建，直接 pull |
+| `nginx` | `nginx:1.27-alpine` | Docker Hub 官方（CI 同步到 GHCR） | 不构建，直接 pull |
+| `minio` | `quay.io/minio/minio:RELEASE.*` | **quay.io（不在 CI 镜像流）** | 不构建，部署机单独 pull+起 |
+
+（compose 里还留了 `node`/`coturn` 两个注释掉的服务，放开直播媒体面/TURN 时才多拉对应镜像。）
+
+**im-server 单镜像体积（估算，以实测为准）**：
+
+| 组成 | 未压缩 | 依据 |
+|---|---|---|
+| 底座 `eclipse-temurin:21-jre`（Ubuntu 24.04 + JRE21） | 约 250–280 MB | 官方 JRE 版，比 JDK 版小近一半 |
+| `im-server.jar`（Spring Boot fat jar，含全部依赖） | 约 73 MB | 即 CI Artifacts 里那个 `im-server-jar`（实测 72.7 MB） |
+| `/app` 下几个空目录 + ENV/ENTRYPOINT | 可忽略 | 运行时被 bind mount 覆盖 |
+| **合计** | **约 330–360 MB**（未压缩） | GHCR 存/`docker pull` 传的是压缩态，约 **120–160 MB**（jar 已是 zip 压不动多少） |
+
+> 整栈首次 `docker compose pull` 落盘远大于此（光 `mysql:8.0` 未压缩就近 600 MB，minio/redis/nginx 各几十到一两百 MB），
+> 但那些是官方镜像、与本项目构建无关，本仓库只对该体积负责。**别为省体积换 `-alpine` 底座**：理由见 4.1 顶部注释（busybox/dash 不认 `/dev/tcp`，健康检查会静默失效）。
+
+**整个 compose 栈的体积估算（5 个服务，均为约值，以实测为准）：**
+
+| 服务 / 镜像 | 未压缩（约） | 压缩 pull（约） | 说明 |
+|---|---|---|---|
+| `im-server` | 330–360 MB | 120–160 MB | 本仓库唯一自建镜像（拆解见上表） |
+| `mysql:8.0` | 约 600 MB | 约 160 MB | 官方，**栈里最大头** |
+| `redis:7-alpine` | 约 45 MB | 约 15 MB | 官方 alpine 版，很小 |
+| `quay.io/minio/minio:RELEASE.*` | 约 60–150 MB | 约 40 MB | 官方（Go 静态二进制 + 精简底），源在 quay.io |
+| `nginx:1.27-alpine` | 约 50 MB | 约 15 MB | 官方 alpine 版 |
+| **整栈合计** | **约 1.1–1.2 GB** | **约 350–400 MB** | 首次 `compose pull` 落盘量级 |
+
+> 上表只算镜像本身，**不含数据卷**（`mysql-data`/`redis-data`/minio 存储等运行时才增长）。若把 §五 里注释的 `node`（直播媒体面）与 `coturn`（TURN）放开，再各加几十到上百 MB。
+
+**整栈精确实测（拉完/起完后跑，别信估算）：**
+
+```bash
+# 列出本 compose 会用到的镜像及其 SIZE（未拉取的显示 0）
+docker compose images
+# 看真实落盘（按服务名过滤）
+docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' | grep -E 'im-server|mysql|redis|minio|nginx'
+# 本机全部镜像/容器/卷的总占用概览
+docker system df
+```
+
+**im-server 单镜像精确实测（拉完/起完后跑，别信估算）：**
+
+```bash
+# 本地已 build 的镜像未压缩总字节数
+docker image inspect local/im-server:1.0.0 --format '{{.Size}}'
+# 逐层看谁占地方（应就是 base + jar 两块）
+docker history --human local/im-server:1.0.0
+# GHCR 上压缩后的真实传输体积（读 manifest 各层 size 求和，public 包无需登录）
+docker buildx imagetools inspect ghcr.io/<owner>/im-server:<tag> --raw \
+  | grep -o '"size":[0-9]*' | awk -F: '{s+=$2} END{printf "%.1f MB\n", s/1024/1024}'
+```
+
+> CI 已在 build-push-action 里设 `provenance: false`（见 §10.5），省掉默认 attestation 那两条 `unknown/unknown` 记录，GHCR 版本列表更干净（不影响体积本身）。
+
+### 4.4 整栈一键：把依赖镜像也扫到 GHCR（目标机不碰 Docker Hub）
+
+国内服务器 `docker compose pull` 拉 Docker Hub 经常超时/失败，而 mysql/redis/nginx 是官方镜像、本仓库不构建它们。所以让 CI 把这三个也镜像到 GHCR，compose 默认改从 GHCR 拉，实现整栈一键（minio 不在其中，走宿主二进制）。四处改动配合：
+
+1. **CI**（`build-and-package.yml` 的 `mirror-images` job）：用 `skopeo copy --override-arch amd64` 把三个官方镜像原样复制到 `ghcr.io/<owner>/im-deps/{mysql,redis,nginx}:<同官方 tag>`；先 `skopeo inspect` 比 digest，已同步就秒跳过，不会每次 push 重传 mysql 那 ~160 MB。★ minio 不在此列（官方镜像已下架、quay 拒 CI 匿名拉，改用宿主二进制，见 §8.1）。PR 不跑；main/tag 总跑；手动跑受 `mirror_images` 勾选控制。
+2. **compose**：三个依赖镜像改为 `${MYSQL_IMAGE:-mysql}:${MYSQL_TAG:-8.0}` 这种「变量 + Docker Hub 默认值」写法。**不设变量时行为与以前完全一致**，向后兼容。
+3. **`.env.example`**：把 `MYSQL_IMAGE`/`REDIS_IMAGE`/`NGINX_IMAGE` 默认值填成 `ghcr.io/<owner小写>/im-deps/*`（minio 无镜像变量，改用 `MINIO_DATA_DIR` 指向宿主二进制数据目录）。
+4. **`bootstrap.sh`**（①.5 步）：从 `IM_SERVER_TAG` 里提取 owner，自动回填上面三行的 `<owner小写>`——**owner 只在一处填，四处不会各写各的**。
+
+部署侧流程不变（§二）：`cp .env.example .env` → 填密码与 `IM_SERVER_TAG` 的真 owner → `bash scripts/bootstrap.sh`（自动对齐依赖镜像 owner）→ `docker compose pull && docker compose up -d`，全程只访问 GHCR。
+
+> ★ **首次部署前需先有镜像站**：`im-deps/*` 是由 CI 同步的。若 GHCR 上还没有，先手动跑一次 Actions（Run workflow，勾上 `mirror_images`）把四个镜像推上去；或者临时把 `.env` 里那四个 `*_IMAGE` 改回官方短名先走 Docker Hub。
+> ★ **想回落 Docker Hub**：删掉 `.env` 里那四行 `*_IMAGE`（或改回 `mysql`/`redis`/`minio/minio`/`nginx`）即可，compose 默认值就是官方短名。
+> ★ **升级依赖版本**：改 `.env` 里对应的 `*_TAG`（如 `MYSQL_TAG=8.4`）**同时**改 `mirror-images` job 矩阵里的 `src` tag，两边一致；下次 CI 跑就会把新版本同步上去。
+
 ---
 
 ## 五、docker-compose.yml 全文
 
 `/opt/im-docker/docker-compose.yml`。这份是**可以整份抄走**的最小生产形态：直播媒体面与 TURN 已写好但注释掉，按需放开。
+
+> ★ 仓库里的本体是 [`Docker/docker-compose.yml`](../../Docker/docker-compose.yml)，与下面这段同源，但有几处已经在服务器上补过的差异：
+> ① `redis` 服务多了 `REDIS_PASSWORD: ${REDIS_PASSWORD:?}` 这个环境变量——不加它，`docker compose exec redis redis-cli -a "$REDIS_PASSWORD"`
+> 在容器里拿到的是空串（compose 只在 `command:` 里插值，不会把变量注进容器环境），`health.sh` 与 `clear-perm-cache.sh` 就会鉴权失败；
+> 代价是 `docker inspect` 里能看到这个值，而它本来也能从 `command:` 里看到，没有新增泄露面。② 镜像名走 `${IM_SERVER_TAG}`，与 §10.5 的 CI 产出直接对接。
+> **以文件为准；下面这段的作用是把“为什么这么写”讲完。**
 
 ```yaml
 # IM 即时通讯系统 —— Ubuntu 24.04 + Docker Compose 部署
@@ -481,27 +625,11 @@ services:
       retries: 6
       start_period: 10s
 
-  # ---------------------------------------------------------------- MinIO
-  minio:
-    image: minio/minio:latest        # ★ 生产请把 latest 换成具体 RELEASE 标签（docker inspect 看当前跑的是哪个），latest 让回滚失去意义
-    container_name: im-minio
-    restart: unless-stopped
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      TZ: Asia/Shanghai
-    volumes:
-      - minio-data:/data
-    # 9000/9001 都不发布：控制台走 SSH 隧道看（docker compose port minio 9001 → ssh -L）
-    healthcheck:
-      # 官方镜像自带 mc。若你用的构建里没 mc，换成
-      #   test: ["CMD-SHELL", "mc ready local || exit 1"]  →  前先 docker compose exec minio which mc 确认
-      test: ["CMD-SHELL", "mc ready local"]
-      interval: 15s
-      timeout: 5s
-      retries: 8
-      start_period: 20s
+  # ---------------------------------------------------------------- MinIO —— 已移出本栈
+  # minio 不再写在主 compose 里：因 MinIO 2026-09-11 从 Docker Hub 整仓删除、quay 又拒 CI 匿名拉（401），
+  # CI 搬不动它，遂改由宿主机官方二进制跑（systemd 服务 minio，监听 0.0.0.0:9000/9001，见 §8.1 / MinIO部署指南.md）。
+  # 它发布宿主 9000/9001，im-server 经 extra_hosts 的 host.docker.internal:9000 连它（MINIO_ENDPOINT 见 conf/im.env）。
+  # ★ minio 在栈外，主栈无法对它做 depends_on: service_healthy——务必先确认二进制 minio 在跑（systemctl is-active minio、curl 127.0.0.1:9000/minio/health/live），再起主栈。
 
   # ---------------------------------------------------------------- 后端
   im-server:
@@ -516,8 +644,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy   # ★ 关键：IM_FILE_STORAGE 默认 minio 且连不上桶会 fail-fast，没有这条就是无限重启循环
+      # ★ minio 已移出本栈（单独部署在宿主），compose 无法跨项目对它 service_healthy。
+      #   代价：若单独部署的 minio 没先起来，im-server 会因连不上桶 fail-fast 崩重启——先起 minio 再起主栈。
+    # 让 im-server 能用 host.docker.internal 解析到宿主机，连上面单独部署的 minio:9000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ./conf/im.env
     volumes:
@@ -535,8 +666,10 @@ services:
         limits:
           memory: 2g                 # 与 JAVA_OPTS 的 MaxRAMPercentage=75 配套：堆上限约 1.5g
     healthcheck:
-      # Actuator 只绑 127.0.0.1，所以只能在容器内问；bash 的 /dev/tcp 免装 curl/wget（alpine 基础镜像要改写）
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
+      # Actuator 只绑 127.0.0.1，所以只能在容器内问；/dev/tcp 免装 curl/wget
+      # ★ 写 CMD ["bash", …] 而不是 CMD-SHELL：CMD-SHELL 走 /bin/sh，eclipse-temurin 是 Ubuntu 底、/bin/sh 就是 dash，
+      #   而 dash 不认 /dev/tcp → 健康检查永失败 → 容器一直 unhealthy → nginx 的 service_healthy 卡死，整个栈起不来
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 | grep -q UP"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -610,10 +743,10 @@ services:
 # compose 对「服务里用了但顶层没声明」的卷是直接报错的：
 #   service "mysql" refers to undefined volume mysql-data: invalid compose project
 # 声明为空体即可，卷名会带上项目名前缀（im-docker_mysql-data），驱动与选项由 Docker 默认
+# （minio 已移出本栈改用宿主二进制，数据在宿主目录 .env 的 MINIO_DATA_DIR，不在 compose 卷里）
 volumes:
   mysql-data:
   redis-data:
-  minio-data:
 ```
 
 ### 5.1 起与看
@@ -633,13 +766,13 @@ docker compose logs -f im-server  # 看到「Started ImApplication」且没有 I
 
 ```bash
 # 后端能不能摸到 mysql / redis / minio（服务名解析对不对，这是容器化第一大坑）
-docker compose exec im-server sh -c 'for h in mysql redis minio; do printf "%s: " "$h"; timeout 2 bash -c "exec 3<>/dev/tcp/$h/${h/mysql/3306}" 2>&1 && echo OK || echo FAIL; done'
-# 上面这条用了嵌套替换，读起来别扭；分三条更清楚：
+# ★ 用 bash 而不是 sh：/dev/tcp 是 bash 的特性，dash / busybox sh 都不认；
+#   也别用变量替把端口凑在一起（${h/mysql/3306} 对 redis / minio 会拼成主机名当端口）
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/mysql/3306   && echo mysql-ok'
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/redis/6379   && echo redis-ok'
 docker compose exec im-server bash -c 'exec 3<>/dev/tcp/minio/9000   && echo minio-ok'
-# nginx 能不能摸到后端
-docker compose exec nginx  sh -c 'exec 3<>/dev/tcp/im-server/8080 && echo upstream-ok'
+# nginx 能不能摸到后端：nginx:1.27-alpine 里没有 bash，用 busybox 自带的 nc（不写 -z，靠 </dev/null 立刻 EOF）
+docker compose exec nginx  sh -c 'nc -w 2 im-server 8080 < /dev/null' && echo upstream-ok
 ```
 
 ---
@@ -759,6 +892,10 @@ docker compose exec nginx sh -c "nginx -V 2>&1 | tr ' ' '\\n' | grep -E 'http_da
 `unknown directive "dav_methods"`，或者签名根本不校验。
 
 ### 8.2 `nginx/conf.d/im.conf`（可直接抄）
+
+> ★ 仓库里已经落盘为 [`Docker/nginx/conf.d/im.conf.example`](../../Docker/nginx/conf.d/im.conf.example)：它把下面这些域名换成了 `__IM_DOMAIN__` 形式的 token，
+> 由 `bootstrap.sh` 从 `.env` 里取值替换后生成 `nginx/conf.d/im.conf`。**不用 nginx 自带的 `envsubst`**——那会把 `$host`、`$uri`、`$remote_addr` 这些 nginx 变量一并吃成空串，
+> 是一个很难查的坑（表现是 `Host: ` 空头发给后端，接口全 404）。下面这段保留写死的 `im.example.com`，是为了让你能直接读懂结构；两边不同步时**以文件为准**。
 
 ```nginx
 # ---------- 公共片段：snippets/proxy.conf（下面引它，避免四个 server 块各写一遍）----------
@@ -885,7 +1022,8 @@ docker compose exec nginx nginx -s reload   # 或直接 docker compose restart n
 
 ### 8.3 ★ 容器形态下「谁在监听、怎么挡」这件事的正确答案
 
-- 只发布 `80` / `443`（按需 `8088`、TURN 的 `3478` 与中继端口段、以及 `8947/udp`）。**8080/8081/3306/6379/9000/9001 一律不发布**。
+- 主栈只发布 `80` / `443`（按需 `8088`、TURN 的 `3478` 与中继端口段、以及 `8947/udp`）。**主栈里 8080/8081/3306/6379 一律不发布**。
+  （minio 不在主栈而是宿主二进制：它的 `9000`/`9001` 是**宿主机自己监听的端口，走 UFW 的 INPUT 链**（不像 Docker 发布端口那样绕过 UFW）。容器经 `host.docker.internal`（网桥网关 IP，如 `172.17.0.1`）访问它，所以要放行 docker 子网：`ufw allow from 172.16.0.0/12 to any port 9000 proto tcp`；对外来源继续靠云安全组挡在公网之外。）
 - 要按源 IP 过滤已发布的端口，**UFW 不管用**（Docker 直接动 `DOCKER` 链，绕过 `ufw` 的 `INPUT`）。
   官方给的口子是 `DOCKER-USER` 链：
 
@@ -1035,11 +1173,10 @@ cd /opt/im-docker && mkdir -p backup
 # ① 数据库（逻辑备份，唯一能跨镜像版本恢复的路子）
 docker compose exec -T mysql mysqldump -uim -p"$MYSQL_PASSWORD" \
   --single-transaction --routines --default-character-set=utf8mb4 im_db | gzip > backup/im-$(date +%F-%H%M).sql.gz
-# ② 对象存储：MinIO 数据在命名卷里，停容器后 tar（桶内对象与元数据一起走）
-docker compose stop minio
-docker run --rm -v im-docker_minio-data:/data -v "$PWD/backup":/backup alpine \
-  tar czf /backup/minio-$(date +%F).tar.gz -C /data .
-docker compose start minio
+# ② 对象存储：minio 是宿主二进制，停服务后直接 tar 它的数据目录（MINIO_DATA_DIR，默认 /data/minio）
+sudo systemctl stop minio
+sudo tar czf backup/minio-$(date +%F).tar.gz -C "${MINIO_DATA_DIR:-/data/minio}" .
+sudo systemctl start minio
 # ③ 编排与配置（这三份丢了等于整套环境重建）
 tar czf backup/im-docker-conf-$(date +%F).tar.gz docker-compose.yml .env conf app/extra nginx
 # ④ Redis：已开 appendonly，AOF 在卷里；要快照就：
@@ -1080,8 +1217,48 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 
 ### 10.4 别随手 `docker system prune -a --volumes`
 
-`--volumes` 会把 `mysql-data` / `minio-data` / `redis-data` 一起删掉；`-a` 会删掉所有「当前没被容器引用」的镜像，包括你留着回滚的旧 tag。
+`--volumes` 会把当前没被容器引用的卷一起删掉（主栈的 `im-docker_mysql-data` / `im-docker_redis-data`；minio 已改用宿主二进制，数据不在卷里、不受此影响）；`-a` 会删掉所有「当前没被容器引用」的镜像，包括你留着回滚的旧 tag。
 要清理就用精确命令：`docker image prune`（只删悬空层）、`docker builder prune`（删构建缓存）。
+
+### 10.5 用 GitHub Actions 把 10.2 自动化（仓库里已给现成 workflow）
+
+本节上面那堆 `mvn package` / `scp` / `sed .env` / `compose up`，在 [`build-and-package.yml`](../../.github/workflows/build-and-package.yml) 里已经写完。**关键前提：构建不发生在开发机，也不发生在业务机，而是发生在 GitHub 的 runner 上。**
+
+| job | 干什么 | 产物 |
+|---|---|---|
+| `meta` | 从根 `pom.xml` 里取版本号、把仓库主名转小写（GHCR 只认小写镜像名）、判定本次是否该 push（PR 不推） | job 输出 `version` / `image` / `push` |
+| `build-jar` | `setup-java@temurin 21` + Maven 缓存 → `mvn -B -DskipTests clean package` → 验 MANIFEST 里的 **`Start-Class`**（★ 不是 `Main-Class`，见下面坑单最后一条） | artifact `im-server-jar-<sha>`（已用 `root:` 收窄到只剩 jar）+ `im-remote-agent-jar-<sha>` |
+| `build-web` | 矩阵跑 `im-ui` / `im-admin-ui` / `im-website`：先过一道 **lockfile 自检** → `npm ci` → `npm run build` | artifact `web-<站>-<sha>`，里面就是干净的 `dist/**` |
+| `docker-image` | download jar 到 `Docker/app` → buildx + metadata → build **并 push 到 GHCR** | `ghcr.io/<owner>/im-server:<版本>` / `:latest` / `:sha-<短sha>` |
+| `mirror-images` | 用 **skopeo** 把 `mysql`/`redis`/`minio`/`nginx` 四个官方镜像原样（仅 linux/amd64）复制到 GHCR；先 `skopeo inspect` 比 digest，已同步就秒跳过不重传 | `ghcr.io/<owner>/im-deps/{mysql,redis,minio,nginx}:<同官方 tag>`（让目标机 `compose pull` 不碰 Docker Hub） |
+| `deploy` | **只在手动触发且勾了 `deploy` 时跑**：`workflow_dispatch`。把三份 dist 打包走 ssh 覆盖到服务器 `web/`，再改远端 `.env` 的 `IM_SERVER_TAG` + `docker compose pull/up -d --no-deps --wait im-server` + 在部署机上 curl 探活 | —— |
+
+需要在仓库 Settings → Secrets and variables → Actions 里配的（**推 GHCR 不需要任何 Secret**，用内置 `GITHUB_TOKEN` 的 `packages: write` 权限）：
+
+| Secret | 必需 | 说明 |
+|---|---|---|
+| `DEPLOY_HOST` | 要自动部署就必需 | 那台开放机的 IP 或域名 |
+| `DEPLOY_USER` | 必需 | 能 `sudo docker` 或在 docker 组里的账号 |
+| `DEPLOY_SSH_KEY` | 必需 | **私钥**全文；对应公钥进服务器 `~/.ssh/authorized_keys`，用 `ssh-keygen -t ed25519` 现做一对，不要用你日常开发机的钥匙 |
+| `DEPLOY_PORT` | 可选（默认 22） | SSH 端口 |
+| `DEPLOY_DIR` | 可选（默认 `/opt/im-docker`） | 就是本文的部署根目录 |
+
+几个已经踩过的坑，改这个文件前先读：
+
+- **`upload-artifact` 不写 `root:` 会坑死下一步。** 默认以工作区根为基准，download 到 `Docker/app` 后会变成 `Docker/app/im-bootstrap/target/im-server.jar`，而 `COPY im-server.jar /app/` 只认前者，直接构建失败。三个上传步骤都显式写了 `root`。
+- **GHCR 镜像名必须全小写。** 仓库主名字带大写时，`metadata-action` 会直接报错；所以 `meta` 里先 `tr '[:upper:]' '[:lower:]'`。
+- **PR 只构建不推送。** `push` 这个开关在 `meta` 里按事件类型算，别把它写成恒 true——那等于每个 PR 往 GHCR 里堆一堆拉不下来的野镜像。
+- **`provenance: false`。** 不关它在 GHCR 上会多两个 `unknown/unknown` 的空壳镜像，看着像多供了一个版本，实际拉不到东西。
+- **前端 dist 是“覆盖”而不是“同步”。** `tar` 走 ssh 时故意**不带 `--delete`：带上了，一个 `im-website` 的构建就能把 `web/` 下另外两站扫干净。旧版本的带 hash 文件名会堆积，想清就单独跑一次 `find web -name '*.js' -mtime +30 -delete`，别交给 CI。
+- **探活为什么绕到部署机上去 curl**：runner 在公网另一侧，目标机可能只开放内网/回环。所以探活命令是 `ssh ... "DEPLOY_DIR=$DIR bash -s" <<'EOF'`，只认 `HTTP 200`，不是「能连上就算成功」。
+- **`deploy` 绑了 `environment: production`**，可以在 Settings → Environments 里给它加「必需审批人」，就能做到「合入 main 自动出镜像，上生产需要人点一下」。
+- **★ 第一次真跑就撞上的两条（下面这些只有上 runner 才会暴露，本地静态检查看不到）**：
+  1. **`npm ci` 只报一句 `npm error Invalid Version: `（空字符串）就挂了。** 跟 node 版本、跟 Windows/Linux 差异都没关系，**是 lock 本身破了一个条目**：`im-admin-ui/package-lock.json` 里 `node_modules/rollup/node_modules/@rollup/rollup-freebsd-x64` 只剩 `{"dev":true,"optional":true}`，没 `version`（上一次 install 被中断留下的半成品）。所以 `build-web` 里加了一步 `lockfile 自检`（排在 `npm ci` 前面），直接把缺 `version` 的条目路径打印出来。修法：先删那个缺 `version` 的条目（lock 坏着时 `npm install --package-lock-only` 自己也会报同一个错），再跑一次 `npm install --package-lock-only` 让 npm 重建这一段；★ 不要删整份 lock 重做（会把 `^` 范围内全部依赖悄悄升最新版）。
+  2. **验 jar 不能 grep `Main-Class: com.im.bootstrap.ImApplication`。** Spring Boot 重打包后 `Main-Class` 是 `org.springframework.boot.loader.launch.JarLauncher`，**我们的主类在 `Start-Class:` 行**；那条 grep 永远匹不到，`set -euo pipefail` 下就是一个好端端的 81M jar 被判失败。另：MANIFEST 行尾是 CRLF，要 `tr -d '\r'` 再用 `grep -x`。
+
+> 反过来讲一句红线：**本仓库的开发机不需要、也不应该装 Maven/JDK/Node/docker 来做这些事。**
+> `Docker/app/Dockerfile.multistage` 存在的唯一理由，是那台开放机连 GitHub 都拉不动时当场 `docker compose build` 兜一份；
+> 它是兜底路线，不是日常路线。日常只走路线 A（Actions 推镜像 → 服务器 `pull`）。
 
 ---
 
@@ -1092,8 +1269,8 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 ```bash
 docker compose ps                                       # ① 编排层：谁没 healthy
 docker compose logs --since=10m --tail=200 im-server    # ② 应用层：IllegalStateException / 连不上 / 端口占用
-docker compose exec im-server sh -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; cat <&3'   # ③ 容器内自问
-docker compose exec nginx sh -c 'exec 3<>/dev/tcp/im-server/8080 && echo upstream-ok'   # ④ 跳容器：nginx 能不能摸到后端
+docker compose exec im-server bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf "GET /actuator/health HTTP/1.0\r\n\r\n" >&3; cat <&3'   # ③ 容器内自问（★ bash：dash 不认 /dev/tcp）
+docker compose exec nginx sh -c 'nc -w 2 im-server 8080 < /dev/null'   # ④ 跨容器：nginx 能不能摸到后端（★ alpine 无 bash，用 busybox nc）
 curl -sk -o /dev/null -w "%{http_code}\n" https://im.example.com/api/auth/me -H "Origin: https://im.example.com"   # ⑤ 外部
 docker compose exec im-server env | grep -E 'IM_|MYSQL_|REDIS_|MINIO_'   # ⑥ 变量真值（3.3 那条坑的复核手段）
 ```
@@ -1181,6 +1358,7 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 | 大文件上传 413 | nginx 先拦了 | `client_max_body_size 110m`（单请求通道）；分片通道单片 6MB，走 `/api/file/upload/*` 不受 100MB 限 |
 | 推流口 PUT 返回 500，nginx 日志 `client body temp ... failed` | `client_body_temp_path` 不可写 | 指到 `/tmp/nginx_body` 或把该 server 的挂载改读写 |
 | 改了 `sql-init/` 里的 SQL，重启 mysql 没生效 | `initdb.d` 只在空卷跑一次 | 7.1 手工导；或试用环境 `down -v` 重建（★ 数据全没） |
+| 镜像构建报 `groupadd: GID '1000' already in use`（退出码 4）或 `useradd: UID 1000 is not unique` | 底座（Ubuntu 24.04）自带 ubuntu 用户/组已占了 uid/gid 1000，再新建一个叫 im 的用户去抢 1000 必冲突 | 4.1 的正确写法：数字 1000 已存在就**直接复用**（getent 按数字查）、不新建用户；USER/chown/COPY --chown 全用数字，不依赖用户叫名 |
 | `/app/logs` 是空的，`docker compose logs` 却很多 | 目录 uid 不对，logback **不拦启动只静默丢** | `chown -R 1000:1000 data/logs upload-tmp`；或 `docker compose logs im-server \| grep -i logback` |
 | 时间差 8 小时（含定时任务不到点跑：红包退款、消息过期清理） | MySQL 容器默认 UTC 而 JDBC 钉了 +08 | 第五节 `--default-time-zone=+08:00` + 应用容器 `TZ=Asia/Shanghai`；12 个 `@Scheduled` 的 cron 按 JVM 时区解释 |
 | 中文与 emoji 存进去变 `?` | 管道导入 / 服务端字符集退回 latin1 | 7.1 的 `cp` + `-e "source"`；6.2 的 `SELECT @@character_set_server` |
@@ -1224,4 +1402,7 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 | WebRTC 通话、STUN/TURN、群通话 mesh、录制留存 | `md/语音视频通话接入指南.md` |
 | 监控与告警（Actuator / Prometheus / Grafana） | `md/监控告警部署指南.md` |
 | 被控端 Agent 的编译与配置（**不在服务器上跑**，见服务器部署指南 §2.3） | `md/远程控制Agent使用说明.md` |
+| **本文对应的成品文件：整套部署包（compose / env 模板 / Dockerfile / nginx / 运维脚本 / bootstrap）** | [`Docker/`](../../Docker/)，上手读 [`Docker/README.md`](../../Docker/README.md) |
+| **本文 §10.5 对应的 CI：打 jar + 打三个前端 + 构建并推镜像 + 可选 SSH 部署** | [`.github/workflows/build-and-package.yml`](../../.github/workflows/build-and-package.yml) |
+| 行尾统一（`*.sh` / compose / Dockerfile 强制 LF，否则 Windows 上检出就跑不了） | [`.gitattributes`](../../.gitattributes)、仓库根 [`.dockerignore`](../../.dockerignore) |
 | 每一次变更的登记 | `md/CHANGELOG.md` |

@@ -1,0 +1,3 @@
+占位文件：本目录被 compose 挂到 nginx 容器的 /etc/letsencrypt（只读），里面是
+live/<域名>/{fullchain.pem,privkey.pem} —— 私钥，永不进版本库（根 .gitignore 的 *.pem / *.key + Docker/certs/*）。
+首次冒烟测试若缺证书，scripts/bootstrap.sh 会生成 30 天自签名顶上；上线前换成 certbot 签发的（指南 §8.4）。

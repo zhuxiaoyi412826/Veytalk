@@ -56,6 +56,13 @@
 
 ## 三、下载 MinIO Server
 
+> ★★ **MinIO 官方 Docker 镜像已下架，本项目的部署口径统一改为「用官方二进制」。**
+> MinIO 已于 **2026-09-11** 把 `minio/minio`（及 `minio/mc`）从 Docker Hub **整仓删除**，所有 tag 拉取返回
+> `404 / access denied`；迁到 `quay.io/minio/minio` 后，Quay 又对 GitHub Actions runner 那批共享 IP 的匿名拉取
+> 拒授权（`401 unauthorized`）——CI 镜像同步这条路彻底走不通。因此**不再依赖容器分发 MinIO**，
+> 一律用官方直链下载的单个可执行文件（Windows `.exe` / Linux 无后缀二进制）直接跑。下文即二进制路线。
+> （仓库 `Docker/minio/docker-compose.yml` 仍保留一份「能连上 quay 时的容器方案」作为可选退路，但**首选二进制**。）
+
 MinIO Server 采用日期版本号（形如 `RELEASE.2024-XX-XX...`），**直接下最新稳定版即可**，无需特意找旧版本。
 
 Windows 官方直链（单个 `.exe`，免安装）：
@@ -66,7 +73,9 @@ https://dl.min.io/server/minio/release/windows-amd64/minio.exe
 
 下载后放到一个固定目录，例如 `D:\minio\minio.exe`。
 
-> 其他平台：Linux/macOS 从 `https://dl.min.io/server/minio/release/` 对应目录下载；也可用 Docker 镜像 `minio/minio`。配置项与本文完全一致，仅启动命令不同。
+> Linux/macOS：从 `https://dl.min.io/server/minio/release/` 对应架构目录下载二进制（如 Linux amd64 为
+> `https://dl.min.io/server/minio/release/linux-amd64/minio`），`chmod +x` 后直接 `./minio server <数据目录>` 运行。
+> 配置项与本文完全一致，仅启动命令不同。★ 这里**不再提「用 Docker 镜像 `minio/minio`」**——该镜像已从 Docker Hub 下架（见上方红框）。
 
 ---
 

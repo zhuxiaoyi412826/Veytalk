@@ -12,6 +12,7 @@ import com.im.common.security.PasswordEncryptor;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.OnlineStatusSpi;
 import com.im.common.spi.PermissionProvider;
+import com.im.common.spi.SystemContactSpi;
 import com.im.common.spi.UserDataEraseSpi;
 import com.im.common.util.TextUtil;
 import com.im.user.convert.UserConvert;
@@ -34,6 +35,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.Collection;
@@ -68,6 +71,8 @@ public class UserServiceImpl implements UserService {
     private final ThreeLevelCache cache;
     /** 账号注销时收集各模块的数据清除实现；某模块未装配则该模块不参与级联（im-user 单独跑不报错） */
     private final ObjectProvider<UserDataEraseSpi> userDataEraseSpiProvider;
+    /** 新用户注册后装配客服/文件传输助手两个保留联系人；im-friend 未装配时该步骤自动跳过 */
+    private final ObjectProvider<SystemContactSpi> systemContactSpiProvider;
 
     @Override
     public User requireById(Long userId) {
@@ -158,6 +163,7 @@ public class UserServiceImpl implements UserService {
         userMapper.insert(user);
 
         bindDefaultRole(user.getId());
+        provisionSystemContacts(user.getId());
         log.info("新用户注册成功: userId={}, username={}", user.getId(), user.getUsername());
         return user;
     }
@@ -185,6 +191,7 @@ public class UserServiceImpl implements UserService {
         userMapper.insert(user);
 
         bindDefaultRole(user.getId());
+        provisionSystemContacts(user.getId());
         log.info("验证码登录自动建号: userId={}, username={}", user.getId(), user.getUsername());
         return user;
     }
@@ -199,6 +206,38 @@ public class UserServiceImpl implements UserService {
             return;
         }
         userRoleMapper.insert(new UserRole(userId, roleId));
+    }
+
+    /**
+     * 注册事务提交后装配系统保留联系人（客服 + 文件传输助手）。
+     *
+     * <p>挂到 afterCommit 而非就地执行：关系与会话的建立在 im-friend / im-conversation 各自带事务，
+     * 且都属于「注册成功后才该发生」的副作用——放在提交前会与注册主事务抢同一连接的语义、提交失败又留下脏关系。
+     * best-effort：任何异常都只记日志，绝不回拖已成功的注册。
+     */
+    private void provisionSystemContacts(Long userId) {
+        SystemContactSpi spi = systemContactSpiProvider.getIfAvailable();
+        if (spi == null) {
+            return;
+        }
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    safeProvision(spi, userId);
+                }
+            });
+        } else {
+            safeProvision(spi, userId);
+        }
+    }
+
+    private void safeProvision(SystemContactSpi spi, Long userId) {
+        try {
+            spi.provisionContacts(userId);
+        } catch (Exception e) {
+            log.warn("[系统联系人] 注册后装配失败: userId={}, {}", userId, e.getMessage());
+        }
     }
 
     @Override
@@ -334,7 +373,9 @@ public class UserServiceImpl implements UserService {
         }
 
         LambdaQueryWrapper<User> wrapper = Wrappers.<User>lambdaQuery()
-                .eq(User::getStatus, User.STATUS_NORMAL);
+                .eq(User::getStatus, User.STATUS_NORMAL)
+                // 保留账号（客服/文件传输助手）不对外可搜，避免被普通用户乱加、乱发消息
+                .notIn(User::getId, ImConstants.SYSTEM_CONTACT_IDS);
         wrapper.and(w -> {
             w.like(User::getUsername, keyword).or().like(User::getNickname, keyword);
             // 精确模式下手机号走全等，避免模糊匹配泄露号段
@@ -411,6 +452,10 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void cancelAccount(Long userId, String rawPassword) {
+        // 保留账号是系统功能载体，不允许被注销（客服 / 文件传输助手）
+        if (ImConstants.SYSTEM_CONTACT_IDS.contains(userId)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "系统保留账号不可注销");
+        }
         User user = requireById(userId);
         // 验证码自动建号且未设密码的账号无法用密码二次确认，先引导设置密码再注销
         if (User.NO_PASSWORD.equals(user.getPassword())) {

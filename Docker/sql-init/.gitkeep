@@ -1,0 +1,6 @@
+占位文件：本目录挂在 compose 的 mysql:/docker-entrypoint-initdb.d（只读）。
+★ 里面只应在「全新建库」时放 01_im_schema.sql + 02_im_data.sql（数字前缀决定执行顺序，字典序）。
+  库建好后建议清空本目录并把 compose 里那行挂载注释掉 —— im_schema.sql 开头有 37 条 DROP TABLE IF EXISTS，
+  卷一旦被重建就会静默清库（指南 §6.1、§6.3）。
+  平时的 migration 走 bash scripts/import-sql.sh，不进这里。
+本文件本身会被 mysql entrypoint 以「ignoring」跳过（它只认 *.sql / *.sql.gz / *.sh）。

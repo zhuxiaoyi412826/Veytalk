@@ -129,7 +129,8 @@ VALUES (101, 'user:profile:update', '修改个人资料', 'user', '修改昵称�
        (119, 'system:wallet', '后台钱包管理', 'system', '钱包台账与流水、余额调整、礼物上下架（唯一能改别人余额的点）', 1),
        (120, 'system:interview', '后台面试记录', 'system', 'AI 面试场次、作答原文与违规审计（只读）', 1),
        (121, 'system:group:manage', '后台群组管理', 'system', '群台账与成员、强制解散（不可逆）与全员禁言', 1),
-       (122, 'system:message:manage', '后台消息管理', 'system', '全库消息检索（含聊天正文）与强制撤回', 1);
+       (122, 'system:message:manage', '后台消息管理', 'system', '全库消息检索（含聊天正文）与强制撤回', 1),
+       (123, 'system:article:manage', '后台文章管理', 'system', '文章的检索/新建/编辑/审核通过驳回/上下架/删除', 1);
 
 -- admin 拥有全部权限点（二期必须补齐 108~111、三期必须补齐 112~115、四期补 116~122，
 -- 否则细化后的控制器会拦住原有全权管理员）
@@ -155,7 +156,8 @@ VALUES (6001, 1, 101),
        (6019, 1, 119),
        (6020, 1, 120),
        (6021, 1, 121),
-       (6022, 1, 122);
+       (6022, 1, 122),
+       (6023, 1, 123);
 
 -- user 拥有除「撤回任意消息」「系统管理」之外的权限点
 INSERT INTO `im_role_permission` (`id`, `role_id`, `permission_id`)
@@ -185,7 +187,10 @@ VALUES (6301, 4, 108),
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_user` (`id`, `username`, `password`, `nickname`, `avatar`, `gender`, `signature`, `phone`, `email`,
                        `status`)
-VALUES (1000, 'admin',
+VALUES (1, 'service', '!NO_PASSWORD!', '客服', NULL, 0, '官方客服', NULL, NULL, 1),
+       -- 保留账号：1 客服 / 2 文件传输助手。password 写 NO_PASSWORD 哨兵，不可密码登录，仅作消息收发端
+       (2, 'filehelper', '!NO_PASSWORD!', '文件传输助手', NULL, 0, '手机发这里，电脑收', NULL, NULL, 1),
+       (1000, 'admin',
         '$argon2id$v=19$m=16384,t=2,p=1$Sf5L7MQjD4P12TiiFtHtEw$0U0n0WoV1+Oovrb2CumTshLOYPBSwd+zZQSjF+uKR1I',
         '系统管理员', NULL, 1, '保持系统稳定运行', '13800000000', 'admin@im.local', 1),
        (1001, 'alice',
@@ -208,7 +213,20 @@ VALUES (5001, 1000, 1),
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_friend` (`id`, `user_id`, `friend_id`, `remark`, `group_name`, `status`)
 VALUES (7001, 1001, 1002, NULL, '默认分组', 1),
-       (7002, 1002, 1001, 'Alice', '同事', 1);
+       (7002, 1002, 1001, 'Alice', '同事', 1),
+       -- 保留账号与演示用户的双向好友行（新用户由注册钩子自动装配，这里只回填种子用户）
+       (7101, 1000, 1, NULL, '默认分组', 1),
+       (7102, 1, 1000, NULL, '默认分组', 1),
+       (7103, 1000, 2, NULL, '默认分组', 1),
+       (7104, 2, 1000, NULL, '默认分组', 1),
+       (7105, 1001, 1, NULL, '默认分组', 1),
+       (7106, 1, 1001, NULL, '默认分组', 1),
+       (7107, 1001, 2, NULL, '默认分组', 1),
+       (7108, 2, 1001, NULL, '默认分组', 1),
+       (7109, 1002, 1, NULL, '默认分组', 1),
+       (7110, 1, 1002, NULL, '默认分组', 1),
+       (7111, 1002, 2, NULL, '默认分组', 1),
+       (7112, 2, 1002, NULL, '默认分组', 1);
 
 INSERT INTO `im_friend_request` (`id`, `from_user_id`, `to_user_id`, `verify_message`, `source`, `status`,
                                  `handle_time`)

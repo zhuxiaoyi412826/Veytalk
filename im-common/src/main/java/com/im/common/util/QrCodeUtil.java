@@ -1,4 +1,4 @@
-package com.im.group.util;
+package com.im.common.util;
 
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.EncodeHintType;
@@ -17,7 +17,7 @@ import java.util.Map;
 /**
  * 二维码工具：把一段文本编成 PNG 并输出 base64 数据 URL。
  *
- * <p>本工具目前只服务群邀请链接二维码，好友/远程接入的二维码如果需要也可以直接调这里的 {@link #toPngBase64}。
+ * <p>群邀请链接二维码与网页端扫码登录都复用它，故收口到 im-common 供多模块共享。
  * 后端生成而不是前端，是因为前端要引入 QR 库（~几百 KB 代码或新的 npm 依赖）；本模块已引入 zxing 且
  * {@code MatrixToImageWriter} 走的是 java.awt，服务端完全能承担。返回 data URL 让 &lt;img&gt; 直接嵌，不用另开下载端点。
  */

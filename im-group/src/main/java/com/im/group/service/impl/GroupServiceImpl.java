@@ -37,7 +37,7 @@ import com.im.group.mapper.GroupMapper;
 import com.im.group.mapper.GroupMemberMapper;
 import com.im.group.service.GroupPermissionChecker;
 import com.im.group.service.GroupService;
-import com.im.group.util.QrCodeUtil;
+import com.im.common.util.QrCodeUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;

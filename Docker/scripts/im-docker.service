@@ -1,0 +1,32 @@
+# ==============================================================================
+# 开机自启 / 服务化（对应 Docker部署指南.md §11.2）。装法：
+#   sudo cp scripts/im-docker.service /etc/systemd/system/
+#   # ★ 部署目录不是 /opt/im-docker 时要改 WorkingDirectory（compose 的相对路径都以它为准）
+#   sudo systemctl daemon-reload && sudo systemctl enable --now im-docker
+#   systemctl status im-docker --no-pager
+#
+# 其实只 `sudo systemctl enable docker` + 各服务的 restart: unless-stopped 也能自动回来，
+# 这个单元的价值是把「等健康检查」和「可命名的启停」补齐，运维可以用 systemctl 统一操作。
+# ==============================================================================
+[Unit]
+Description=IM Docker Compose Stack (mysql/redis/minio/im-server/nginx)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/im-docker
+# ★ --wait：等所有 healthcheck 变 healthy 才返回，比「起完立刻算成功」适合放进脚本。
+#   前提是 compose 里那几个 healthcheck 真能过，否则会一直卡到 TimeoutStartSec。
+ExecStart=/usr/bin/docker compose up -d --wait
+# ★★★ 这里绝对没有 -v：docker compose down -v 会把 mysql-data / redis-data / minio-data 一起删掉。
+#   生产只允许 down，down -v 必须先备份（指南 §10.1 那条一字之差的提醒）
+ExecStop=/usr/bin/docker compose down
+# 首次要等 mysql initdb（建 37 张表）+ 后端冷启（40~80s 是正常量级），默认 90s 不够
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

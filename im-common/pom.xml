@@ -96,6 +96,16 @@
             <artifactId>hutool-jwt</artifactId>
         </dependency>
 
+        <!-- 二维码：ZXing core + javase（群邀请链接、网页端扫码登录复用），版本由父 POM 统一管理 -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>javase</artifactId>
+        </dependency>
+
         <!-- Lombok 与 spring-boot-configuration-processor 已在父 POM 全局声明 -->
     </dependencies>
 </project>

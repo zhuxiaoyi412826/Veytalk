@@ -1,0 +1,42 @@
+# ==============================================================================
+# 只在「构建上下文 = 仓库根」时生效，也就是：
+#   docker build -f Docker/app/Dockerfile.multistage -t local/im-server:1.0.0 .
+# （路线 A 的 Docker/app/Dockerfile 上下文是 Docker/app，用不到本文件）
+#
+# ★ 没有这个文件，多阶段构建会慢到不能用：node_modules + 各模块 target + electron 打包产物
+#   + 三个前端 dist 加起来好几个 GB，全部要先打进上下文传给 daemon。
+# 对应 Docker部署指南.md §4.2。
+# ==============================================================================
+
+# ---------- 依赖与构建产物 ----------
+**/node_modules
+**/target
+# 唯一要留下的产物：路线 B 的第二阶段就是从它 COPY 的。顺序敏感——这条必须排在 **/target 之后
+!**/im-bootstrap/target/im-server.jar
+
+**/dist
+electron/win-unpacked
+electron/resources/app.asar
+*.tmp
+
+# ---------- 部署包自身（镜像里不需要，留着还会造成「上下文里套上下文」的困惑） ----------
+Docker/data
+Docker/web
+Docker/certs
+Docker/app/im-server.jar
+Docker/backup
+
+# ---------- 版本库与本地环境 ----------
+.git
+.github
+.vscode
+logs
+tmp
+md/打包
+im-android
+*.log
+*.log.gz
+.env
+.env.*
+!.env.example
+Docker/conf/im.env

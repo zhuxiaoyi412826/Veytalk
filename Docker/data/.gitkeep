@@ -1,0 +1,2 @@
+占位文件：本目录下的 logs / upload-tmp / files / live / knowledge 由 scripts/bootstrap.sh 建立，
+是运行时数据与日志，不进版本库（见根 .gitignore 的 Docker/data/*）。

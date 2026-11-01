@@ -26,6 +26,10 @@
           <el-icon><VideoCamera /></el-icon>
           <span>视频管理</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:article:manage')" index="articles" :route="{ name: 'articles' }">
+          <el-icon><Document /></el-icon>
+          <span>文章管理</span>
+        </el-menu-item>
         <el-menu-item v-if="auth.can('system:live:manage')" index="lives" :route="{ name: 'lives' }">
           <el-icon><VideoPlay /></el-icon>
           <span>直播管理</span>

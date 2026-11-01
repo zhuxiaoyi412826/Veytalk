@@ -2,6 +2,7 @@ package com.im.conversation.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import com.im.common.api.Result;
+import com.im.common.constant.ImConstants;
 import com.im.common.util.SecurityUtil;
 import com.im.conversation.dto.req.CreateSingleRequest;
 import com.im.conversation.dto.req.FlagRequest;
@@ -66,6 +67,14 @@ public class ConversationController {
     @PostMapping("/single")
     public Result<Long> createSingle(@RequestBody @Valid CreateSingleRequest request) {
         return Result.ok(conversationService.createSingle(SecurityUtil.getUserId(), request.getTargetUserId()));
+    }
+
+    @Operation(summary = "定位文件传输助手会话",
+            description = "幂等获取当前用户与文件传输助手的单聊会话 ID，供网页登录后直接打开传文件；存量/边缘未预建时兼带懒建")
+    @PostMapping("/assistant")
+    public Result<Long> assistant() {
+        return Result.ok(conversationService.getOrCreateSingle(
+                SecurityUtil.getUserId(), ImConstants.FILE_HELPER_USER_ID));
     }
 
     @Operation(summary = "标记会话已读",

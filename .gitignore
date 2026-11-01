@@ -115,3 +115,29 @@ temp/
 *.tmp
 *.bak
 *.orig
+
+# ==============================================================================
+# Docker/ 部署包：只进「模板 + 编排 + 脚本」，生成物、真凭据、数据一律不进仓库
+# （规则与 Docker/README.md 的目录表逐条对应；.env / *.jar / *.pem / *.key 已被上面的全局规则兜住，
+#  这里显式列出是为了看 .gitignore 时不用去推「那条全局规则到底覆盖了哪一层」）
+# ==============================================================================
+Docker/.env
+Docker/conf/im.env
+Docker/app/im-server.jar
+Docker/app/extra/application-prod-extra.yml
+Docker/nginx/conf.d/im.conf
+Docker/scripts/live-retention.js
+Docker/**/*.bak.*
+# ★ 例外：这份速查文档必须进库（Docker/README.md 里有链接指向它，不入库就是 clone 后的死链）；
+#   顶部的 *.txt 全局规则会把它吞掉，所以这里显式反向放行。以后往 Docker/ 里加 .txt 都要记得补一行。
+!Docker/开发必备.txt
+# 这些目录由 scripts/bootstrap.sh 建立，仓库里只保留一个 .gitkeep 占位（★ 不能用 .txt 占位，上方 *.txt 全局忽略）
+Docker/data/*
+!Docker/data/.gitkeep
+Docker/web/*
+!Docker/web/.gitkeep
+Docker/certs/*
+!Docker/certs/.gitkeep
+Docker/sql-init/*
+!Docker/sql-init/.gitkeep
+Docker/backup/

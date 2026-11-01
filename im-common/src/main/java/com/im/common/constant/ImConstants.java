@@ -1,6 +1,7 @@
 package com.im.common.constant;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * 全局通用常量。
@@ -66,6 +67,20 @@ public final class ImConstants {
     /** 系统通知消息的发送者 ID（虚拟系统账号） */
     public static final Long SYSTEM_USER_ID = 0L;
 
+    /**
+     * 系统保留账号：客服与文件传输助手。
+     *
+     * <p>与 {@link #SYSTEM_USER_ID}（0，纯虚拟发送者、库里无对应行）不同，这两个是 {@code im_user}
+     * 里真实存在的固定 ID 行：可被加为好友、可收发单聊消息、可下发客服通知。用 1、2 这样的小固定 ID
+     * 而不用雪花，是因为运行期用户 ID 是 ~10^18 量级，小整数段永远不会被真实账号占用。
+     *
+     * <p>它们的 {@code password} 写入 {@code User.NO_PASSWORD} 哨兵，无法用密码登录，只作为消息对端存在。
+     */
+    public static final Long SERVICE_USER_ID = 1L;
+    public static final Long FILE_HELPER_USER_ID = 2L;
+    /** 全部系统保留账号 ID：注册钩子自动加好友、搜索排除、注销/禁用护栏都以此为准 */
+    public static final Set<Long> SYSTEM_CONTACT_IDS = Set.of(SERVICE_USER_ID, FILE_HELPER_USER_ID);
+
     /** 内置角色编码 */
     public static final String ROLE_ADMIN = "admin";
     public static final String ROLE_USER = "user";
@@ -107,6 +122,16 @@ public final class ImConstants {
      */
     public static final String PERM_SYSTEM_VIDEO_MANAGE = "system:video:manage";
     public static final String PERM_SYSTEM_LIVE_MANAGE = "system:live:manage";
+    /**
+     * 后台权限点：文章管理（Markdown 文章的检索、新建/编辑、审核通过/驳回、上下架与删除）。
+     *
+     * <p>与视频/直播各设一点同一口径：这一屏挂着「代写发布」与「审核放行」两种能对外可见的写动作，
+     * 危险度与治理动作不同档，单独设点才能让「能下架视频」的人不必然「能发文章」。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/im_data.sql} 种子），否则新控制器上线即把老管理员拦在门外。
+     */
+    public static final String PERM_SYSTEM_ARTICLE_MANAGE = "system:article:manage";
     public static final String PERM_SYSTEM_MONITOR = "system:monitor";
     public static final String PERM_SYSTEM_LOG = "system:log";
     /**

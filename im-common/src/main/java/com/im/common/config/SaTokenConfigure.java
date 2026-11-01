@@ -44,6 +44,9 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/auth/login",
             "/api/auth/login/sms",
             "/api/auth/login/email",
+            // 网页端扫码登录：出码与轮询状态时网页尚无登录态，天然匿名可达（授权 / 已扫码仍由 @SaCheckLogin 守）
+            "/api/auth/qr-login/create",
+            "/api/auth/qr-login/status",
             "/api/auth/password/**",
             "/api/captcha/**",
             "/api/file/download/**",
