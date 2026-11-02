@@ -4,7 +4,9 @@ Vue 3 + Vite + Element Plus 的**独立 npm 工程**，对应后端的 `im-admin
 它**不参与 Maven 构建**（根 `pom.xml` 里没有它），和 `im-ui` 一样是纯前端目录。
 
 一期三个页面（**数据看板 / 用户管理 / 举报工单**），二期加**角色管理**，三期再加四页
-（**视频管理 / 直播管理 / 监控告警 / 日志管理**）。
+（**视频管理 / 直播管理 / 监控告警 / 日志管理**），四期一路加到十五屏。
+本工程的**第十六屏是「审核记录」**（五期·路线 2，★ 不开新权限点，复用日志那一屏的 `system:log`），
+同时给第三期的「日志管理」加了**归档浏览**（五期·路线 1）。
 
 ---
 
@@ -119,7 +121,10 @@ POST /api/auth/logout
 | 监控 | `GET /api/admin/monitor/overview` | JVM/HTTP/连接池/健康/慢接口一屏快照，取不到的指标为 `null`（前端渲染「—」）；手动刷新不做轮询 |
 | 监控 | `GET /api/admin/monitor/slow` | 只回慢接口分组，比整屏便宜 |
 | 日志 | `GET /api/admin/log/files` | 七个逻辑档的存在性/大小/修改时间；**前端只认 key 不传路径** |
-| 日志 | `GET /api/admin/log/content?key=&tail=&keyword=` | 尾读；tail 服务端夹上限（`im.admin.log-tail-max-lines`），关键词只在尾读窗口内过滤（不是全文件搜索）、不下载 |
+| 日志 | `GET /api/admin/log/content?key=&tail=&keyword=&date=&index=` | 尾读；tail 服务端夹上限（`im.admin.log-tail-max-lines`），关键词只在尾读窗口内过滤（不是全文件搜索）、不下载；`date`（`yyyy-MM-dd`，服务端 STRICT 校验）非空时读那一天的归档，`index` 选同日分段（缺省 0），归档不存在回 `exists=false` 而不是报错 |
+| 日志 | `GET /api/admin/log/archives?key=` | 某档已滚存的带日期归档清单（日期/段号/大小/时间）；**只回结构化 date+index，文件名仅作展示**，拉取失败前端静默降级成只剩「当天」一个选项 |
+| 审核记录 | `GET /api/admin/log/moderation/page` | 图片审核命中流水（`im_moderation_log`）按 用户 / 场景 / 类别 / 时间区间 翻页，固定主键倒序（雪花即时间序），**单页上限 50**（服务端夹）；★ 复用 `system:log`，本屏与日志屏同一道闸 |
+| 审核记录 | `GET /api/admin/log/moderation/{id}/image` | 隔离区图片回显（★ 本轮新增）：返回体是图字节本体，`inline` + `nosniff` + `no-store`，不走 JSON 信封。前端用 `fetchMedia` 带登录头取 blob 而不是 `<img src>`（带不了自定义头，Cookie 读取为规避 CSRF 已关）；无图回 `NOT_FOUND(1004)` 带原因文案 |
 | 字典 | `GET /api/report/config` | 理由 / 对象类型 / 处置动作三份码表，**后台与用户侧共用这一个接口** |
 
 各 `/api/admin/**` 控制器类上都是 `@SaCheckLogin` + `@SaCheckPermission(...)`，二期从伞权限
@@ -181,9 +186,29 @@ streamKey 后端不下发、前端也不留字段位。
 健康检查大卡片 + JVM/HTTP/连接池/慢接口四张指标卡 + 最近慢接口明细表。手动刷新不做轮询；
 所有空值走「—」口径（`metric()` 统一兜），堆水位进 `el-progress`（≥90% 红、≥75% 黄）。
 
-**日志管理**（`LogsView.vue`，三期新增）
+**日志管理**（`LogsView.vue`，三期新增 / 五期加归档浏览）
 左边七个逻辑档的清单（存在性/大小/修改时间，敏感档打标），右边尾读查看器（tail 下拉 + 窗口内关键词过滤，
 黑底等宽字体区，行序旧→新与 `tail -f` 肌肉记忆一致）。没有任何路径输入口，选档只传 key。
+读取栏最前那个「数据源」下拉是五期补的：默认读当天活动文件，选归档后读 `name-yyyy-MM-dd.N.log`；
+归档清单按档懒加载（切档时拉一次），**切档同时把数据源拨回当天**——上一个档的日期对下一个档未必存在，
+留着只会读出一个让人误以为「没日志」的空页。
+
+**审核记录**（`ModerationView.vue`，五期·路线 2 新增）
+纯读的一屏：谁在什么时候试过什么图、撞在哪一类上、概率多少。筛选是用户 ID / 场景 / 命中类别 / 时间区间，
+表格带评分明细 tag（命中那一类标红）。两个写死的本地字典（六个类别名 + 三个图片类场景）
+**而不是从库里 distinct**：后端不校验类别名，distinct 会把某次异常上报里的脏字符串也变成候选项。
+没有删除与修改入口——销毁追责现场的口子从表结构上就不留。权限复用 `system:log`，
+所以这一屏在菜单里的显隐与日志管理永远一致。
+
+**★ 本轮加的「图片」列**：行上有 `evidenceFileId` 才给「查看」按钮，否则灰字「无图」；点开一个
+`el-dialog` + `el-image`（`preview-src-list` 支持点击放大）。三个口径得记着：
+
+- **为「无图」是常态不是 bug**：隔离区开关关掉、图超过 `quarantine-max-size`、副本上传失败都算。
+  历史命中（本轮之前落库的那些）**永远不会回头补图**——那时还没有往上传副本这一步。
+- **快速连点两行要靠一个自增 seq 防竞态**：`fetchMedia` 先回的会覆盖后开的，`openImage` 里的
+  `viewerSeq` 就是拿来说「这个结果已经过期了」。
+- **顶部那条 `el-alert` 文案已按隔离区后的真实口径改写**：以前写的是「被拦下的图片从未离开本机」，
+  现在它是说谎。识别仍在发送端跑，本行记的是判定结果，图本体靠行末那个「查看」按钮。
 
 ## 7. 目录
 
@@ -202,7 +227,8 @@ im-admin-ui/
    ├─ stores/auth.js           # 权限闸门在这一层，与 request.js 的 1003 处理成对
    ├─ styles/index.css         # 只放跨页面复用的少数几条
    ├─ utils/{token,format}.js
-   └─ views/{Login,Dashboard,Users,Reports,Roles,Videos,Lives,Monitor,Logs}View.vue
+   └─ views/{Login,Dashboard,Users,Reports,Roles,Videos,Lives,Monitor,Logs,Moderation}View.vue
+      （四期又加了 Wallet/Group/Interview/Message/Config/Remote/Articles/AiGuard 等，以目录为准）
 ```
 
 ## 8. 上线部署（还没做，步骤留在这）
@@ -227,6 +253,9 @@ im-admin-ui/
   这只能证明代码能编译打包、模板指令与 import 不报错。
 - 一期时的构建记录（供对照）：`npm install` 成功，`npm run build` EXIT=0（built in 8.86s，主包
   `dist/assets/index-*.js` 1,189.29 kB / gzip 382.81 kB）。
+- **五期两条路线的构建已实测通过**（2026-11-02）：`node node_modules/vite/bin/vite.js build` 输出 `✓ built in 10.57s`、1729 模块，产物里 `ModerationView-*.js`（5.94 kB）与重建后的 `LogsView-*.js`（5.41 kB）都在；后端 `mvn -q compile -pl im-common,im-file,im-admin -am` 通过。本批**零新权限点**，所以不需要清 `im:auth:*`，只要跑 `sql/migration_moderation_log.sql` + 重启后端。
+- **「审核记录查看图片」这一轮也已跑过构建**（同日稍后）：`node node_modules/vite/bin/vite.js build` → **built in 10.58s**；后端 `mvn -o -q compile -pl im-common,im-file,im-admin -am` 通过（`im-ui` 同步重构建 → built in 23.09s）。★ 本轮同样**零新权限点**，但比上一轮多一个条件：得按顺序跑 `sql/migration_moderation_log.sql` **与** `sql/migration_moderation_evidence.sql` 两份，只跑前一份就是「每一行都无图」（后果推导见《README详细开发指南》的增量升级表）。浏览器实测仍未做。
+- **★ 本轮实跑抓到的一个现场**：后端没重启就刷后台，日志管理页会弹一条「请求的资源不存在」——那是 `ResultCode.NOT_FOUND(1004)`，新前端在调旧进程里不存在的 `GET /api/admin/log/archives`。它**不是路由配错也不是没权限**：同一个页面上老端点全正常、只有新端点 404，就是「代码没进进程」的形状（归档下拉此时静默降级成只剩「当天」）。另注意这条提示目前仍会弹：`LogsView` 的 catch 只吞异常，而 `request.js` 拦截器在 catch 之前就已经弹了 toast。
 - **仍然没有做浏览器实测**：登录、看板数字、举报处置二次确认、三期四页的交互路径，
   都需要跑着的后端 + 已执行 `sql/migration_admin_phase3.sql` 并清过权限缓存的库，
   本批不具备这个条件。接口形状是照 Controller / VO 源码抄的，不是猜的。

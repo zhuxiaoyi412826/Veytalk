@@ -30,4 +30,10 @@ public class ModerationPolicyVO implements Serializable {
 
     @Schema(description = "判违规的类别与阈值：类别名 → 概率上限，任一类命中即拒发；未列出的类别不参与判定")
     private Map<String, Double> thresholds;
+
+    @Schema(description = "命中后是否把原图副本上传到隔离区；false 时后台「审核记录」只能看到判定结果没有图")
+    private boolean quarantineEnabled;
+
+    @Schema(description = "隔离区副本的字节上限，超过就干脆不传（前端据此省掉一次注定被拒的上传）", example = "10485760")
+    private Long quarantineMaxSize;
 }

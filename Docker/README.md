@@ -5,6 +5,9 @@
 文档里那些代码块只是讲解用的快照（指南 §二 顶部有一张逐章对照表）。
 
 > ★ **只想速查「docker 部署 / nginx 前端 / 打包 / 域名」这四件事**，看 [`开发必备.txt`](开发必备.txt)，那一页是本目录的结论版。
+>
+> ★ **准备动某个文件之前**（想知道它到底干什么、跟谁衔接、改完要做什么动作），看 [`文件说明.md`](文件说明.md)：
+> 逐个文件的说明书，含「模板 → 生成物 → 谁读它」的生成关系图、七个脚本的职责表、以及「改了怎么生效」那张表。
 
 > ★ **要在 Ubuntu 服务器上跑 HTTPS 部署**（GHCR 镜像 + `docker compose` 一键 + 80/443 + 三站域名分流 + 证书），
 > 照着 [`../md/部署/Ubuntu镜像HTTPS部署教程.md`](../md/部署/Ubuntu镜像HTTPS部署教程.md) 从上往下做即可，那份是本目录的可执行操作流程版。
@@ -20,6 +23,7 @@
 | 路径 | 进版本库 | 作用 |
 |---|---|---|
 | `docker-compose.yml` | ✅ | 四个必选服务（mysql / redis / im-server / nginx）+ 两个注释掉的选装（live-retention / coturn）。★ minio 不在此栈：改用宿主机官方二进制+systemd（见 `md/MinIO部署指南.md` 三/四节、`md/部署/Ubuntu镜像HTTPS部署教程.md` §8.1），im-server 经 host.docker.internal:9000 连它 |
+| `文件说明.md` | ✅ | 逐个文件的作用、彼此衔接与生效方式（本表的详细版，动文件前看它） |
 | `.env.example` | ✅ | compose 层参数模板：镜像 tag、密码、域名。`cp .env.example .env` 后填 |
 | `conf/im.env.example` | ✅ | 应用层环境变量模板：37 个键，逐个与 `application.yml` 的 `${}` 占位符对过账 |
 | `app/Dockerfile` | ✅ | **路线 A**（推荐）：只装运行时，jar 由 CI 放进 `app/` |

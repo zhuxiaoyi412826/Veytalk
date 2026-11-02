@@ -62,6 +62,10 @@
           <el-icon><Document /></el-icon>
           <span>日志管理</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:log')" index="moderation-logs" :route="{ name: 'moderation-logs' }">
+          <el-icon><PictureFilled /></el-icon>
+          <span>审核记录</span>
+        </el-menu-item>
         <el-menu-item v-if="auth.can('system:config')" index="config" :route="{ name: 'config' }">
           <el-icon><Setting /></el-icon>
           <span>系统配置</span>

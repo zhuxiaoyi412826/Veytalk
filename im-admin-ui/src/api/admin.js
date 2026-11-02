@@ -220,9 +220,28 @@ export function fetchLogFiles() {
   return http.get('/admin/log/files')
 }
 
-/** 尾读日志：tail 行服务端夹上限，关键词只在尾读窗口内过滤（不是全文件搜索） */
-export function fetchLogContent(key, tail, keyword) {
-  return http.get('/admin/log/content', { params: { key, tail, keyword: keyword || undefined } })
+/** 尾读日志：tail 行服务端夹上限，关键词只在尾读窗口内过滤（不是全文件搜索）；
+ * 带 date（yyyy-MM-dd）读对应归档、index 选同日分段（五期·路线 1），不带则读当天活动文件 */
+export function fetchLogContent(key, tail, keyword, date, index) {
+  return http.get('/admin/log/content', {
+    params: {
+      key,
+      tail,
+      keyword: keyword || undefined,
+      date: date || undefined,
+      index: date ? index ?? 0 : undefined
+    }
+  })
+}
+
+/** 某档已滚存的带日期归档清单：只回 date+index 结构化值，前端永远不拿文件名去拼路径 */
+export function fetchLogArchives(key) {
+  return http.get('/admin/log/archives', { params: { key } })
+}
+
+/** 审核命中流水分页（im_moderation_log，五期·路线 2）：userId / scene / hitClass / startTime / endTime 都可空 */
+export function fetchModerationLogs(params) {
+  return http.get('/admin/log/moderation/page', { params })
 }
 
 /* ==================== 系统配置（四期） ==================== */

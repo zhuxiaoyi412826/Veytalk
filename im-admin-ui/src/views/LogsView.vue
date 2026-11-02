@@ -14,7 +14,7 @@
       :closable="false"
       type="info"
       title="只尾读、不下载；只认白名单档位、不传路径"
-      description="前端永远只把 key（如 error）发给后端，路径映射表写死在服务端，这是路径穿越防线的主要一层。尾读行数有上限，关键词只在本页尾读窗口内过滤——不是全文件搜索，想找历史就去归档文件里 grep。日志原文可能含手机号等个人信息，别截图外发。"
+      description="前端永远只把 key（如 error）发给后端，路径映射表写死在服务端，这是路径穿越防线的主要一层。尾读行数有上限，关键词只在本页尾读窗口内过滤——不是全文件搜索。带日期的归档可在右侧选日期翻阅（保留期内），跨多文件的深挖仍该登录服务器 grep。日志原文可能含手机号等个人信息，别截图外发。"
     />
 
     <div class="cols">
@@ -64,6 +64,15 @@
           </div>
         </template>
         <div class="read-bar">
+          <el-select v-model="read.source" class="source" @change="onSourceChange">
+            <el-option value="" label="当天（进行中）" />
+            <el-option
+              v-for="a in archives"
+              :key="a.fileName"
+              :value="a.date + ':' + a.index"
+              :label="`归档 ${a.date} 第${a.index + 1}段（${formatBytes(a.sizeBytes)}）`"
+            />
+          </el-select>
           <el-select v-model="read.tail" class="tail" @change="loadContent">
             <el-option :value="200" label="最近 200 行" />
             <el-option :value="500" label="最近 500 行" />
@@ -105,14 +114,18 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { fetchLogContent, fetchLogFiles } from '@/api/admin'
+import { fetchLogArchives, fetchLogContent, fetchLogFiles } from '@/api/admin'
 import { EMPTY_TEXT, formatBytes, formatListTime } from '@/utils/format'
 
 /**
- * 日志管理页（三期）。
+ * 日志管理页（三期，五期·路线 1 加归档浏览）。
  *
  * 左列是七个逻辑档的清单，右列是尾读查看器。两列都手动触发、不自动轮询——
  * 这是排障页不是驾驶舱，「刷一下看新行」的点一下成本比常驻定时器低。
+ *
+ * 数据源下拉：默认读当天活动文件；选归档日期后读对应的 name-yyyy-MM-dd.N.log。
+ * 归档清单按档懒加载（切档时拉一次），切档同时把数据源拨回当天——
+ * 上一个档的日期对下一个档未必存在，留着只会读出一个让人误以为「没日志」的空页。
  *
  * 行序：后端返回与文件一致（旧→新），最后一行在最下面，和 tail -f 的肌肉记忆一致，
  * 前端不再倒序。
@@ -124,9 +137,10 @@ const files = ref([])
 const filesLoading = ref(false)
 const current = ref(null)
 
+const archives = ref([])
 const content = ref(null)
 const contentLoading = ref(false)
-const read = reactive({ tail: 200, keyword: '' })
+const read = reactive({ tail: 200, keyword: '', source: '' })
 
 async function loadFiles() {
   filesLoading.value = true
@@ -151,6 +165,22 @@ function pickFile(row) {
     return
   }
   current.value = row
+  read.source = ''
+  archives.value = []
+  loadArchives(row.key)
+  loadContent()
+}
+
+async function loadArchives(key) {
+  try {
+    archives.value = await fetchLogArchives(key) || []
+  } catch {
+    // 归档清单拉不到不影响读当天文件，静默降级成只有「当天」一个选项
+    archives.value = []
+  }
+}
+
+function onSourceChange() {
   loadContent()
 }
 
@@ -160,7 +190,9 @@ async function loadContent() {
   }
   contentLoading.value = true
   try {
-    content.value = await fetchLogContent(current.value.key, read.tail, read.keyword?.trim())
+    // source 形如 '2026-10-14:0'；空串是当天活动文件
+    const [date, index] = read.source ? read.source.split(':') : []
+    content.value = await fetchLogContent(current.value.key, read.tail, read.keyword?.trim(), date, index)
   } catch {
     // 保留上一次读到的内容：读取失败不等于日志被删了
   } finally {
@@ -216,6 +248,10 @@ onMounted(loadFiles)
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.source {
+  width: 230px;
 }
 
 .tail {

@@ -110,6 +110,14 @@ const routes = [
         meta: { title: '日志管理', perm: 'system:log' }
       },
       {
+        // 审核记录复用 system:log 而不单设权限点：日志页本来就能读 moderation.log 原文，
+        // 这一屏只是同一份现场的结构化版本（五期·路线 2），拆两个点只会制造半个现场看不到
+        path: 'moderation-logs',
+        name: 'moderation-logs',
+        component: () => import('@/views/ModerationView.vue'),
+        meta: { title: '审核记录', perm: 'system:log' }
+      },
+      {
         path: 'config',
         name: 'config',
         component: () => import('@/views/ConfigView.vue'),
@@ -183,6 +191,7 @@ router.beforeEach(async (to) => {
       'ai-guard',
       'monitor',
       'logs',
+      'moderation-logs',
       'config',
       'remote',
       'announcements'

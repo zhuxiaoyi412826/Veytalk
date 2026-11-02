@@ -410,7 +410,7 @@ im:
   #   色情——nsfwjs + TensorFlow.js，MobileNetV2 权重约 3.5MB 随前端构建产物离线分发；
   #   血腥 / 暴力——ViT-Base 的 int8 ONNX（约 83MB）+ onnxruntime-web，默认不启用，
   #   只有下面的 thresholds 里出现 Violent 才会被激活（运行时随构建产物发出，模型本体不入库）。
-  # 服务端只下发阈值、只接收命中上报。
+  # 服务端下发阈值、接收命中上报、并接收被拦下图片的隔离区副本（见下面 quarantine-enabled）。
   # 键名对应 com.im.common.config.ImProperties.Moderation。
   #
   # ★ 这是「正常使用路径」上的闸门，不是对抗性防御：判定在客户端做，改前端代码或直接
@@ -436,6 +436,16 @@ im:
       # Violent: 0.75
     max-score-entries: 16
     max-text-length: 120
+    # 隔离区：命中后除了拒发，再让发送端把原图另传一份进 im_file
+    # （biz_type=moderation_quarantine），后台「审核记录」因此能点开看图本体。
+    # ★ 这是一次隐私口径变更：只有把它改成 false，才能重新说「被拦下的图片从未离开本机」。
+    #   关掉不影响拦图与审计，只是从此不再新增副本（已有图片不受影响，也不会自动清理）；
+    #   而没有图的记录只能证明「有过一次判定」，判不了「判得对不对」，误拦申诉无从下手。
+    #   后台可改（系统设置 → 图片审核），也可按下面的环境变量启动时定值。
+    quarantine-enabled: ${IM_MODERATION_QUARANTINE_ENABLED:true}
+    # 副本体积上限：比 im.file.max-size 小是正常的——证据只需要「看得出判得对不对」，
+    # 不需要承载原始大图。超过这个值的图直接不传（前端先比一次，省掉一次注定被拒的上传）。
+    quarantine-max-size: 10MB
 
   message:
     # 撤回时限（秒），默认 2 分钟（120 秒）。超过这个时间的消息不能再撤回，

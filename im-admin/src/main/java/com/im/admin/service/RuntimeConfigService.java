@@ -308,6 +308,7 @@ public class RuntimeConfigService {
             case RATE_LIMIT_WS_CHAT_SECONDS -> () -> imProperties.getRateLimit().getWsChatSeconds();
             case MODERATION_ENABLED -> () -> imProperties.getModeration().isEnabled();
             case MODERATION_AUDIT_ENABLED -> () -> imProperties.getModeration().isAuditEnabled();
+            case MODERATION_QUARANTINE_ENABLED -> () -> imProperties.getModeration().isQuarantineEnabled();
             case INTELLIGENCE_ENABLED -> () -> imProperties.getIntelligence().isEnabled();
             case CALL_ENABLED -> () -> imProperties.getCall().isEnabled();
             case CALL_GROUP_ENABLED -> () -> imProperties.getCall().isGroupEnabled();
@@ -358,6 +359,7 @@ public class RuntimeConfigService {
                     value -> imProperties.getRateLimit().setWsChatSeconds(number(key, value).intValue());
             case MODERATION_ENABLED -> value -> imProperties.getModeration().setEnabled((Boolean) value);
             case MODERATION_AUDIT_ENABLED -> value -> imProperties.getModeration().setAuditEnabled((Boolean) value);
+            case MODERATION_QUARANTINE_ENABLED -> value -> imProperties.getModeration().setQuarantineEnabled((Boolean) value);
             case INTELLIGENCE_ENABLED -> value -> imProperties.getIntelligence().setEnabled((Boolean) value);
             case CALL_ENABLED -> value -> imProperties.getCall().setEnabled((Boolean) value);
             case CALL_GROUP_ENABLED -> value -> imProperties.getCall().setGroupEnabled((Boolean) value);

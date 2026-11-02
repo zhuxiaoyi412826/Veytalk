@@ -41,6 +41,7 @@ DROP TABLE IF EXISTS `im_interview_session`;
 DROP TABLE IF EXISTS `im_remote_audit_log`;
 DROP TABLE IF EXISTS `im_remote_session`;
 DROP TABLE IF EXISTS `im_remote_device`;
+DROP TABLE IF EXISTS `im_moderation_log`;
 DROP TABLE IF EXISTS `im_file`;
 DROP TABLE IF EXISTS `im_group_member`;
 DROP TABLE IF EXISTS `im_group_join_request`;
@@ -438,7 +439,7 @@ CREATE TABLE `im_file`
 (
     `id`            BIGINT       NOT NULL COMMENT '文件 ID',
     `uploader_id`   BIGINT       NOT NULL COMMENT '上传者用户 ID',
-    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice / video / video_cover',
+    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice / video / video_cover / article_cover / article_img / call_record / moderation_quarantine（图片审核隔离区），全集见 FileBizType',
     `storage_type`  VARCHAR(16)  NOT NULL DEFAULT 'local' COMMENT '存储实现：local / minio',
     `bucket`        VARCHAR(64)           DEFAULT NULL COMMENT '存储桶，本地实现为空',
     `object_key`    VARCHAR(512) NOT NULL COMMENT '对象键 / 相对路径',
@@ -457,6 +458,36 @@ CREATE TABLE `im_file`
     KEY `idx_uploader` (`uploader_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='文件元数据表';
+
+-- 图片审核命中流水（五期）：审计文件 MODERATION/moderation.log 只留 30 天且不能按维度检索，
+-- 追责数据挪进表里才能按「谁 / 哪个场景 / 哪一类」翻页。继承 AuditEntity（流水表只增不改不删，
+-- 没有 deleted 列）。概率与阈值用 DECIMAL(5,4)：客户端上报已收敛到 0~1，定长小数事后排序省事。
+-- 排序固定按主键倒序（雪花 ID 即时间序），所以二级索引都带 id 收尾，不再单建 create_time 索引。
+-- ★ evidence_file_id（五期·查看图片）：命中后发送端把原图复制一份进隔离区（biz_type=moderation_quarantine），
+--   这一列指向那行 im_file。它是对判定结果的「补写」而不是修改：只有 NULL → 有值这一个方向，
+--   判定字段（类别/概率/阈值/评分）永远不再被改，所以「只增不改」的口径不受影响。
+CREATE TABLE `im_moderation_log`
+(
+    `id`              BIGINT       NOT NULL COMMENT '主键（雪花，兼时间排序键）',
+    `user_id`         BIGINT       NOT NULL COMMENT '上报用户 ID（发图人 / 设头像的人）',
+    `scene`           VARCHAR(32)  NOT NULL COMMENT '业务场景：avatar / chat_image / video_cover 等图片类 FileBizType',
+    `hit_class`       VARCHAR(32)  NOT NULL COMMENT '命中类别名（模型输出原名）：Porn / Hentai / Violent 等',
+    `hit_probability` DECIMAL(5, 4) NOT NULL DEFAULT 0 COMMENT '命中类别概率（0~1，服务端夹后落库）',
+    `threshold`       DECIMAL(5, 4)         DEFAULT NULL COMMENT '上报时前端实际使用的阈值，事后核对阈值改动的影响',
+    `file_name`       VARCHAR(200)          DEFAULT NULL COMMENT '原始文件名（客户端报的，已洗成单行）；图片本体见 evidence_file_id',
+    `file_size`       BIGINT                DEFAULT NULL COMMENT '文件字节数',
+    `conversation_id` BIGINT                DEFAULT NULL COMMENT '会话 ID，聊天场景非空',
+    `scores`          JSON                  DEFAULT NULL COMMENT '模型完整评分 [{className,probability}]，上限 16 条，仅留痕',
+    `evidence_file_id` BIGINT               DEFAULT NULL COMMENT '隔离区图片的 im_file.id（biz_type=moderation_quarantine）：未开启/超大/上传失败为 NULL',
+    `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '命中时间',
+    `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（仅挂证据时被动一次，判定字段不回改）',
+    PRIMARY KEY (`id`),
+    -- 「这个人试过几次」：按用户过滤后天然按主键倒序取一页
+    KEY `idx_user` (`user_id`, `id`),
+    -- 按场景看分布（比如头像位有没有人试毒）
+    KEY `idx_scene` (`scene`, `id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='图片审核命中流水（追责数据落库，判定字段只增不改；与审计文件双写）';
 
 -- =====================================================================================
 --  七、远程控制（im-remote）

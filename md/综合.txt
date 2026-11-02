@@ -1,21 +1,31 @@
+vitge 内网地址设置和输出
 Write-Host "Vite局域网地址：http://$((Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notmatch '^(127\.|169\.254\.)'} | Select-Object -First 1 -ExpandProperty IPAddress)):5173"
 PoweShell下执行    自动拿到本机局域网 IPv4，输出 Vite 开发服务的局域网访问地址（端口固定 5173）
 Vite 默认开发端口就是 `5173`，这个地址给同一 WiFi / 局域网里其他设备（手机、别的电脑）访问你的前端项目。
-Get-NetIPAddress -AddressFamily IPv4|Where-Object{$_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'}|Select-Object -ExpandProperty IPAddress|ForEach-Object{Write-Host "Vite局域网地址：http://$_:5173"}
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+    $_.IPAddress -and
+    $_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'
+} | ForEach-Object {
+    Write-Host "Vite局域网地址：http://$($_.IPAddress):5173"
+}
 列出所有内网链接IP地址
 
+
+前端页面模块 
 1. im-ui — 用户端（Vue3 + Vite + Element Plus + Pinia，同时用于 Electron/Tauri/Capacitor 打包）
 2. im-admin-ui — 管理后台（对应后端 im-admin 模块）
 3. im-website — 官网
 4. electron — 桌面壳（im-desktop）  它把 im-ui 构建出的 dist 包成 Windows 桌面端
 5. im-ui/src/views/FileHelper.vue  微信文件传输助手页面
 
-
+htpps证书
 电脑换 IP 重签 = 只换服务器证书，手机 CA 不用更新；只有看到"根 CA：重新签发"那行输出时才需要重装 ca.pem
 npm run gen:cert 重签证书后必须重启 dev server
 npm run dev:lan 访问的是 http://localhost:5173/
 npm run dev 访问的是 https://localhost:5173/
-
+添加证书
+路径  im-ui\certs\ca.pem 
+certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
 
 
 .\minio.exe server D:\minio-data --console-address :9001 
@@ -48,9 +58,7 @@ npm run build
 Remove-Item .\release\win-unpacked -Recurse -Force -ErrorAction SilentlyContinue
 npm run build
 
-添加证书
-路径  im-ui\certs\ca.pem 
-certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
+
 
 
 
@@ -62,6 +70,9 @@ mvn spring-boot:run    # 在 im-bootstrap 目录
 
 
 netsh advfirewall firewall add rule name="IM Backend 8080" dir=in action=allow protocol=TCP localport=8080  开放8080端口防火墙
+
+
+
 重新打包
 # Windows exe（增量编译，很快）
 cd c:\daima\Veytalk\im-ui; 
@@ -77,18 +88,17 @@ Windows 安装包 `C:\daima\Veytalk\im-ui\src-tauri\target\release\bundle\nsis\I
 Windows 免安装版 `C:\daima\Veytalk\im-ui\src-tauri\target\release\app.exe` （37.7 MB） 
 安卓 APK `C:\daima\Veytalk\im-ui\android\app\build\outputs\apk\debug\app-debug.apk` （37.5 MB）
 
-http://192.168.17.18:8080  在笔记本电脑上修改每次手机插入固定都是这个
+
+ed浏览器UDP放行   
+New-NetFirewallRule -DisplayName "IM WebRTC media (Edge)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Profile Any
+
+账号密码
 admin            123456
 alice            123456
 bob              123456
 zhuxiaoyi        412826
 zhuxiaoyizxy     412826
 zhuxiaoyi1       412826
-
-
-ed浏览器UDP放行   
-New-NetFirewallRule -DisplayName "IM WebRTC media (Edge)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Profile Any
-
 
 PR冲突解决方法
 
@@ -105,6 +115,7 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 
 
+镜像
 cd Docker
 cp .env.example .env && chmod 600 .env
 systemctl is-active minio || sudo systemctl start minio   # 二进制 minio，minioadmin/minioadmin
