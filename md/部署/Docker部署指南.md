@@ -300,7 +300,7 @@ MINIO_BUCKET=im-files
 # ===== 按需 =====
 IM_AI_KNOWLEDGE_DIR=/app/knowledge           # 默认 D:/资料/知识库/面试官（Windows 路径，Linux 必须覆盖）
 ALI_BABA_API_KEY=<百炼 Key，不设则仅面试功能不可用>
-IM_SMS_PROVIDER=aliyun                       # 默认 mock：只写日志、不发真短信，用户永远收不到码
+IM_SMS_PROVIDER=mock                         # 默认 mock：只写日志、不发真短信，用户永远收不到码（目前只有 mock 一个 SmsSender 实现，填 aliyun 会发不出码）
 MAIL_USERNAME=you@qq.com
 MAIL_PASSWORD=<QQ 邮箱的 SMTP 授权码，不是 QQ 登录密码>
 IM_LIVE_ENABLED=true
@@ -1344,6 +1344,7 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 |---|---|---|
 | 后端无限重启，`Unknown database 'im_db'` 或 `Access denied for user 'im'` | 卷是空的 / 两份密码不一致 | `docker compose logs mysql`；确认 `.env` 与 `conf/im.env` 里同一个密码；空库按第六节导 |
 | `Communications link failure` / `Connection refused: localhost/127.0.0.1:3306` | **`MYSQL_HOST` 还是 `127.0.0.1`** | `docker compose exec im-server env \| grep MYSQL_HOST`；容器里必须是服务名 |
+| 启动即失败：`Parameter 2 of constructor in CaptchaServiceImpl required a bean of type 'com.im.user.sms.SmsSender'` | `IM_SMS_PROVIDER` 填了 `aliyun` / `tencent` 这类**还没有实现类**的服务商名（目前只有 `mock` 一个实现），`MockSmsSender` 的 `@ConditionalOnProperty` 不匹配，一个通道 bean 都装配不上 | `conf/im.env` 里改回 `mock`，然后 `docker compose up -d im-server`（★ `restart` 不重读 `env_file`）；现行代码已把它降为「发码时报《短信服务未配置》」，不再拖垮整个启动 |
 | 启动日志 `MinIO 存储桶初始化失败: im-files` | minio 容器未就绪 / endpoint 不对 / 凭据不一致 | 这是**刻意的 fail-fast**；先 `docker compose ps` 看 minio 是否 healthy，再核 `MINIO_ENDPOINT=http://minio:9000` |
 | minio 容器直接退出 `Password must be at least 8 characters` | `MINIO_ROOT_PASSWORD` 太短 | 改 `.env`，≥8 位 |
 | `nginx: [emerg] unknown directive "dav_methods"` | 镜像没 dav 模块（或自己压的精简版） | 8.1 的 `nginx -V`；换回官方镜像 |

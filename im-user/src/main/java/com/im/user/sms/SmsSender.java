@@ -13,6 +13,11 @@ package com.im.user.sms;
  * 标 {@code @ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")} 即可，
  * 无需修改任何调用方。
  *
+ * <p>★ {@code im.sms.provider} 写了一个还没有对应实现类的服务商（目前只有 mock 这一个实现，
+ * 直接配 aliyun / tencent 就是这种情况）会得到零个 bean：调用方把它当「可选通道」看待，
+ * 发码时抛 {@code SMS_NOT_CONFIGURED} 并留一条 WARN，应用照常启动。
+ * 短信通道配置错误不该让登录、消息、群聊等与它无关的功能一起挂掉。
+ *
  * <p>约定：实现类只负责「把这条短信发出去」，失败时抛异常；
  * 频率限制、验证码写入 Redis 都由调用方在发送前后完成，实现类不要碰 Redis。
  */

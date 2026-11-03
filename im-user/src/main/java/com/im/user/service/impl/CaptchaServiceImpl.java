@@ -77,14 +77,22 @@ public class CaptchaServiceImpl implements CaptchaService {
 
     private final RedisUtil redisUtil;
     private final ImProperties properties;
-    /** 短信下发通道，默认 MockSmsSender；接真实服务商时换一个实现即可 */
-    private final SmsSender smsSender;
+    /**
+     * 短信下发通道。{@code MockSmsSender} 只在 {@code im.sms.provider} 为 mock（或未配置）时装配，
+     * 把它指向一个尚无实现类的服务商时一个 bean 都没有 —— 因此按「可选通道」处理，
+     * 与下面的 {@code JavaMailSender} 同一套路：发码时才报错，不让一个配置值拖垮整个应用启动。
+     */
+    private final ObjectProvider<SmsSender> smsSenderProvider;
     /** QQ 邮箱 SMTP 未配置（无 spring-boot-starter-mail 或缺少账号）时为空，发信时才报错 */
     private final ObjectProvider<JavaMailSender> mailSenderProvider;
 
     /** 发件人地址，取 QQ 邮箱账号 */
     @Value("${spring.mail.username:}")
     private String mailFrom;
+
+    /** 当前配置的短信服务商名，只为了「通道未装配」时日志能说清是哪个值写错了 */
+    @Value("${im.sms.provider:mock}")
+    private String smsProvider;
 
     @Override
     public CaptchaImageVO generateImage() {
@@ -126,6 +134,9 @@ public class CaptchaServiceImpl implements CaptchaService {
         // 场景先归一：非法场景要在消耗图形验证码之前就被拒，
         // 否则用户白白浪费一张图，重发时还得重新识别一次
         String scene = sceneOf(request.getScene());
+        // 通道是否装配也要在消耗图形验证码之前判掉，理由与「场景先归一」相同：
+        // 否则用户白白浪费一张图，还要再等一个 60 秒的频率锁
+        SmsSender sender = requireSmsSender();
         // 绑定手机号场景下用户已登录、是本人操作，跳过图形验证码闸门；
         // 登录/注册/找回密码等匿名场景仍先校验图形验证码，防止脚本化短信轰炸（一次性消费）
         if (!SendSmsRequest.SCENE_BIND.equals(scene)) {
@@ -143,14 +154,14 @@ public class CaptchaServiceImpl implements CaptchaService {
         long ttl = properties.getCaptcha().getSmsTtlSeconds();
         redisUtil.set(RedisKeys.captchaSms(scene, phone), code, Duration.ofSeconds(ttl));
         try {
-            smsSender.sendCode(phone, sceneName(scene), code, ttl);
+            sender.sendCode(phone, sceneName(scene), code, ttl);
         } catch (Exception e) {
             // 下发失败时回滚验证码与频率占位，否则用户会被「60 秒内只能发一次」
             // 锁在一个根本没发出去的码上，只能干等
             redisUtil.delete(RedisKeys.captchaSms(scene, phone));
             redisUtil.delete(limitKey);
             log.error("短信验证码下发失败: phone={}, channel={}, {}",
-                    TextUtil.maskPhone(phone), smsSender.provider(), e.getMessage());
+                    TextUtil.maskPhone(phone), sender.provider(), e.getMessage());
             throw new BusinessException(ResultCode.SMS_SEND_FAILED);
         }
 
@@ -241,6 +252,25 @@ public class CaptchaServiceImpl implements CaptchaService {
         if (expected == null || !expected.equals(emailCode.trim())) {
             throw new BusinessException(ResultCode.EMAIL_CODE_ERROR);
         }
+    }
+
+    /**
+     * 取当前装配的短信通道，一个都没有时按「服务未配置」拒绝本次发码。
+     *
+     * <p>{@code MockSmsSender} 上的 {@code @ConditionalOnProperty(im.sms.provider = mock)} 意味着
+     * 把 {@code IM_SMS_PROVIDER} 写成一个还没有实现类的服务商（比如 {@code aliyun}）会得到零个 bean。
+     * 这是配置缺失不是代码缺陷，失败方向必须是「发不出去」而不是「绕过校验」，
+     * 因此抛业务异常并留一条 WARN，而不是让容器启动阶段直接 UnsatisfiedDependency 失败。
+     */
+    private SmsSender requireSmsSender() {
+        SmsSender sender = smsSenderProvider.getIfAvailable();
+        if (sender == null) {
+            log.warn("短信通道未装配：im.sms.provider={} 没有对应的 SmsSender 实现类（当前只有 mock），"
+                    + "接真实服务商需新增实现类并标 @ConditionalOnProperty(havingValue = \"{}\")",
+                    smsProvider, smsProvider);
+            throw new BusinessException(ResultCode.SMS_NOT_CONFIGURED);
+        }
+        return sender;
     }
 
     /**

@@ -715,6 +715,9 @@ im:
   # @ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")，
   # 再把这里（或 IM_SMS_PROVIDER 环境变量）改成 aliyun 即可：
   # 验证码的生成、频率限制、Redis 存储与校验都在 CaptchaServiceImpl 里，一行都不用动。
+  # ★ 这个值只能填「已有实现类」的服务商，目前只有 mock 一个。填了 aliyun 而没先加实现类，
+  #   一个 SmsSender bean 都装配不上：短信按「可选通道」处理，发码时报 2021（短信服务未配置），
+  #   应用照常启动——历史上这里是硬依赖，一个写错的环境变量能让整站 UnsatisfiedDependency 起不来。
   sms:
     provider: ${IM_SMS_PROVIDER:mock}
 

@@ -42,6 +42,9 @@ public enum ResultCode {
     USER_EMAIL_NOT_BOUND(2018, "该邮箱未绑定任何账号，请先注册或用其他方式登录"),
     PASSWORD_RESET_NEW_SAME(2019, "新密码不能与当前密码相同"),
     SMS_SEND_FAILED(2020, "短信发送失败，请稍后再试"),
+    /* 与 MAIL_NOT_CONFIGURED 同理：im.sms.provider 指到一个还没有对应 SmsSender 实现类的服务商时，
+       容器里一个通道 bean 都没有。这属于配置缺失，只能在发码这一步如实报错，不能让它拖垮整个应用启动。 */
+    SMS_NOT_CONFIGURED(2021, "短信服务未配置，无法发送验证码"),
 
     /* ==================== 3xxx 好友 ==================== */
     FRIEND_NOT_FOUND(3001, "好友关系不存在"),
