@@ -38,15 +38,24 @@
 | `scripts/health.sh` | ✅ | 五层健康检查 + 容器内变量真值 |
 | `scripts/update.sh` | ✅ | 升级与回滚后端镜像（换 tag，绝不覆盖同名 tag） |
 | `scripts/im-docker.service` | ✅ | systemd 单元（`up -d --wait`，ExecStop 无 `-v`） |
-| `.env`、`conf/im.env`、`app/im-server.jar`、`app/extra/application-prod-extra.yml`、`nginx/conf.d/im.conf`、`web/*`、`data/*`、`certs/*`、`sql-init/*`、`backup/` | ❌ | 凭据、产物、运行时数据。**由 bootstrap.sh / CI 生成**，`.gitignore` 已逐条忽略 |
+| `.env`、`conf/im.env`、`app/im-server.jar`、`app/extra/application-prod-extra.yml`、`nginx/conf.d/im.conf`、`web/*`、`data/*`、`certs/*`、`sql-init/*`、`backup/` | ❌ | 凭据、产物、运行时数据。**由 bootstrap.sh / CI 生成**（★ 例外：`web/*` 三站 dist——`bootstrap.sh` 只建空目录不填它，CI 也只在手动勾选 `deploy` 时才推，手工部署必须自己 `scp`，见下面第二步半），`.gitignore` 已逐条忽略 |
 
 ## 二、部署机上的一次性准备（全新机器）
 
 ```bash
 # 1. 装 Docker（Ubuntu 24.04，两种路线见指南 §1.1/§1.2）+ 配 daemon.json（日志限额、容器真实 IP）
 sudo mkdir -p /opt/im-docker
-# 2. 把本目录整体拷过去（scp -r / git clone 都行；★ compose 里的相对路径全以这个目录为基准，别换目录再抄配置）
+# 2. 把本目录整体拷过去（scp -r / git clone 都行；★ compose 里的相对路径全以这个目录为基准，别换目录再拄配置）
 scp -r Docker/ deploy@server:/opt/im-docker/
+
+# 2.5 ★ 三站 dist 拷进 web/<站>/（本目录进库的只有 web/.gitkeep，bootstrap.sh 也不填它）
+#     构建机上先 npm ci && npm run build（只认默认模式，别用 build:electron），再在仓库根执行：
+scp -r im-ui/dist/*        deploy@server:/opt/im-docker/web/im-ui/
+scp -r im-admin-ui/dist/*  deploy@server:/opt/im-docker/web/im-admin-ui/
+scp -r im-website/dist/*   deploy@server:/opt/im-docker/web/im-website/
+#     Windows 构建机把分隔符换成反斜杠即可：scp -r im-ui\dist\* deploy@server:/opt/im-docker/web/im-ui/
+#     漏了这一步不会报错，但站点根回 403（directory index ... is forbidden）、子路径回 500（重定向循环）
+
 ssh deploy@server
 cd /opt/im-docker
 

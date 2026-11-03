@@ -21,6 +21,13 @@ im:
       - https://__IM_DOMAIN__
       - https://__ADMIN_DOMAIN__
       - https://__WEBSITE_DOMAIN__
+      # ---------- 用 IP 直接打开页面时才需要（默认注释）----------
+      # ★ 前端走同源相对路径 /api，所以地址栏是 IP 时 Origin 就是 IP，而上面三条只能匹域名。
+      #   不取消注释的表现：页面能打开（静态文件不受 CORS 管），但登录/接口全回 403 Invalid CORS request。
+      #   改完用 docker compose restart im-server（改的是这份文件，java 启动时才读；up -d 不会重建容器）。
+      #   公网正式上线建议不要加这两行。
+      # - https://192.168.83.130
+      # - http://192.168.83.130
       # ---------- 桌面端 Tauri：Windows 是 http://tauri.localhost，macOS/Linux 是 tauri://localhost ----------
       - http://tauri.localhost
       - tauri://localhost

@@ -189,7 +189,7 @@ docker pull mysql:8.0     # 能拉下来才算配好；拉不动就先去云厂�
 ├── nginx/
 │   ├── conf.d/im.conf            ← 第八节
 │   └── snippets/                 ← ssl params、proxy headers 复用片段
-├── web/
+├── web/                          ← ★ 三站 dist 的内容，首次 up -d 之前就得放好（空目录＝站点根 403，见 5.1 ⓪）
 │   ├── im-ui/                    ← 构建机 npm run build 的 dist 内容
 │   ├── im-admin-ui/
 │   └── im-website/               （官网，可选）
@@ -751,11 +751,46 @@ volumes:
 
 ### 5.1 起与看
 
+**⓪ `up -d` 之前：三站 dist 必须先就位**（这一步属于上线清单，不是可选优化）。
+`./web/` 是挂给 nginx 的静态目录，版本库里**只有一个 `.gitkeep`**，`bootstrap.sh` 也不往里放东西（它只检查 `web/<站>/index.html` 在不在，缺了打一行 `warn` 就继续）。
+结果是「四个容器全 healthy，浏览器却 403」——很多人第一反应去查后端和 CORS，方向就偏了。
+
+构建机上先出三份 dist（用 `npm ci` 不用 `npm install`，三站各有各的 lock；口径与坑见 10.5）：
+
+```bash
+cd im-ui        && npm ci && npm run build      # → im-ui/dist
+cd im-admin-ui  && npm ci && npm run build      # → im-admin-ui/dist
+cd im-website   && npm ci && npm run build      # → im-website/dist（官网，可选）
+```
+
+★ 只认默认模式的 `npm run build`：`build:electron` / `build:tauri` / `build:capacitor` 是给客户端打包的，
+`build:electron` 会把 `base` 改成 `./`、`outDir` 改到 `../electron/dist`，这份产物拷到服务器就是「刷新 404 + 资源路径全错」。
+再把 **dist 里的内容**（不是 `dist` 目录本身，否则变成 `web/im-ui/dist/index.html`，照样 403）拷进 `web/<站>/`：
+
+```powershell
+# Windows 构建机（Win10+ 自带 OpenSSH 客户端），仓库根下执行；目的路径＝部署根的 web/<站>
+scp -r im-ui\dist\*        deploy@server:/opt/im-docker/web/im-ui/
+scp -r im-admin-ui\dist\*  deploy@server:/opt/im-docker/web/im-admin-ui/
+scp -r im-website\dist\*   deploy@server:/opt/im-docker/web/im-website/
+```
+
+```bash
+# 落位校验：① 宿主机三个 index.html 都在；② 容器里也看得见（回显为空＝挂的是空目录）
+ls /opt/im-docker/web/{im-ui,im-admin-ui,im-website}/index.html
+docker compose exec nginx ls /usr/share/nginx/html/im-ui/
+```
+
+★ 空目录的指纹很好认，别和别的 403 搞混（详细一行已进第十二节速查表）：
+访问站点根回 **403**，nginx error log 是 `directory index of "/usr/share/nginx/html/im-ui/" is forbidden`
+——`try_files $uri $uri/ /index.html` 里 `$uri/` 命中了那个空目录，而 `autoindex` 关着；
+访问任何子路径（日志里通常是 `/favicon.ico`）回 **500**，`rewrite or internal redirection cycle while internally redirecting to "/index.html"`
+——兜底的 `index.html` 同样不存在，内部重定向转满 10 次。**同一个病因的两张脸**，补上 dist 一起消失，既不用 reload 也不用重启容器。
+
 ```bash
 cd /opt/im-docker
 docker compose config -q          # ★ 先静态校验：插值没配对、缩进错、引用了不存在的卷，都在这一步报出来
 docker compose up -d
-docker compose ps                 # 五个服务都应是 running(healthy)
+docker compose ps                 # 四个服务（mysql / redis / im-server / nginx）都应是 running(healthy)
 docker compose logs -f im-server  # 看到「Started ImApplication」且没有 IllegalStateException 即成
 ```
 
@@ -1081,13 +1116,61 @@ im:
       # 还需要开发/联调用的话，把裸机那份 5173/4173/5273/4273 与 http://*.*.*.*:5173 四条一并抄过来
 ```
 
-然后在 `conf/im.env` 里取消注释：
+然后在 `conf/im.env` 里取消注释（`bootstrap.sh` 见到 `app/extra/application-prod-extra.yml` 存在会自动帮你打开这一行）：
 
 ```bash
 SPRING_CONFIG_ADDITIONAL_LOCATION=file:/app/extra/application-prod-extra.yml
 ```
 
-改完 `docker compose up -d im-server`。不改的表现：所有浏览器请求回 `403 Invalid CORS request`，而 `curl` 一切正常。
+改完**怎么生效要看改了哪个文件**，这里很容易搞错：
+
+```bash
+docker compose restart im-server   # 只改了 extra yml：它是 java 启动时读的外挂文件，重启进程就够
+docker compose up -d im-server     # 改了 conf/im.env：env_file 是建容器时注入的，必须重建（restart 不重读）
+```
+
+★ 只改 extra yml 时跑 `up -d` 是**没用的**：文件内容变了但 compose 配置没变，compose 不会重建容器，java 也就不会重启、不会重读那份 yml（这一条是「改了没生效」的一个典型假象）。
+
+不改的表现：所有浏览器请求回 `403 Invalid CORS request`，而 `curl` 一切正常（`curl` 不带 `Origin` 头）。
+
+#### ★ 另一个同病因的坑：用 **IP 打开页面**，Origin 就是 IP
+
+上面这份白名单里只有**域名形态**（`https://im.example.com` 等）与 `localhost` 那几条客户端变体，**没有任何一条能匹 IP**。
+而前端用的是同源相对路径 `/api`，所以浏览器地址栏里是什么，`Origin` 就是什么：
+
+| 浏览器里打开 | 发出去的 `Origin` | 结果 |
+| --- | --- | --- |
+| `https://im.example.com/` | `https://im.example.com` | 命中白名单 → 正常 |
+| `https://192.168.83.130/` | `https://192.168.83.130` | **403 Invalid CORS request**（页面能打开，登录/接口全挂） |
+
+这个情况特别容易误判成「nginx 挂了 / 后端挂了 / dist 没放」，因为**站点本身确实是能打开的**（静态文件不受 CORS 管），只有 XHR 才 403。
+
+两条路，选一：
+
+```bash
+# ① 推荐：改用域名访问（hosts 里要有这一条），不动任何配置
+#   192.168.83.130  im.example.com admin.example.com www.example.com
+#   页面开 https://im.example.com/ ，Origin 就自动变成白名单里的值
+
+# ② 就是想要 IP 直接可访问（内网自测、暂时没域名）：把 IP 抄进白名单
+vi app/extra/application-prod-extra.yml
+#   im.cors.allowed-origins 下加两行（http/https 各自一条，因为 Origin 含协议）：
+#     - https://192.168.83.130
+#     - http://192.168.83.130
+docker compose restart im-server
+```
+
+★ ② 是**逐字符比对**（`CorsConfiguration` 走 `allowedOriginPatterns`），写 `https://192.168.83.*` 这种带 `*` 的形式虽然能匹，但等于把整段内网放进白名单；
+公网正式上线建议删掉 IP 条目，只留真域名（与那四条 `http://*.*.*.*:5173` 一起删）。
+
+验一下就知道了（两个 `Origin` 对照着跑，一眼能看出是白名单问题而不是后端问题）：
+
+```bash
+# 带域名 Origin → 不 403（进到业务层，回 code:1002 或参数错误都算正常）
+curl -k -si -X POST https://192.168.83.130/api/auth/login -H 'Origin: https://im.example.com' -H 'Content-Type: application/json' -d '{}' | head -12
+# 带 IP Origin → 403 + 响应体 Invalid CORS request
+curl -k -si -X POST https://192.168.83.130/api/auth/login -H 'Origin: https://192.168.83.130' -H 'Content-Type: application/json' -d '{}' | head -12
+```
 
 ## 九、按功能追加（回放清理 / TURN / AI / 监控）
 
@@ -1200,7 +1283,12 @@ scp im-bootstrap/target/im-server.jar deploy@server:/opt/im-docker/app/im-server
 sed -i 's|^IM_SERVER_TAG=.*|IM_SERVER_TAG=local/im-server:1.0.1|' .env
 docker compose build im-server && docker compose up -d im-server
 docker compose ps            # 确认只有 im-server 被重建，mysql/redis/minio/nginx 没跟着重启
-# 4) 前端 dist 同理：scp 覆盖 ./web/*，静态目录是 bind mount，不重启也生效（浏览器强刷）
+# 4) 前端 dist 同理：三站 dist 的内容覆盖 ./web/<站>/（Windows 构建机见 5.1 ⓪）
+scp -r im-ui/dist/*         deploy@server:/opt/im-docker/web/im-ui/
+scp -r im-admin-ui/dist/*   deploy@server:/opt/im-docker/web/im-admin-ui/
+scp -r im-website/dist/*    deploy@server:/opt/im-docker/web/im-website/
+#    静态目录是 bind mount，覆盖即生效：不重启容器、不 reload nginx，浏览器强刷就行
+#    ★ CI 的 deploy job 干的是同一件事（tar over ssh，覆盖但不删除，所以 web/ 会攒旧 hash 文件），见 10.5
 ```
 
 ### 10.3 回滚
@@ -1352,7 +1440,9 @@ docker compose exec mysql sh -c 'mysql -uim -p"$MYSQL_PASSWORD" -e "SHOW STATUS 
 | 多档直播一律 403，单档正常 | 变体清单也被签名了 | hls.js 拉变体不携 `?expire=&sign=`；`location ~ \.m3u8$` 那段**不能**有 `secure_link` |
 | 主播端 PUT 全 404/403，而 nginx 日志里看不到对应请求 | `IM_LIVE_PUSH_BASE_URL` 写了容器内部地址 | 改成主播端公网可达的地址（第五节注释已标 ★★）；`http://nginx:8088/...` 这种服务名只能在容器内解析 |
 | nginx 启动即退 `host not found in upstream "im-server"` | 后端未就绪 / 服务名拼错 | 保留 `depends_on.condition: service_healthy`；`docker compose ps` 看 im-server |
+| 容器全 healthy，但**站点根 403、任何子路径 500** | `./web/<站>/` 是空的——前端 dist 没拷进去（版本库里只有 `.gitkeep`，`bootstrap.sh` 也不填它） | error log 两行就是指纹：`directory index of "/usr/share/nginx/html/im-ui/" is forbidden`（403，`try_files` 的 `$uri/` 命中空目录且 `autoindex off`）与 `rewrite or internal redirection cycle while internally redirecting to "/index.html"`（500，兜底页也不存在）。按 5.1 ⓪ 把三站 dist 的**内容**拷进 `web/<站>/`，bind mount 即时生效，不用 reload 也不用重启容器 |
 | 浏览器全 403 `Invalid CORS request`，`curl` 正常 | CORS 是 yml 字面列表 | 8.5 外挂配置；注意它是**整体替换**，客户端 Origin 要一并抄 |
+| **页面能打开，但登录/接口全 403**，且地址栏是 `https://192.168.x.x/` 这种 IP | 静态文件不受 CORS 管，XHR 才受；而白名单里只有**域名形态**，没有 IP 能匹上 | 首选改用域名访问（`https://im.example.com/`，Origin 自动对得上）；确实要 IP 自测就在 8.5 那份 extra 里补 `- https://<部署机IP>` 两行（http/https 各一）后 `docker compose restart im-server` |
 | 手机浏览器正常、桌面端（Tauri/Capacitor/Electron）连不上 | 外挂 CORS 只写了三个域名，把 tauri/capacitor/localhost 顶掉了 | 同上，补齐 |
 | `ufw allow/deny` 加了没反应，端口还是公网可达 | **Docker 绕过 UFW** | 别发布该端口；要按 IP 过滤用 `DOCKER-USER` 链或云安全组（8.3） |
 | nginx 日志里客户端 IP 全是 `172.x.x.1` | docker-proxy 换了源地址 | `daemon.json` 设 `"userland-proxy": false` 后实测；推流口 `allow` 名单相应改 |

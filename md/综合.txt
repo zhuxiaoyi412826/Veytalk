@@ -125,3 +125,21 @@ docker compose pull                                        # ★ 先拉，避开
 docker compose up -d
 docker compose ps                                          # 等 im-server / nginx healthy
 bash scripts/health.sh
+
+把三站 dist 拷进 Docker/web/
+
+cd d:\daima\Lianshi\spring-boot-duomokuia
+scp -r im-ui\dist\*        zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-ui/
+scp -r im-admin-ui\dist\*  zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-admin-ui/
+scp -r im-website\dist\*   zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-website/
+
+访问命令 localhost:80 
+
+构建镜像命令 
+docker build -t local/im-server:1.0.0 Docker/app  
+
+
+站点	在浏览器里敲	落到哪个 server	磁盘目录
+聊天端	https://im.example.com/	server_name __IM_DOMAIN__	web/im-ui
+管理后台	https://admin.example.com/	server_name __ADMIN_DOMAIN__	web/im-admin-ui
+静态官网	https://www.example.com/	server_name __WEBSITE_DOMAIN__	web/im-website
