@@ -69,7 +69,7 @@ class VideoPlayerViewModel @Inject constructor(
 
     /** 列表页点击时已预建缓冲；兜底（深链接/异常路径）现场建 */
     fun player(): ExoPlayer = holder.player ?: run {
-        holder.prepare(fileUrl)
+        holder.prepare(fileUrl, com.im.nativeapp.core.config.UiPrefs.autoPlayVideo)
         holder.player!!
     }
     fun coverFull(): String = session.resolveUrl(coverUrl) ?: ""
@@ -113,6 +113,10 @@ fun VideoPlayerScreen(onBack: () -> Unit, vm: VideoPlayerViewModel = hiltViewMod
     }
 
     val player = remember { vm.player() }
+    // 「视频自动播放」关闭时只 prepare 不 auto start：保留封面首帧，等用户点播放
+    LaunchedEffect(player) {
+        if (!com.im.nativeapp.core.config.UiPrefs.autoPlayVideo) player.playWhenReady = false
+    }
     // 首帧渲染前用封面占位（Coil 已缓存秒出），消除黑屏空窗
     var firstFrame by remember { mutableStateOf(false) }
     // 控制层显隐：点按画面切换

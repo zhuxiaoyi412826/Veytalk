@@ -30,11 +30,20 @@
             @submit.prevent="submitAccount"
           >
             <el-form-item label="账号" prop="account">
-              <el-input v-model.trim="accountForm.account" placeholder="用户名或手机号" clearable :prefix-icon="User" />
+              <el-input
+                v-model.trim="accountForm.account"
+                name="username"
+                autocomplete="username"
+                placeholder="用户名或手机号"
+                clearable
+                :prefix-icon="User"
+              />
             </el-form-item>
             <el-form-item label="密码" prop="password">
               <el-input
                 v-model="accountForm.password"
+                name="password"
+                autocomplete="current-password"
                 type="password"
                 placeholder="请输入密码"
                 show-password
@@ -318,8 +327,12 @@ defineOptions({ name: 'Login' })
 // 原生壳（Tauri exe / Capacitor APK）下显示「服务器地址」输入框：
 // 存 localStorage.IM_SERVER_URL_OVERRIDE，env.js 的 serverBase() 每次请求实时读取，保存后立即生效
 const showServerConfig = isNativeShell()
+// 回填「当前生效地址」而不是留空：APK 里打包默认值写死在 .env.capacitor，
+// 换网段后用户要能一眼看到现在连的是哪个 IP，直接改成正确地址即可
 const serverUrl = ref(
-  (typeof localStorage !== 'undefined' && localStorage.getItem('IM_SERVER_URL_OVERRIDE')) || ''
+  (typeof localStorage !== 'undefined' && localStorage.getItem('IM_SERVER_URL_OVERRIDE')) ||
+  (import.meta.env && import.meta.env.VITE_IM_SERVER_URL) ||
+  ''
 )
 function saveServerUrl() {
   const v = serverUrl.value.trim().replace(/\/+$/, '')
@@ -567,21 +580,50 @@ function redirectAfterLogin() {
 }
 
 async function submitAccount() {
-  const valid = await accountFormRef.value.validate().catch(() => false)
-  if (!valid) {
+  // 安卓 WebView / 密码管理器自动填充只改 DOM 的 value，不派发 input 事件，
+  // 于是页面上「明明已经填了」但 v-model 还是空串，校验报「请输入账号」、登录什么也不做。
+  // 提交前以 DOM 实际内容为准回填（浏览器里两者一致，无副作用）。
+  syncAccountFormFromDom()
+  const account = accountForm.account.trim()
+  if (!account) return ElMessage.warning('请输入账号')
+  if (!accountForm.password.trim()) return ElMessage.warning('请输入密码')
+  const valid = await (accountFormRef.value
+    ? accountFormRef.value.validate().catch(() => false)
+    : true)
+  if (valid === false) {
     return
   }
   submitting.value = true
   try {
     await auth.login({
       loginType: 'username',
-      account: accountForm.account,
+      account,
       password: accountForm.password
     })
     ElMessage.success('登录成功')
     redirectAfterLogin()
   } finally {
     submitting.value = false
+  }
+}
+
+/**
+ * 把表单内真实输入框的值同步回 accountForm。
+ *
+ * 顺序与模板一致：账号、密码（show-password 会额外插一个隐藏按钮，但只取 input 元素）。
+ * 只在值与模型不同时才写，避免覆盖 IME 组合中的内容。
+ */
+function syncAccountFormFromDom() {
+  const el = accountFormRef.value && accountFormRef.value.$el
+  if (!el) return
+  const inputs = el.querySelectorAll('input')
+  const accountInput = inputs[0]
+  const passwordInput = inputs[1]
+  if (accountInput && accountInput.value !== accountForm.account) {
+    accountForm.account = accountInput.value
+  }
+  if (passwordInput && passwordInput.value !== accountForm.password) {
+    accountForm.password = passwordInput.value
   }
 }
 

@@ -55,6 +55,7 @@ class MessageNotifier @Inject constructor(
     }
 
     fun onIncoming(dto: MessageVO, viewing: Boolean, mentioned: Boolean) {
+        if (!com.im.nativeapp.core.config.UiPrefs.notifyEnabled) return
         if (viewing || appForeground) return
         val cid = dto.conversationId ?: return
         val conv = conversations.find(cid)
@@ -82,7 +83,10 @@ class MessageNotifier @Inject constructor(
             .setContentText(body)
             .setAutoCancel(true)
             .setContentIntent(pi)
+            .setSilent(!notifySoundNow())
             .build()
         runCatching { NotificationManagerCompat.from(context).notify(cid.hashCode(), notification) }
     }
+
+    private fun notifySoundNow(): Boolean = com.im.nativeapp.core.config.UiPrefs.notifySound
 }

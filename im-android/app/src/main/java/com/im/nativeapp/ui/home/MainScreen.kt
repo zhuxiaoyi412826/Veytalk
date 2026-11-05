@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
@@ -43,6 +44,7 @@ fun MainScreen(
     onOpenVideoPlayer: (com.im.nativeapp.core.network.VideoVO) -> Unit = {},
     onOpenAi: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onLogout: () -> Unit,
     vm: MainViewModel = hiltViewModel()
 ) {
@@ -98,6 +100,13 @@ fun MainScreen(
                     selected = tab == 3,
                     onClick = { tab = 3 },
                     colors = navItemColors,
+                    icon = { Icon(Icons.Default.SmartToy, contentDescription = "AI") },
+                    label = { Text("AI") }
+                )
+                NavigationBarItem(
+                    selected = tab == 4,
+                    onClick = { tab = 4 },
+                    colors = navItemColors,
                     icon = { Icon(Icons.Default.AccountCircle, contentDescription = "我的") },
                     label = { Text("我的") }
                 )
@@ -119,7 +128,9 @@ fun MainScreen(
                     onOpenCreateGroup = onOpenCreateGroup
                 )
                 2 -> LiveTab(onOpenRoom = onOpenLiveRoom, onOpenVideoPlayer = onOpenVideoPlayer)
-                3 -> ProfileTab(onLogout = onLogout, onOpenAi = onOpenAi, onOpenProfile = onOpenProfile)
+                // AI 与「视频」并列成一个 Tab（对应用户要求：AI 放在视频和我的之间并改名 AI）
+                3 -> com.im.nativeapp.ui.ai.AiScreen(onBack = {})
+                4 -> ProfileTab(onOpenSettings = onOpenSettings, onOpenProfile = onOpenProfile)
             }
         }
     }

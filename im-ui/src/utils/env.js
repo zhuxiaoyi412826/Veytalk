@@ -24,7 +24,19 @@ export function isTauri() {
 
 /** 是否运行在 Capacitor 原生壳里（安卓/iOS，原生桥会注入 window.Capacitor） */
 export function isCapacitor() {
-  return typeof window !== 'undefined' && !!window.Capacitor
+  if (typeof window === 'undefined') return false
+  if (window.Capacitor) return true
+  // 兜底：打包后的 Capacitor 页面由 WebView 以 https://localhost（或 http://localhost，无端口）加载，
+  // 桥对象偶发注入失败时不能因此把整壳当 Web（否则 /api 会打到 WebView 自身，全部请求失败）。
+  // 浏览器访问带端口的 localhost（5173/4173 等）不会命中这条。
+  try {
+    const { protocol, hostname, port } = window.location
+    return (hostname === 'localhost' || hostname === '127.0.0.1') &&
+      port === '' &&
+      (protocol === 'https:' || protocol === 'http:')
+  } catch (e) {
+    return false
+  }
 }
 
 /** 是否任意原生壳（Electron / Tauri / Capacitor）——凡是「非浏览器同源」的宿主都用它 */

@@ -92,6 +92,10 @@ class FriendViewModel @Inject constructor(
     private val _error = MutableStateFlow("")
     val error: StateFlow<String> = _error
 
+    /** 好友申请是否在途（按钮展示发送中并防连点） */
+    private val _applying = MutableStateFlow(false)
+    val applying: StateFlow<Boolean> = _applying
+
     init {
         viewModelScope.launch {
             runCatching { repo.fetchFriends() }
@@ -104,10 +108,14 @@ class FriendViewModel @Inject constructor(
     }
 
     fun apply(account: String, verifyMessage: String, onDone: (Boolean) -> Unit) {
+        // 防连点：请求在途时再点直接忽略，避免重复申请
+        if (_applying.value) return
+        _applying.value = true
         viewModelScope.launch {
             repo.apply(targetAccount = account.trim(), targetUserId = null, verifyMessage = verifyMessage.trim().ifEmpty { null })
                 .onSuccess { onDone(true) }
                 .onFailure { _error.value = it.message ?: "申请失败"; onDone(false) }
+            _applying.value = false
         }
     }
 
@@ -676,6 +684,16 @@ fun AddFriendScreen(
     val context = LocalContext.current
     var account by remember { mutableStateOf("") }
     var verifyMessage by remember { mutableStateOf("") }
+    val applying by vm.applying.collectAsStateWithLifecycle()
+    val error by vm.error.collectAsStateWithLifecycle()
+
+    // 申请失败（账号不存在 / 已是好友 / 不能添加自己等）必须给反馈，否则按钮看起来「没反应」
+    LaunchedEffect(error) {
+        if (error.isNotEmpty()) {
+            Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+            vm.clearError()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -715,9 +733,9 @@ fun AddFriendScreen(
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = account.isNotBlank()
+                enabled = account.isNotBlank() && !applying
             ) {
-                Text("发送申请")
+                Text(if (applying) "发送中…" else "发送申请")
             }
         }
     }

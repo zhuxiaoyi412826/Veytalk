@@ -82,6 +82,10 @@ interface MessageApi {
     @GET("message/offline")
     suspend fun offline(): ApiEnvelope
 
+    /** 导出某会话的完整聊天记录（服务端权威数据，单次上限 20000 条，仅会话成员可导） */
+    @GET("message/export")
+    suspend fun export(@Query("conversationId") conversationId: String): ApiEnvelope
+
     @PUT("message/read")
     suspend fun reportRead(@Body body: ConvReadRequest): ApiEnvelope
 

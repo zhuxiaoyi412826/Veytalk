@@ -5,11 +5,15 @@ import com.im.nativeapp.core.network.ApiClient
 import com.im.nativeapp.core.network.MessageVO
 import com.im.nativeapp.core.push.MessageNotifier
 import com.im.nativeapp.core.ws.ImWebSocket
+import com.im.nativeapp.core.config.UiPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -48,6 +52,9 @@ class WsDispatcher @Inject constructor(
 
     private var installed = false
 
+    /** 断线期间轮询会话列表兜底的协程；连接恢复（OPEN）时取消 */
+    private var unreadPollJob: Job? = null
+
     fun install() {
         if (installed) return
         installed = true
@@ -56,6 +63,8 @@ class WsDispatcher @Inject constructor(
         scope.launch {
             ws.status.collect { status ->
                 if (status == ImWebSocket.Status.OPEN) {
+                    unreadPollJob?.cancel()
+                    unreadPollJob = null
                     messages.flushPending()
                     if (everOpened) {
                         // 重连：后端返回离线消息的同时推进位点但不清未读，拉完要刷会话列表对角标
@@ -66,12 +75,28 @@ class WsDispatcher @Inject constructor(
                     } else {
                         everOpened = true
                     }
+                } else {
+                    // 断线/重连中：LAN 后端进程重启期间收不到 WS 推送，15s 轮询一次会话列表，
+                    // 至少让未读角标和最后一条摘要不至于长时间停在旧值（设置里可关）
+                    if (UiPrefs.pollUnread) startUnreadPolling() else unreadPollJob?.cancel()
                 }
             }
         }
 
         scope.launch {
             ws.events.collect { ev -> handle(ev.type, ev.packet) }
+        }
+    }
+
+    /** 断线期间每 15s 拉一次会话列表（对齐桌面端 Web 的断线兜底刷新） */
+    private fun startUnreadPolling() {
+        if (unreadPollJob?.isActive == true) return
+        unreadPollJob = scope.launch {
+            while (isActive) {
+                delay(15_000L)
+                if (!UiPrefs.pollUnread) break
+                runCatching { conversations.fetchList() }
+            }
         }
     }
 
@@ -92,7 +117,10 @@ class WsDispatcher @Inject constructor(
                 // 送达回执与是否在看无关：消息已经到端了
                 dto.messageId?.let { messages.reportDelivered(listOf(it)) }
                 if (viewing) {
-                    messages.reportRead(dto.conversationId ?: return, dto.seq)
+                    // 已读回执可关（对齐 Web「已读回执」开关）；本端角标仍然清零
+                    if (com.im.nativeapp.core.config.UiPrefs.readReceipt) {
+                        messages.reportRead(dto.conversationId ?: return, dto.seq)
+                    }
                     conversations.markRead(dto.conversationId ?: return, dto.seq)
                 }
             }

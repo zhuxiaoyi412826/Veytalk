@@ -486,6 +486,24 @@ class MessageRepository @Inject constructor(
         return list
     }
 
+    // ------------------------------ 本机消息缓存 ------------------------------
+
+    /**
+     * 清除本机消息缓存（只删本地 Room 行 + 内存分桶，不调服务端接口）。
+     * 重新进会话会从服务端历史重新拉一页，所以不会丢云端记录。
+     */
+    suspend fun clearLocalCache(cid: String? = null) {
+        if (cid != null) {
+            runCatching { db.messageDao().clearConversation(cid) }
+            buckets[cid]?.value = emptyList()
+            hasMoreMap[cid]?.value = true
+        } else {
+            runCatching { db.messageDao().clearAll() }
+            buckets.values.forEach { it.value = emptyList() }
+            hasMoreMap.values.forEach { it.value = true }
+        }
+    }
+
     // ------------------------------ 回执上报（WS 优先，HTTP 兜底，对齐 chat.js） ------------------------------
 
     suspend fun reportRead(cid: String, maxSeq: String?) {

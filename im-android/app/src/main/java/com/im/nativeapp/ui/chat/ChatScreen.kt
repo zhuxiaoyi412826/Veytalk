@@ -9,6 +9,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -67,10 +69,18 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -85,6 +95,14 @@ import com.im.nativeapp.ui.components.formatBubbleTime
 import com.im.nativeapp.ui.theme.WxColors
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+
+/** 字体种类设置 → Compose 字体族（默认/衬线/等宽） */
+private fun uiFontFamily(): FontFamily = when (com.im.nativeapp.core.config.UiPrefs.fontFamily) {
+    "serif" -> FontFamily.Serif
+    "mono" -> FontFamily.Monospace
+    else -> FontFamily.Default
+}
 
 /** 聊天页（对齐 Chat.vue + ChatWindow）：文字/图片/语音/文件、历史分页、撤回、回执、失败重发、引用回复、群@提醒 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,6 +118,8 @@ fun ChatScreen(
     val hasMore by vm.hasMore.collectAsStateWithLifecycle()
     val sendingAttachment by vm.sendingAttachment.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    // 外观/行为设置是同步快照，收集 rev 在设置改动后即时重组（背景图/字体/回车发送等）
+    val prefsRev = com.im.nativeapp.core.config.UiPrefs.rev.collectAsStateWithLifecycle().value
 
     // 拨打前补权限：语音要麦，视频要麦+摄像头
     var pendingCallType by remember { mutableStateOf<String?>(null) }
@@ -130,11 +150,13 @@ fun ChatScreen(
     // 群聊：拉一次成员列表（@ 选人面板与提及解析共用）
     LaunchedEffect(conversation?.type) { vm.loadMembersIfGroup() }
 
-    // 滚动到顶部（reverseLayout 下是列表尾部 index）时加载更早历史
-    LaunchedEffect(listState, hasMore) {
+    // 滚动到顶部（reverseLayout 下是列表尾部 index）时加载更早历史；关闭「自动加载历史」后交给手动按钮
+    LaunchedEffect(listState, hasMore, prefsRev) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
             .collect { lastIndex ->
-                if (hasMore && lastIndex != null && lastIndex >= listState.layoutInfo.totalItemsCount - 3) {
+                if (hasMore && com.im.nativeapp.core.config.UiPrefs.autoLoadHistory &&
+                    lastIndex != null && lastIndex >= listState.layoutInfo.totalItemsCount - 3
+                ) {
                     vm.loadMore()
                 }
             }
@@ -188,12 +210,37 @@ fun ChatScreen(
                 .imePadding()
         ) {
             Box(modifier = Modifier.weight(1f)) {
-                // 微信聊天页底色：浅灰 #EDEDED（深色 #111111），气泡在灰底上才有层次
-                val chatBg = if (androidx.compose.foundation.isSystemInDarkTheme()) WxColors.ChatBgDark else WxColors.ChatBg
+                // 微信聊天页底色：浅灰 #EDEDED（深色 #111111）；设置里选纯色则覆盖
+                val chatBg = run {
+                    val mode = com.im.nativeapp.core.config.UiPrefs.chatBgMode
+                    if (mode != "default") {
+                        com.im.nativeapp.ui.theme.colorFromHex(com.im.nativeapp.core.config.UiPrefs.chatBgColor)
+                    } else null
+                } ?: if (androidx.compose.foundation.isSystemInDarkTheme()) WxColors.ChatBgDark else WxColors.ChatBg
+                // 自定义背景图：铺满 + 白/黑蒙层，蒙层 alpha = 1 - 不透明度（无图片时保持纯色逻辑）
+                val bgImagePath = com.im.nativeapp.core.config.UiPrefs.chatBgImage
+                val bgImageFile = remember(bgImagePath) {
+                    bgImagePath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.exists() }
+                }
+                if (bgImageFile != null) {
+                    AsyncImage(
+                        model = bgImageFile,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    val scrim = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+                    val opacity = com.im.nativeapp.core.config.UiPrefs.chatBgOpacity.coerceIn(0.3f, 1.0f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(scrim.copy(alpha = 1f - opacity))
+                    )
+                }
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
-                    modifier = Modifier.fillMaxSize().background(chatBg),
+                    modifier = Modifier.fillMaxSize().background(if (bgImageFile != null) Color.Transparent else chatBg),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -212,17 +259,33 @@ fun ChatScreen(
                     if (hasMore) {
                         item {
                             Box(modifier = Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                // 关闭「自动加载历史」后，滚动到底不再自动拉，只给一个显式入口
+                                if (com.im.nativeapp.core.config.UiPrefs.autoLoadHistory) {
+                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                } else {
+                                    TextButton(onClick = { vm.loadMore() }) { Text("加载更多历史消息") }
+                                }
                             }
                         }
                     }
+                }
+                // 聊天水印：叠账号 + 日期，降低截图外泄的可识别性（设置里开关）
+                if (com.im.nativeapp.core.config.UiPrefs.watermark) {
+                    Text(
+                        text = vm.watermarkText(),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 44.dp, end = 12.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = com.im.nativeapp.ui.theme.WxColors.OnBubble.copy(alpha = 0.22f)
+                    )
                 }
                 if (sendingAttachment) {
                     LinearUploadingHint(modifier = Modifier.align(Alignment.TopCenter))
                 }
             }
 
-            ChatInputBar(vm = vm)
+            ChatInputBar(vm = vm, enterToSend = com.im.nativeapp.core.config.UiPrefs.enterToSend)
         }
     }
 }
@@ -318,14 +381,23 @@ private fun MessageRow(
             Box {
                 // 微信气泡：自己浅绿 #95EC69 / 对方白底，四角均等小圆角，黑字
                 val dark = androidx.compose.foundation.isSystemInDarkTheme()
+                val meHex = com.im.nativeapp.core.config.UiPrefs.bubbleMeColor
+                val peerHex = com.im.nativeapp.core.config.UiPrefs.bubblePeerColor
                 val bubbleColor = if (self) {
-                    if (dark) WxColors.BubbleSelfDark else WxColors.BubbleSelf
+                    com.im.nativeapp.ui.theme.colorFromHex(meHex)
+                        ?: if (dark) WxColors.BubbleSelfDark else WxColors.BubbleSelf
                 } else {
-                    if (dark) WxColors.BubblePeerDark else WxColors.BubblePeer
+                    com.im.nativeapp.ui.theme.colorFromHex(peerHex)
+                        ?: if (dark) WxColors.BubblePeerDark else WxColors.BubblePeer
                 }
                 val contentColor = if (dark) WxColors.OnBubbleDark else WxColors.OnBubble
+                val bubbleShape = if (com.im.nativeapp.core.config.UiPrefs.bubbleShape == "plain") {
+                    RoundedCornerShape(2.dp)
+                } else {
+                    RoundedCornerShape(8.dp)
+                }
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
+                    shape = bubbleShape,
                     color = bubbleColor,
                     modifier = Modifier.combinedClickable(
                         onClick = {},
@@ -497,8 +569,13 @@ private fun BubbleContent(
                     .width(maxWidth)
                     .height(height.coerceIn(80.dp, 320.dp))
                     .combinedClickable(
-                        onClick = { url?.let(onPreviewImage) },
-                        onLongClick = { saveDialog = true }
+                        onClick = {
+                            // 「图片点击放大预览」关闭后不响应
+                            if (com.im.nativeapp.core.config.UiPrefs.imageZoom) url?.let(onPreviewImage)
+                        },
+                        onLongClick = {
+                            if (com.im.nativeapp.core.config.UiPrefs.allowSaveImage) saveDialog = true
+                        }
                     ),
                 contentScale = ContentScale.Crop
             )
@@ -602,7 +679,7 @@ private fun BubbleContent(
         else -> {
             Text(
                 msg.content ?: "",
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = uiFontFamily()),
                 color = contentColor,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
@@ -676,9 +753,18 @@ private fun queryDisplayName(context: android.content.Context, uri: Uri): String
 }.getOrNull()
 
 @Composable
-private fun ChatInputBar(vm: ChatViewModel) {
+private fun ChatInputBar(vm: ChatViewModel, enterToSend: Boolean = false) {
     val context = LocalContext.current
     var text by remember { mutableStateOf("") }
+    // 发送的唯一入口：按钮、IME 发送键、回车发送都走这里，避免各写一份校验
+    fun sendNow() {
+        if (text.isNotBlank()) {
+            vm.sendText(text)
+            text = ""
+        } else {
+            Toast.makeText(context, "请输入内容再发送；点左侧「+」可发图片/文件", Toast.LENGTH_SHORT).show()
+        }
+    }
     var voiceMode by remember { mutableStateOf(false) }
     var panelOpen by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
@@ -826,26 +912,43 @@ private fun ChatInputBar(vm: ChatViewModel) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.weight(1f).heightIn(max = 120.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(max = 120.dp)
+                        // 「回车发送」开启时拦截硬件键盘 Enter（Shift+Enter 仍换行）；IME 发送键走 keyboardActions
+                        .onPreviewKeyEvent { e ->
+                            if (enterToSend && e.type == KeyEventType.KeyDown &&
+                                e.key == Key.Enter && !e.isShiftPressed
+                            ) {
+                                sendNow()
+                                true
+                            } else false
+                        },
                     placeholder = { Text("发送消息…") },
                     maxLines = 4,
-                    shape = RoundedCornerShape(22.dp)
+                    shape = RoundedCornerShape(22.dp),
+                    keyboardOptions = if (enterToSend) {
+                        KeyboardOptions(imeAction = ImeAction.Send)
+                    } else KeyboardOptions.Default,
+                    keyboardActions = if (enterToSend) {
+                        KeyboardActions(onSend = { sendNow() })
+                    } else KeyboardActions.Default
                 )
             }
 
             IconButton(onClick = { panelOpen = !panelOpen }) {
                 Icon(Icons.Default.Add, contentDescription = "更多")
             }
-            IconButton(
-                onClick = {
-                    if (text.isNotBlank()) {
-                        vm.sendText(text)
-                        text = ""
+            IconButton(onClick = { sendNow() }) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "发送",
+                    tint = if (text.isNotBlank()) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.secondary
                     }
-                },
-                enabled = text.isNotBlank()
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+                )
             }
         }
 

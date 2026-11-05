@@ -118,6 +118,10 @@ interface MessageDao {
     @Query("DELETE FROM message WHERE conversationId = :cid")
     suspend fun clearConversation(cid: String)
 
+    /** 清除全部本机消息缓存（只删本地，不动服务器；pending 草稿队列保留） */
+    @Query("DELETE FROM message")
+    suspend fun clearAll()
+
     /**
      * upsert：服务端 messageId 优先，其次本地占位的 clientMsgId。
      * REPLACE 插不进球因为主键是自增 rowid，必须先查再定插还是改。

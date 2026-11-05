@@ -2,6 +2,7 @@ package com.im.nativeapp.ui.home
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,6 +64,10 @@ fun ConversationTab(
     val list by vm.list.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
+
+    // 每次进入消息页都向服务端拉一次：群聊未读只能以服务端 unread_count 为准，
+    // 只靠 WS 增量在后台/断线期间会漏，导致群聊看着「没有红点」
+    LaunchedEffect(Unit) { runCatching { vm.refresh() } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // 自绘窄标题栏：TopAppBar 固定 64dp，比微信高出一截，列表被迫整体下移
@@ -141,6 +146,20 @@ private fun ConversationRow(
     onRemove: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // 列表密度：紧凑/标准/宽松，只影响行高与头像-文字间距（默认 normal 保持原视觉）
+    // 收集 rev 让设置在设置页改完立即反映到已渲染的列表行
+    val prefsRev = com.im.nativeapp.core.config.UiPrefs.rev.collectAsStateWithLifecycle().value
+    val density = remember(prefsRev) { com.im.nativeapp.core.config.UiPrefs.listDensity }
+    val rowVPad = when (density) {
+        "compact" -> 5.dp
+        "loose" -> 14.dp
+        else -> 9.dp
+    }
+    val avatarGap = when (density) {
+        "compact" -> 8.dp
+        "loose" -> 16.dp
+        else -> 12.dp
+    }
 
     Box {
         Row(
@@ -151,11 +170,19 @@ private fun ConversationRow(
                     else MaterialTheme.colorScheme.surface
                 )
                 .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
-                .padding(horizontal = 16.dp, vertical = 9.dp),
+                .padding(horizontal = 16.dp, vertical = rowVPad),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box {
-                Avatar(url = avatarUrl, name = item.name, size = 46.dp)
+                Avatar(
+                    url = avatarUrl,
+                    name = item.name,
+                    size = when (com.im.nativeapp.core.config.UiPrefs.avatarSize) {
+                        "sm" -> 40.dp
+                        "lg" -> 52.dp
+                        else -> 46.dp
+                    }
+                )
                 // 单聊在线绿点（对齐会话列表的 online 字段）
                 if (item.type == 1 && item.online == true) {
                     Box(
@@ -168,7 +195,7 @@ private fun ConversationRow(
                     )
                 }
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(avatarGap))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -191,7 +218,9 @@ private fun ConversationRow(
                         Text("[有人@我] ", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
                     Text(
-                        item.lastMsgContent ?: "",
+                        // 关闭「消息预览」后只显示占位，对齐 Web 端 privacy 选项
+                        if (!com.im.nativeapp.core.config.UiPrefs.showPreview) "收到一条新消息"
+                        else (item.lastMsgContent ?: ""),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.secondary,
                         maxLines = 1,

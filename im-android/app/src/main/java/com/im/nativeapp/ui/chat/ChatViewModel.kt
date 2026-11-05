@@ -97,6 +97,14 @@ class ChatViewModel @Inject constructor(
 
     fun resolveUrl(path: String?): String? = session.resolveUrl(path)
 
+    /** 水印文案：账号 + 当天日期（设置里打开后叠在聊天页右上角） */
+    fun watermarkText(): String {
+        val who = session.currentTokenName() ?: ""
+        val day = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        return "$who · $day"
+    }
+
     /**
      * 下载文件消息：换带短时票据的直链交给系统下载管理器。
      * DownloadManager 不能自定义鉴权头，走 /file/{id}/url 票据直链（对齐 Web 端 resolveDirectDownloadUrl）。
