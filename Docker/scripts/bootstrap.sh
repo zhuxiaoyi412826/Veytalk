@@ -227,7 +227,7 @@ if [[ -d ../sql ]]; then
     [[ -f ../sql/im_schema.sql ]] && cp ../sql/im_schema.sql sql-init/01_im_schema.sql && say "已放 sql-init/01_im_schema.sql"
     [[ -f ../sql/im_data.sql   ]] && cp ../sql/im_data.sql   sql-init/02_im_data.sql   && say "已放 sql-init/02_im_data.sql"
     warn "★ sql-init/ 仅在「空卷首次启动」时执行一次（指南 §6.1/§6.3）。库建好后建议：
-      注释掉 compose 里那行 ./sql-init 挂载并清空该目录 —— 01_im_schema.sql 开头有 37 条 DROP TABLE IF EXISTS，
+      注释掉 compose 里那行 ./sql-init 挂载并清空该目录 —— 01_im_schema.sql 开头有 41 条 DROP TABLE IF EXISTS，
       一旦卷被重建就会静默清库"
   fi
 fi

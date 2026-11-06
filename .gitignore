@@ -2,6 +2,8 @@
 # 构建产物
 # ==============================================================================
 target/
+electron/release-fresh/
+
 !.mvn/wrapper/maven-wrapper.jar
 build/
 out/

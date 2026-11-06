@@ -235,7 +235,7 @@ mvn -f ..\pom.xml clean install -DskipTests
 
 | 地址                              | 用途                                                         |
 | --------------------------------- | ------------------------------------------------------------ |
-| http://localhost:8080/doc.html    | Knife4j 接口文档，按模块分成 9 个分组（01-09，含 AI 面试与远程控制） |
+| http://localhost:8080/doc.html    | Knife4j 接口文档，按模块前缀分组（组数随功能增长，以 `swagger-config` 的 `urls` 为准，不写死） |
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON                                          |
 | ws://localhost:8080/ws            | WebSocket 端点（需先取票据）                                 |
 | http://localhost:8080/api/        | 全部 REST 接口                                               |

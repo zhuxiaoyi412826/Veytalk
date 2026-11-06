@@ -33,7 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
  * 而「预算花完还来烧钱」大多数时候只需要停掉这一项能力就够了。
  * 封禁即时生效（护栏每次模型调用现查库），解封同样即时，无需重启或清缓存。
  */
-@Tag(name = "17-管理后台", description = "AI 用量管控：付费模型调用的用量账本与封禁闸门")
+@Tag(name = "16-管理后台", description = "AI 用量管控：付费模型调用的用量账本与封禁闸门")
 @RestController
 @RequestMapping("/api/admin/ai")
 @RequiredArgsConstructor

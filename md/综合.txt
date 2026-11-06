@@ -99,14 +99,14 @@ bob              123456
 zhuxiaoyi        412826
 zhuxiaoyizxy     412826
 zhuxiaoyi1       412826
+qwer             123456
+zzzz             123456
 
 PR冲突解决方法
-
 # 路 1：把 PR 分支拉到本地解，回推 fork → PR 自己变「可合并」，保留作者署名
 gh pr checkout 1            # 自动建本地分支 + 加 fork 远端（#1 开了 maintainerCanModify，你有权推）
 git merge origin/main       # 解冲突 → 改文件 → git add → git commit
 git push <fork远端名> HEAD:main
-
 # 路 2：直接在 main 上吃掉它（你刚才做的）
 git fetch origin pull/1/head:pr-1
 git checkout main; git merge pr-1    # 解冲突、add、commit
@@ -114,32 +114,79 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 
 
+docker 镜像构建部署
+1.前置条件
+    MinIO 二进制本体要先装好  账号密码默认为 minioadmin
+   .env.example 里所有 <...> 换成真值   
+   装 Docker + compose 插件
 
-镜像
-cd Docker
-cp .env.example .env && chmod 600 .env
-systemctl is-active minio || sudo systemctl start minio   # 二进制 minio，minioadmin/minioadmin
-docker login ghcr.io                                      # 私有包才需要；PAT 只需 read:packages
+
+cd Docker                                                 # 拷贝docker 目录到服务器
+cp .env.example .env && chmod 600 .env                    # 复制文件.env.example 为 .env 并加600权限 仅属主可读写
+systemctl is-active minio || sudo systemctl start minio   # 启动二进制 minio，  账号 密码设置为  minioadmin/minioadmin   
+docker login ghcr.io                                      # 向 GitHub 容器仓库认证，之后 compose pull 才拉得动
 bash scripts/bootstrap.sh                                  # 生成 conf/im.env、nginx 配置、自签证书
-docker compose pull                                        # ★ 先拉，避开本地 build
-docker compose up -d
-docker compose ps                                          # 等 im-server / nginx healthy
-bash scripts/health.sh
 
-把三站 dist 拷进 Docker/web/
-
+2.把三站 dist 拷进 Docker/web/
 cd d:\daima\Lianshi\spring-boot-duomokuia
 scp -r im-ui\dist\*        zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-ui/
 scp -r im-admin-ui\dist\*  zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-admin-ui/
 scp -r im-website\dist\*   zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-website/
 
-访问命令 localhost:80 
+3.启动镜像
+docker compose pull                                        # ★ 先拉，避开本地 build
+docker compose up -d                                       # 启动
+docker compose ps                                          # 查看每个容器的状态  
+bash scripts/health.sh                                     # 六段分层诊断，按「哪层开始失败，问题就在它与上一层之间」来读
 
-构建镜像命令 
-docker build -t local/im-server:1.0.0 Docker/app  
+4.数据库初始化  
+1  手动执行 SQL 文件     账号 root zhuxiaoyi   im  412826zxyZXY  
+在SQL-int文件里 把SQL拷贝到这个文件夹里，并先执行01 在执行02
+2  docker exec -i im-mysql mysql -uroot -pzhuxiaoyi im_db < ./02_im_data.sql  和 01_im_schema.sql  
+3  docker exec -it im-mysql mysql -uroot -pzhuxiaoyi -e "use im_db; show tables;"  查看导入的表
 
 
+
+5.访问测试
+本机 hosts 加上这一行
+192.168.83.130  im.example.com admin.example.com www.example.com
 站点	在浏览器里敲	落到哪个 server	磁盘目录
-聊天端	https://im.example.com/	server_name __IM_DOMAIN__	web/im-ui
+聊天端	https://im.example.com/	        server_name __IM_DOMAIN__	    web/im-ui
 管理后台	https://admin.example.com/	server_name __ADMIN_DOMAIN__	web/im-admin-ui
 静态官网	https://www.example.com/	server_name __WEBSITE_DOMAIN__	web/im-website
+
+
+6. 其他docker命令 
+docker build -t local/im-server:1.0.0 Docker/app   # 构建命令
+docker logs 查看日志  
+docker
+
+
+7. 真实服务器上问题
+证书换成真证书 + 续期 hook：bootstrap.sh 只补 30 天自签（CN=$d + subjectAltName=DNS:$d，不含 IP SAN）。推荐 DNS-01，且要加 deploy-hook 做 nginx -s reload（续期后 nginx 不会自己重载）。★ HTTPS 不只是加密：getUserMedia（语音/视频通话、录屏）只在安全上下文可用，为了省事只挂 80 = 通话功能直接不可用。
+CORS 外挂配置（换真域名后 app/extra/application-prod-extra.yml）。注意两条生效命令不一样，别搞反：改 conf/im.env 必须 docker compose up -d 重建（restart 不重读 env_file）；改 extra yml 只需 docker compose restart im-server（改完跑 up -d 反而没用，compose 认为配置没变不重建）。
+bash scripts/clear-perm-cache.sh：只要 SQL 动过 im_permission / im_role_permission（含首次建库）就跑。im:auth:perm:{userId} 有 30 分钟 TTL 且登录不刷新，不清的表现是「SQL 明明执行了、后台菜单还是旧的、点进去 403」，极易误判成代码 bug。
+live-retention sidecar —— 开直播就是必装项：后端只管 Redis 那个入口标记，控制面一个媒体字节都不碰；盘上分片没人删，一场 2 小时四档直播约 8~10GB。两条红线：不能图省事写成 find -mtime +1 -delete（会抽走正在直播的房间的老分片），--days 必须与 IM_LIVE_REPLAY_RETENTION_DAYS（默认 1）同一个数，否则「后台列表有这条回放、点进去 404」。
+AI 知识库路径：IM_AI_KNOWLEDGE_DIR=/app/knowledge。默认值是 D:/资料/知识库/面试官，Linux 上不存在也不报错，只是检索永远空转 —— 这类静默不可用比启动失败难发现得多。
+开机自启：sudo cp scripts/im-docker.service /etc/systemd/system/ 并改 WorkingDirectory（默认写死 /opt/im-docker）。★ 那个单元的 ExecStop 没有 -v 是刻意的：docker compose down -v 会把 mysql-data/redis-data/minio-data 卷一起删。同理别随手 docker system prune -a --volumes。
+备份 cron：bash scripts/backup.sh mysql（--single-transaction 不锁表 + --routines + utf8mb4），每天 03:30 留 14 天。★ 备份只落同一块盘等于没备份，*.sql.gz 要同步异地。
+上线护栏：建完库把 compose 里 ./sql-init:/docker-entrypoint-initdb.d:ro 那行注释掉并清空该目录 —— 让这份 compose 永久失去「卷被重建时静默清库」的能力，这是一个很便宜的保险。
+
+
+
+
+
+
+electron 打包
+# ① 重出渲染包（产物直接落 electron\dist，不用手动拷贝）
+cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
+node node_modules/vite/bin/vite.js build --mode electron
+# 网页端打包
+node node_modules/vite/bin/vite.js build          # → im-ui\dist（默认模式，base '/'）
+
+# ② ★ 必须先退出正在运行的客户端，否则打包 EBUSY 中断
+Get-Process | Where-Object { $_.ProcessName -like 'IM*' } | Stop-Process -Force
+
+# ③ 打包
+cd d:\daima\Lianshi\spring-boot-duomokuia\electron
+node node_modules/electron-builder/cli.js --win

@@ -174,7 +174,7 @@ bash scripts/bootstrap.sh
 
 全新建库：`bootstrap.sh` 在仓库里跑时会自动把 `sql/im_schema.sql`、`sql/im_data.sql`
 复制成 `sql-init/01_im_schema.sql`、`sql-init/02_im_data.sql`（数字前缀保证建表先于插数据）。
-**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 37 条
+**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 41 条
 `DROP TABLE IF EXISTS`，一旦卷被重建就会静默清库。
 
 ---
@@ -321,7 +321,103 @@ echo | openssl s_client -connect im.example.com:443 -servername im.example.com 2
 
 ---
 
-## 十、日常运维
+## 十、数据库初始化（首次建库与失败排查）
+
+> ★ 这一节为什么单开：`docker compose ps` 四个全绿**不等于库建好了**。空库不影响**任何** healthcheck（mysql
+> 自己只看能不能连上），四个容器照常 healthy、`doc.html` 照常能翻，**直到第一次有人登录**才炸出
+> `Table 'im_db.im_user' doesn't exist`。而本篇 §三 教的正是「只把 `Docker/` 这一层拷上服务器」，
+> 恰好是 SQL 最容易整块漏掉的那种做法。本节把它拆成「判据 → 两条导入路线 → 失败对照表 → 收尾护栏」。
+
+### 10.1 先判 SQL 到没到位（一分钟，只读）
+
+```bash
+cd /opt/im-docker
+ls -l sql-init/*.sql            # 只有 .gitkeep、或干脆 No such file → 就是没到位
+[ -d ../sql ] && echo "有 ../sql，bootstrap.sh 会自动拷" || echo "没有 ../sql，得手动补"
+# 卷里到底有没有表（期望 41，不是 0）
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"im_db\""'
+```
+
+为什么会漏：`bootstrap.sh` 那一步包在 `if [[ -d ../sql ]]` 里。在仓库里跑（`cd 仓库/Docker`）能命中 `../sql`，
+自动拷成 `01_/02_`；`scp -r Docker/*` 只搬一层时该判断为假，**一声不吭跳过，不报也不 warn**。
+
+> 至于「用 SQL 客户端手动连进去执行」那一条：本形态下 **3306 没发布到宿主机**（§〇 的端口约束），外部客户端根本
+> 连不上。要逐条手贴就进容器：`docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" im_db'`。
+> 确实要用 Navicat/DBeaver 就得临时发布 `127.0.0.1:3306:3306` + SSH 隧道，**用完把那一行注释掉**。
+
+### 10.2 路线 A（首选，但只在**卷还空**时有效）：挂 `initdb.d` 自动导
+
+适用条件：刚 `up -d` 就发现 `sql-init/` 是空的（卷里还没东西），或者是可以丢数据的试用环境。卷一旦非空就改走 10.3。
+
+```bash
+# SQL 没到位先手动补（从开发机 scp 上来，或 git clone 仓库后拷）
+scp sql/im_schema.sql sql/im_data.sql deploy@<服务器IP>:/opt/im-docker/
+mv im_schema.sql sql-init/01_im_schema.sql
+mv im_data.sql   sql-init/02_im_data.sql
+# ★ 前缀 01_/02_ 是字典序：建表必须早于插数据；后缀只能是 .sql/.sh/.sql.gz，其他名字被静默忽略
+docker compose up -d mysql
+docker compose logs -f mysql      # 看得见 01_im_schema.sql 被执行的过程才算真导入
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SHOW TABLES FROM im_db"'   # 目视一遍表名
+docker compose up -d               # ★ 数对了（41）再起全栈，别只看 ps 四个绿
+```
+
+补完 SQL 时 mysql 已经跑过一轮（卷非空）的话，`initdb.d` 不会再跑：试用环境可以 `docker compose down -v`
+删卷重来（★ 数据全没），正式库一律走 10.3。
+
+`im_schema.sql` 自带 `CREATE DATABASE IF NOT EXISTS im_db` 与 `USE im_db;`，`im_data.sql` 也自带 `USE`，
+所以不需要额外 `--database` 参数。
+
+### 10.3 路线 B（卷已非空、或不能删）：`cp` 进容器再 `-e "source"`
+
+`initdb.d` **只在数据目录为空时跑一次**，`docker compose restart mysql` 不会重放。已起过一轮的库走这条：
+
+```bash
+docker compose cp sql-init/01_im_schema.sql mysql:/tmp/01_im_schema.sql
+docker compose cp sql-init/02_im_data.sql   mysql:/tmp/02_im_data.sql
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 im_db -e "source /tmp/01_im_schema.sql"'
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 im_db -e "source /tmp/02_im_data.sql"'
+docker compose exec mysql sh -c 'rm -f /tmp/01_im_schema.sql /tmp/02_im_data.sql'
+bash scripts/clear-perm-cache.sh        # ★ 全量建库会新插 im_permission / im_role_permission，导完必跑（症状见 10.4 倒第二行）
+```
+
+★ 两条禁令：
+
+- **不能用管道**：`docker exec -i im-mysql mysql -uroot -p<密码> im_db < ./02_im_data.sql` 这种写法会把中文与 emoji
+  **静默刷成 `?`**（命令返回 0、行数还都对得上，事后极难发现）；`cat x.sql | docker compose exec -T mysql …` 同理，heredoc 同理。
+- **`scripts/import-sql.sh` 在这里用不了**：它 grep 到 `^\s*DROP\s+TABLE` 就 `exit 3`，而 `im_schema.sql` 正是它拦的对象
+  （设计意图是防你把全量建库脚本灌进生产库）。空库手工补建表是它唯一放行不了的合理场景，**不要为了顺手去改那道护栏**。
+
+> 密码一律写成 `sh -c '… -p"$MYSQL_ROOT_PASSWORD" …'` 让**容器内**的 shell 展开：compose 不对 `exec` 的命令行做插值，
+> 而 `.env` 不进宿主 shell 环境，所以宿主侧直接写 `-p"${MYSQL_ROOT_PASSWORD}"` 会展开成**空串**，症状是「密码明明对，
+> 却回 Access denied / 反复让你输密码」。
+
+### 10.4 如果失败：按症状定位
+
+| 症状 | 真正原因 | 处置 |
+|---|---|---|
+| 四个容器全 healthy，**一登录就** `Table 'im_db.im_user' doesn't exist`；数表为 0 | `sql-init/` 是空的（§三 只拷了一层，`bootstrap.sh` 静默跳过） | 回 10.1 拿判据，卷空走 10.2（补文件后 `docker compose down -v && up -d`，★ 仅试用环境），卷非空走 10.3 |
+| `Unknown database 'im_db'` / `Access denied for user 'im'`，im-server 无限重启 | ① 建库压根没跑；② `.env` 与 `conf/im.env` 同一个密码不一致 | 先数表区分这两种；改过 `.env` 里的密码必须**重跑** `bash scripts/bootstrap.sh`（它负责把凭据灌进 `conf/im.env`），再 `docker compose up -d` **重建**（`restart` 不重读 `env_file`） |
+| 只导了 `02` 就报「表不存在」，或只有部分表 | 文件名前缀顺序错（`initdb.d` 按字典序执行） | 改成 `01_im_schema.sql` / `02_im_data.sql`；后缀不是 `.sql`/`.sh`/`.sql.gz` 会被**静默忽略** |
+| `docker compose logs mysql` 里看不见 SQL 被执行 | ① 卷已非空（`initdb.d` 只跑一次）；② 文件没挂进去 | 走 10.3；或确认 compose 里 `./sql-init:/docker-entrypoint-initdb.d:ro` 未被注释 |
+| 中文、表注释、种子数据里的中文变成 `?` | 用了管道/heredoc 导入；或服务端字符集退回 latin1 | 重导走 10.3；复核 `SELECT @@character_set_server, @@collation_server;` 应为 `utf8mb4` / `utf8mb4_general_ci`，抽查 `SELECT name FROM im_db.im_gift LIMIT 3;` |
+| 改了 `sql-init/` 里的 SQL，`restart mysql` 没生效 | `initdb.d` 只在空卷跑一次 | 10.3 手工导；试用环境才可 `down -v` 重建（★ 数据全没） |
+| `-p"$MYSQL_ROOT_PASSWORD"` 回 Access denied 而密码是对的 | 变量被**宿主 shell** 展开成空串 | 整个命令放进 `sh -c '…'` 让容器内展开（10.3 末的注） |
+| 库建好了、后台菜单还是旧的，点进去 403 | 权限缓存 `im:auth:perm:{userId}` TTL 30 分钟且**登录不刷新** | `bash scripts/clear-perm-cache.sh`，删完复跑一次确认残留 = 0（极易误判成代码 bug） |
+| 这些命令在 Windows PowerShell 里跑不了（`chmod` / `bash` / 服务名解析） | 本节命令全部在**部署机（Ubuntu）**上跑 | 先 `ssh deploy@<服务器IP>` 再执行；只有 `scp` 那几条在开发机跑 |
+
+### 10.5 收尾护栏（建完库必做，30 秒）
+
+```bash
+# 把挂载行注释掉：防止将来卷被重建（down -v / 换机器 / 改了 name:）时这 41 条 DROP TABLE 静默清库
+grep -n 'sql-init' docker-compose.yml            # 先看到它在 mysql 服务的 volumes 下
+vi docker-compose.yml                            # 注释 - ./sql-init:/docker-entrypoint-initdb.d:ro
+rm -f sql-init/*.sql                             # 目录里只留 .gitkeep
+docker compose up -d mysql                       # ★ 改了 compose 要 up -d 才生效（restart 不重读定义）
+```
+
+---
+
+## 十一、日常运维
 
 ### 升级 / 回滚后端镜像
 
@@ -361,7 +457,7 @@ sudo systemctl enable --now im-docker
 
 ---
 
-## 十一、常见坑速查
+## 十二、常见坑速查
 
 | 症状 | 根因 / 处置 |
 |---|---|
@@ -374,10 +470,11 @@ sudo systemctl enable --now im-docker
 | 观众端直播黑屏 403，推流/列表正常 | `IM_LIVE_SIGN_SECRET` 与 nginx `secure_link_md5` 不一致（`.env` 只填一次即为防这个） |
 | 换镜像 tag 后行为没变 | 覆盖用了同名 tag。升级到新版本号，或 `docker compose pull` 确认拉到新 digest |
 | `docker compose down -v` | ★ 一字之差清库。systemd 的 ExecStop 里特意没有 `-v` |
+| **四个容器全 healthy，但登录就报 `Table 'im_db.im_user' doesn't exist`** | 只拷了 `Docker/` 一层上服务器，`bootstrap.sh` 的 `if [[ -d ../sql ]]` 不成立，`sql-init/` 里根本没 SQL，于是建出**空库**（不报不 warn）。按 **§十** 走：`ls -l sql-init/*.sql` 拿判据 → 数表（期望 41）→ 卷空走 10.2、卷非空走 10.3 |
 
 ---
 
-## 十二、一页速查（生产全新机，最小路径）
+## 十三、一页速查（生产全新机，最小路径）
 
 ```bash
 # 1 装 docker
@@ -401,4 +498,6 @@ docker compose pull && docker compose up -d
 
 # 7 验证
 docker compose ps && bash scripts/health.sh && curl -kI https://im.example.com
+# ★ 还要数表（四个全绿不等于库建好了，见 §十）：期望 41
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"im_db\""'
 ```

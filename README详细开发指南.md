@@ -377,7 +377,7 @@ mvn spring-boot:run
 
 | 地址 | 用途 |
 |---|---|
-| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分成 9 个分组（01-09，含 AI 面试与远程控制） |
+| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分组（组数由 `Knife4jConfig` 的 `GroupedOpenApi` Bean 个数决定，不写死；`GET /v3/api-docs/swagger-config` 看 `urls` 数组就是当前分组清单，覆盖率自查 `python scripts/api-doc-check.py`） |
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
 | http://localhost:8080/api/ | 全部 REST 接口 |

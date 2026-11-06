@@ -14,6 +14,7 @@ import com.im.file.enums.FileBizType;
 import com.im.file.service.ModerationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -45,6 +46,7 @@ import java.io.IOException;
  * 拿上传权限去挡，一个没获得上传配额的人就连证据也递不进来，那是把两件无关的事绑在一起。
  */
 @Slf4j
+@Tag(name = "06-文件审核", description = "图片内容审核：策略下发、发送端命中上报与隔离区证据投递")
 @RestController
 @RequestMapping("/api/file/moderation")
 @RequiredArgsConstructor

@@ -25,7 +25,7 @@
 | `docker-compose.yml` | ✅ | 四个必选服务（mysql / redis / im-server / nginx）+ 两个注释掉的选装（live-retention / coturn）。★ minio 不在此栈：改用宿主机官方二进制+systemd（见 `md/MinIO部署指南.md` 三/四节、`md/部署/Ubuntu镜像HTTPS部署教程.md` §8.1），im-server 经 host.docker.internal:9000 连它 |
 | `文件说明.md` | ✅ | 逐个文件的作用、彼此衔接与生效方式（本表的详细版，动文件前看它） |
 | `.env.example` | ✅ | compose 层参数模板：镜像 tag、密码、域名。`cp .env.example .env` 后填 |
-| `conf/im.env.example` | ✅ | 应用层环境变量模板：37 个键，逐个与 `application.yml` 的 `${}` 占位符对过账 |
+| `conf/im.env.example` | ✅ | 应用层环境变量模板：38 个键，逐个与 `application.yml` 的 `${}` 占位符对过账 |
 | `app/Dockerfile` | ✅ | **路线 A**（推荐）：只装运行时，jar 由 CI 放进 `app/` |
 | `app/Dockerfile.multistage` | ✅ | **路线 B**：在构建机上从源码编译（上下文必须是仓库根） |
 | `app/extra/application-prod-extra.example.yml` | ✅ | CORS 白名单外挂配置模板（yml 里是字面列表，环境变量改不动它） |
