@@ -1,7 +1,7 @@
 # Docker 部署指南（Ubuntu 24.04 · Docker Compose）
 
-> 事实来源：`im-bootstrap/src/main/resources/application.yml`（997 行、63 个不同的 `${ENV:默认值}` 占位符；
-> 这两个数会随版本漂移，**引用时按变量名而不是按行号**）、
+> 事实来源：`im-bootstrap/src/main/resources/application.yml`（61 个不同的 `${ENV:默认值}` 占位符，口径为 `\$\{([A-Z0-9_]+):` 去重计数；
+> 这个数会随版本漂移，所以**引用一律按变量名，不写行号也不写文件总行数**——加两行注释就会让整仓行号引用集体作废）、
 > `application-prod.yml`、`im-bootstrap/pom.xml`（`finalName=im-server`，主类 `com.im.bootstrap.ImApplication`）、
 > 根 `pom.xml`（`java.version=21`、Spring Boot 4.0.8）、`sql/im_schema.sql` / `sql/im_data.sql`、
 > `im-common` 的 `logback-spring.xml`、`im-file` 的 `MinioFileStorage` / `LocalFileStorage`、`md/直播.md` §10.4-10.5、`electron/live-retention.js`。
@@ -42,7 +42,7 @@
 
 | 服务 | 镜像 | 干什么 | 对外发布端口 |
 |---|---|---|---|
-| `mysql` | `mysql:8.0` | 业务库 `im_db`（41 张表） | ❌ 不发布 |
+| `mysql` | `mysql:8.0` | 业务库 `im_db`（43 张表） | ❌ 不发布 |
 | `redis` | `redis:7-alpine` | 会话 / 权限缓存 / 直播与通话瞬时态 | ❌ 不发布 |
 | `im-server` | 本目录 `Dockerfile` 构建 | 唯一的 Java 进程（HTTP + WebSocket + 定时任务） | ❌ 不发布（只给 nginx 反代） |
 | `nginx` | `nginx:1.27-alpine` | 三份前端静态站 + `/api` `/ws` 反代 + 直播推流/播放口 | ✅ `80` `443`，按需 `8088` |
@@ -265,7 +265,7 @@ docker history --human local/im-server:1.0.0                                    
 | `IM_AI_KNOWLEDGE_DIR=/app/knowledge` 并真的放文件 | 默认值是 `D:/资料/知识库/面试官`，Linux 上**不存在也不报错**，只是检索永远空转——这类静默不可用比启动失败难发现得多 | §9.3 |
 | `im-docker.service` 开机自启（`WorkingDirectory` 改成实际目录） | 重启机器后服务不回来；★ 它的 `ExecStop` 刻意**没有 `-v`**：`down -v` 会把 `mysql-data` / `redis-data` 两个卷一起删（minio 已移出栈，数据在宿主目录 `MINIO_DATA_DIR`，`down -v` 删不到它，但一条 `rm -rf` 能） | §11.2 |
 | `backup.sh mysql` 进 cron + 异步同步 | 备份只落同一块盘等于没备份 | §10.1 |
-| 建完库把 `./sql-init:/docker-entrypoint-initdb.d:ro` 这行注释掉并清空该目录 | 留着就是一个定时炸弹：`im_schema.sql` 开头有 41 条 `DROP TABLE IF EXISTS`，一旦卷被重建（`down -v` / 换机器 / 换项目名）就**静默清库** | §6.3 |
+| 建完库把 `./sql-init:/docker-entrypoint-initdb.d:ro` 这行注释掉并清空该目录 | 留着就是一个定时炸弹：`im_schema.sql` 开头有 43 条 `DROP TABLE IF EXISTS`，一旦卷被重建（`down -v` / 换机器 / 换项目名）就**静默清库** | §6.3 |
 | 改演示账号密码 | `im_data.sql` 里是 `admin / 123456`，业务侧红线与容器与否无关 | §十三 |
 
 > ★ 改了配置后的生效命令**分两种，搞反就是「改了没生效」**：改 `conf/im.env`（env_file 是建容器时注入的）必须
@@ -816,7 +816,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 40s           # 首次初始化要建 41 张表，别把 start_period 设小了导致误判 unhealthy
+      start_period: 40s           # 首次初始化要建 43 张表，别把 start_period 设小了导致误判 unhealthy
 
   # ---------------------------------------------------------------- Redis
   redis:
@@ -1032,7 +1032,7 @@ docker compose exec nginx  sh -c 'nc -w 2 im-server 8080 < /dev/null' && echo up
 
 ### 6.1 ★ 先分清「全新库」和「存量库」，这条在容器形态下更危险
 
-`sql/im_schema.sql` 开头是 **41 条 `DROP TABLE IF EXISTS`**（为了让脚本幂等，与同文件 41 张 `CREATE TABLE` 对得上）。
+`sql/im_schema.sql` 开头是 **43 条 `DROP TABLE IF EXISTS`**（为了让脚本幂等，与同文件 43 张 `CREATE TABLE` 对得上）。
 裸机上误跑一次还能从备份回；容器里如果你把它挂进 `docker-entrypoint-initdb.d` 又执行了
 `docker compose down -v`（`-v` 连命名卷一起删），**库和数据一起没了**。
 
@@ -1388,7 +1388,7 @@ docker compose -f /opt/im-docker/docker-compose.yml exec -T nginx nginx -s reloa
 
 ### 8.5 换域名后必须动的第二处：CORS 白名单（yml 是字面列表，环境变量改不动它）
 
-`im.cors.allowed-origins`（`application.yml` L638-681）**没有 `${}` 占位符**，所以不能靠 `conf/im.env` 覆盖。
+`im.cors.allowed-origins`（`application.yml` 的 `cors:` 段）**没有 `${}` 占位符**，所以不能靠 `conf/im.env` 覆盖。
 容器里的做法是挂一份外挂配置（compose 已经把 `./app/extra` 挂到 `/app/extra`）：
 
 `app/extra/application-prod-extra.yml`：
@@ -1612,7 +1612,7 @@ docker images | grep im-server      # 确认目标 tag 还在；被 prune 过就
 ```
 
 > ★ **回滚镜像不等于回滚数据库**。跑过的 migration 里，加权限点/改列宽这类**向后兼容**的可以留着；
-> 而 `im_schema.sql` 那种带 41 条 `DROP TABLE` 的全量脚本（共 41 张表），永远不要出现在生产回滚流程里。
+> 而 `im_schema.sql` 那种带 43 条 `DROP TABLE` 的全量脚本（共 43 张表），永远不要出现在生产回滚流程里。
 > 每份 `migration_*.sql` 都自带注释形态的回滚段，用它。
 
 ### 10.4 别随手 `docker system prune -a --volumes`
@@ -1926,7 +1926,7 @@ LOGGING_LEVEL_COM_IM=debug
 | 主题 | 文档 |
 |---|---|
 | **裸机口径的同一件事（装哪些软件、systemd、Nginx、上线检查清单、migration 顺序表）** | [`服务器部署指南.md`](服务器部署指南.md) |
-| 41 张表的逐表逐列解析（当前覆盖其中 37 张）、种子数据、两份全量脚本与真实库的对账结论 | `md/数据库表解析.md`（对账在 §14.10） |
+| 43 张表的逐表逐列解析（当前覆盖其中 40 张）、种子数据、两份全量脚本与真实库的对账结论 | `md/数据库表解析.md`（对账在 §14.10） |
 | 直播架构与 Nginx 推流/播放口的完整配置 | `md/直播.md`（部署在 §10） |
 | MinIO 的下载、启动、桶与凭据、故障排查 | `md/MinIO部署指南.md` |
 | WebRTC 通话、STUN/TURN、群通话 mesh、录制留存 | `md/语音视频通话接入指南.md` |

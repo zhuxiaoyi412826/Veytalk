@@ -12,7 +12,7 @@ preview 验货口 `4373`。
 2. **Hero**：产品名、一句话定位、下载/文档两个 CTA
 3. **产品特性**：8 张能力卡（消息 / 社交 / 文件 / 远程控制 / AI 面试 / 直播 / 隐私 / 后台）+ 技术栈标签
 4. **下载**：三张卡对应三个规范文件名（见下），推荐位高亮 Windows 安装版
-5. **资源 + 页脚**：GitHub 仓库、官方文档（仓库 README）、Releases 页
+5. **资源 + 页脚**：GitHub 仓库、官方文档（仓库 README）、Releases 页；页脚另有「用户协议 / 隐私政策 / 服务条款」三个法定文本入口（见下）
 
 文案与链接全部在 `src/App.vue` 顶部的常量 / 数组里集中维护，改内容不动模板。
 
@@ -46,6 +46,23 @@ npm run fetch:downloads
 
 大文件不进 git（根 `.gitignore` 已排除 `im-website/dist/`、downloads 下 zip/apk），
 部署静态站点时把产物拷进 `public/downloads/`，或直接改用 GitHub Releases 直链。
+
+## 法定文本入口
+
+应用商店上架与各类审核都要求「隐私政策能从官网直达」，所以页脚固定摆三个链接。**官网不抄一份正文**：
+三份文本的真源在数据库（后台「法定文本」那屏可起草发布），公示页是 im-ui 那个免登录即可打开的
+`/legal/{code}`，这里只放链接。
+
+链接基址由环境变量 `VITE_APP_BASE` 决定：
+
+| 部署形态 | 配置 | 生成结果 |
+| --- | --- | --- |
+| 官网与应用同域（应用挂在域名根路径） | 不配 | `/legal/terms` |
+| 官网与应用不同源 | `VITE_APP_BASE=https://im.example.com` | `https://im.example.com/legal/terms` |
+
+两种写法都行：构建前的 `.env`（`im-website/.env.production`）或命令行临时变量
+（`$env:VITE_APP_BASE='https://im.example.com'; npm run build`）。尾部斜杠会被抹掉，
+配成 `https://im.example.com/` 也不会拼出 `//legal/terms` 那种地址。
 
 ## 构建与部署
 

@@ -134,6 +134,14 @@ const routes = [
         name: 'announcements',
         component: () => import('@/views/AnnounceView.vue'),
         meta: { title: '全服公告', perm: 'system:announcement' }
+      },
+      {
+        // 法定文本与同意留痕：单独一个权限点 125，不并进 system:announcement——
+        // 公告可以随时撤，协议发出去就改不了，而且这一屏带着可举证的个人信息留痕
+        path: 'agreements',
+        name: 'agreements',
+        component: () => import('@/views/AgreementView.vue'),
+        meta: { title: '法定文本', perm: 'system:agreement:manage' }
       }
     ]
   },
@@ -194,7 +202,8 @@ router.beforeEach(async (to) => {
       'moderation-logs',
       'config',
       'remote',
-      'announcements'
+      'announcements',
+      'agreements'
     ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)

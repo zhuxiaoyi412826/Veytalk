@@ -36,7 +36,7 @@ mvn clean install -DskipTests 改了模块
 mvn -f ..\pom.xml clean install -DskipTests
 mvn spring-boot:run
 
-解决乱码  
+解决后端启动乱码  
 chcp 65001
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -67,8 +67,6 @@ $env:MYSQL_USER='root'; $env:MYSQL_PASSWORD='412826'
 $env:JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"   # 解决控制台中文乱码
 mvn spring-boot:run    # 在 im-bootstrap 目录
 使这个环境变量永久生效
-
-
 netsh advfirewall firewall add rule name="IM Backend 8080" dir=in action=allow protocol=TCP localport=8080  开放8080端口防火墙
 
 
@@ -162,15 +160,7 @@ docker logs 查看日志
 docker
 
 
-7. 真实服务器上问题
-证书换成真证书 + 续期 hook：bootstrap.sh 只补 30 天自签（CN=$d + subjectAltName=DNS:$d，不含 IP SAN）。推荐 DNS-01，且要加 deploy-hook 做 nginx -s reload（续期后 nginx 不会自己重载）。★ HTTPS 不只是加密：getUserMedia（语音/视频通话、录屏）只在安全上下文可用，为了省事只挂 80 = 通话功能直接不可用。
-CORS 外挂配置（换真域名后 app/extra/application-prod-extra.yml）。注意两条生效命令不一样，别搞反：改 conf/im.env 必须 docker compose up -d 重建（restart 不重读 env_file）；改 extra yml 只需 docker compose restart im-server（改完跑 up -d 反而没用，compose 认为配置没变不重建）。
-bash scripts/clear-perm-cache.sh：只要 SQL 动过 im_permission / im_role_permission（含首次建库）就跑。im:auth:perm:{userId} 有 30 分钟 TTL 且登录不刷新，不清的表现是「SQL 明明执行了、后台菜单还是旧的、点进去 403」，极易误判成代码 bug。
-live-retention sidecar —— 开直播就是必装项：后端只管 Redis 那个入口标记，控制面一个媒体字节都不碰；盘上分片没人删，一场 2 小时四档直播约 8~10GB。两条红线：不能图省事写成 find -mtime +1 -delete（会抽走正在直播的房间的老分片），--days 必须与 IM_LIVE_REPLAY_RETENTION_DAYS（默认 1）同一个数，否则「后台列表有这条回放、点进去 404」。
-AI 知识库路径：IM_AI_KNOWLEDGE_DIR=/app/knowledge。默认值是 D:/资料/知识库/面试官，Linux 上不存在也不报错，只是检索永远空转 —— 这类静默不可用比启动失败难发现得多。
-开机自启：sudo cp scripts/im-docker.service /etc/systemd/system/ 并改 WorkingDirectory（默认写死 /opt/im-docker）。★ 那个单元的 ExecStop 没有 -v 是刻意的：docker compose down -v 会把 mysql-data/redis-data/minio-data 卷一起删。同理别随手 docker system prune -a --volumes。
-备份 cron：bash scripts/backup.sh mysql（--single-transaction 不锁表 + --routines + utf8mb4），每天 03:30 留 14 天。★ 备份只落同一块盘等于没备份，*.sql.gz 要同步异地。
-上线护栏：建完库把 compose 里 ./sql-init:/docker-entrypoint-initdb.d:ro 那行注释掉并清空该目录 —— 让这份 compose 永久失去「卷被重建时静默清库」的能力，这是一个很便宜的保险。
+
 
 
 

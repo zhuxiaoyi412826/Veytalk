@@ -595,6 +595,37 @@
         </div>
       </section>
 
+      <!-- ==================== 九、法律与隐私 ====================
+           合规要求的「便捷入口」：个保法与各类应用商店审核都要在应用内能随时看到
+           隐私政策与用户协议，不能只藏在注册页那一个勾选框里（人注册完就不再看第二眼）。
+           链接开在新的公示页而不是站内弹窗：那份文本要能打印、能收藏、能发给别人。 -->
+      <section class="settings__card">
+        <div class="settings__card-title">法律与隐私</div>
+
+        <div v-for="item in agreement.list" :key="item.code" class="settings__row">
+          <div class="settings__label">
+            <span>
+              {{ item.codeName }}
+              <el-tag v-if="item.required === false" size="small" type="info" effect="plain">可选</el-tag>
+            </span>
+            <span class="settings__desc">
+              第 {{ item.version }} 版{{ formatEffective(item.effectiveTime) }}
+              <template v-if="item.summary">｜{{ item.summary }}</template>
+            </span>
+          </div>
+          <router-link :to="{ name: 'legal', params: { code: item.code } }" target="_blank">
+            <el-button plain>查看全文</el-button>
+          </router-link>
+        </div>
+
+        <div v-if="!agreement.list.length" class="settings__row">
+          <div class="settings__label">
+            <span>法律文本</span>
+            <span class="settings__desc">暂无已发布的条款文本（后端未执行 sql/migration_agreement.sql）</span>
+          </div>
+        </div>
+      </section>
+
       <div class="settings__footer">
         <el-button :icon="RefreshLeft" @click="onReset">恢复默认设置</el-button>
       </div>
@@ -615,6 +646,7 @@ import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS, FONT_FAMILIES } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
+import { useAgreementStore } from '@/stores/agreement'
 import { dbStats, dbClearAllMessages, dbExportAll, localDbEnabled } from '@/utils/localdb'
 import { mediaCacheStats, mediaCacheClear } from '@/utils/medacache'
 import { clearMediaCache } from '@/utils/media'
@@ -643,6 +675,13 @@ const router = useRouter()
 const settings = useSettingsStore()
 const chat = useChatStore()
 const conversations = useConversationStore()
+const agreement = useAgreementStore()
+
+/** 「2026-11-01 00:00:00」→「｜2026-11-01 起生效」；没给时间就不拼这一句，不留一个光秃秃的分隔符 */
+function formatEffective(value) {
+  const day = String(value || '').replace('T', ' ').slice(0, 10)
+  return day ? `｜${day} 起生效` : ''
+}
 
 const themeColors = THEME_COLORS
 const fontFamilies = FONT_FAMILIES
@@ -824,6 +863,12 @@ const recordDirText = computed(() => {
   return remoteRecordDir.value
     ? '录像与审计 JSON 都写到这里；正在进行的会话不受影响，下次会话生效'
     : '未自定义，使用默认目录（首次录制时自动创建）'
+})
+
+onMounted(async () => {
+  // 法律文本清单单独一路：下面那个 onMounted 在「本环境不支持录屏」时会直接 return，
+  // 把协议拉取搭在那条路上会让非桌面端的用户永远看不到设置页那三行入口
+  agreement.refreshList()
 })
 
 onMounted(async () => {

@@ -22,6 +22,8 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_user_agreement`;
+DROP TABLE IF EXISTS `im_agreement`;
 DROP TABLE IF EXISTS `im_announcement`;
 DROP TABLE IF EXISTS `im_sensitive_word`;
 DROP TABLE IF EXISTS `im_config`;
@@ -973,3 +975,77 @@ CREATE TABLE `im_announcement`
     KEY `idx_status_publish` (`status`, `publish_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='全服公告（后台唯一主动广播通道，状态 0→1→2；无已读回执表，去重记在客户端本地）';
+
+-- =====================================================================================
+--  十五、法定文本与同意留痕（im-user）
+-- =====================================================================================
+
+-- 面向公众的三份法定文本（用户协议 / 隐私政策 / 服务条款），一个版本一行。
+-- 为什么建表而不是把 md 文件塞进 im-website：改一份对外生效的合同是一次**有操作人、有生效时刻、
+-- 需要留下变更说明**的行为，而这些正好是文件系统给不了的三样；同时官网页脚、App 内公示页、
+-- 注册勾选行必须读到同一份文本，两处各存一份 markdown 迟早出现「弹窗里是旧的、官网上是新的」。
+-- ★ 不启 deleted：这一列一旦生效就是一份对用户履行过的合同原件，销毁原件不是「删除」能表达的动作。
+--   法务要改文案只能发一个版本号更大的新版本，旧行转 status=2 归档，文本永久按 code+version 可查
+--   （一个已经注销的账号当初点开的链接，今天仍然要能打开）——所以后台控制器压根没有删除端点。
+-- version 由服务端取「该 code 下历史最大值 + 1」（含草稿与归档，号段永不复用），客户端传来的版本号
+--   一律不认：它是 im_user_agreement 里那条留痕的对账依据，可写就等于允许留痕和账对不上。
+-- required 分两档不是随便定的：隐私政策与用户协议不签就不能用（法定门槛），而服务条款只覆盖钱包 /
+--   打赏 / 远程协助这类增值服务，拒签只该关掉这些入口，不该拦住注册——拒签同样要落一行留痕。
+-- 索引两条就够：status 全表扫那一下命中行数就是「发布过的版本数」（个位到十几），而
+--   idx_code_version 这个唯一键同时服务「按 code 取生效版」与「按 code+version 取历史版」两种查法。
+CREATE TABLE `im_agreement`
+(
+    `id`             BIGINT        NOT NULL COMMENT '协议版本 ID（雪花）；im_user_agreement.agreement_id 指向的就是这一行，它一旦发布过就不可被替换',
+    `code`           VARCHAR(32)   NOT NULL COMMENT '协议标识：terms 用户协议 / privacy 隐私政策 / service 服务条款。白名单在服务端（Agreement#isKnownCode），不建 ENUM——将来加一份新的法定文本不该动表结构',
+    `version`        INT           NOT NULL COMMENT '同一 code 内单调递增的版本号，服务端算，客户端传来的值一律不认',
+    `title`          VARCHAR(120)  NOT NULL COMMENT '文档标题，公示页的 h1；发布后不可改，标题也是那份被同意的文本的一部分',
+    `summary`        VARCHAR(500)           DEFAULT NULL COMMENT '一句话摘要：注册页勾选行下面与再同意弹窗里那行小字',
+    `content`        MEDIUMTEXT    NOT NULL COMMENT 'Markdown 正文原文，渲染端 marked + DOMPurify 净化（与文章同一口径）。用 MEDIUMTEXT 而不是 VARCHAR(65535)：后者上限按字节算，utf8mb4 下中文实际只装得下两万多字，一份带信息清单表格的隐私政策轻松过线',
+    `required`       TINYINT       NOT NULL DEFAULT 1 COMMENT '是否必签：1 必须同意才能注册与继续使用 0 可拒（只影响对应增值服务的入口）',
+    `status`         TINYINT       NOT NULL DEFAULT 0 COMMENT '状态（单向，没有撤回这条边）：0 草稿（仅后台可见，对外等于不存在） 1 已发布（同一 code 至多一行） 2 已归档（被新版本顶替，文本仍永久可查）',
+    `effective_time` DATETIME               DEFAULT NULL COMMENT '生效时刻，发布时盖；公示页那行「本版生效于」取它，也是判断「某次同意是否发生在文本改版之前」的唯一依据',
+    `publish_time`   DATETIME               DEFAULT NULL COMMENT '发布时刻，草稿为空',
+    `publish_by`     BIGINT                 DEFAULT NULL COMMENT '发布人（后台账号 ID）：出了争议要能问出「这一版是谁放出去的」',
+    `remark`         VARCHAR(255)           DEFAULT NULL COMMENT '本版变更说明：「v3 比 v2 改了什么」唯一能直接答上的字段，发布时可补写一次',
+    `create_time`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '起草时间',
+    `update_time`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（只有草稿阶段会被改，已发布行的这两列应当相等或只差一次发布动作）',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_code_version` (`code`, `version`),
+    KEY `idx_code_status` (`code`, `status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='法定文本版本表（发布后正文不可改、无删除端点，改文案等于发新版本）';
+
+-- 同意留痕：一行 = 某个用户在某个时刻对某个**具体版本**的一次表态。整个合规链路里唯一拿得出证据的
+-- 就是这张表——官网上挂一份公示文本不构成「取得单独同意」，监管和对方律师要看的是能逐行对上的记录：
+-- 谁、什么时候、从哪个入口、对着哪一版、点了同意还是拒绝、从哪个 IP 与设备。少任何一列，
+-- 举证时都要现编说辞。三个 source 的举证强度并不相同：register 是账号本身就是那次点击的产物，
+-- login 是验证码登录自动建号（他从未勾过东西，靠之后那次弹窗补齐），dialog 是文本改版后的再同意。
+-- ★ 不启 deleted 且后台无删除端点：法定留存期内没有任何角色有权删这一行，清理只跟日志留存策略走、
+--   不跟业务走。注销账号也不连带删它——「他当初同意过什么」与「账号还在不在」是两件事，
+--   所以这里刻意不建外键（建了就得允许级联删，或者让注销报错，两个都错）。
+-- ★ 刻意不加唯一键：同一版重复同意在技术上能插两条，但服务层每次先查「这一版表过态没有」再决定写不写；
+--   换成唯一键会把「先拒了服务条款、后来改主意同意」这条正常路径撞成主键冲突。
+-- code 与 version 是从主表抄下来的冗余快照：留痕要能整表导出成一份自足的材料，不该依赖主表当时
+--   长成什么样（也不必为了补这两个字段去 join 一次几百万行的表）。
+CREATE TABLE `im_user_agreement`
+(
+    `id`           BIGINT      NOT NULL COMMENT '留痕 ID（雪花）',
+    `user_id`      BIGINT      NOT NULL COMMENT '表态的用户 ID。注销后仍保留，且不建外键：级联删等于销毁证据',
+    `agreement_id` BIGINT      NOT NULL COMMENT '指向 im_agreement 的具体版本行：点进去能看到他当时同意的那份原文',
+    `code`         VARCHAR(32) NOT NULL COMMENT '协议标识快照（冗余），整表导出时不必 join 主表',
+    `version`      INT         NOT NULL COMMENT '版本号快照（冗余），「他同意的是 v2」全靠这一列，不看主表当前值',
+    `action`       TINYINT     NOT NULL COMMENT '动作：1 同意 0 拒绝。0 同样是有价值的证据——它证明这个人明确没同意过，也是「必签项没勾」与「勾了不同意」在服务端合成的同一种失败',
+    `source`       VARCHAR(16) NOT NULL COMMENT '场景：register 注册勾选 / login 验证码登录自动建号 / dialog 登录后强制再同意弹窗。三个入口的举证强度不同，出了争议要先问这一行是怎么产生的',
+    `ip`           VARCHAR(64)          DEFAULT NULL COMMENT '来源 IP，与登录日志同一口径（含反代头，写入前截到列宽）',
+    `user_agent`   VARCHAR(255)         DEFAULT NULL COMMENT 'User-Agent，写入前截到列宽：判断「是不是本人设备点的」的唯一线索',
+    `create_time`  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '表态时刻（本表只有 INSERT，这一列就是事件时间）',
+    `update_time`  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（流水不更，列形同虚设，与 im_ai_usage 同一口径）',
+    PRIMARY KEY (`id`),
+    -- 每次登录后判断「要不要弹框」与「同一版是否已表过态」都是这个组合：WHERE user_id=? AND agreement_id IN (...)
+    KEY `idx_user_agreement` (`user_id`, `agreement_id`),
+    -- 后台反查「这一版有多少人同意过」（发布效果与同意率统计）
+    KEY `idx_agreement` (`agreement_id`),
+    -- 留痕按时间范围翻页（监管取证常给一个起止日期）；个人同意链按 user_id 排序取，行数是个位量级
+    KEY `idx_create_time` (`create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='同意留痕（一次表态一行、只 INSERT；无删除端点、无唯一键、无外键）';

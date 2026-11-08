@@ -78,6 +78,12 @@
           <el-icon><Bell /></el-icon>
           <span>全服公告</span>
         </el-menu-item>
+        <!-- 放在公告之后：两屏都是「对外说话」，但公告是可撤回的日常运营，
+             协议是改一个字就得让全数人重新确认一次的合同，误操作代价不一样，排在后面 -->
+        <el-menu-item v-if="auth.can('system:agreement:manage')" index="agreements" :route="{ name: 'agreements' }">
+          <el-icon><Document /></el-icon>
+          <span>法定文本</span>
+        </el-menu-item>
       </el-menu>
       <p class="muted side-note">
         一期没有待办角标：新工单数只有登录后进看板才拿得到，为一个小红点在每个页面轮询

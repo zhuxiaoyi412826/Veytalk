@@ -3,6 +3,42 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 /**
+ * 代理错误处理：与 im-ui/vite.config.js 的 devProxy 同一口径（那边有完整的实测注料与原因）。
+ *
+ * 一句话版本：vite（本工程实测 7.3.7，dist/node/chunks/config.js 里 `opts.configure` 在
+ * 它自己注册 error 监听之前执行）默认在上游连不上时只打一行 `http proxy error`、
+ * 然后回一个 **空 body 的 500**，后台页面因此只能读到「服务异常（HTTP 500）」，
+ * 分不清是后端没起、正在重启，还是接口真坏了。这里改成 502 + Result 形状的 JSON，
+ * 把 target 与 errno 写进 message；`api/request.js` 会优先显示那句文案。
+ * 两侧不要各自演化：改这一处请同步改 im-ui 那一份。
+ */
+function devProxy(target, hint) {
+  return {
+    target,
+    changeOrigin: true,
+    configure(proxy) {
+      proxy.on('error', (err, _req, res) => {
+        if (!res || typeof res.writeHead !== 'function' || res.headersSent || res.writableEnded) {
+          return
+        }
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(
+          JSON.stringify({
+            code: 502,
+            message: `后端未就绪：dev server 连不上 ${target}（${err.code || err.message}）。` +
+              `若正在启动请稍后重试；否则${hint}。`,
+            data: null,
+            success: false,
+            traceId: '',
+            timestamp: Date.now()
+          })
+        )
+      })
+    }
+  }
+}
+
+/**
  * 管理后台前端的构建配置。
  *
  * 与 im-ui 的关系是「同栈、不同进程、不同端口」：两个工程各自 npm run dev，
@@ -30,10 +66,7 @@ export default defineConfig({
     // 端口被占用时直接报错，静默顺延会让后端 CORS 白名单莫名对不上（403 Invalid CORS request）
     strictPort: true,
     proxy: {
-      '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true
-      }
+      '/api': devProxy('http://localhost:8080', '请确认 ImApplication 已启动并监听 8080')
     }
   },
   preview: {

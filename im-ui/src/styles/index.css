@@ -107,6 +107,22 @@ body {
   overflow: hidden;
 }
 
+/*
+  打印（含「另存为 PDF」）必须把文档级的高度与 overflow 放开：
+  上面那两条 `height:100%` + `body{overflow:hidden}` 在屏幕上是防误滚的基线，
+  可纸张上没有「视口」这个概念——不放开的话整份长文会被当成一个一屏高的滚动区，
+  只打出第一页，后面直接消失。★ 各页面自己写的 @media print 救不了这一层，
+  因为裁切发生在 html/body 上，所以只能在全局这一处解决，页面只管排自己的版式。
+*/
+@media print {
+  html,
+  body,
+  #app {
+    height: auto;
+    overflow: visible;
+  }
+}
+
 a {
   color: var(--im-primary);
   text-decoration: none;
@@ -150,6 +166,31 @@ a {
 
 .im-scroll::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/*
+ * 弹窗高度适配视口：只滚 body，标题与页脚钉住。
+ *
+ * 为什么要单独一个类：注册弹窗有 8 个表单项，实测在 490px 高的视口里整弹窗 796px、
+ * 「我已阅读并同意」那一行落在 top=694px——**直接在屏幕外**。Element Plus 默认靠外层
+ * `.el-overlay-dialog` 整体滚（确实能滚），但没人会去滚弹窗外面那片空白，于是用户看到
+ * 的现象是「协议根本找不到」与「点了注册什么反应都没有」（校验错字也渲在屏外）。
+ * 改成只滚 body 后滚动条出现在真正长内容那一段旁边，配合 el-form 的 scroll-to-error
+ * 与失败时的 toast，三个一起才能把这条路铺平。
+ * 写在**全局**而不是组件的 scoped 里：这些弹窗都带 `append-to-body`，DOM 被传送到组件
+ * 作用域之外，scoped + :deep 打不中 `.el-dialog__body`；类名放到 el-dialog 上会落到
+ * `.el-dialog` 根节点，与 FileViewer 的 `.file-viewer--narrow` 同一手法。
+ */
+.im-dialog--fit {
+  margin-bottom: 4vh;
+}
+
+.im-dialog--fit .el-dialog__body {
+  /* 两行写法是有意的：老内核不认 dvh 时用上一行的 100vh，移动端地址栏伸缩则用 dvh */
+  max-height: calc(100vh - 230px);
+  max-height: calc(100dvh - 230px);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* 单行省略，会话列表的昵称与摘要都用得上 */

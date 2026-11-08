@@ -1,6 +1,6 @@
 # MinIO 部署指南
 
-> 事实来源：`pom.xml`（依赖版本）、`im-bootstrap/src/main/resources/application.yml` L367-400（配置项）、
+> 事实来源：`pom.xml`（依赖版本）、`im-bootstrap/src/main/resources/application.yml` 的 `im.file` 段（配置项，定位就搜 `storage: ${IM_FILE_STORAGE`）、
 > `im-file` 的 `MinioClientConfig` / `MinioFileStorage` / `LocalFileStorage` / `FileServiceImpl`（运行行为）、根 `README.md` 第十一节。
 > 适用环境：Windows + 本机 MinIO。其他系统仅启动命令不同，配置项完全一致（Linux / 生产部署见 [`md/部署/服务器部署指南.md`](部署/服务器部署指南.md)）。
 
@@ -36,7 +36,7 @@
 
 ## 二、这一步不是可选的（默认就是 minio）
 
-★ **`im.file.storage` 的默认值是 `minio`**（`application.yml` L370 写的是 `${IM_FILE_STORAGE:minio}`），
+★ **`im.file.storage` 的默认值是 `minio`**（`application.yml` 里 `storage: ${IM_FILE_STORAGE:minio}` 那一行），
 而 `MinioFileStorage` 在初始化时连不上存储桶会抛 `IllegalStateException` **让启动 fail-fast**。
 所以“不想装 MinIO”不是一个可以忽略的选项，而是一个**必须显式声明的决定**：
 
@@ -101,7 +101,7 @@ D:\minio\minio.exe server D:\minio\data --console-address ":9001"
 
 ## 五、项目侧配置
 
-所有 MinIO 配置项都是 `${环境变量:默认值}` 形式（见 `application.yml` L367-400），因此有两种做法：
+所有 MinIO 配置项都是 `${环境变量:默认值}` 形式（见 `application.yml` 的 `im.file` 段），因此有两种做法：
 
 ### 方式 A：设环境变量后重启后端（推荐，不改任何文件）
 
@@ -119,7 +119,7 @@ java -jar im-bootstrap\target\im-server.jar
 
 ### 方式 B：改配置文件后重新打包
 
-把 `application.yml` L370 那一行的默认值改掉（`storage: ${IM_FILE_STORAGE:local}` ↔ `storage: ${IM_FILE_STORAGE:minio}`），
+把 `application.yml` 里 `storage: ${IM_FILE_STORAGE:minio}` 那一行的默认值改掉（`${IM_FILE_STORAGE:local}` ↔ `${IM_FILE_STORAGE:minio}`），
 然后 `mvn package -DskipTests` 重新打包。除非要把某种存储固化为这台机器的默认，否则优先用方式 A（不改文件、不重新构建）。
 
 ---
@@ -184,7 +184,7 @@ MinIO Server 的启动变量与项目配置项**名字不同但值必须一致**
 
 ## 十、配置项速查表
 
-`application.yml` 中与文件存储相关的全部配置项（L367-400）：
+`application.yml` 中与文件存储相关的全部配置项（`im.file` 那一段）：
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|

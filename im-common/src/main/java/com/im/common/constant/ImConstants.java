@@ -231,6 +231,23 @@ public final class ImConstants {
      * （见 {@code sql/migration_ai_guard.sql}），否则新控制器上线即把老管理员拦在门外。
      */
     public static final String PERM_SYSTEM_AI_GUARD = "system:ai:guard";
+    /**
+     * 后台权限点（合规批）：协议与同意留痕。
+     *
+     * <p>这一点下挂着两个性质不同的动作：<b>发布新版本的隐私政策 / 用户协议 / 服务条款</b>，
+     * 以及<b>查某个用户在某一刻同意的是哪一版</b>。前者是对全服生效的对外承诺（发布即生效、
+     * 不能像公告那样「弹出去收回来」，旧版本只是归档、文本仍永久可查），后者是举证材料——
+     * 监管问「他同意过哪一版」时，只有这一屏能给出口径一致的答复。
+     *
+     * <p>不并进 {@code system:config}：那一点管的是可立刻改回的内部旋钮，本点改的是
+     * 对用户的合同文本，可撤销性与影响面都不是一个量级；也不给 {@code system:announcement}，
+     * 公告是「喊话」，协议是「立约」。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_agreement.sql}），否则新控制器上线即把老管理员拦在门外。
+     * 补完之后<b>必须清一次 {@code im:auth:perm:*}</b>（权限缓存 TTL 30 分钟且登录不刷新）。
+     */
+    public static final String PERM_SYSTEM_AGREEMENT_MANAGE = "system:agreement:manage";
 
     /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。

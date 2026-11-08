@@ -3,7 +3,7 @@
 # ==============================================================================
 target/
 electron/release-fresh/
-
+electron/release/
 !.mvn/wrapper/maven-wrapper.jar
 build/
 out/

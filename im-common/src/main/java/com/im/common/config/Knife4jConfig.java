@@ -116,7 +116,8 @@ public class Knife4jConfig {
     @Bean
     public GroupedOpenApi adminContentApi() {
         return build("13-后台-内容运营", "/api/admin/article/**", "/api/admin/announcement/**",
-                "/api/admin/video/**", "/api/admin/live/**", "/api/admin/report/**", "/api/admin/sensitive-word/**");
+                "/api/admin/video/**", "/api/admin/live/**", "/api/admin/report/**",
+                "/api/admin/sensitive-word/**", "/api/admin/agreement/**");
     }
 
     @Bean
@@ -147,13 +148,25 @@ public class Knife4jConfig {
     }
 
     /**
+     * 法定文本与同意留痕（合规批）的用户侧。
+     *
+     * <p>单独一组而不是归进「01-用户中心」：这一组里有两条是<b>匿名</b>接口，
+     * 在 Authorize 之前就该能调通；混进用户中心那一组，看文档的人会以为它们跟其余接口一样需要登录态，
+     * 于是官网那个页脚链接到底该怎么接，就没人敢定。
+     */
+    @Bean
+    public GroupedOpenApi agreementApi() {
+        return build("19-协议与合规", "/api/agreement/**");
+    }
+
+    /**
      * 按路径前缀分组，而不是按包名。
      *
      * <p>按包名分组的版本实测过：当时七个分组各自都返回了全部 60 个接口，过滤根本没生效，
      * 而 {@code application.yml} 里还同时设着全局 {@code springdoc.packages-to-scan=com.im}。
      * 改成 {@code pathsToMatch} 之后每组的接口数恢复正确，所以保留路径方案。
      *
-     * <p>目前是十八个分组，覆盖实测的 241 条路径（分组号与控制器 {@code @Tag} 的编号
+     * <p>目前是十九个分组，覆盖实测的 245 条路径（分组号与控制器 {@code @Tag} 的编号
      * 是两个独立序列，不必强求一致）。
      *
      * <p><strong>新增控制器时必须同步在这里补前缀。</strong>只写了 {@code @Tag}/{@code @Operation}

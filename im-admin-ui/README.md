@@ -125,6 +125,13 @@ POST /api/auth/logout
 | 日志 | `GET /api/admin/log/archives?key=` | 某档已滚存的带日期归档清单（日期/段号/大小/时间）；**只回结构化 date+index，文件名仅作展示**，拉取失败前端静默降级成只剩「当天」一个选项 |
 | 审核记录 | `GET /api/admin/log/moderation/page` | 图片审核命中流水（`im_moderation_log`）按 用户 / 场景 / 类别 / 时间区间 翻页，固定主键倒序（雪花即时间序），**单页上限 50**（服务端夹）；★ 复用 `system:log`，本屏与日志屏同一道闸 |
 | 审核记录 | `GET /api/admin/log/moderation/{id}/image` | 隔离区图片回显（★ 本轮新增）：返回体是图字节本体，`inline` + `nosniff` + `no-store`，不走 JSON 信封。前端用 `fetchMedia` 带登录头取 blob 而不是 `<img src>`（带不了自定义头，Cookie 读取为规避 CSRF 已关）；无图回 `NOT_FOUND(1004)` 带原因文案 |
+| 法定文本 | `GET /api/admin/agreement/page` | 版本列表（含草稿/已发布/已归档全状态），入参 `code / status / keyword / current / size`；固定 `code` 升序 + `version` 倒序，**列表项不含正文** |
+| 法定文本 | `GET /api/admin/agreement/{id}` | 版本详情，含 `content` 原文，供预览弹框与草稿编辑器回填 |
+| 法定文本 | `POST /api/admin/agreement/draft` | 在指定 `code` 下追加一个草稿，版本号由服务端取「历史最大 + 1」（前端不传 version，传了也不认） |
+| 法定文本 | `PUT /api/admin/agreement/{id}` | **只能改草稿**；已发布与已归档行后端直接拒（改了会让既有同意留痕变成伪证），所以前端对这两类状态根本不给「保存」按钮 |
+| 法定文本 | `POST /api/admin/agreement/{id}/publish?remark=` | ★ 全端即时生效的高危动作：草稿→已发布并盖生效时间，同 `code` 原生效版自动转归档。**没有撤回**，且 `remark` 是 `@RequestParam` 不是 body（同 `disable/adjust/muteAll` 那个坑） |
+| 同意留痕 | `GET /api/admin/agreement/consent/page` | 入参 `userId / agreementId / code / action / startTime / endTime`，固定同意时间倒序；**`action=0` 的拒签行也在这里**，它是「这个人明确没同意过」的证据 |
+| 同意留痕 | `GET /api/admin/agreement/consent/user/{userId}` | 单个人的完整同意链（版本号/时刻/IP/设备），不分页、服务端硬截 200 条；监管与工单问到「他同意过哪一版」时给的就是这一份 |
 | 字典 | `GET /api/report/config` | 理由 / 对象类型 / 处置动作三份码表，**后台与用户侧共用这一个接口** |
 
 各 `/api/admin/**` 控制器类上都是 `@SaCheckLogin` + `@SaCheckPermission(...)`，二期从伞权限
@@ -134,6 +141,10 @@ POST /api/auth/logout
 `system:log` 单独设点是因为日志原文可能含敏感内容，能看指标的人不必能看正文）。
 `/api/report/**`（提交举报、我的举报）是**任何登录用户都能调**的用户侧接口，
 后台界面不调它们——路径前缀就是那道权限边界。
+法定文本那一屏（七个 mapping，版本侧五个 + 留痕侧两个只读）用本批新开的 `system:agreement:manage`（125）。
+★ 它**没有**并进相邻的 `system:announcement`（118）：公告发错了可以随时撤，协议发出去就改不了，
+而且这一屏带着可举证的个人信息留痕，「能调开关」与「能改合同」不是一个量级的授权。
+跑完 `sql/migration_agreement.sql` 必须清一次 Redis `im:auth:*`（见 §9 那条）。
 
 ## 6. 各页面在做什么
 
@@ -210,6 +221,24 @@ streamKey 后端不下发、前端也不留字段位。
 - **顶部那条 `el-alert` 文案已按隔离区后的真实口径改写**：以前写的是「被拦下的图片从未离开本机」，
   现在它是说谎。识别仍在发送端跑，本行记的是判定结果，图本体靠行末那个「查看」按钮。
 
+**法定文本与同意留痕**（`AgreementView.vue`，本批新增，一个屏两个 tab）
+
+版本那一页是筛选（文本 / 状态 / 标题关键词）+ 表格 + 原文预览弹框，动作列按状态分支：草稿给「编辑 + 发布」，
+已发布只给「起草新版」，已归档什么都不给（文本仍永久可查）。**这一屏没有删除按钮，也不是界面偷懒**：
+后端根本不开删除与改已发布这两个端点（语义上等于销毁一份对用户生效过的合同原件，理由写在
+`AdminAgreementController` 的类注释里），前端摆一个点了必报错的按钮更糟。
+发布用 `ElMessageBox.prompt` 现填变更说明：那一句是对「v3 比 v2 改了什么」的正式回答，起草时往往还说不准。
+
+留痕那一页是举证材料：表态时间 / 用户 / 协议版本 / 同意或拒绝 / 场景 / IP，行展开里补全 User-Agent，
+两个跳转是「同意链」（单个人那份不分页的完整链）与「他同意的原文」（按 `agreementId` 反查那一版正文）——
+现场问的一定是这两者的对应关系。**拒签行也在这一页**（`action=0`），它是「这个人明确没同意过」的证据，
+不是一个需要过滤掉的噪声。
+
+两处依赖得记着：① 筛选下拉用的 `CODE_OPTIONS` 是本仓少见的**前端拷一份码表**（后端下发 `codeName` 用的是
+同一份映射 `Agreement.nameOf`），为三个常量单开一个字典端点不划算，**加第四份协议时要两边都改**；
+② 正文渲染与 `im-ui` 公示页、文章管理同一口径（`marked` + `DOMPurify` 净化），缺 DOMPurify 就等于把后台
+变成存储型 XSS 的执行现场（草稿可能由低权限运营人员起草，读者是管理员）。
+
 ## 7. 目录
 
 ```
@@ -228,7 +257,8 @@ im-admin-ui/
    ├─ styles/index.css         # 只放跨页面复用的少数几条
    ├─ utils/{token,format}.js
    └─ views/{Login,Dashboard,Users,Reports,Roles,Videos,Lives,Monitor,Logs,Moderation}View.vue
-      （四期又加了 Wallet/Group/Interview/Message/Config/Remote/Articles/AiGuard 等，以目录为准）
+      （四期又加了 Wallet/Group/Interview/Message/Config/Remote/Articles/AiGuard 等，本批再加
+      Agreement，以目录为准）
 ```
 
 ## 8. 上线部署（还没做，步骤留在这）
@@ -259,6 +289,9 @@ im-admin-ui/
 - **仍然没有做浏览器实测**：登录、看板数字、举报处置二次确认、三期四页的交互路径，
   都需要跑着的后端 + 已执行 `sql/migration_admin_phase3.sql` 并清过权限缓存的库，
   本批不具备这个条件。接口形状是照 Controller / VO 源码抄的，不是猜的。
+- **★ 本批（法定文本与同意留痕）构建已实测通过**（2026-11-06）：`node node_modules/vite/bin/vite.js build` → **built in 10.45s**，产物里 `AgreementView-DaWfq6ni.js`（18.14 kB / gzip 6.53 kB）与它引用的 `purify.es-*.js`（78.00 kB / gzip 25.71 kB，DOMPurify 单独成 chunk）都在；后端 `mvn -o -DskipTests compile -pl im-user -am` EXIT=0（`AdminAgreementController` 在 im-admin，但本轮给它补降级时只动了 im-user）。
+  ★ 本批**新开一个权限点 125**，所以上线口径与四期第五批同一条：**跑完 `sql/migration_agreement.sql` 必须清一次 Redis `im:auth:*`**（`PermissionProviderImpl` 按用户缓存 30 分钟且**登录动作不刷新**，退登重登不管用），不清就是菜单里少那一项、直接地址栏打 `/agreements` 回 1003——而新菜单项的显隐文就是 `auth.can('system:agreement:manage')`，看起来像「前端没加上」。
+  另记一句本批特有的验证坑：**没跑 SQL 的库上这一屏看起来是正常的**（列表空、留痕空，不报错），所以不能拿界面当验收依据；要验就跑 `SELECT COUNT(*) FROM im_agreement;` 期望回 3。
 - 已知会踩的第一个坑（一期记的那条至今有效）：如果 `sql/migration_report.sql` 没跑就直接启动后端，
   登录仍正常，但一进后台就会看到「Table 'im_db.im_report' doesn't exist」——
   那张表只有 `im-admin` 用，别的模块不受影响。

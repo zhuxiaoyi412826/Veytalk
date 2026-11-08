@@ -73,6 +73,16 @@ import http from './request'
  *  im:auth:* 缓存，理由与上一批相同。消息那一屏服务端有一道与权限无关的硬闸：
  *  带 keyword 必须同时带 conversationId / fromUserId / 时间范围之一，否则回 1001（见 MessageView）。
  *
+ * 本批新增（法定文本与同意留痕，一个屏两个权限面）：
+ *  - /api/admin/agreement/page        GET，入参 code / status / keyword / current / size
+ *  - /api/admin/agreement/{id}        GET（含正文）；POST /draft 起草；PUT /{id} 改草稿
+ *  - /api/admin/agreement/{id}/publish POST，remark 是 @RequestParam
+ *  - /api/admin/agreement/consent/page      GET，入参 userId / agreementId / code / action / startTime / endTime
+ *  - /api/admin/agreement/consent/user/{userId} GET，个人同意链，不分页（服务端硬截 200 条）
+ *  这一批与公告那一屏长得像，但【没有删除也没有改已发布版本】：那两个动作在语义上等于
+ *  销毁一份对用户生效过的合同原件，所以后端根本不开这两个端点，前端也就没有对应按钮（见 AgreementView）。
+ *  新的权限点 125 system:agreement:manage：跑完 SQL 必须清一次 im:auth:* 缓存，否则已登录的 admin 看不到这一屏。
+ *
  * disable 的 reason 用 params 而不是 data 传：后端没写 @RequestBody，
  * 发一个 JSON body 过去它会当成「reason 为空」而打回「请填写禁用事由」，
  * 而前端看到的是一句看不出问题的 400 提示。
@@ -600,4 +610,51 @@ export function onlineArticle(id) {
 /** 逻辑删除，不可自助恢复——前端必须二次确认 */
 export function deleteArticle(id) {
   return http.delete(`/admin/article/${id}`)
+}
+
+/* ==================== 法定文本与同意留痕 ==================== */
+
+/** 协议版本列表：含全状态（草稿/已发布/已归档）；固定 code 升序 + version 倒序；列表项不含正文 */
+export function fetchAgreementPage(params) {
+  return http.get('/admin/agreement/page', { params })
+}
+
+/** 版本详情：含正文，供后台预览与草稿编辑回填 */
+export function fetchAgreementDetail(id) {
+  return http.get(`/admin/agreement/${id}`)
+}
+
+/**
+ * 起草新版本：在同一 code 下追加一个草稿。
+ *
+ * version 不传也没用：服务端取「历史最大 + 1」，客户端传来的版本号一律不认。
+ * 这不是防君子，是防止两个管理员同时点「新建」时各自算出一个 v3。
+ */
+export function createAgreementDraft(dto) {
+  return http.post('/admin/agreement/draft', dto)
+}
+
+/** 编辑草稿：只能改草稿态那一行，已发布与已归档不可修改 */
+export function updateAgreementDraft(id, dto) {
+  return http.put(`/admin/agreement/${id}`, dto)
+}
+
+/**
+ * 发布生效：全端即时生效的高危动作，没有撤回。
+ *
+ * remark 走 query 而不是 body（后端是 @RequestParam，与 disableUser 的 reason 同一口径）。
+ * 一发新版，同 code 原生效版自动转归档，且所有只同意过旧版的人下次登录会被弹窗要求重新确认。
+ */
+export function publishAgreement(id, remark) {
+  return http.post(`/admin/agreement/${id}/publish`, null, { params: { remark } })
+}
+
+/** 同意留痕翻页：按用户 / 版本行 / 协议标识 / 动作与时间范围组合查；拒签记录同样在这里 */
+export function fetchConsentPage(params) {
+  return http.get('/admin/agreement/consent/page', { params })
+}
+
+/** 某个用户的完整同意链：监管问到「他同意过哪一版」时给的就是这一份 */
+export function fetchUserConsents(userId) {
+  return http.get(`/admin/agreement/consent/user/${userId}`)
 }

@@ -49,7 +49,7 @@
 
     <div v-if="info.configPath" class="dbg__path">
       配置文件：<code>{{ info.configPath }}</code>
-      <el-link type="primary" :underline="false" :icon="FolderOpened" @click="reveal">打开所在目录</el-link>
+      <el-link type="primary" underline="never" :icon="FolderOpened" @click="reveal">打开所在目录</el-link>
     </div>
 
     <template #footer>

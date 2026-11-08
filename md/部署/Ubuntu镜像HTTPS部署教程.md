@@ -174,7 +174,7 @@ bash scripts/bootstrap.sh
 
 全新建库：`bootstrap.sh` 在仓库里跑时会自动把 `sql/im_schema.sql`、`sql/im_data.sql`
 复制成 `sql-init/01_im_schema.sql`、`sql-init/02_im_data.sql`（数字前缀保证建表先于插数据）。
-**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 41 条
+**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 43 条
 `DROP TABLE IF EXISTS`，一旦卷被重建就会静默清库。
 
 ---
@@ -408,7 +408,7 @@ bash scripts/clear-perm-cache.sh        # ★ 全量建库会新插 im_permissio
 ### 10.5 收尾护栏（建完库必做，30 秒）
 
 ```bash
-# 把挂载行注释掉：防止将来卷被重建（down -v / 换机器 / 改了 name:）时这 41 条 DROP TABLE 静默清库
+# 把挂载行注释掉：防止将来卷被重建（down -v / 换机器 / 改了 name:）时这 43 条 DROP TABLE 静默清库
 grep -n 'sql-init' docker-compose.yml            # 先看到它在 mysql 服务的 volumes 下
 vi docker-compose.yml                            # 注释 - ./sql-init:/docker-entrypoint-initdb.d:ro
 rm -f sql-init/*.sql                             # 目录里只留 .gitkeep

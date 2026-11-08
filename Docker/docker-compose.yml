@@ -56,7 +56,7 @@ services:
       - mysql-data:/var/lib/mysql
       # ★ 仅「全新建库」时用：空卷的第一次启动按文件名字典序执行 sql-init/ 里的 .sql/.sh/.sql.gz。
       #   上线之后建议注释掉这两行并清空该目录——让这份 compose 失去「重建库」的能力，
-      #   是很便宜的防误操作护栏（sql/im_schema.sql 开头有 41 条 DROP TABLE IF EXISTS，41 张表全部先删后建）。
+      #   是很便宜的防误操作护栏（sql/im_schema.sql 开头有 43 条 DROP TABLE IF EXISTS，43 张表全部先删后建）。
       - ./sql-init:/docker-entrypoint-initdb.d:ro
     # 不发布 3306（Docker 发布的端口绕过 UFW）。临时调试：ports: ["127.0.0.1:3306:3306"]
     healthcheck:
@@ -64,7 +64,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 40s      # 首次初始化要建 41 张表，设小了会被误判成 unhealthy
+      start_period: 40s      # 首次初始化要建 43 张表，设小了会被误判成 unhealthy
 
   # ---------------------------------------------------------------- Redis
   redis:

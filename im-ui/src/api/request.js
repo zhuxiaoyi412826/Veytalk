@@ -115,10 +115,21 @@ http.interceptors.response.use(
     if (error.code === 'ECONNABORTED' || /timeout/i.test(error.message || '')) {
       message = '请求超时，请检查网络后重试'
     } else if (error.response) {
-      // 走到这里说明后端没按 Result 返回，通常是代理或容器层的问题
-      message = `服务异常（HTTP ${error.response.status}）`
-    } else {
+      // 走到这里说明后端没按 Result 返回，通常是代理或容器层的问题。
+      // 但 dev server 连不上后端时会回 502 + 一段 Result 形状的 JSON（见 vite.config.js 的 devProxy），
+      // 那个 body 里写的才是真原因（「连不上 http://localhost:8080」），优先用它——
+      // 否则用户只读到一句「服务异常（HTTP 502）」，既不知道是后端没起，也不知道该做什么
+      const body = error.response.data
+      message = (isErrorEnvelope(body) && (body.message || body.msg)) || `服务异常（HTTP ${error.response.status}）`
+    } else if (error.request) {
+      // 请求已经交到底层适配器但一个响应都没回：这一句才真的是连不上（断网、后端没起、被浏览器挡下）
       message = '无法连接服务器，请确认后端已启动'
+    } else {
+      // 连 request 都没有 = 请求在本端就折了，根本没出浏览器。最常见的是把 ref/computed 本体
+      // 当请求体交出来，JSON.stringify 直接抛「Converting circular structure to JSON」
+      // （2026-11-08 的注册按钮就是这样，却被当成「后端没起」报了一轮）。
+      // 这里不能照抄上一句：把前端自己的错归因到后端，等于把排查引向死路
+      message = `请求未能发出（前端错误）：${error.message || '未知原因'}`
     }
     if (!config.silent) {
       ElMessage.error(message)
