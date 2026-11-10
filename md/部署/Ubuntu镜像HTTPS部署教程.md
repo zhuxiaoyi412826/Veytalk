@@ -192,36 +192,60 @@ DNS-01 不用暂露 80、不用停容器，还能给 `*.example.com` 签一张�
 ```bash
 sudo apt install -y certbot python3-certbot-dns-cloudflare     # DNS 插件按你的服务商换
 certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/cf.ini \
-  -d im.example.com -d admin.example.com -d www.example.com -d live.example.com
+  -d im.example.com -d admin.example.com -d www.example.com
 
 # certbot 产物在宿主机 /etc/letsencrypt/live/，拷进部署包目录供 nginx 只读挂载
-sudo cp -r /etc/letsencrypt/live/* /opt/im-docker/certs/live/
+# ★ 必须带 -L：live/<域名>/fullchain.pem 是指向 ../archive/ 的软链接，而容器里没有 archive/，
+#   cp -r 拷过去就是悬空链接 → nginx `[emerg] cannot load certificate` 起不来
+sudo cp -rL /etc/letsencrypt/live/* /opt/im-docker/certs/live/
 sudo chmod -R a+rX /opt/im-docker/certs
 ```
 
+> ★ 域名清单以「conf 里实际有 443 server 块」为准：im / admin / www 三个必须有。`live.` 只出现在 80 的
+> `server_name` 上（推流口 8088 默认注释、不带 TLS），现在不需要证书；少签一个 www 的结果不是「那一站没证书」，
+> 而是 nginx 整个起不来。
+>
 > certbot 生成的自签兜底会被这里覆盖。换完真证书后重载：`docker compose exec nginx nginx -s reload`。
-> 续期不会自动重载 nginx，配一个 deploy-hook（指南 §8.4 有）。
+> 续期链路必须**先拷再 reload**：timer 只更新宿主机那份，容器里的副本不会自己变，deploy-hook 只写 reload 等于没配
+> （完整 hook 与速率限制注意事项见指南 §8.4）。
 
-### 方案 B（内网 / 本地联调）：mkcert 生成本机可信证书
+### 方案 B（内网 / 本地联调，★ 推荐）：本项目自带的两级 CA
 
-自签名浏览器会告警；想让本地/内网**绿锁**，用 mkcert 建一个自己的根 CA 并信任它：
+自签浏览器一定告警，而告警的根因是「颁发者不受信任」不是「30 天太短」。正规做法是**自己当一个根 CA**：
+客户端只信任根（装一次管 10 年），叶子由根现签、30 天自动换 —— 换证书对客户端完全无感。
+仓库里两个脚本就是把这套流程做完的（完整参数与原理见 [`Docker部署指南.md` §8.4](Docker部署指南.md)）：
 
 ```bash
-sudo apt install -y libnss3-tools
-# 装 mkcert（去 releases 下二进制，或 git clone 后 go build）
-mkcert -install                                   # 在客户端机器上信任本地根 CA
-mkcert -cert-file im.example.com.pem -key-file im.example.com-key.pem \
-  im.example.com admin.example.com www.example.com live.example.com
+# 在【签发机】上跑（开发机 Git Bash / WSL / 一台内网 Linux）。★ 不在部署机上跑：根私钥不能和 nginx 同机
+bash scripts/gen-selfca.sh --ip 192.168.83.130              # 建根（已存在则复用）+ 按 .env 三个域名各签一张 30 天叶子
 
-# 放到 nginx 引用的路径
-mkdir -p /opt/im-docker/certs/live/im.example.com
-cp im.example.com.pem /opt/im-docker/certs/live/im.example.com/fullchain.pem
-cp im.example.com-key.pem /opt/im-docker/certs/live/im.example.com/privkey.pem
+# 根证书只一次，装到每台内网测试机/手机（★ 只有 .pem 能离开这台机器，rootCA.key 绝不外传）
+#   Windows : certutil -addstore -f root rootCA.pem
+#   iOS     : 装描述文件后还要去 设置→通用→关于本机→证书信任设置 把开关拨开，不拨等于没装
+#   Android : 设置→安全→加密与凭据→安装证书→CA 证书
+
+bash scripts/push-cert.sh ubuntu@192.168.83.130 /opt/im-docker          # 推叶子 + 远端 nginx reload
+bash scripts/gen-selfca.sh --install-cron ubuntu@192.168.83.130 /opt/im-docker   # 每天一次，剩余不足 10 天才重签
+```
+
+> 没真域名就在**客户端**的 hosts（Windows 的 `C:\Windows\System32\drivers\etc\hosts`）加
+> `192.168.83.130 im.test admin.test www.test`，`.test` 是保留 TLD、不会撞公网；或用 nip.io 这类泛解析域名。
+> ★ 记得带 `--ip <部署机IP>`：手机按 IP 直连时，SAN 里没这个 IP 就一定是名称不匹配。
+> 推过来的证书旁会留一个 `certs/.managed-by-push`，`bootstrap.sh` ⑤ 见到它就不再自签（否则重跑一次 bootstrap 就把真证书盖回了自签）。
+
+想要外部工具：`mkcert` 是同一套思路（`mkcert -install` 建的也是本地根），代价是多一个依赖（Go + libnss3-tools）、
+根与叶子同机、续期得自己记着：
+
+```bash
+sudo apt install -y libnss3-tools        # 去 releases 下 mkcert 二进制，或 git clone 后 go build
+mkcert -install                          # 在客户端机器上信任本地根 CA
+mkcert -cert-file im.test.pem -key-file im.test-key.pem im.test admin.test www.test
+mkdir -p /opt/im-docker/certs/live/im.test
+cp im.test.pem /opt/im-docker/certs/live/im.test/fullchain.pem
+cp im.test-key.pem /opt/im-docker/certs/live/im.test/privkey.pem
 ```
 
 > 三个站共用一张多 SAN 证书也行：把同一对 pem 拷进每个 `certs/live/<域名>/` 即可。
-> 用「本地虚拟域名」（`im.test` 等）联调时，在**客户端** `/etc/hosts`（Windows 的
-> `C:\Windows\System32\drivers\etc\hosts`）加 `127.0.0.1 im.test admin.test www.test`，`.test` 是保留顶级域、不会撞公网。
 
 ### 方案 C：云厂商 / 已有证书
 

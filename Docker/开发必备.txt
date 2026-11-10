@@ -40,7 +40,8 @@
   bootstrap.sh 干的活（幂等，可反复跑）：
     校验 .env 里还有没有 <占位符> → 建目录并把 data 下四个可写目录 chown 1000:1000
     → 由 .example 生成 nginx/conf.d/im.conf、app/extra/application-prod-extra.yml、conf/im.env
-    → 缺证书时补 30 天自签名（只为让 nginx 起得来）→ 放 sql-init 与 live-retention.js
+    → 缺证书时补 30 天单张自签（只为让 nginx 起得来；已有文件只体检不覆盖，剩余不足 7 天才打 WARN，
+      见到 certs/.managed-by-push 则连空位都不补）→ 放 sql-init 与 live-retention.js
     → 检查三站 index.html（缺了只 warn 一行就继续，不堵启动）→ docker compose config -q 静态校验
 
   四条红线（破任何一条都是「起来了但不对」）：
@@ -63,9 +64,11 @@
   另有：import-sql.sh（导 migration，★ 用 cp 进容器再 -e source，不要管道）
         clear-perm-cache.sh（改权限点后必跑，不清要等 TTL 30 分钟）
         health.sh（五层检查：容器起没起 / healthy / 端口通不通 / 接口回不回 / 静态有没有）
+        backup.sh（备份库/对象存储/配置/Redis；--install-cron 装每天 03:30 备库，清理+异地都在脚本里，读 .env 的 BACKUP_KEEP_DAYS/BACKUP_SYNC_DIR；cron 装在部署机）
+        guard-sql-init.sh（★ 建完库跑一次上护栏：把 sql-init 建库脚本挪走 + 落 .disabled 标记，卷被重建也不清库；--status/--unlock/--comment-compose）
         im-docker.service（systemd 开机自启，ExecStop 里特意没有 -v）
 
-  ★ 永远不要 docker compose down -v   —— 一字之差就是清库。
+  ★ 永远不要 docker compose down -v   —— 一字之差就是清库。建完库跑 guard-sql-init.sh 上护栏，卷即便被重建也无脚本可跑。
 
 
 --------------------------------------------------------------------------------
@@ -97,7 +100,8 @@
   必须存在的三样（bootstrap.sh 对前两项只 warn 不堵启动，靠人工确认）：
     web/<站>/index.html                     —— 少了就是站点根 403、子路径 500
     nginx/conf.d/im.conf                    —— 由 .example 生成，别手改生成物，改 .example
-    certs/live/<域名>/{fullchain.pem,privkey.pem}   —— Let's Encrypt 或自签
+    certs/live/<域名>/{fullchain.pem,privkey.pem}   —— 三个来源选一：certbot / 签发机 gen-selfca.sh+push-cert.sh
+                                                        推上来的两级 CA 叶子 / bootstrap.sh 补的单张自签
 
   配置要点（改 im.conf.example 前先看这几条）：
     · SPA 兜底：location / { try_files $uri $uri/ /index.html; }  缺了刷子路由全站 404
@@ -184,6 +188,12 @@
   并同步 7 项凭据进 conf/im.env（改 .env 里的密码而不重跑 = 应用还在用旧密码，是最常见的一次「改了没生效」）。
 
   四个域名要有各自的 DNS A 记录 + 各自的证书目录 certs/live/<域名>/。
+  （自签阶段 bootstrap.sh 给四个域名都签一张；换成 certbot 后只有 im / admin / www 三个必须签，
+   live 当前没有 443 server 块、不需要证书。但反过来少签一个 www 会让 nginx 直接起不来，见指南 §8.4）
+  ★ 内网长期测试不要拿单张自签凑：它每次都要点「继续访问」，而 nginx 不校验自己证书的有效期，
+   30 天一过就是「容器全 healthy、客户端全炸」。正解是在签发机（开发机就行）跑
+   gen-selfca.sh（建本地根，装一次管 10 年）+ push-cert.sh（推叶子、远端 reload），
+   再 --install-cron 挂每天一次：叶子 30 天自动换，客户端无感，根私钥也不落部署机。
   IM_LIVE_PLAY_BASE_URL / IM_LIVE_PUSH_BASE_URL 里不能写容器内部地址（http://nginx:8088 主播在公网解析不到），
   且路径前缀要和 nginx 的 location /live/ 同名。
 

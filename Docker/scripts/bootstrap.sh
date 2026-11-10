@@ -6,13 +6,18 @@
 #   bash scripts/bootstrap.sh            # 只补缺失的生成物，已存在且不同则保留并提示
 #   bash scripts/bootstrap.sh --force    # 用 example 重新生成，覆盖前先备份 .bak.<时间戳>
 #
-# 它做五件事：
+# 它做七件事：
 #   ① 校验 .env 填全了（拦下所有还留着 <...> 占位符的项）
 #   ② 建目录 + 把 data/ 下要写的目录 chown 成 uid 1000（与容器内 USER 1000:1000 运行身份对齐）
 #   ③ 由 example 生成 nginx/conf.d/im.conf、app/extra/application-prod-extra.yml，
 #      并把 .env 里的域名与直播签名密钥灌进占位符
 #   ④ 由 conf/im.env.example 生成 conf/im.env，并把 .env 的密码/密钥同步进去（两边逐字一致这条红线由脚本保证）
-#   ⑤ 证书位缺文件时补一张自签名（只为让 nginx 能起来做冒烟测试，上线前必须换成 certbot 签发的）
+#   ⑤ 证书位缺文件时补一张 30 天单张自签（只为让 nginx 能起来做冒烟测试）；
+#      ★ 只补空位：见到 certs/.managed-by-push 就一行不写（那种证书归签发机的 gen-selfca.sh 管），
+#      已有证书即使快到期也只提醒不重签（判据本来只看文件在不在，重跑本脚本换不掉过期证书）
+#   ⑥ 补齐周边资料：sql-init/01_、02_（只在仓库里跑时有 ../sql；★ 见 sql-init/.disabled 就不拷，那是 guard-sql-init.sh 上的护栏）、
+#      live-retention.js，并体检 web/ 三站
+#   ⑦ docker compose config -q 静态校验（不启动、不联网）
 # ==============================================================================
 set -euo pipefail
 
@@ -30,7 +35,9 @@ die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 [[ -f .env ]] || die "缺 .env。先 cp .env.example .env 并填好密码/域名/tag，再重跑本脚本。"
 read_env() {
   local line
-  line="$(grep -m1 "^$1=" .env || true)"
+  # ★ 先剔 UTF-8 BOM 再 grep：Windows 上记事本/PowerShell 存出的 .env 第一行前面多三个字节，
+  #   grep "^XXX=" 碰不到它 —— 表现为「这个键没填」而肉眼去看 .env 是填好的（第一个键常就是域名或密码，会一路带到 nginx/im.env）
+  line="$(sed '1s/^\xEF\xBB\xBF//' .env | grep -m1 "^$1=" || true)"
   [[ -n "$line" ]] || { printf ''; return; }
   printf '%s' "${line#*=}" | tr -d '\r'
 }
@@ -197,37 +204,67 @@ fi
 # ==============================================================================
 say "⑤ 证书位（缺文件就补自签名，只为让 nginx 起得来）"
 mkdir -p certs/live
+# ★ 三种来源先分清，本脚本只补空位、从不抢着覆盖：
+#   a) certs/.managed-by-push 存在 —— 证书由签发机的 gen-selfca.sh + push-cert.sh 供，本机一行都不写（写了就是把真证书盖成自签）
+#   b) certs/live/<域名>/ 已有文件 —— 尊重现状，只在 「剩余不足 7 天」 时提醒（★ 重跑本脚本不会重签，判据只看文件在不在）
+#   c) 都没有 —— 现场签 30 天单张自签，纯冒烟用，浏览器一定告警（内网测试建议换两级 CA，见指南 §8.4 方案 B）
+MANAGED=0; [[ -f certs/.managed-by-push ]] && MANAGED=1
 for d in "$IM_DOMAIN" "$ADMIN_DOMAIN" "$WEBSITE_DOMAIN" "$LIVE_DOMAIN"; do
   [[ -n "$d" ]] || continue
-  if [[ ! -f "certs/live/$d/fullchain.pem" ]]; then
-    if command -v openssl >/dev/null 2>&1; then
-      mkdir -p "certs/live/$d"
-      # ★ 失败要当场说出来：set -e 下 openssl 非零退出会静默终止整个脚本（前面所有步骤都白跑，还没有一句报错）
-      if ! openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
-           -subj "/CN=$d" -addext "subjectAltName=DNS:$d" \
-           -keyout "certs/live/$d/privkey.pem" -out "certs/live/$d/fullchain.pem"; then
-        warn "为 $d 生成自签名证书失败（上面有 openssl 的报错）：不阻断流程，但 nginx 会因缺 ssl_certificate 起不来，"
-        warn "→ 把真证书放进 certs/live/$d/{fullchain.pem,privkey.pem} 后再 docker compose up -d nginx"
+  f="certs/live/$d/fullchain.pem"
+  if [[ -f "$f" ]]; then
+    # checkend 返回非 0 = 不足 7 天就到期（或已经过期）。openssl 本身不在就当通过，不让体检把主流程带倒
+    if command -v openssl >/dev/null 2>&1 \
+       && ! openssl x509 -in "$f" -checkend $((7 * 86400)) -noout >/dev/null 2>&1; then
+      warn "$d 的证书不足 7 天就到期或已过期（notAfter=$(openssl x509 -in "$f" -noout -enddate 2>/dev/null | cut -d= -f2)）。"
+      warn "→ nginx 不校验自己证书的有效期，四个容器照样 healthy，症状全在客户端：ERR_CERT_DATE_INVALID、wss 握不上、getUserMedia 失效。"
+      if (( MANAGED )); then
+        warn "→ 这台由签发机供证书：在签发机跑 bash scripts/gen-selfca.sh --force && bash scripts/push-cert.sh <user@本机>（本机不自签）"
       else
-        warn "已为 $d 生成 30 天自签名证书（浏览器会警告，上线前换 certbot 的真证书，见指南 §8.4）"
+        warn "→ 想换真证书或两级 CA（推荐，指南 §8.4）；急用冒烟就 rm -rf certs/live/$d 再重跑本脚本——不删则本脚本不会动它"
       fi
-    else
-      die "缺 openssl，且 certs/live/$d/ 没有证书：nginx 会因 ssl_certificate 文件不存在直接退出"
     fi
+    continue
+  fi
+  if (( MANAGED )); then
+    warn "certs/live/$d/ 没有证书，但这台在 certs/.managed-by-push 管辖下 → 不在本机自签（会盖掉签发机推来的叶子）"
+    warn "→ 回签发机：bash scripts/gen-selfca.sh && bash scripts/push-cert.sh <user@本机>"
+    continue
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    mkdir -p "certs/live/$d"
+    # ★ 失败要当场说出来：set -e 下 openssl 非零退出会静默终止整个脚本（前面所有步骤都白跑，还没有一句报错）
+    # ★ MSYS_NO_PATHCONV=1 不是多余：Git Bash 会把 "/CN=x" 当成 Unix 路径改写成 D:\…\CN=x，openssl 直接报错，
+    #   而在 Linux/macOS 上没人认这个变量，无副作用（本机实测：不加 rc=1、加了 rc=0）
+    if ! MSYS_NO_PATHCONV=1 openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+         -subj "/CN=$d" -addext "subjectAltName=DNS:$d" \
+         -keyout "certs/live/$d/privkey.pem" -out "$f"; then
+      warn "为 $d 生成自签名证书失败（上面有 openssl 的报错）：不阻断流程，但 nginx 会因缺 ssl_certificate 起不来，"
+      warn "→ 把真证书放进 certs/live/$d/{fullchain.pem,privkey.pem} 后再 docker compose up -d nginx"
+    else
+      warn "已为 $d 生成 30 天单张自签名证书（浏览器告警且只活 30 天；上线前换 certbot，内网测试换两级 CA，见指南 §8.4）"
+    fi
+  else
+    die "缺 openssl，且 certs/live/$d/ 没有证书：nginx 会因 ssl_certificate 文件不存在直接退出"
   fi
 done
 
 # ==============================================================================
 say "⑥ 补齐周边资料（只有从仓库里跑才有；整目录 scp 上来时这些已经在了）"
 if [[ -d ../sql ]]; then
-  # 用「有没有 *.sql」而不是「目录是否为空」做判据 —— 目录里有一个进库的 .gitkeep 占位
-  if ! ls sql-init/*.sql >/dev/null 2>&1; then
+  if [[ -f sql-init/.disabled ]]; then
+    # ★ 护栏已上锁（scripts/guard-sql-init.sh）：这里再拷一份就等于把锁悄悄撤了——
+    #   卷一旦被重建，01_im_schema.sql 开头那 43 条 DROP TABLE IF EXISTS 会把库静默清空
+    say "sql-init/.disabled 在：护栏已上锁，不往里拷建库脚本（确实要重建库先跑 bash scripts/guard-sql-init.sh --unlock）"
+  elif ! ls sql-init/*.sql >/dev/null 2>&1; then
+    # 用「有没有 *.sql」而不是「目录是否为空」做判据 —— 目录里有一个进库的 .gitkeep 占位
     # ★ 必须重命名成 01_/02_ 前缀：镜像 entrypoint 按文件名字典序执行，
     #   原名 im_data.sql 排在 im_schema.sql 前面（d < s）→ 往不存在的表插数据，建库直接失败
     [[ -f ../sql/im_schema.sql ]] && cp ../sql/im_schema.sql sql-init/01_im_schema.sql && say "已放 sql-init/01_im_schema.sql"
     [[ -f ../sql/im_data.sql   ]] && cp ../sql/im_data.sql   sql-init/02_im_data.sql   && say "已放 sql-init/02_im_data.sql"
-    warn "★ sql-init/ 仅在「空卷首次启动」时执行一次（指南 §6.1/§6.3）。库建好后建议：
-      注释掉 compose 里那行 ./sql-init 挂载并清空该目录 —— 01_im_schema.sql 开头有 43 条 DROP TABLE IF EXISTS，
+    warn "★ sql-init/ 仅在「空卷首次启动」时执行一次（指南 §6.1/§6.3）。库建好后上一条护栏：
+      bash scripts/guard-sql-init.sh            # 把建库脚本挪走 + 落一个标记（重跑本脚本也不会被撤销）
+      手改也行：注释掉 compose 里那行 ./sql-init 挂载并清空该目录 —— 01_im_schema.sql 开头有 43 条 DROP TABLE IF EXISTS，
       一旦卷被重建就会静默清库"
   fi
 fi

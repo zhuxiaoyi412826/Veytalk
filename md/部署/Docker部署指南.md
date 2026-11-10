@@ -1080,7 +1080,7 @@ docker compose exec -T mysql mysql ... -e "source /tmp/x.sql"   # ② 手工导�
 ```
 
 上线之后建议**把 `sql-init/` 清空并把那两行 volume 注释掉**，让这份 compose 失去「重建库」的能力，
-这是一个便宜的防误操作护栏。
+这是一个便宜的防误操作护栏。现成脚本：`bash scripts/guard-sql-init.sh`（把建库脚本挪进 `sql-init.disabled/` + 落 `sql-init/.disabled` 标记，重跑 `bootstrap.sh` 也不会被撤销），要连挂载一起注释再 `--comment-compose`；`--status` 看锁着没有、`--unlock` 解锁。★ 锁是本机状态不随仓库走（`sql-init/` 与 `sql-init.disabled/` 都被 `.gitignore` 排除），新机部署天然无锁、能正常建库。
 
 ### 6.4 ★ 只拷了 `Docker/` 目录上服务器：SQL 不会自动到位，必须手动补
 
@@ -1246,7 +1246,7 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/im.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/im.example.com/privkey.pem;
-    include /etc/nginx/snippets/ssl.conf;      # 协议/HSTS/会话缓存，单独一份
+    include /etc/nginx/snippets/ssl.conf;      # 协议/会话缓存/HSTS（HSTS 默认注释着，原因见 §8.4）
 
     client_max_body_size 110m;                 # 与 spring.servlet.multipart.max-request-size(110MB) 对齐，小了会被 nginx 先 413
 
@@ -1361,30 +1361,130 @@ docker compose exec nginx nginx -s reload   # 或直接 docker compose restart n
 ### 8.4 证书
 
 **先认清 `bootstrap.sh` 补的那份是什么**：它对 `IM` / `ADMIN` / `WEBSITE` / `LIVE` 四个域名各生成一张 **30 天自签证书**
-（`openssl req -x509 -nodes -newkey rsa:2048 -days 30 -subj "/CN=$d" -addext "subjectAltName=DNS:$d"`），两件事要记住：
+（`openssl req -x509 -nodes -newkey rsa:2048 -days 30 -subj "/CN=$d" -addext "subjectAltName=DNS:$d"`），三件事要记住：
 
 - ★ **只有 DNS SAN、不含 IP SAN**。所以 `https://192.168.83.130/` 这种 IP 直访一定是「证书名称不匹配」，而且**换真证书也治不好**（Let's Encrypt 不给 IP 签域名证书）——要拿掉告警只能走域名。
 - 它的唯一作用是**让 nginx 起得来**（缺 `ssl_certificate` 时 nginx 是 `[emerg]` 直接退出，而 `depends_on: service_healthy` 会让后端白起一轮）。浏览器信任、通话安全上下文、公网访问这三件都靠下面的 certbot。另：生成失败时脚本**只 WARN 不阻断**，所以症状是 nginx 反复重启而不是 `bootstrap.sh` 报错（看它的输出末尾有没有那行「已为 … 生成 30 天自签名证书」）。
 
-正式环境换成真证书，推荐 **DNS-01**（不用暂露 80、不用停容器、能给 `*.example.com` 一张泛域名）：
+- ★ **30 天到期后重跑 `bootstrap.sh` 依然不会重签**（现在它会**提醒**，但仍然不动文件）。⑤ 的判据是「**文件在不在**」，
+  有效期只用来在不足 7 天时打一行 WARN；而 nginx 不校验自己证书的有效期，照样把这张过期的递出去、握手照常成功。
+  于是症状是「四个容器全 healthy、客户端全炸」：`ERR_CERT_DATE_INVALID`、`wss` 握不上、`getUserMedia` 失效。
+  临时续命只能先 `sudo rm -rf /opt/im-docker/certs/live/<域名>` 再跑脚本（又是一张 30 天），但那是在把冒烟道具当生产用，
+  正经解法是下面那套两级 CA（内网）或再下面的 certbot（公网）；而且 `ssl.conf` 里的 HSTS 一旦下发过，过期期间连「继续访问」按钮都没有，所以测试期那行默认是注释着的（见 §8.2 与 `Docker/nginx/snippets/ssl.conf`）。
+
+#### 内网测试想绿锁：两级 CA，根装一次 + 叶子 30 天自动换
+
+自签的根因是「**颁发者不受信任**」，跟有效期是两回事：把 `-days 30` 改成 `-days 3650`，`ERR_CERT_AUTHORITY_INVALID` 照样在。
+真解法是**自己当一个 CA**：客户端只信任根，叶子由根现签 —— 于是换叶子对客户端完全无感，自动续期才第一次有意义。
+本项目用 `scripts/gen-selfca.sh`（签发）+ `scripts/push-cert.sh`（推送）这两步做完：
+
+| 谁 | 持有什么 | 跑什么 |
+|---|---|---|
+| ★ **签发机**（开发机 Git Bash / WSL / 一台内网 Linux） | 根私钥 `certs/ca/rootCA.key`（600，**永不出这台机器**） | `bash scripts/gen-selfca.sh --ip <部署机IP>` |
+| **部署机**（跑 nginx 的那台） | 只有叶子 `certs/live/<域名>/` + 标记 `certs/.managed-by-push` | 不签任何东西；`bootstrap.sh` ⑤ 见到标记就绕开 |
+| **每台内网测试机 / 手机** | 根证书 `certs/ca/rootCA.pem`（装进「受信任的根证书颁发机构」，10 年一次） | 无 |
+
+```bash
+# ① 签发机：建根（已存在就复用）+ 按 .env 的 IM/ADMIN/WEBSITE 三个域名各签一张 30 天叶子
+bash scripts/gen-selfca.sh --ip 192.168.83.130        # ★ 把部署机 IP 写进 SAN，否则手机按 IP 直连一定名称不匹配
+#   没真域名就用 hosts 假域名（im.test/admin.test/www.test → 部署机 IP）或 nip.io 这类泛解析，.test 是保留 TLD 不会撞公网
+
+# ② 根证书发到每台测试机，只装这一次（★ 能离开的只有 .pem，rootCA.key 一步都不许）
+scp <签发机用户>@<签发机地址>:<Docker 目录>/certs/ca/rootCA.pem ./
+#   Windows : certutil -addstore -f root rootCA.pem       （或双击→安装证书→本地计算机→受信任的根证书颁发机构）
+#   iOS     : 装描述文件后 ★必须★ 去 设置→通用→关于本机→证书信任设置 把开关拨开，不拨等于没装
+#   Android : 设置→安全→加密与凭据→安装证书→CA 证书（App 内嵌 WebView 默认不吃用户级 CA，浏览器可用）
+
+# ③ 推叶子到部署机并生效（远端落一个 certs/.managed-by-push，此后 bootstrap.sh ⑤ 不再自签盖掉它）
+bash scripts/push-cert.sh ubuntu@192.168.83.130 /opt/im-docker      # 先加 --dry-run 只看会推哪些也行
+
+# ④ 自动续期：每天 05:30 跑一轮「到期前重签 → 推送 → reload」，剩余不足 10 天才真重签（幂等，没到期就是「什么都没改」）
+bash scripts/gen-selfca.sh --install-cron ubuntu@192.168.83.130 /opt/im-docker
+crontab -l | grep gen-selfca                          # 就这一行；日志落在 Docker/logs/selfca-cron.log
+```
+
+- ★ **为什么不在部署机上跑 `gen-selfca.sh`**：那样根私钥和 nginx 同机，测试网里任何一台沦陷＝整条信任链被拿走。
+  拆成「签发 + 推送」两步后，部署机上永远只有叶子，被拿下也签不出第二张受信任的证书。
+- ★ **叶子为什么只签 30 天而不是 820 天**：根装一次管 10 年，叶子短有效期＝私钥泄露窗口小，而且逼着续期链路真的被跑通
+  （从没验证过的自动续期等于没有）。要拉长有硬上限 **825 天**（苹果对 TLS 服务器证书的限制，超了 iOS/macOS 直接拒），脚本已经拦。
+- ★ **cron 为什么每天跑而不是每月跑一次**：判据是「剩余 < 10 天」，天天跑意味着签发机停机两周也不会断服务；
+  每月一次只要有一次没跑成（笔记本合着盖、IP 换了、免密掉了）就直接裸奔到期。
+- 免密前提：先 `ssh-copy-id` 通了再装 cron —— 密码交互在 cron 里会静默失败。`push-cert.sh` 用 `BatchMode=yes`，
+  不通就当场报错退出，不会挂在那等输入。
+- Windows 上没 cron：`--install-cron` 会在末尾打印等价的 `schtasks /Create /SC DAILY` 写法，照着建即可。
+- 同思路的外部工具是 `mkcert`（`mkcert -install` 建的也是本地根），差别是它把根和叶子放在同一台机器上、续期得你自己记着。
+
+正式环境换成真证书，**只能走 DNS-01**（不是「推荐」，而是本项目的 HTTP-01 天生不通：`im.conf` 里虽然留了
+`location /.well-known/acme-challenge/ { root /var/www/acme; }`，但 nginx 容器的 `volumes:` 里**没挂载 `/var/www/acme`**
+（只挂了 conf.d / snippets / 三站 web / certs / data/live），在宿主机往那个目录写 challenge 文件，容器里读到的是空目录 → 永远 404；
+而 `--standalone` 又要去抢已被容器占住的 80。DNS-01 不碰 80、不停容器，还能给 `*.example.com` 签一张泛域名：
 
 ```bash
 sudo apt install -y certbot python3-certbot-dns-cloudflare     # DNS 插件按你的服务商换
+sudo chmod 600 /root/cf.ini                                    # 里面是 API token，权限不收紧等于把凭据放公网
+
+# ★ 域名清单以「conf 里实际有 443 server 块」为准：IM / ADMIN / WEBSITE 三个必须有，live 现在不需要
+#   （im.conf 只给这三个写了 ssl_certificate；LIVE_DOMAIN 只出现在 80 的 server_name 上，
+#    推流口 8088 那块默认注释且 `server_name _` 不带 TLS）。多签一个 live 无害，少签一个 www 就不是那回事：
+#   ★ 少 www 的后果不是「那一站没证书」，而是 nginx `[emerg] cannot load certificate` 直接起不来，
+#   而 nginx 又排在 im-server 的 `depends_on: service_healthy` 后面——一个 server 块挂，整栈起不来。
 certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/cf.ini \
-  -d im.example.com -d admin.example.com -d live.example.com
-sudo cp -r /etc/letsencrypt/live /opt/im-docker/certs/ && sudo chmod -R a+rX /opt/im-docker/certs
+  -d im.example.com -d admin.example.com -d www.example.com
+
+# ★ 必须带 -L：Let's Encrypt 的 `live/<域名>/fullchain.pem` 是指向 `../archive/fullchainN.pem` 的**软链接**，
+#   而容器只挂了 `./certs` 这一层、没有 archive/。`cp -r` 会把软链接原样拷过去 → 悬空链接 → nginx 加载证书失败。
+sudo rm -rf /opt/im-docker/certs/live                            # 先清掉自签那批目录，别新旧混在同一层
+sudo cp -rL /etc/letsencrypt/live /opt/im-docker/certs/ && sudo chmod -R a+rX /opt/im-docker/certs
+file /opt/im-docker/certs/live/im.example.com/fullchain.pem      # 要输出 "PEM certificate"；出现 "symbolic link" 就是漏了 -L
+
+docker compose -f /opt/im-docker/docker-compose.yml exec nginx nginx -t \
+  && docker compose -f /opt/im-docker/docker-compose.yml exec nginx nginx -s reload
+
+# 验收：issuer 必须是 Let's Encrypt。还是 CN=<域名> 就说明仍在用那张自签（或者证书根本没换成功）
+echo | openssl s_client -connect im.example.com:443 -servername im.example.com 2>/dev/null \
+  | openssl x509 -noout -issuer -dates -ext subjectAltName
 ```
 
-续期后 nginx 不会自动重载，补一个 deploy-hook：
+> 换真域名前要先改 `.env` 的四个域名并**重跑 `bash scripts/bootstrap.sh`**：`im.conf` 的 `server_name`、证书路径
+> 与 CORS 白名单那三条 origin 全是生成物，不重跑就还停在老域名上（换域名后必须动的第二处见 §8.5）。
+> 另外 `bootstrap.sh` 签证书那一步是「**文件不存在才签**」，所以你放进真证书后再跑多少次 bootstrap 都不会被覆盖（这是好事，脚本可以重复跑）。
+> 唯一例外：证书是 `push-cert.sh` 推上来的，远端会留一个 `certs/.managed-by-push`，⑤ 见到它就**连空位都不补**——免得哪天重跑 bootstrap 把签发机推来的叶子盖成单张自签。
+
+**续期是两步，不止 reload。** certbot 的 systemd timer 会自动续，但续期只更新**宿主机**的 `/etc/letsencrypt`，
+而容器里那份是拷贝出去的副本，不会自己变 —— 所以 deploy-hook 必须**先拷再 reload**，只写 reload 等于没配（不报错，就是新证书永远不生效）：
 
 ```bash
-# /etc/letsencrypt/renewal-hooks/deploy/im-nginx.sh
+# /etc/letsencrypt/renewal-hooks/deploy/im-nginx.sh  ★ 以下四行就是脚本全文
 #!/bin/sh
+cp -rL /etc/letsencrypt/live /opt/im-docker/certs/
+chmod -R a+rX /opt/im-docker/certs
 docker compose -f /opt/im-docker/docker-compose.yml exec -T nginx nginx -s reload
 ```
 
+```bash
+# ★ 以下不是脚本内容，是装上去与自检
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/im-nginx.sh   # 没有执行权限的 hook 会被静默跳过
+systemctl list-timers | grep certbot          # 确认续期定时器真的在排
+certbot certificates                          # 看每张还剩几天
+```
+
+★ 验链路是否真跑通需要重签一次（`sudo certbot renew --force-renewal`），但**有速率限制**：同一组域名每周最多 5 张重复证书、
+每域名单周最多 50 次签发。`renew --dry-run` 走的是 Let's Encrypt 的测试环境，**不会触发 deploy-hook**，
+所以它只能验「能不能续」，验不了「续完服务器有没有真的换证」—— 后者只能靠上面那一次 force-renewal，跑完就停。
+
 > ★ HTTPS 不只是加密：浏览器 `getUserMedia`（语音/视频通话、摄像头、录屏授权）只在**安全上下文**里可用，
 > http 打开的页面点通话会直接拿不到媒体权限。容器化不改变这条，别为了省事只挂 80。
+
+**三个阶段各自用哪张证书（一张表定死，别混着用）**
+
+| 阶段 | 域名哪来 | 谁签 | 叶子多久 | 客户端要做什么 | 到期怎么办 |
+|---|---|---|---|---|---|
+| 冒烟 / 临时演示 | `.env` 里随手填 | `bootstrap.sh` ⑤ 单张自签 | 30 天 | 每次手动点「继续访问」（所以 HSTS 必须注释着） | `rm -rf certs/live/<域名>` 再跑 bootstrap；光重跑不会重签 |
+| ★ 内网长期测试 | hosts 假域名 / 内网 DNS / nip.io | 签发机 `gen-selfca.sh`（两级 CA） | 30 天，cron 自动换 | 只装一次 `rootCA.pem`，之后无感 | 什么都不用做；签发机停两周也不怕（前提：免密 ssh 还通） |
+| 公网正式 | 真域名 + DNS 记录 | certbot DNS-01（或云厂商证书） | 90 天，LE timer 自动续 | 无（Let's Encrypt 是公共受信任根） | 自动续，★ 但必须配 deploy-hook 先 `cp -rL` 再 reload |
+
+三行共同前提：证书都落到 `certs/live/<域名>/{fullchain.pem,privkey.pem}`，nginx 只读挂 `./certs`；而且 **im / admin / www 三个域名一个都不能少**（少一个是整栈起不来，不是那一站没证书）。
+换真域名时记得 `.env` 四处域名都要改并重跑 `bootstrap.sh`（见 §8.5）。
 
 ### 8.5 换域名后必须动的第二处：CORS 白名单（yml 是字面列表，环境变量改不动它）
 
@@ -1400,7 +1500,7 @@ im:
       - https://im.example.com
       - https://admin.example.com
       - https://www.example.com
-      # ★★ 下面几行是「照拄」而不是「多余」：Spring 绑 List 属性时，外挂配置是**整体替换**而不是追加。
+      # ★★ 下面几行不是冗余，而是必须整段搬过来：Spring 绑 List 属性时，外挂配置是**整体替换**而不是追加。
       #   只写上面三行，桌面端与移动端就连不上来了（这些 Origin 来自客户端本身，与你的域名无关）。
       - http://tauri.localhost
       - tauri://localhost
@@ -1553,10 +1653,9 @@ bash scripts/backup.sh mysql                 # 只备数据库：最常用，也
 bash scripts/backup.sh minio                 # ★ 会 sudo systemctl stop/start minio：给这几个命令配 NOPASSWD，或整个脚本用 root 跑
 ```
 
-> cron 例子（脚本头注释里那条，每天 03:30 留 14 天）：
-> `30 3 * * * cd /opt/im-docker && bash scripts/backup.sh mysql && find backup -name 'im-*.sql.gz' -mtime +14 -delete`
-> ★ 备份只落在**同一块盘**上等于没备份：`backup/*.sql.gz` 要另走异地 / 对象存储同步；而这里的
-> `-mtime +14 -delete` 是安全的（它扫的是自己写出的备份件），别与 9.1 那条「不能用 `find -mtime` 删直播分片」混为一谈。
+> ★ 装 cron 用现成的：`bash scripts/backup.sh --install-cron`（每天 03:30 备库，幂等，重跑只留一行；装在**部署机**上——靠 `docker compose exec mysql`，日志落 `logs/backup-cron.log`）。清理与异地同步都在脚本里、不用手写进 cron 行：保留天数读 `.env` 的 `BACKUP_KEEP_DAYS`（默认 14）、异地目标读 `BACKUP_SYNC_DIR`（NAS 目录或 `user@host:/path` 走 rsync，同步后比对字节数，不一致只 WARN——本地这份已成功）。
+> ★ 备份只落在**同一块盘**上等于没备份：`BACKUP_SYNC_DIR` 务必配上。
+> ★ 若要手写清理：`find -mtime +N` 删的是「至少 N+1 天前」（`+14` 删 15 天前的），且 `.partial` 不匹配 `im-*.sql.gz`——脚本内部已按 `KEEP_DAYS-1` 处理并单独清 `.partial` 残留；别与 9.1 那条「不能用 `find -mtime` 删直播分片」混为一谈。
 
 下面是手工等价命令：
 
@@ -1572,7 +1671,7 @@ sudo systemctl stop minio
 sudo tar czf backup/minio-$(date +%F).tar.gz -C "${MINIO_DATA_DIR:-/data/minio}" .
 sudo systemctl start minio
 # ③ 编排与配置（这三份丢了等于整套环境重建）
-tar czf backup/im-docker-conf-$(date +%F).tar.gz docker-compose.yml .env conf app/extra nginx scripts sql-init
+tar czf backup/im-docker-conf-$(date +%F).tar.gz docker-compose.yml .env conf app/extra nginx scripts sql-init sql-init.disabled
 chmod 600 backup/im-docker-conf-$(date +%F).tar.gz    # ★ 里面有明文密码（.env 与 conf/im.env）
 # ④ Redis：已开 appendonly，AOF 在卷里；要快照就：
 docker compose exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning BGSAVE'

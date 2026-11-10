@@ -27,6 +27,20 @@ npm run dev 访问的是 https://localhost:5173/
 路径  im-ui\certs\ca.pem 
 certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
 
+Docker 部署侧的同一件事（内网测试要绿锁，指南 §8.4）
+scripts/gen-selfca.sh 建本地根（certs/ca/rootCA.pem，装一次管 10 年）+ 按 .env 三个域名各签 30 天叶子
+scripts/push-cert.sh <user>@<部署机> /opt/im-docker  推叶子 + 远端 nginx reload，并留 certs/.managed-by-push
+--install-cron <user>@<部署机> /opt/im-docker  每天一次，剩余不足 10 天才重签
+★ 这两个脚本在【签发机】（开发机 Git Bash 就行）跑，根私钥不落部署机；与上面 dev 端那套是两个独立的根
+
+Docker 部署侧的备份与上线护栏（指南 §10.1 / §6.3）
+scripts/backup.sh --install-cron   每天 03:30 备库（mysqldump --single-transaction 不锁表）；清理+异地都在脚本里
+  保留天数读 .env 的 BACKUP_KEEP_DAYS（默认 14）、异地目标读 BACKUP_SYNC_DIR（NAS 目录或 user@host:/path 走 rsync）
+  ★ 备份只落同一块盘等于没备份；cron 装在【部署机】（靠 docker compose exec mysql），日志 logs/backup-cron.log
+scripts/guard-sql-init.sh   建完库跑一次上护栏：把 sql-init 建库脚本挪进 sql-init.disabled/ + 落 .disabled 标记
+  让「卷被重建时静默清库」失效（重跑 bootstrap 也不会被撤销）；--status 看状态 / --unlock 解锁 / --comment-compose 再注释那行挂载
+  ★ 锁是本机状态不随仓库走，新机部署天然无锁、能正常建库
+
 
 .\minio.exe server D:\minio-data --console-address :9001 
 单机minIo启动  API 9000 浏览器9001
@@ -114,14 +128,17 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 docker 镜像构建部署
 1.前置条件
-    MinIO 二进制本体要先装好  账号密码默认为 minioadmin
+    MinIO 二进制本体要先装好  账号密码默认为 minioadmin  设置账号  
    .env.example 里所有 <...> 换成真值   
    装 Docker + compose 插件
+   打好jar包
 
-
-cd Docker                                                 # 拷贝docker 目录到服务器
+# 拷贝docker 目录到服务器  并进入docker目录
+cd Docker    
+jar包复制到  app目录下                                        
+填写  .env.example的值改为自己的                                     
 cp .env.example .env && chmod 600 .env                    # 复制文件.env.example 为 .env 并加600权限 仅属主可读写
-systemctl is-active minio || sudo systemctl start minio   # 启动二进制 minio，  账号 密码设置为  minioadmin/minioadmin   
+systemctl is-active minio || sudo systemctl start minio   # 启动二进制 minio，   
 docker login ghcr.io                                      # 向 GitHub 容器仓库认证，之后 compose pull 才拉得动
 bash scripts/bootstrap.sh                                  # 生成 conf/im.env、nginx 配置、自签证书
 

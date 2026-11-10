@@ -18,6 +18,12 @@
 
 ### 新增 Added
 
+- **★ 新增 `md/部署/真实服务器部署手册.md`：公网正式部署照抄 runbook（写死 `120.78.126.132` · `dsaol.asia`，十步：域名/安全组 → 建库 → certbot → 收尾 → 验收）**。区别于 `md/综合.txt` 的内网自签测试流程：证书走 **certbot DNS-01** 且 im/admin/www **各签一张独立证书**（nginx 每个 443 块读各自域名路径，一张多 SAN 会让 admin/www 缺文件、整栈 `[emerg]` 起不来）+ 续期 deploy-hook「先 `cp -rL` 再 reload」；CORS 由 `bootstrap.sh` 按 `.env` 域名自动渲染，无需手改；建库后接 `guard-sql-init.sh` + `backup.sh --install-cron`。涉及：新增该手册（汇总现有 `Docker部署指南.md` §〇·B/§8.4/§8.5，未改代码与既有文档）。
+
+- **★ 备份与上线护栏落脚本（用户原话见 `md/待开发功能.txt` 27/29：「备份 cron…*.sql.gz 要同步异地」「建完库…让这份 compose 永久失去『卷被重建时静默清库』的能力」）**。`Docker/scripts/backup.sh` 加 `--install-cron`（每天 03:30 备库、幂等）、「先写 `.partial`→验完解压后 ≥1024 字节再 `mv`」的空备份硬判据、按 `BACKUP_KEEP_DAYS` 清理、`BACKUP_SYNC_DIR` 异地同步（NAS 目录或 `user@host:/path` 走 rsync，同步后比对字节数）；新增 `Docker/scripts/guard-sql-init.sh`（把 `sql-init/` 建库脚本挪进 `sql-init.disabled/` + 落 `.disabled` 标记，让 `bootstrap.sh` ⑥ 不再拷回来；`--status`/`--unlock`/`--comment-compose`）。★ 新增两个 `.env` 键：`BACKUP_KEEP_DAYS`（默认 14）、`BACKUP_SYNC_DIR`（默认空）。★ 生效口径：备份 cron 装在**部署机**（靠 `docker compose exec mysql`）；护栏是**本机状态、不随仓库走**（`sql-init/`、`sql-init.disabled/` 均被 `.gitignore` 排除，新机部署天然无锁）。涉及：两份脚本、`Docker/scripts/bootstrap.sh`、`Docker/.env.example`、`.gitignore`、`Docker/README.md`、`Docker/文件说明.md`、`Docker/开发必备.txt`、`md/综合.txt`、`md/部署/Docker部署指南.md` §6.3/§10.1、`md/待开发功能.txt`。
+
+- **★ 内网测试 HTTPS 换成两级 CA：根装一次 + 叶子 30 天自动换（用户原话：「一次性把根证书安装到所有内网测试电脑 / 浏览器信任区，10 年内不用反复装根；每 30 天自动生成一张新叶子证书，scp 上传到服务器、nginx reload」）**。新增 `Docker/scripts/gen-selfca.sh`（★ 在**签发机**跑：建 10 年本地根 + 按 `.env` 的 IM/ADMIN/WEBSITE 各签 30 天叶子，剩余不足 10 天才重签，`--ip` 把部署机地址写进 SAN，`--install-cron` 挂每天一轮「重签→推送→reload」）与 `Docker/scripts/push-cert.sh`（scp 叶子 → 远端 `nginx -t` 后 reload，首次新目录改 restart → 落一个 `certs/.managed-by-push`）。★ 根私钥只留在签发机、部署机上永远只有叶子；叶子 825 天上限（苹果）已在脚本里拦。★ 生效口径：只跑 `gen-selfca.sh` 不会动到服务器，签完必须再跑 `push-cert.sh`（或由 `--install-cron` 每天带着跑）才会 scp 上去并 reload。涉及：两份新脚本、`Docker/scripts/bootstrap.sh`（⑤ 见标记就不签）、`Docker/README.md`、`Docker/文件说明.md`、`Docker/开发必备.txt`、`md/综合.txt`、`md/部署/Docker部署指南.md` §8.4、`md/部署/Ubuntu镜像HTTPS部署教程.md` 方案 B。
+
 - **★ 新增规范 6.6：文档只写必要描述，一条三要素不超 3 行（用户原话：「以后在进行增加、修改文档操作时，只增加必要文字描述 不然大部分都是无效信息」）**：本文件实测 487 KB / 971 行 / 154 条，其中子项展开行 688 行（占正文 71%）、平均行长 286 字，无效信息主要就是验证过程与取证数字。口径：三要素一条 + 六类不进文档 + 四类必须保留的例外（DDL、不重启就不生效、新增配置键与环境变量、不可逆操作），并把「一个版本区内分组标题只出现一次」写为结构纪律。本文件顶部「约定」块已同步这一口径；按用户选定范围，历史 154 条一律未动。涉及：`md/项目长期遵守规范.md`（新增 6.6、1.3 补指向）、`md/CHANGELOG.md`。
 
 - **★ 新增规范 1.10：Redis 命令助手可直接执行，但要先分辨「缓存」与「业务状态」（用户原话：「增加一个规则关于Redis缓存的命令操作，你都可以执行，数据库MySQL 的不变」）**。本轮**零代码 / 零 SQL**，只改一份规范。
@@ -424,6 +430,17 @@
 
 ### 修复 Fixed
 
+- **★ 三个建库/种子 SQL 头部各加一行 `SET NAMES utf8mb4;`，从源头免疫「客户端默认字符集不对 → 中文双重编码乱码」（会话列表显示成 `æ–‡ä»¶ä¼ è¾“åŠ©æ‰‹` 那种）**。改了什么：`sql/im_schema.sql` / `sql/im_data.sql` / `sql/im_system_contact_patch.sql` 在头部注释之后、第一条语句之前各插一行 `SET NAMES utf8mb4;`（附中文缘由注释）。为什么：客户端以 latin1/GBK 连接时，表注释、种子昵称、权限名里的 UTF-8 字节会被逐字节当单字节字符转存进 utf8mb4 列 = 双重编码；这一行让 `source` 时会话字符集恒为 utf8mb4、与客户端默认解耦。★ 两点提醒：① 救不了 PowerShell 管道（`Get-Content | mysql` 在 shell 层就把中文刷成 `?`），仍须 `-e "source"` 或 `scripts/import-sql.sh`；② 只保未来导入，**已入库的乱码行不会自动修复**（需重导或 `CONVERT(CAST(CONVERT(col USING latin1) AS BINARY) USING utf8mb4)` 反向解码，且直接改库绕过了应用、须清 `im:cache:user:brief:{id}` 缓存或重启后端才生效）。涉及：上述三个 SQL 文件。
+
+- **★ 备份/护栏脚本实测挖出两条真缺陷（纸面看不出、只有真跑才暴露）**：① `backup.sh` 原本 `mysqldump | gzip > 正式名`，当 mysqldump 一行都没输出就失败时，gzip 仍产出一个极小、且 `gzip -t` 能通过的空包——cron 里能连攒十几天「看着全绿」的假备份；改为先写 `.partial`、`verify_dump` 验完「解压后 ≥1024 字节」再 `mv`，不达标记失败并删掉。② `guard-sql-init.sh --comment-compose` 用 `sed` 注释 compose 挂载行时漏写 YAML 列表项的 `- ` 前缀，注释后成 `# ./sql-init:…`，日后手工取消注释得到非法 YAML；改为 `\1# - \2` 并加「取消注释后能变回合法活挂载行」的自检。顺带两条口径：`find -mtime +N` 实为「至少 N+1 天前」（留 N 天要传 `N-1`）、失败残留的 `.partial` 不匹配 `im-*.sql.gz` 需单独清（脚本已按此写）。涉及：`Docker/scripts/backup.sh`、`Docker/scripts/guard-sql-init.sh`。
+
+- **★ 本轮实测挖出三条真缺陷**：① `bootstrap.sh` ⑤ 的 `openssl req -subj "/CN=x"` 在 Git Bash 里被 MSYS 当路径改写成 `D:\…\CN=x`，**Windows 上必然签不出证书**（症状是 nginx `[emerg]` 反复重启而不是脚本报错）——已加 `MSYS_NO_PATHCONV=1`（Linux/macOS 不认这个变量，无副作用）；新脚本改用 config 文件，天然不踩。② `push-cert.sh` 对「只有 privkey、没有 fullchain」的半套证书**静默跳过**，推送看着全绿而远端那站证书一直没更新——改为逐目录点名告警。③ `gen-selfca.sh --install-cron` 在 crontab 本来是空的时会在顶部留下一个空行（先 `printf` 再过滤），改为「没有旧内容就一行都不写」，无附加参数时多出的那个空格一并收掉。顺带两条：⑤ 现在剩余不足 7 天会打 WARN（重跑仍不重签，判据只看文件在不在），`bootstrap.sh` 的 `read_env` 补上剔 UTF-8 BOM（记事本存的 `.env` 第一行以前读不到）。涉及：`Docker/scripts/bootstrap.sh`、`Docker/scripts/push-cert.sh`、`Docker/scripts/gen-selfca.sh`。
+
+- **★ 修正证书链上三处会咬人的口径**：① 指南 §8.4 的 certbot 域名清单写成 im/admin/**live**、漏了 www——少签 www 不是「官网没证书」而是 nginx `[emerg] cannot load certificate` 整栈起不来（`im.conf` 只有 IM/ADMIN/WEBSITE 三个 443 server 块，live 只出现在 80 的 `server_name`，推流口 8088 默认注释、不带 TLS）。② 两处 `cp -r /etc/letsencrypt/live` 缺 `-L`：LE 的 `live/<域名>/fullchain.pem` 是指向 `archive/` 的软链接，而容器只挂了 `./certs` 一层，拷成悬空链接同样起不来；deploy-hook 原本只写 `reload` 不写 `cp`，续期后容器端仍是旧证书且**不报错**。③ `Docker/nginx/snippets/ssl.conf` 里 HSTS 的注释说「测试期建议先关掉」而代码是开着的（`max-age=31536000`）——与 30 天自签并存意味着证书一过期连「继续访问」按钮都没有，**已改成默认注释**。
+  - ★ 生效提醒：ssl.conf 是被 include 的片段，改完要 `docker compose exec nginx nginx -t && docker compose exec nginx nginx -s reload`；已经拿到过 HSTS 头的浏览器得手动清 HSTS 列表（或重开一个干净配置）才能回到未下发状态。顺带补两条实测口径进文档：自签过期后**重跑 `bootstrap.sh` 不会重签**（判据是 `[[ ! -f fullchain.pem ]]`，只看存在不看到期；nginx 也不校验自己证书的有效期，症状是「容器全 healthy、客户端全炸」，续命得先 `rm -rf certs/live/<域名>`）；本项目 HTTP-01 天生不通（im.conf 里那个 `root /var/www/acme` 根本没被挂载），所以 DNS-01 是硬约束不只是偏好。涉及：`Docker/nginx/snippets/ssl.conf`、`md/部署/Docker部署指南.md`、`md/部署/Ubuntu镜像HTTPS部署教程.md`、`Docker/文件说明.md`、`Docker/开发必备.txt`。
+
+- **`Docker/README.md` 修正三处已过期的事实断言**：① `conf/im.env.example` 那句「38 个键，逐个与占位符对过账」不成立——`application*.yml` 共 37 个 `${IM_*}`，其中 **17 个在模板里连注释行都没有**（钱包/审核/通话/连麦/PK/回放/智能报告等开关，靠 yml 默认值全开，要关得手工往 `conf/im.env` 加一行）；② `health.sh` 已是六层不是五层；③ Secrets 漏了可选的 `QUAY_USERNAME`/`QUAY_PASSWORD`（`mirror-images` job 拉 quay.io 避开匿名 401）。同时补上两条方向相反的生效提醒（改 `conf/im.env` 用 `up -d`、改 extra yml 用 `restart`）与依赖镜像可改指 GHCR `im-deps`。涉及：`Docker/README.md`。
+
 - **★ 公示页白卡「边框没盖住下面的文本」：上一条修好滚动后暴出来的第二个症状（用户原话：「这个边框没有覆盖下面的文本完全修复一下」）**。
   - **取证（先量再改）**：`.legal__card` 计算高度 **335px** 而 `scrollHeight` **2838px**（溢出 2500px），`.legal__main` 的 `align-items` 为 `normal`。⇒ flex 容器高度确定（`flex:1`）时 `normal` 等价于 `stretch`，卡片被钉成容器可见高度，后半段正文直接溢到灰底上。
   - **★ 它与上一条是同一处代码、但不是同一次改动**：钉高度从一开始就在，只是被「整页滚不动」盖住了——滚不了就看不到溢出。所以「修 A 后冒出 B」不等于「修 A 修坏了」，锁死的布局会掩盖同一块上的其它错误，改完一处要把这个面重新看一遍而不是直接结案。
@@ -631,6 +648,8 @@
   - **文档**：`md/语音视频通话接入指南.md` 新增第十二节「手机 ⇄ 电脑同一局域网互通步骤」（同 Wi-Fi/验网关、gen:cert + `npm run dev` 开 https、手机装根 CA、两账号互为好友、防火墙 UDP 放行、跨公网需 TURN），并警示通话场景禁用 `dev:lan`；第十一节排查表补「点接听后秒关」与「已接通但无画面约 5s 自动挂断」两行。纯文档 + 前端，无后端/DDL 改动。
 
 ### 变更 Changed
+
+- **★ 部署手册 §5/§6 订正**：① §5 删掉错误的 `cd /conf; cp .env.example .env`（`/conf` 不存在、`conf/im.env` 由 bootstrap 生成非手拷），「conf/.env 必填值」补全为 `conf/im.env` 手填清单——MAIL_USERNAME/MAIL_PASSWORD 或 MANAGEMENT_HEALTH_MAIL_ENABLED=false 二选一（占位符去认证 QQ→535→mail 健康 DOWN→im-server unhealthy→nginx 起不来）、IM_LIVE_PUSH_BASE_URL、IM_CALL_*/IM_TURN_SECRET、ALI_BABA_API_KEY；密码/密钥 7 项 bootstrap 已从 .env 同步不用手填。② §6 补：种子 SQL 已自带 `SET NAMES utf8mb4;`，空卷首启自动导入不乱码。涉及：`md/部署/真实服务器部署手册.md`。
 
 - **★ 表数量口径 37 → 41 全面订正（上轮只报了 4 处，实际 16 处跨 9 个文件）+ `im.env.example` 补慢接口阈值**：用户对上轮四件待表态事项逐项点头（1 补 env 一行、2 改代码注释、3 knife4j 已验、4 约束全员）。
   - 实测依据：`sql/im_schema.sql` 现 **41 条 `DROP TABLE IF EXISTS` / 41 张 `CREATE TABLE`（唯一表名 41 个）**，三个口径互相印证，不是推的。

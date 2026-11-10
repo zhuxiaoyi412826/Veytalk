@@ -14,6 +14,12 @@
 --    3. 时间列统一 DATETIME，由 MyBatis-Plus 自动填充，同时给出数据库默认值兜底
 -- =====================================================================================
 
+-- ★ 强制会话字符集为 utf8mb4：客户端默认字符集不对（latin1 / GBK）时，表注释、列注释里的
+--   中文会被按错误字符集解释、存成双重编码乱码。这一行让 source 本文件时会话字符集恒为
+--   utf8mb4，与客户端默认值解耦。注意它救不了 PowerShell 管道（Get-Content | mysql 在 shell
+--   层就把中文刷成 ?），那种仍须用 -e "source" 或 scripts/import-sql.sh。
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS `im_db`
     DEFAULT CHARACTER SET utf8mb4
     DEFAULT COLLATE utf8mb4_general_ci;
