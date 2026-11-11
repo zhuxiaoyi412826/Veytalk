@@ -18,9 +18,9 @@
 # 可选：Variables 里配 IM_SERVER_URL 覆盖桌面端要连的后端根地址（默认 https://im.dsaol.asia）
 #
 # 触发方式：
-#   打 tag v1.2.3 → 自动构建 + 签名公证 + 传 artifact + 发 Release
-#                   （缺证书 secrets 会明确报错退出，不静默产出未签名包冒充成品）
-#   手动 Run workflow → 可取消勾选「签名公证」先验证构建链路（无需证书，出未签名 .dmg 仅本机测试）
+#   打 tag v1.2.3 → 自动构建 + 传 artifact + 发 Release；
+#                   配齐了 APPLE_* secrets 就自动签名公证，没配就自动出【未签名】包（不报错、不中断）
+#   手动 Run workflow → 同上；也可显式取消勾选「签名公证」强制出未签名包
 #
 # 说明：Tauri 是「换壳不换功能」，屏幕共享直播 / 防截屏 / 被控端 Agent 在桌面壳下退化或缺失
 #       （见 md/打包/Tauri打包指南.md 第十节）；主聊天 / 文件 / 语音观看 / 通话可用，定位轻客户端。
@@ -33,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       sign:
-        description: '代码签名 + 公证（需要 APPLE_* secrets；取消勾选则出未签名包，仅本机测试用）'
+        description: '是否签名公证：默认自动（配齐 APPLE_* secrets 才签，否则出未签名包，不报错）；取消勾选则强制不签名'
         type: boolean
         default: true
       server_url:
@@ -62,8 +62,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------- 决定是否签名 + 校验 Apple secrets
-      - name: 决定是否签名 + 校验 Apple secrets
+      # ---------------------------------------------------------- 决定是否签名（secrets 齐全才签，否则自动降级未签名）
+      - name: 决定是否签名（secrets 齐全才签，否则自动降级未签名，不报错）
         id: sign
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -73,34 +73,33 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          # push tag 一律要签名；手动触发看勾选（inputs.sign 默认 true）
-          if [[ '${{ github.event_name }}' == 'push' ]]; then
-            WANT=true
-          elif [[ '${{ inputs.sign }}' == 'false' ]]; then
-            WANT=false
-          else
-            WANT=true
-          fi
-          # 必需的 5 项（APPLE_SIGNING_IDENTITY 可省，Tauri 会自动选第一个 Developer ID 身份）
+          # 签名所需的 5 项（APPLE_SIGNING_IDENTITY 可省，Tauri 会自动选第一个 Developer ID 身份）
           MISSING=""
           [[ -n "$APPLE_CERTIFICATE" ]]          || MISSING="$MISSING APPLE_CERTIFICATE"
           [[ -n "$APPLE_CERTIFICATE_PASSWORD" ]] || MISSING="$MISSING APPLE_CERTIFICATE_PASSWORD"
           [[ -n "$APPLE_ID" ]]                   || MISSING="$MISSING APPLE_ID"
           [[ -n "$APPLE_PASSWORD" ]]             || MISSING="$MISSING APPLE_PASSWORD"
           [[ -n "$APPLE_TEAM_ID" ]]              || MISSING="$MISSING APPLE_TEAM_ID"
-          if [[ "$WANT" == true && -n "$MISSING" ]]; then
-            echo "::error::要求签名公证，但缺少 secrets:$MISSING"
-            echo "::error::去 Settings → Secrets and variables → Actions 配齐 APPLE_*（含义见本 workflow 顶部注释）；或手动触发时取消勾选「签名公证」先出未签名测试包。"
-            exit 1
+          # 手动触发显式取消勾选 → 强制不签名；否则「secrets 齐全就签名，不齐就自动降级未签名」（永不 fail）
+          if [[ '${{ inputs.sign }}' == 'false' ]]; then
+            WANT=false
+          elif [[ -z "$MISSING" ]]; then
+            WANT=true
+          else
+            WANT=false
           fi
           if [[ "$WANT" == true ]]; then
             echo "sign=true"  >> "$GITHUB_OUTPUT"
             echo "suffix=signed" >> "$GITHUB_OUTPUT"
-            echo "::notice::本次将执行代码签名 + 公证"
+            echo "::notice::APPLE_* secrets 齐全，本次执行代码签名 + 公证"
           else
             echo "sign=false" >> "$GITHUB_OUTPUT"
             echo "suffix=unsigned" >> "$GITHUB_OUTPUT"
-            echo "::warning::本次未签名（--no-sign）：成品仅本机/测试可用，分发给他人会被 Gatekeeper 拦（提示「已损坏」）"
+            if [[ -n "$MISSING" ]]; then
+              echo "::warning::未配齐签名 secrets（缺:$MISSING），本次出【未签名】包：本机测试没问题；分发给他人首次打开会被 Gatekeeper 拦，需右键→打开或终端 xattr -cr 去隔离。将来配齐 6 个 APPLE_* 后重跑即可自动签名，无需改 workflow。"
+            else
+              echo "::notice::按手动选择强制出【未签名】包"
+            fi
           fi
 
       # ---------------------------------------------------------- 工具链
