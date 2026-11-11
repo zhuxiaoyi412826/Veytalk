@@ -17,7 +17,7 @@
 1. 真实服务器上问题
 证书换成真证书  现在证书是用 openssl 现签一张 30 天自签名 需要修改为certbot 的真证书+续期 
 
-注意修改配置文件的话   改 conf/im.env 必须 docker compose up -d  重跑bootstrap.sh文件     改 extra yml 只需 docker compose restart im-server
+
 
 
 权限点变更后（**必跑**）
@@ -27,10 +27,6 @@ bash scripts/clear-perm-cache.sh：只要 SQL 动过 im_permission / im_role_per
 AI 知识库路径：IM_AI_KNOWLEDGE_DIR=/app/knowledge。默认值是 D:/资料/知识库/面试官，Linux 上不存在也不报错，只是检索永远空转 —— 这类静默不可用比启动失败难发现得多。
 增加env环境设置  
 
-
-【已做】备份 cron：bash scripts/backup.sh --install-cron（每天 03:30 备库，mysqldump --single-transaction 不锁表 + --routines + utf8mb4）。清理与异地都在脚本里：BACKUP_KEEP_DAYS（默认 14 天）、BACKUP_SYNC_DIR（NAS 目录或 user@host:/path 走 rsync）。★ 备份只落同一块盘等于没备份，务必配异地；cron 装在部署机（靠 docker compose exec mysql）。
-
-【已做】上线护栏：bash scripts/guard-sql-init.sh —— 建完库把 sql-init/ 的建库脚本挪进 sql-init.disabled/ 并落 .disabled 标记，让这份 compose 失去「卷被重建时静默清库」的能力（重跑 bootstrap 也不会被撤销）；--comment-compose 再注释掉那行挂载，--status/--unlock 看状态/解锁。★ 锁是本机状态、不随仓库走。
 
 2.凡是有关大模型需要花钱的，都需要进行限制，比如限制3分钟体验，后台管理能看到使用多少，可以封禁  安全系数拉高  并完善这个管理功能 
 3. GitHubActions CI/CD +云端服务 自动化流水线 +CI/CD  自动化审核 测试 部署

@@ -127,6 +127,8 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 
 docker 镜像构建部署
+注意修改配置文件的话   改 conf/im.env 必须 docker compose up -d  重跑bootstrap.sh文件     改 extra yml 只需 docker compose restart im-server
+
 1.前置条件
     MinIO 二进制本体要先装好  账号密码默认为 minioadmin  设置账号  
    .env.example 里所有 <...> 换成真值   
