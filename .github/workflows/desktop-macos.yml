@@ -97,7 +97,7 @@ jobs:
             echo "sign=false" >> "$GITHUB_OUTPUT"
             echo "suffix=unsigned" >> "$GITHUB_OUTPUT"
             if [[ -n "$MISSING" ]]; then
-              echo "::warning::未配齐签名 secrets（缺:$MISSING），本次出【未签名】包：本机测试没问题；分发给他人首次打开会被 Gatekeeper 拦，需右键→打开或终端 xattr -cr 去隔离。将来配齐 6 个 APPLE_* 后重跑即可自动签名，无需改 workflow。"
+              echo "::warning::未配齐签名 secrets（缺:${MISSING}），本次出【未签名】包：本机测试没问题；分发给他人首次打开会被 Gatekeeper 拦，需右键→打开或终端 xattr -cr 去隔离。将来配齐 6 个 APPLE_* 后重跑即可自动签名，无需改 workflow。"
             else
               echo "::notice::按手动选择强制出【未签名】包"
             fi
@@ -185,4 +185,4 @@ jobs:
               --title "IM通讯 ${TAG} (macOS arm64)" \
               --generate-notes
           fi
-          echo "::notice::已发布到 Release $TAG：$DMG"
+          echo "::notice::已发布到 Release ${TAG}：${DMG}"
