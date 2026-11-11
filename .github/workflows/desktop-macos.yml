@@ -1,12 +1,12 @@
 # ==============================================================================
 # macOS 桌面端（Tauri）自动构建
 #
-# 打 tag 或手动触发 → 在 Apple Silicon(arm64) 的 macos-14 runner 上，用系统 WebView
+# 打 tag 或手动触发 → 在 Apple Silicon(arm64) 的 macos-15 runner 上，用系统 WebView
 # 打包 im-ui 前端 + Rust 壳，产出 .dmg / .app；配了 Apple 证书就自动「代码签名 + 公证」，
 # 成品可直接分发（用户首次打开不被 Gatekeeper 拦）。tag 触发时还会把 .dmg 附到 GitHub Release。
 #
 # ★ 与 build-and-package.yml 的分工：那份是后端 jar + 三站 web dist + Docker 镜像（全 ubuntu）；
-#   这份只管 macOS 桌面客户端（Tauri），跑在 macos-14（arm64），互不影响。
+#   这份只管 macOS 桌面客户端（Tauri），跑在 macos-15（arm64），互不影响。
 #
 # 需要在 Settings → Secrets and variables → Actions 里配（用户已选「正式签名 + 公证」）：
 #   APPLE_CERTIFICATE           base64 的 .p12 —— openssl base64 -A -in cert.p12 -out b64.txt 的全文
@@ -54,8 +54,9 @@ env:
 
 jobs:
   build-macos:
-    # macos-14 = Apple Silicon(M1, arm64)，host triple 默认 aarch64-apple-darwin，产出即 arm64 成品
-    runs-on: macos-14
+    # macos-15 = Apple Silicon(arm64)，host triple 默认 aarch64-apple-darwin，产出即 arm64 成品
+    # （macos-14 已于 2026-11-02 退役，runner 不可用会报 "configuration ... is not supported" 并 cancelled）
+    runs-on: macos-15
     # 首次公证 notarytool 往返可能较慢，留足超时
     timeout-minutes: 90
 
