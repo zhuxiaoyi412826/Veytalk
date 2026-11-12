@@ -57,7 +57,7 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
    * set/reset 只落盘，生效靠前端 reload 页面（preload 会重新取一次）。
    */
   server: {
-    /** → { baseUrl, source, builtIn, env, configPath, hasConfig } */
+    /** → { baseUrl, source, builtIn, fallbackBase, fallbackActive, env, configPath, hasConfig } */
     get: () => call('im:server-get', null),
     /** 只校验规整不落盘 → { baseUrl }；前端拿它统一口径后再去探连接，避免两处各写一份规则 */
     normalize: (baseUrl) => call('im:server-normalize', { baseUrl }),

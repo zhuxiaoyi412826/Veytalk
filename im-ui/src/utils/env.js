@@ -32,6 +32,17 @@ export function isNativeShell() {
   return isElectron() || isTauri() || isCapacitor()
 }
 
+/** 后端地址运行时覆盖键（Tauri / Capacitor 壳）：「开发调试」弹窗改的就是它；Electron 走主进程配置文件那套 */
+export const IM_SERVER_OVERRIDE_KEY = 'IM_SERVER_URL_OVERRIDE'
+/** IP 回落激活标记键（Tauri / Capacitor 壳）：启动探测 ensureServerBase() 写入，下次启动域名又通时会清掉 */
+export const IM_SERVER_FALLBACK_ACTIVE_KEY = 'IM_SERVER_FALLBACK_ACTIVE'
+/**
+ * 内置回落地址：与 electron/server-config.js 的 BUILT_IN_FALLBACK_BASE 同一台后端，公网 IP 直连 nginx 443。
+ * 域名托管在未备案的大陆云上时会被运营商在 TLS 握手阶段 reset，没有主进程探测的壳（Tauri / Capacitor）
+ * 靠启动探测 ensureServerBase() 切到本地址保证开箱可连。
+ */
+export const IM_FALLBACK_BASE = 'https://120.78.126.132'
+
 /**
  * 远程后端根地址（协议+host+端口，不含 /api），Web 环境为空串。
  * Electron 由主进程经 preload 注入；Tauri 没有 preload，用编译期 Vite 环境变量（.env.tauri）。
@@ -43,11 +54,63 @@ function serverBase() {
   if (isTauri() || isCapacitor()) {
     // 运行时覆盖优先于编译期默认值：热点/换网段导致后端 IP 变化时，
     // 在登录页改一下即可连上新地址，无需重打包（localStorage 每次请求实时读取）。
-    const override = window.localStorage && window.localStorage.getItem('IM_SERVER_URL_OVERRIDE')
+    const override = window.localStorage && window.localStorage.getItem(IM_SERVER_OVERRIDE_KEY)
     if (override) return override.replace(/\/+$/, '')
+    // IP 回落层：启动探测判定域名不可达（如被备案拦截 reset）时切到内置公网 IP
+    if (window.localStorage && window.localStorage.getItem(IM_SERVER_FALLBACK_ACTIVE_KEY) === '1') {
+      return IM_FALLBACK_BASE
+    }
     return (import.meta.env && import.meta.env.VITE_IM_SERVER_URL) || ''
   }
   return ''
+}
+
+/**
+ * 当前生效的后端地址与它的来源，供设置页 / 调试弹窗显示，与 serverBase() 同口径：
+ * Electron 读主进程注入；Tauri / Capacitor 按 覆盖 > 回落 > 编译期默认 分级；Web 返回空。
+ */
+export function serverBaseInfo() {
+  if (typeof window !== 'undefined' && window.__IM_SERVER__ && window.__IM_SERVER__.baseUrl) {
+    return { baseUrl: window.__IM_SERVER__.baseUrl, source: window.__IM_SERVER__.source || '' }
+  }
+  if (isTauri() || isCapacitor()) {
+    const override = window.localStorage && window.localStorage.getItem(IM_SERVER_OVERRIDE_KEY)
+    if (override) return { baseUrl: override.replace(/\/+$/, ''), source: 'local' }
+    if (window.localStorage && window.localStorage.getItem(IM_SERVER_FALLBACK_ACTIVE_KEY) === '1') {
+      return { baseUrl: IM_FALLBACK_BASE, source: 'fallback' }
+    }
+    return { baseUrl: (import.meta.env && import.meta.env.VITE_IM_SERVER_URL) || '', source: 'default' }
+  }
+  return { baseUrl: '', source: '' }
+}
+
+/**
+ * 启动期探测（Tauri / Capacitor 壳）：域名不可达则激活 IP 回落层；Electron 有自己的主进程探测、Web 同源，都不需要。
+ * 必须在 mount 之前调用（见 main.js）：axios 的 baseURL 与 WS 地址在模块加载时就算定，探测晚一步首屏就发错地址。
+ * 探测只问「有没有 HTTP 应答」，不看状态码（1002 未登录也是可达的证据）；任何抛错（reset / 证书拒 / 超时）都算不可达。
+ * 证书校验严格的壳（WKWebView / Android WebView）上，证书不受信与网络被拦都会算「不可达」而落 IP——
+ * 那种场景 IP 自己能不能用取决于证书有没有 IP SAN，见打包文档。
+ */
+export async function ensureServerBase(timeoutMs = 2500) {
+  if (!isTauri() && !isCapacitor()) return serverBase()
+  const store = window.localStorage
+  if (!store || store.getItem(IM_SERVER_OVERRIDE_KEY)) return serverBase()
+  const compileBase = (import.meta.env && import.meta.env.VITE_IM_SERVER_URL) || ''
+  if (!compileBase) return serverBase()
+  const reachable = await new Promise((done) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    fetch(`${compileBase.replace(/\/+$/, '')}/api/auth/me`, { signal: controller.signal, cache: 'no-store' })
+      .then(() => done(true))
+      .catch(() => done(false))
+      .finally(() => clearTimeout(timer))
+  })
+  if (reachable) {
+    store.removeItem(IM_SERVER_FALLBACK_ACTIVE_KEY)
+  } else {
+    store.setItem(IM_SERVER_FALLBACK_ACTIVE_KEY, '1')
+  }
+  return serverBase()
 }
 
 /** axios 的 baseURL：桌面壳用「后端绝对地址 + /api」，Web 用同源相对路径 /api */
@@ -116,11 +179,14 @@ export function livePlayBase() {
   // Tauri / Capacitor：流媒体服务器地址编译期注入（.env.tauri / .env.capacitor 的 VITE_IM_MEDIA_BASE）
   if (isTauri() || isCapacitor()) {
     // 服务器地址被运行时覆盖时（热点换 IP）：流媒体与后端同机部署，跟随覆盖地址的 host，只换端口为 8088
-    const override = window.localStorage && window.localStorage.getItem('IM_SERVER_URL_OVERRIDE')
+    const override = window.localStorage && window.localStorage.getItem(IM_SERVER_OVERRIDE_KEY)
     if (override) return override.replace(/\/+$/, '').replace(/:\d+$/, '') + ':8088'
+    // IP 回落层：流媒体口与聊天口同一台 nginx，跟随回落地址（同域复用 443 证书）
+    if (window.localStorage && window.localStorage.getItem(IM_SERVER_FALLBACK_ACTIVE_KEY) === '1') {
+      return IM_FALLBACK_BASE
+    }
     return import.meta.env.VITE_IM_MEDIA_BASE || 'http://127.0.0.1:8088'
   }
-  return isElectron() ? 'http://127.0.0.1:8088' : ''
   if (!isElectron()) return ''
   const base = serverBase()
   if (base) {

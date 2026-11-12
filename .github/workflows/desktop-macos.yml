@@ -17,6 +17,10 @@
 #   APPLE_TEAM_ID               团队 ID（Apple Developer 会员页可查）
 # 可选：Variables 里配 IM_SERVER_URL 覆盖桌面端要连的后端根地址（默认 https://im.dsaol.asia）
 #
+# ★ 证书前提（mac 独有，WKWebView 无证书绕过）：生产证书须为两级 CA 且叶子 SAN 同时含域名与公网 IP，
+#   签发机：bash scripts/gen-selfca.sh --ip 120.78.126.132 --force && bash scripts/push-cert.sh user@部署机 /opt/im-docker；
+#   mac 客户端一次性装根 CA（certs/ca/rootCA.pem，钥匙串「始终信任」）。步骤与验证见 md/打包/Tauri打包指南.md 第十三节。
+#
 # 触发方式：
 #   打 tag v1.2.3 → 自动构建 + 传 artifact + 发 Release；
 #                   配齐了 APPLE_* secrets 就自动签名公证，没配就自动出【未签名】包（不报错、不中断）

@@ -642,6 +642,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, Tools, User, DeleteFilled } from '@element-plus/icons-vue'
 import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
 import { canDebug, sourceLabel, sourceTagType } from '@/utils/servercfg'
+import { getServerBridge } from '@/utils/serverBridge'
+import { serverBaseInfo } from '@/utils/env'
 import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS, FONT_FAMILIES } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
@@ -658,17 +660,15 @@ import { notifyCapability, requestNotifyPermission, previewChime } from '@/utils
 
 defineOptions({ name: 'Settings' })
 
-/* ------------------------------ 后端地址（仅桌面端） ------------------------------ */
+/* ------------------------------ 后端地址（原生壳） ------------------------------ */
 
-// 直接读主进程注入的那份（preload 每次页面加载都现取），不额外发 IPC：
-// 这一行要显的就是「当前页面实际在用哪个地址」，注入值本身就是权威
-const injectedServer = (typeof window !== 'undefined' && window.__IM_SERVER__) || { baseUrl: '', source: '' }
+// 从 env.js 的统一口径同步读：Electron 是主进程注入值、Tauri / 安卓是 覆盖>回落>编译期默认，Web 同源为空：
+// 这一行要显的就是「当前页面实际在用哪个地址」，serverBase() 本身就是权威
+const injectedServer = serverBaseInfo()
 const serverDebugVisible = ref(false)
-const canServerDebug = computed(() =>
-  canDebug(typeof window !== 'undefined' && window.__IM_NATIVE__ ? window.__IM_NATIVE__.server : null)
-)
-const serverBaseText = computed(() => injectedServer.baseUrl || '未注入（老安装包或 Web 部署）')
-const serverSourceText = computed(() => sourceLabel(injectedServer.source))
+const canServerDebug = computed(() => canDebug(getServerBridge()))
+const serverBaseText = computed(() => injectedServer.baseUrl || '同源（Web 部署，由 Nginx / vite 转发）')
+const serverSourceText = computed(() => (injectedServer.source ? sourceLabel(injectedServer.source) : '同源'))
 const serverTagType = computed(() => sourceTagType(injectedServer.source))
 
 const router = useRouter()

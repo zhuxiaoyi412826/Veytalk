@@ -19,8 +19,10 @@ export const PROBE_LEVEL = {
 /** 后端地址的三种来源，与 electron/server-config.js 的 resolve() 一一对应 */
 export const SOURCE = {
   FILE: 'file',
+  LOCAL: 'local',
   ENV: 'env',
   DEFAULT: 'default',
+  FALLBACK: 'fallback',
   ARGV: 'argv'
 }
 
@@ -66,9 +68,10 @@ export function classifyProbe(res) {
       title: '连不上这个地址',
       detail:
         `请求根本没发出去${raw ? `（${raw}）` : ''}。` +
-        '若这是刚装好的安装包，先想一件事：内置默认是 http://localhost:8080，' +
-        '它指向的是「运行本程序的这台电脑」——这台机器上没起后端就必然连不上，' +
-        '把地址改成真正部署了后端的机器 IP 或域名即可。'
+        '若这是刚装好的安装包：内置默认是公网域名，域名被备案拦截等不可达时会自动回落公网 IP' +
+        '（Electron 走主进程探测、Tauri / 安卓走启动探测）；' +
+        '两者都不通才需要把地址改成真正部署了后端的机器 IP 或域名。' +
+        'mac / 安卓壳对自签证书零容忍：没装根 CA 时域名与 IP 都会表现为连不上（Electron 有证书白名单，不受此限）。'
     }
   }
 
@@ -122,10 +125,14 @@ export function sourceLabel(source) {
   switch (source) {
     case SOURCE.FILE:
       return '配置文件（界面改的就是它）'
+    case SOURCE.LOCAL:
+      return '本地设置（界面改的就是它）'
     case SOURCE.ENV:
       return '环境变量 IM_SERVER_BASE'
     case SOURCE.DEFAULT:
       return '安装包内置默认'
+    case SOURCE.FALLBACK:
+      return '内置回落（域名不可达，已切公网 IP）'
     case SOURCE.ARGV:
       return '窗口启动参数'
     default:
@@ -141,7 +148,9 @@ export function effectiveBase(serverInfo) {
 /** El 标签配色：绿=配置文件生效，灰=内置默认，蓝=环境变量 */
 export function sourceTagType(source) {
   if (source === SOURCE.FILE) return 'success'
+  if (source === SOURCE.LOCAL) return 'success'
   if (source === SOURCE.ENV) return 'primary'
+  if (source === SOURCE.FALLBACK) return 'warning'
   return 'info'
 }
 
@@ -151,4 +160,43 @@ export function sourceTagType(source) {
  */
 export function canDebug(bridge) {
   return !!bridge && typeof bridge.get === 'function' && typeof bridge.set === 'function'
+}
+
+/**
+ * 后端地址规整（纯函数）：与主进程 electron/server-config.js 的 normalizeBase 逐条同口径——
+ * Tauri / Capacitor 壳没有主进程配置通道，调试弹窗的校验只能落在这份纯函数层；
+ * 改规则时两处要一起改（Electron 那份仍是渲染前统一口径的权威）。
+ *
+ * 规则：允许省协议（localhost:8080 按 http 补全，但 file:/javascript: 这类自带协议的直接拒）；
+ * 只收 http/https；丢用户名密码；剥尾部 /api 与斜杠。
+ */
+const HOST_PORT_RE = /^[A-Za-z0-9._~%-]+:\d+(\/.*$)?/
+const SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/
+const MAX_BASE_LEN = 200
+
+export function normalizeBase(raw) {
+  const s = String(raw == null ? '' : raw).trim()
+  if (!s || /\s/.test(s) || s.length > MAX_BASE_LEN) return null
+
+  let u = null
+  try {
+    u = new URL(s)
+  } catch {
+    u = null
+  }
+  if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) {
+    if (SCHEME_RE.test(s) && !HOST_PORT_RE.test(s)) return null
+    try {
+      u = new URL('http://' + s.replace(/^\/+/, ''))
+    } catch {
+      u = null
+    }
+  }
+  if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) return null
+  if (!u.hostname || u.username || u.password) return null
+
+  let p = String(u.pathname || '').replace(/\/+$/, '')
+  if (/\/api$/i.test(p)) p = p.slice(0, -4)
+  p = p.replace(/\/+$/, '')
+  return `${u.protocol}//${u.host}${p}`
 }

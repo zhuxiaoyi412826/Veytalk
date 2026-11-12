@@ -350,9 +350,9 @@
       </template>
     </el-dialog>
 
-    <!-- ==================== 后端地址（开发调试，仅桌面端） ====================
-         读写全走主进程 IPC，不发任何 HTTP 请求——这正是要修「请求发不出去」的那个场景，
-         弹窗自己不能依赖那条路。 -->
+    <!-- ==================== 后端地址（开发调试，原生壳） ====================
+         Electron 读写走主进程 IPC、Tauri / 安卓壳走 localStorage 覆盖，都不依赖后端链路可达——
+         这正是要修「请求发不出去」的那个场景，弹窗自己不能依赖那条路。 -->
     <ServerDebugDialog v-model="serverDebugVisible" />
   </div>
 </template>
@@ -365,6 +365,7 @@ import { Iphone, Key, Lock, Message, User } from '@element-plus/icons-vue'
 import CaptchaImage from '@/components/CaptchaImage.vue'
 import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
 import { canDebug } from '@/utils/servercfg'
+import { getServerBridge } from '@/utils/serverBridge'
 import {
   fetchCaptchaImage,
   sendSmsCode as sendSmsCodeApi,
@@ -410,14 +411,12 @@ const agreement = useAgreementStore()
 const tab = ref('account')
 const submitting = ref(false)
 
-/* ------------------------------ 后端地址（仅桌面端） ------------------------------ */
+/* ------------------------------ 后端地址（原生壳） ------------------------------ */
 
 const serverDebugVisible = ref(false)
-// 判定交给纯函数：没有主进程配置桥（Web 部署 / 老安装包）就整条不显，
-// 给一个点了只能报「不支持」的入口比没有入口更糟
-const canServerDebug = computed(() =>
-  canDebug(typeof window !== 'undefined' && window.__IM_NATIVE__ ? window.__IM_NATIVE__.server : null)
-)
+// 判定交给纯函数：拿不到调试桥（Web 同源部署）就整条不显，
+// 给一个点了只能报「不支持」的入口比没有入口更糟；桥在 Electron 走 IPC、Tauri / 安卓走 localStorage
+const canServerDebug = computed(() => canDebug(getServerBridge()))
 
 /* ------------------------------ 图形验证码 ------------------------------ */
 
