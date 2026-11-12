@@ -300,7 +300,9 @@ sa-token:
 
 # ==============================================================================
 # 接口文档（Knife4j / springdoc）
-# 分组由 Knife4jConfig 的 9 个 GroupedOpenApi Bean 定义，按模块划分。
+# 分组由 Knife4jConfig 里的 GroupedOpenApi Bean 定义，按路径前缀划分（组数与路径数都不在这里写死，实跑看 python scripts/api-doc-check.py，期望退出码 0）。
+# 新增控制器只要用了新的 /api/xxx 前缀，必须回来补一个分组：swagger-config 只列已声明的分组，
+# 没进任何分组的接口在 doc.html 的下拉里完全看不见，而全量 JSON 里它们其实都在。
 # ==============================================================================
 knife4j:
   enable: true
@@ -410,7 +412,7 @@ im:
   #   色情——nsfwjs + TensorFlow.js，MobileNetV2 权重约 3.5MB 随前端构建产物离线分发；
   #   血腥 / 暴力——ViT-Base 的 int8 ONNX（约 83MB）+ onnxruntime-web，默认不启用，
   #   只有下面的 thresholds 里出现 Violent 才会被激活（运行时随构建产物发出，模型本体不入库）。
-  # 服务端只下发阈值、只接收命中上报。
+  # 服务端下发阈值、接收命中上报、并接收被拦下图片的隔离区副本（见下面 quarantine-enabled）。
   # 键名对应 com.im.common.config.ImProperties.Moderation。
   #
   # ★ 这是「正常使用路径」上的闸门，不是对抗性防御：判定在客户端做，改前端代码或直接
@@ -436,6 +438,16 @@ im:
       # Violent: 0.75
     max-score-entries: 16
     max-text-length: 120
+    # 隔离区：命中后除了拒发，再让发送端把原图另传一份进 im_file
+    # （biz_type=moderation_quarantine），后台「审核记录」因此能点开看图本体。
+    # ★ 这是一次隐私口径变更：只有把它改成 false，才能重新说「被拦下的图片从未离开本机」。
+    #   关掉不影响拦图与审计，只是从此不再新增副本（已有图片不受影响，也不会自动清理）；
+    #   而没有图的记录只能证明「有过一次判定」，判不了「判得对不对」，误拦申诉无从下手。
+    #   后台可改（系统设置 → 图片审核），也可按下面的环境变量启动时定值。
+    quarantine-enabled: ${IM_MODERATION_QUARANTINE_ENABLED:true}
+    # 副本体积上限：比 im.file.max-size 小是正常的——证据只需要「看得出判得对不对」，
+    # 不需要承载原始大图。超过这个值的图直接不传（前端先比一次，省掉一次注定被拒的上传）。
+    quarantine-max-size: 10MB
 
   message:
     # 撤回时限（秒），默认 2 分钟（120 秒）。超过这个时间的消息不能再撤回，
@@ -705,6 +717,9 @@ im:
   # @ConditionalOnProperty(name = "im.sms.provider", havingValue = "aliyun")，
   # 再把这里（或 IM_SMS_PROVIDER 环境变量）改成 aliyun 即可：
   # 验证码的生成、频率限制、Redis 存储与校验都在 CaptchaServiceImpl 里，一行都不用动。
+  # ★ 这个值只能填「已有实现类」的服务商，目前只有 mock 一个。填了 aliyun 而没先加实现类，
+  #   一个 SmsSender bean 都装配不上：短信按「可选通道」处理，发码时报 2021（短信服务未配置），
+  #   应用照常启动——历史上这里是硬依赖，一个写错的环境变量能让整站 UnsatisfiedDependency 起不来。
   sms:
     provider: ${IM_SMS_PROVIDER:mock}
 

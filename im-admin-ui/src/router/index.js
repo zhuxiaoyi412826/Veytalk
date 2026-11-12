@@ -92,6 +92,12 @@ const routes = [
         meta: { title: 'AI 面试记录', perm: 'system:interview' }
       },
       {
+        path: 'ai-guard',
+        name: 'ai-guard',
+        component: () => import('@/views/AiGuardView.vue'),
+        meta: { title: 'AI 用量管控', perm: 'system:ai:guard' }
+      },
+      {
         path: 'monitor',
         name: 'monitor',
         component: () => import('@/views/MonitorView.vue'),
@@ -102,6 +108,14 @@ const routes = [
         name: 'logs',
         component: () => import('@/views/LogsView.vue'),
         meta: { title: '日志管理', perm: 'system:log' }
+      },
+      {
+        // 审核记录复用 system:log 而不单设权限点：日志页本来就能读 moderation.log 原文，
+        // 这一屏只是同一份现场的结构化版本（五期·路线 2），拆两个点只会制造半个现场看不到
+        path: 'moderation-logs',
+        name: 'moderation-logs',
+        component: () => import('@/views/ModerationView.vue'),
+        meta: { title: '审核记录', perm: 'system:log' }
       },
       {
         path: 'config',
@@ -120,6 +134,14 @@ const routes = [
         name: 'announcements',
         component: () => import('@/views/AnnounceView.vue'),
         meta: { title: '全服公告', perm: 'system:announcement' }
+      },
+      {
+        // 法定文本与同意留痕：单独一个权限点 125，不并进 system:announcement——
+        // 公告可以随时撤，协议发出去就改不了，而且这一屏带着可举证的个人信息留痕
+        path: 'agreements',
+        name: 'agreements',
+        component: () => import('@/views/AgreementView.vue'),
+        meta: { title: '法定文本', perm: 'system:agreement:manage' }
       }
     ]
   },
@@ -174,11 +196,14 @@ router.beforeEach(async (to) => {
       'messages',
       'wallet',
       'interviews',
+      'ai-guard',
       'monitor',
       'logs',
+      'moderation-logs',
       'config',
       'remote',
-      'announcements'
+      'announcements',
+      'agreements'
     ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)

@@ -2,6 +2,8 @@
 # 构建产物
 # ==============================================================================
 target/
+electron/release-fresh/
+electron/release/
 !.mvn/wrapper/maven-wrapper.jar
 build/
 out/
@@ -140,4 +142,8 @@ Docker/certs/*
 !Docker/certs/.gitkeep
 Docker/sql-init/*
 !Docker/sql-init/.gitkeep
+# guard-sql-init.sh 上锁时把建库脚本挪到这里（同理：本机状态，不随仓库走）
+Docker/sql-init.disabled/
+# guard-sql-init.sh --comment-compose 注释挂载行前会先备份 yml（本机产物，不进库）
+Docker/docker-compose.yml.bak-*
 Docker/backup/

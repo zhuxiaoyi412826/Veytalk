@@ -112,9 +112,18 @@ http.interceptors.response.use(
     if (error.code === 'ECONNABORTED' || /timeout/i.test(error.message || '')) {
       message = '请求超时，请确认后端已启动'
     } else if (error.response) {
-      message = `服务异常（HTTP ${error.response.status}）`
-    } else {
+      // dev server 连不上后端时会回 502 + 一段 Result 形状的 JSON（见 vite.config.js 的 devProxy），
+      // 那句 message 才是真原因；读得到真因就不许报虚话，否则用户只看到「服务异常（HTTP 502）」，
+      // 分不清「后端没起 / 正在重启」与「这个接口真坏了」（与 im-ui 同口径，两边不要各自演化）
+      const body = error.response.data
+      message = (isResultBody(body) && (body.message || body.msg)) || `服务异常（HTTP ${error.response.status}）`
+    } else if (error.request) {
+      // 请求已交出去但没有任何响应：这一句才真的是连不上（与 im-ui 同口径）
       message = '无法连接服务器，请确认后端已在 8080 启动'
+    } else {
+      // 连 request 都没有 = 请求在本端就折了，根本没出浏览器（把 ref/computed 本体当请求体时
+      // JSON.stringify 会直接抛循环引用）。把前端错归因到后端会把排查引向死路
+      message = `请求未能发出（前端错误）：${error.message || '未知原因'}`
     }
     if (!config.silent) {
       ElMessage.error(message)

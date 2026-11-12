@@ -89,6 +89,7 @@
         <div class="profile__actions">
           <el-button :icon="Lock" @click="openPasswordDialog">{{ firstTimeSet ? '设置密码' : '修改密码' }}</el-button>
           <el-button type="danger" plain :icon="SwitchButton" @click="onLogout">退出登录</el-button>
+          <el-button type="danger" @click="onCancelAccount">注销账号</el-button>
         </div>
       </section>
     </div>
@@ -178,6 +179,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Loading, Lock, SwitchButton } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { uploadAvatar } from '@/api/file'
+import { cancelAccount } from '@/api/user'
 import { guardImage } from '@/utils/nsfw'
 import { sendSmsCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
@@ -501,6 +503,42 @@ async function onLogout() {
   await signOut()
   ElMessage.success('已退出登录')
   router.replace({ name: 'login' })
+}
+
+/* ------------------------------ 账号注销 ------------------------------ */
+
+async function onCancelAccount() {
+  // 第一重确认：说明后果
+  try {
+    await ElMessageBox.confirm(
+      '注销后将永久删除您的账号及所有关联数据（好友、会话、消息、群组等），此操作不可恢复。确定继续？',
+      '高危操作',
+      { confirmButtonText: '我已了解，继续', cancelButtonText: '取消', type: 'error', confirmButtonClass: 'el-button--danger' }
+    )
+  } catch {
+    return
+  }
+  // 第二重确认：输入密码
+  let password
+  try {
+    const result = await ElMessageBox.prompt('请输入登录密码以确认注销：', '二次确认', {
+      confirmButtonText: '确认注销',
+      cancelButtonText: '取消',
+      inputType: 'password',
+      inputValidator: (val) => val ? undefined : '密码不能为空'
+    })
+    password = result.value
+  } catch {
+    return
+  }
+  try {
+    await cancelAccount({ password })
+    ElMessage.success('账号已注销')
+    await signOut()
+    router.replace({ name: 'login' })
+  } catch (e) {
+    ElMessage.error(e?.message || '注销失败，请检查密码是否正确')
+  }
 }
 
 /* ------------------------------ 生命周期 ------------------------------ */

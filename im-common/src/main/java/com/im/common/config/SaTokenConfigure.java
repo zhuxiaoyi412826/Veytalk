@@ -38,6 +38,11 @@ public class SaTokenConfigure implements WebMvcConfigurer {
      * <p>{@code /api/auth/password/**} 是找回密码，用户正是因为登录不进来才走这条路，
      * 天然匿名可达。它的安全性不靠登录态，而靠三道门叠起来：图形验证码闸门
      * （一次性消费）+ 6 位场景验证码 + 按 IP 的 {@code @RateLimit}，缺一不可。
+     *
+     * <p>协议文本读的两条（{@code list} 与 {@code view/**}）匿名可达是<b>合规要求</b>而不是便利：
+     * 官网页脚那条《隐私政策》必须在没登录时就能打开——「收集我的信息之前先告诉我你收集了什么」
+     * 不能反过来要求我先注册。同前缀下的 {@code consent} 与 {@code pending} <b>不</b>在白名单里：
+     * 那两条要写谁的表态，必须有登录态，所以只把读的两条逐个路径写出来而不是放 {@code /api/agreement/**} 整片。
      */
     private static final List<String> EXCLUDE_PATTERNS = List.of(
             "/api/auth/register",
@@ -52,7 +57,10 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/file/download/**",
             // 群机器人 Webhook：外部系统无登录态回调，凭 URL 里的 token 认证（能力 URL 模式），
             // 安全性靠 token 不可猜 + 按 IP 的 @RateLimit + 机器人启用状态三重门控
-            "/api/robot/webhook/**"
+            "/api/robot/webhook/**",
+            // 法定文本公示：只读的两条，逐路径列出（详见类注释），写的那两条留在拦截器里面
+            "/api/agreement/list",
+            "/api/agreement/view/**"
     );
 
     @Override

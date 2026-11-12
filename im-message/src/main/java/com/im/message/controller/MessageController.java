@@ -137,8 +137,9 @@ public class MessageController {
 
     @Operation(summary = "语音转文字",
             description = "对一条未撤回的语音消息调用外部 ASR 服务转写为文本（仅展示不落库，仅会话成员可用）；"
-                    + "未接入 ASR 厂商时优雅降级为『语音转文字服务未配置或暂不可用』")
-    @RateLimit(count = 60, dimension = RateLimit.Dimension.USER, key = "message.to-text")
+                    + "未接入 ASR 厂商时优雅降级为『语音转文字服务未配置或暂不可用』；"
+                    + "背后是按量计费的 ASR 模型调用，限流收紧到 20 次/分钟，另有 AI 护栏预算与封禁兜底")
+    @RateLimit(count = 20, dimension = RateLimit.Dimension.USER, key = "message.to-text")
     @PostMapping("/{id}/to-text")
     public Result<String> toText(@Parameter(description = "消息 ID") @PathVariable("id") Long id) {
         return Result.ok(messageService.toText(SecurityUtil.getUserId(), id));

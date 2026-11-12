@@ -100,6 +100,13 @@
       多处各挂一份就会各持一份滚动位置与各关各的确认状态。
     -->
     <AnnouncementDialog />
+
+    <!--
+      协议再同意弹窗：全站只挂这一份，与举报弹窗、公告列表弹窗同一思路。
+      它必须挂在布局而不是聊天页：改版提醒对所有页面都成立，
+      挂在聊天页就会出现在「用户在设置页时被挡住」的奇怪体感。
+    -->
+    <AgreementConsentDialog />
   </div>
 </template>
 
@@ -114,12 +121,14 @@ import GroupCallOverlay from '@/components/GroupCallOverlay.vue'
 import ReportDialog from '@/components/ReportDialog.vue'
 import AnnouncementBar from '@/components/AnnouncementBar.vue'
 import AnnouncementDialog from '@/components/AnnouncementDialog.vue'
+import AgreementConsentDialog from '@/components/AgreementConsentDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
 import { useChatStore } from '@/stores/chat'
 import { useReportStore } from '@/stores/report'
 import { useAnnounceStore } from '@/stores/announce'
+import { useAgreementStore } from '@/stores/agreement'
 import { installWsDispatch, uninstallWsDispatch } from '@/ws/dispatch'
 import { socketState } from '@/ws/socket'
 
@@ -133,6 +142,7 @@ const friend = useFriendStore()
 const chat = useChatStore()
 const report = useReportStore()
 const announce = useAnnounceStore()
+const agreement = useAgreementStore()
 
 /**
  * 导航项。
@@ -207,6 +217,10 @@ async function bootstrap() {
   // 公告补拉的第二个触发点：跑到这里 auth 已经拉完资料（或确实没登录），userId 必定就绪。
   // 只靠 WS open 那一路不够——open 可能早于 profile 返回，那种情况下补拉会被整趟跳过
   announce.pull()
+  // 协议确认检查：拉一次「本账号还欠哪几份表态」，欠就把弹窗立起来。
+  // 放在 bootstrap 这一趟而不是登录接口返回之后：验证码登录、扫码登录、自动建号
+  // 都不经过注册页那个勾选框，而它们的登录态与账密登录完全等价，必须走同一道确认。
+  agreement.check()
 }
 
 /**

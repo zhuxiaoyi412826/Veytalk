@@ -131,6 +131,7 @@
 
     <!-- ==================== 右侧：聊天窗口 ==================== -->
     <section class="chat-home__main" :style="settings.chatBackgroundStyle">
+      <div v-if="settings.chatBgType === 'image' && settings.chatBgValue" class="chat-bg-overlay"></div>
       <ChatWindow v-if="conversation.activeId" :key="conversation.activeId" :conversation-id="conversation.activeId" />
       <div v-else class="chat-home__placeholder">
         <el-empty description="选择左侧的一个会话开始聊天" :image-size="120" />
@@ -147,6 +148,9 @@
 
     <!-- 我的收藏：跨会话的私人收藏夹，点一行跳回那条消息并高亮 -->
     <FavoritesDialog v-model="favoritesVisible" :current-conversation-id="conversation.activeId" />
+
+    <!-- 桌面端调试日志浮层 -->
+    <DebugLogOverlay v-if="showDebugOverlay" />
   </div>
 </template>
 
@@ -158,6 +162,7 @@ import { MuteNotification, Refresh, Search, Star } from '@element-plus/icons-vue
 import UserAvatar from '@/components/UserAvatar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import FavoritesDialog from '@/components/FavoritesDialog.vue'
+import DebugLogOverlay from '@/components/DebugLogOverlay.vue'
 import ChatWindow from './ChatWindow.vue'
 import { useConversationStore } from '@/stores/conversation'
 import { useFriendStore } from '@/stores/friend'
@@ -185,6 +190,9 @@ const chat = useChatStore()
 
 /** 「我的收藏」面板开关 */
 const favoritesVisible = ref(false)
+
+/** 桌面端调试日志浮层：仅在 debugLog 开启 + Electron 环境下渲染 */
+const showDebugOverlay = computed(() => settings.debugLog && typeof window !== 'undefined' && !!window.imBridge)
 
 function isActive(item) {
   return sameId(item.conversationId, conversation.activeId)
@@ -804,9 +812,15 @@ async function confirmRemove(target) {
 }
 
 .chat-home__main {
+  position: relative;
   flex: 1;
   min-width: 0;
   background: var(--im-chat-bg);
+}
+
+.chat-home__main > :not(.chat-bg-overlay) {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-home__placeholder {

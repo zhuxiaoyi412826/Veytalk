@@ -1,5 +1,6 @@
 package com.im.ai.intelligence;
 
+import com.im.ai.service.AiGuardService;
 import com.im.ai.service.AudioService;
 import com.im.common.api.ResultCode;
 import com.im.common.domain.FileDTO;
@@ -91,8 +92,9 @@ public class DashScopeSpeechToTextSpi implements SpeechToTextSpi {
             log.warn("读取语音字节失败: fileId={}, {}", fileId, e.getMessage());
             throw new BusinessException(ResultCode.AI_ASR_FAILED.getCode(), "语音文件读取失败，请稍后重试");
         }
-        // 容器名以文件记录为准：用户手选的音频可能是 mp3/m4a，谎称 wav 模型会直接回错误
-        return audioService.transcribe(bytes, resolveFormat(file));
+        // 容器名以文件记录为准：用户手选的音频可能是 mp3/m4a，谎称 wav 模型会直接回错误。
+        // 场景显式传 message_to_text：聊天转文字与面试「按住说话」花的是同一份预算，但要分开记账
+        return audioService.transcribe(bytes, resolveFormat(file), AiGuardService.SCENE_MESSAGE_TO_TEXT);
     }
 
     /**

@@ -1369,8 +1369,8 @@ onBeforeUnmount(() => {
 }
 
 .bubble__text {
-  font-size: calc(14px * var(--im-font-scale, 1));
-  line-height: calc(22px * var(--im-font-scale, 1));
+  font-size: calc(var(--im-bubble-font-px, 14) * 1px);
+  line-height: calc(var(--im-bubble-font-px, 14) * 1.55px);
   /* 保留用户敲的换行与连续空格，但不保留 HTML —— 用的是插值而不是 v-html，天然免疫 XSS */
   white-space: pre-wrap;
 }

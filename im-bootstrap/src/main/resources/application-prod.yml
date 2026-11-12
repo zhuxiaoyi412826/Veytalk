@@ -32,7 +32,8 @@ im:
   sms:
     # 这里显式从环境变量读：不设 IM_SMS_PROVIDER 就退回 mock，
     # 后果是短信只写日志、用户永远收不到码（失败方向是「发不出去」而不是「绕过校验」，
-    # 不会造成安全口子，但上线前必须把它换成真实服务商）。
+    # 不会造成安全口子）。但换服务商之前得先有实现类：目前 SmsSender 只实现了 mock 一个，
+    # 直接把 IM_SMS_PROVIDER 写成 aliyun 得零个通道 bean，发码报 2021（短信服务未配置）。
     provider: ${IM_SMS_PROVIDER:mock}
   websocket:
     # 生产环境客户端基数大，空闲扫描放宽到 60s，减少无谓的遍历开销；

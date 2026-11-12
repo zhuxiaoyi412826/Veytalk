@@ -56,8 +56,12 @@ public enum FileBizType {
     /**
      * 聊天语音。opus 是现在录音与网络语音的默认编码之一（装在 Ogg 容器里），
      * Chrome / Firefox 的 {@code <audio>} 原生能播，不必再要用户转成 mp3。
+     *
+     * <p>webm 是网页端（im-ui 文件传输助手）MediaRecorder 的兜底容器：前端已优先选
+     * mp4/ogg 两种白名单内格式，但部分浏览器只支持 webm，不放行会让网页语音直接发不出去；
+     * 与 {@link #CALL_RECORD} 放行 webm 的同一口径。
      */
-    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus")),
+    CHAT_VOICE("chat_voice", Set.of("mp3", "wav", "aac", "m4a", "ogg", "amr", "flac", "opus", "webm")),
 
     /**
      * 直播页视频板块的视频（短视频信息流）。与 {@link #CHAT_FILE} 分开：聊天视频只有同会话成员
@@ -92,7 +96,22 @@ public enum FileBizType {
      * 主用桌面端 MediaRecorder 产出的 webm（流式落盘的必然选择），同时放行 mp4/m4a/opus 等常见录音编码，
      * 便于日后用 ffmpeg 转封装或改换录制容器。
      */
-    CALL_RECORD("call_record", Set.of("webm", "mp4", "m4a", "opus", "wav", "mp3"));
+    CALL_RECORD("call_record", Set.of("webm", "mp4", "m4a", "opus", "wav", "mp3")),
+
+    /**
+     * 图片审核隔离区（五期）：发送端识别为违规、当场拒发后，另传上来的那一份副本。
+     *
+     * <p>单列一种而不是挂在 {@link #CHAT_IMAGE} 上：它不是任何会话的内容，而是一条
+     * 追责证据；混进聊天类型会被「同会话成员可下载」那套口径误伤（另一个成员不该看到
+     * 一张本来就没发出去的图），也不该出现在任何业务列表里。
+     *
+     * <p>不开 {@code isPublic()}：只有后台经 {@code system:log} 那扇门能看（上传者本人
+     * 按「自己传的」仍可取回，那是他自己的图，不构成泄露）。也不进 {@code isImage()}：
+     * 那一项决定普通下载接口默认 inline 还是 attachment，而这一类的字节永远只从后台
+     * 那个端点出去，inline 与否由它自己写死。扩展名不放行 avif：它只用于取证，
+     * 没必要为一种浏览器支持面还窄的格式多开一条渲染路径。
+     */
+    MODERATION_QUARANTINE("moderation_quarantine", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "jfif"));
 
     private final String code;
     private final Set<String> allowedExtensions;

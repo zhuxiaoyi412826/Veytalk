@@ -48,7 +48,8 @@ cd im-ui; npm run build
 <!-- 无就写「无」。有的话：贴 DDL 或对应 sql/ 脚本路径，并说明——
      ① 全新库是否已被 sql/im_schema.sql 覆盖（schema 必须是超集）；
      ② 已有库如何增量升级（新增 migration，不回头改历史脚本，ALTER 要带幂等护栏）；
-     ③ 是否需要现场执行 / 是否破坏兼容。 -->
+     ③ 是否需要现场执行 / 是否破坏兼容；
+     ④ 已在 `md/SQL变更文档.md` 台账新增一条带版本号的记录（起始 1.0.0，标 ★清除/★增加/★修改）。 -->
 
 无 / 见下方说明。
 
@@ -57,6 +58,7 @@ cd im-ui; npm run build
 - [ ] 已在 `md/CHANGELOG.md` 的「未发布 Unreleased」区登记一条（**本项目硬性约定，最常漏**）。
 - [ ] 改变了既有事实描述的，已同步 `README详细开发指南.md`；动了 `README.md` 门面标题的，已同步它的手写目录锚点。
 - [ ] 一个 PR 只做一件事，没夹带无关的格式化 / 重排。
+- [ ] 动了 `sql/**` 的，已在 `md/SQL变更文档.md` 顶部登记一条带版本号的记录（见 CONTRIBUTING 硬性门槛第 8 条）。
 - [ ] commit 信息符合 `type(scope): 中文描述`（见 CONTRIBUTING「三、Commit 规范」）。
 - [ ] 未提交任何凭据与产物：`.env`、被控端 `config.properties`、密钥、`target/`、`node_modules/`、`dist/`、`electron/release/`、`*.log`、大体积模型。
 - [ ] 合并前已 rebase 到最新 `main` 并重新编译通过。

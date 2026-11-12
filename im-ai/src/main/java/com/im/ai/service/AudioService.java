@@ -55,6 +55,8 @@ public class AudioService {
 
     private final AiProperties properties;
     private final JsonUtil jsonUtil;
+    /** 用量护栏（四期第六批）：ASR/TTS 都是按量计费的模型调用，闸门收在这个出口上 */
+    private final AiGuardService aiGuardService;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -79,13 +81,38 @@ public class AudioService {
     }
 
     /**
+     * 同上，场景按面试 ASR 记（历史调用方保留；聊天转文字请显式传场景，见三参重载）。
+     */
+    public String transcribe(byte[] audioBytes, String format) {
+        return transcribe(audioBytes, format, AiGuardService.SCENE_INTERVIEW_ASR);
+    }
+
+    /**
      * 同上，但允许声明音频容器：聊天语音消息存的是用户上传的原始文件（mp3/m4a 都可能），
      * 拿它去转文字时不能再谎称是 WAV。
      *
+     * <p>护栏在 {@link AiGuardService#checkAllowed} 进、{@link AiGuardService#recordUsage} 出：
+     * 本方法永远跑在带请求上下文的线程上（控制器或 SPI 调用链），所以场景里的封禁/预算检查
+     * 能直接读到登录态。耗时按整次上游调用计，失败也留痕但不扣预算。
+     *
      * @param format 容器名，取 {@link #SUPPORTED_ASR_FORMATS}；不认识的一律按 wav 送并记一条 warn
+     * @param scene  计费场景，取 {@code AiGuardService.SCENE_*}
      */
-    public String transcribe(byte[] audioBytes, String format) {
+    public String transcribe(byte[] audioBytes, String format, String scene) {
         requireAvailable();
+        long userId = aiGuardService.checkAllowed(scene);
+        long begin = System.nanoTime();
+        try {
+            String text = doTranscribe(audioBytes, format);
+            aiGuardService.recordUsage(userId, scene, elapsedMillis(begin), true, null);
+            return text;
+        } catch (RuntimeException e) {
+            aiGuardService.recordUsage(userId, scene, elapsedMillis(begin), false, e.getMessage());
+            throw e;
+        }
+    }
+
+    private String doTranscribe(byte[] audioBytes, String format) {
         if (audioBytes == null || audioBytes.length == 0) {
             // 自定义文案走 (code, message) 构造：枚举文案里没有 {} 占位，传 varargs 会被 format 丢弃
             throw new BusinessException(ResultCode.AI_ASR_FAILED.getCode(), "音频为空，请重新录制");
@@ -162,6 +189,19 @@ public class AudioService {
      */
     public byte[] synthesize(String text) {
         requireAvailable();
+        long userId = aiGuardService.checkAllowed(AiGuardService.SCENE_INTERVIEW_TTS);
+        long begin = System.nanoTime();
+        try {
+            byte[] wav = doSynthesize(text);
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_TTS, elapsedMillis(begin), true, null);
+            return wav;
+        } catch (RuntimeException e) {
+            aiGuardService.recordUsage(userId, AiGuardService.SCENE_INTERVIEW_TTS, elapsedMillis(begin), false, e.getMessage());
+            throw e;
+        }
+    }
+
+    private byte[] doSynthesize(String text) {
         if (text == null || text.isBlank()) {
             throw new BusinessException(ResultCode.AI_TTS_FAILED.getCode(), "朗读内容为空");
         }
@@ -244,6 +284,11 @@ public class AudioService {
     }
 
     // ------------------------------------------------------------------ 内部
+
+    /** nanoTime 差折算毫秒：计时只用单调时钟，不碰 wall clock（改系统时间不能影响计费） */
+    private static long elapsedMillis(long beginNanos) {
+        return (System.nanoTime() - beginNanos) / 1_000_000L;
+    }
 
     private void requireAvailable() {
         if (!available()) {

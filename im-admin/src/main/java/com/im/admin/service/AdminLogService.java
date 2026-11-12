@@ -1,6 +1,7 @@
 package com.im.admin.service;
 
 import com.im.admin.config.AdminProperties;
+import com.im.admin.dto.vo.LogArchiveVO;
 import com.im.admin.dto.vo.LogContentVO;
 import com.im.admin.dto.vo.LogFileVO;
 import com.im.common.api.ResultCode;
@@ -16,13 +17,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * 日志管理：把 logback 落在磁盘上的分档日志安全地读回后台页面（三期）。
@@ -45,8 +53,12 @@ import java.util.Map;
  * 上限走 {@code im.admin.log-tail-max-lines}；关键词过滤发生在尾读窗口内，
  * 语义是「在最近 N 行里找」，这一点在响应的 filterNote 里明说，不让管理员以为搜了全文件。
  *
- * <p>归档文件（带日期的那些）不在本页：一期先管「此刻正在写的六个文件」，
- * 历史回溯本来就该 grep/Select-String 在服务器上做，不该由 web 端代理。
+ * <p>归档文件（带日期的那些）自五期·路线 1 起可以浏览：{@link #archives} 列出某档
+ * 已滚存的 {@code name-yyyy-MM-dd.N.log}，{@link #read} 接受 {@code date + index} 定位到
+ * 具体归档——回传的永远是受格式校验的结构化值而不是文件名本身，路径仍由服务端
+ * 按白名单映射表拼装，{@code ../} 依旧进不了文件系统调用。历史深挖（跨多文件全文检索）
+ * 仍该在服务器上用 grep/Select-String 做，本页只是把「翻某一天的日志」这个高频动作
+ * 从登录服务器降级成点一下。
  */
 @Slf4j
 @Service
@@ -57,6 +69,12 @@ public class AdminLogService {
     private static final int INITIAL_WINDOW_BYTES = 64 * 1024;
     private static final int MAX_WINDOW_BYTES = 8 * 1024 * 1024;
     private static final int DEFAULT_TAIL = 200;
+
+    /** 归档日期参数：只认 yyyy-MM-dd 且按严格日历校验，不接受任何形式的「像日期就行」 */
+    private static final DateTimeFormatter ARCHIVE_DATE =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd").withResolverStyle(ResolverStyle.STRICT);
+    /** 归档文件名：{@code base-yyyy-MM-dd.N.log}，与 logback 的 fileNamePattern 逐字对应 */
+    private static final Pattern ARCHIVE_FILE = Pattern.compile("^(.+)-(\\d{4}-\\d{2}-\\d{2})\\.(\\d+)\\.log$");
 
     /** 日志档位定义：key → (中文名, 相对路径, 是否敏感)。与 logback-spring.xml 的落地布局一一对应 */
     private record Definition(String label, String relPath, boolean sensitive) {
@@ -101,13 +119,62 @@ public class AdminLogService {
     }
 
     /**
+     * 列出某个档已滚存的归档文件（五期·路线 1）。
+     *
+     * <p>只扫该档自己的子目录、只认 {@code base-yyyy-MM-dd.N.log} 形状的文件名，
+     * 其余一概不列。目录不存在（这一档从没跨过天）回空列表，不是错误。
+     * 排序按日期倒序、同日期按序号正序：前端下拉框里最近的一天在最上面。
+     */
+    public List<LogArchiveVO> archives(String key) {
+        Definition def = CATALOG.get(key == null ? "" : key);
+        if (def == null) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "未知的日志档：" + key);
+        }
+        Path root = logRoot();
+        String relDir = dirOf(def.relPath());
+        Path dir = safeResolve(root, relDir.isEmpty() ? "." : relDir);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        String base = baseOf(def.relPath());
+        List<LogArchiveVO> result = new ArrayList<>();
+        try (Stream<Path> files = Files.list(dir)) {
+            files.forEach(file -> {
+                String name = file.getFileName().toString();
+                Matcher matcher = ARCHIVE_FILE.matcher(name);
+                // 前缀必须是本档的 base：同一目录里可能滚着别的档（目前只有根目录有这种情况，
+                // 但规则不按现状写死），不匹配的直接跳过
+                if (!matcher.matches() || !base.equals(matcher.group(1))) {
+                    return;
+                }
+                result.add(LogArchiveVO.builder()
+                        .key(key)
+                        .date(matcher.group(2))
+                        .index(Integer.parseInt(matcher.group(3)))
+                        .fileName(name)
+                        .sizeBytes(sizeOf(file))
+                        .lastModified(lastModified(file))
+                        .build());
+            });
+        } catch (IOException e) {
+            log.warn("[日志管理] 归档清单扫描失败 key={}: {}", key, e.getMessage());
+            throw new BusinessException(ResultCode.BUSINESS_ERROR, "归档清单读取失败：" + e.getMessage());
+        }
+        result.sort(Comparator.comparing(LogArchiveVO::getDate).reversed()
+                .thenComparing(LogArchiveVO::getIndex));
+        return result;
+    }
+
+    /**
      * 尾读一个日志档。
      *
      * @param key     白名单逻辑标识
      * @param tail    期望行数，null 取 200；服务端夹到 {@code [1, im.admin.log-tail-max-lines]}
      * @param keyword 可选关键词，在最近 N 行里做不区分大小写的包含匹配
+     * @param date    归档日期（yyyy-MM-dd），null/空 读当天活动文件（五期·路线 1）
+     * @param index   同一天内的分段序号，仅随 date 生效；null 取 0
      */
-    public LogContentVO read(String key, Integer tail, String keyword) {
+    public LogContentVO read(String key, Integer tail, String keyword, String date, Integer index) {
         Definition def = CATALOG.get(key == null ? "" : key);
         if (def == null) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "未知的日志档：" + key);
@@ -115,12 +182,15 @@ public class AdminLogService {
         int maxLines = (int) Math.max(1, adminProperties.getLogTailMaxLines());
         int want = tail == null ? DEFAULT_TAIL : Math.min(Math.max(1, tail), maxLines);
 
+        String relPath = TextUtil.isBlank(date) ? def.relPath() : archiveRelPath(def, date, index);
         Path root = logRoot();
-        Path file = safeResolve(root, def.relPath());
+        Path file = safeResolve(root, relPath);
         if (!Files.isRegularFile(file)) {
-            return LogContentVO.builder().key(key).relPath(def.relPath()).exists(false)
+            return LogContentVO.builder().key(key).relPath(relPath).exists(false)
                     .lines(List.of()).returnedLines(0).truncated(false)
-                    .filterNote("该文件尚未生成（这一档还没有过输出）").build();
+                    .filterNote(TextUtil.isBlank(date)
+                            ? "该文件尚未生成（这一档还没有过输出）"
+                            : "这个归档不存在（可能已被保留期清理，或当天没产生过这一档）").build();
         }
         try {
             TailResult tailResult = readTail(file, want);
@@ -135,7 +205,7 @@ public class AdminLogService {
             }
             return LogContentVO.builder()
                     .key(key)
-                    .relPath(def.relPath())
+                    .relPath(relPath)
                     .exists(true)
                     .lines(lines)
                     .returnedLines(lines.size())
@@ -149,6 +219,38 @@ public class AdminLogService {
     }
 
     /* ==================== 内部 ==================== */
+
+    /**
+     * 拼归档相对路径：{@code dir/base-yyyy-MM-dd.N.log}。
+     *
+     * <p>日期先过严格日历校验（{@code 2026-13-45} 这种「像日期」的直接 400），
+     * 序号夹到 0~9999；拼出来的串与 logback fileNamePattern 同构，再经 safeResolve
+     * 的越界断言落盘——三层都不信外界。
+     */
+    private String archiveRelPath(Definition def, String date, Integer index) {
+        try {
+            LocalDate.parse(date.trim(), ARCHIVE_DATE);
+        } catch (Exception e) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "归档日期格式必须是 yyyy-MM-dd");
+        }
+        int seg = index == null ? 0 : index;
+        BusinessException.throwIf(seg < 0 || seg > 9999, ResultCode.BAD_REQUEST, "归档分段序号越界");
+        String relDir = dirOf(def.relPath());
+        return (relDir.isEmpty() ? "" : relDir + "/")
+                + baseOf(def.relPath()) + "-" + date.trim() + "." + seg + ".log";
+    }
+
+    /** {@code SQL/slow-sql.log} → {@code SQL}；{@code info.log} → 空串（根目录） */
+    private String dirOf(String relPath) {
+        int slash = relPath.lastIndexOf('/');
+        return slash < 0 ? "" : relPath.substring(0, slash);
+    }
+
+    /** {@code SQL/slow-sql.log} → {@code slow-sql}（归档名前缀，与 logback pattern 的 %d 之前那段对应） */
+    private String baseOf(String relPath) {
+        String name = relPath.substring(relPath.lastIndexOf('/') + 1);
+        return name.endsWith(".log") ? name.substring(0, name.length() - 4) : name;
+    }
 
     /** 尾读结果：行集 + 窗口是否没覆盖到文件头（还有更早内容没读到） */
     private record TailResult(List<String> lines, boolean windowTruncated) {

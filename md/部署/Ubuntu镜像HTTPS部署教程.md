@@ -174,7 +174,7 @@ bash scripts/bootstrap.sh
 
 全新建库：`bootstrap.sh` 在仓库里跑时会自动把 `sql/im_schema.sql`、`sql/im_data.sql`
 复制成 `sql-init/01_im_schema.sql`、`sql-init/02_im_data.sql`（数字前缀保证建表先于插数据）。
-**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 37 条
+**建库完成后建议注释掉 compose 里 `./sql-init` 那行挂载并清空目录**——`01_im_schema.sql` 开头有 43 条
 `DROP TABLE IF EXISTS`，一旦卷被重建就会静默清库。
 
 ---
@@ -192,36 +192,60 @@ DNS-01 不用暂露 80、不用停容器，还能给 `*.example.com` 签一张�
 ```bash
 sudo apt install -y certbot python3-certbot-dns-cloudflare     # DNS 插件按你的服务商换
 certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/cf.ini \
-  -d im.example.com -d admin.example.com -d www.example.com -d live.example.com
+  -d im.example.com -d admin.example.com -d www.example.com
 
 # certbot 产物在宿主机 /etc/letsencrypt/live/，拷进部署包目录供 nginx 只读挂载
-sudo cp -r /etc/letsencrypt/live/* /opt/im-docker/certs/live/
+# ★ 必须带 -L：live/<域名>/fullchain.pem 是指向 ../archive/ 的软链接，而容器里没有 archive/，
+#   cp -r 拷过去就是悬空链接 → nginx `[emerg] cannot load certificate` 起不来
+sudo cp -rL /etc/letsencrypt/live/* /opt/im-docker/certs/live/
 sudo chmod -R a+rX /opt/im-docker/certs
 ```
 
+> ★ 域名清单以「conf 里实际有 443 server 块」为准：im / admin / www 三个必须有。`live.` 只出现在 80 的
+> `server_name` 上（推流口 8088 默认注释、不带 TLS），现在不需要证书；少签一个 www 的结果不是「那一站没证书」，
+> 而是 nginx 整个起不来。
+>
 > certbot 生成的自签兜底会被这里覆盖。换完真证书后重载：`docker compose exec nginx nginx -s reload`。
-> 续期不会自动重载 nginx，配一个 deploy-hook（指南 §8.4 有）。
+> 续期链路必须**先拷再 reload**：timer 只更新宿主机那份，容器里的副本不会自己变，deploy-hook 只写 reload 等于没配
+> （完整 hook 与速率限制注意事项见指南 §8.4）。
 
-### 方案 B（内网 / 本地联调）：mkcert 生成本机可信证书
+### 方案 B（内网 / 本地联调，★ 推荐）：本项目自带的两级 CA
 
-自签名浏览器会告警；想让本地/内网**绿锁**，用 mkcert 建一个自己的根 CA 并信任它：
+自签浏览器一定告警，而告警的根因是「颁发者不受信任」不是「30 天太短」。正规做法是**自己当一个根 CA**：
+客户端只信任根（装一次管 10 年），叶子由根现签、30 天自动换 —— 换证书对客户端完全无感。
+仓库里两个脚本就是把这套流程做完的（完整参数与原理见 [`Docker部署指南.md` §8.4](Docker部署指南.md)）：
 
 ```bash
-sudo apt install -y libnss3-tools
-# 装 mkcert（去 releases 下二进制，或 git clone 后 go build）
-mkcert -install                                   # 在客户端机器上信任本地根 CA
-mkcert -cert-file im.example.com.pem -key-file im.example.com-key.pem \
-  im.example.com admin.example.com www.example.com live.example.com
+# 在【签发机】上跑（开发机 Git Bash / WSL / 一台内网 Linux）。★ 不在部署机上跑：根私钥不能和 nginx 同机
+bash scripts/gen-selfca.sh --ip 192.168.83.130              # 建根（已存在则复用）+ 按 .env 三个域名各签一张 30 天叶子
 
-# 放到 nginx 引用的路径
-mkdir -p /opt/im-docker/certs/live/im.example.com
-cp im.example.com.pem /opt/im-docker/certs/live/im.example.com/fullchain.pem
-cp im.example.com-key.pem /opt/im-docker/certs/live/im.example.com/privkey.pem
+# 根证书只一次，装到每台内网测试机/手机（★ 只有 .pem 能离开这台机器，rootCA.key 绝不外传）
+#   Windows : certutil -addstore -f root rootCA.pem
+#   iOS     : 装描述文件后还要去 设置→通用→关于本机→证书信任设置 把开关拨开，不拨等于没装
+#   Android : 设置→安全→加密与凭据→安装证书→CA 证书
+
+bash scripts/push-cert.sh ubuntu@192.168.83.130 /opt/im-docker          # 推叶子 + 远端 nginx reload
+bash scripts/gen-selfca.sh --install-cron ubuntu@192.168.83.130 /opt/im-docker   # 每天一次，剩余不足 10 天才重签
+```
+
+> 没真域名就在**客户端**的 hosts（Windows 的 `C:\Windows\System32\drivers\etc\hosts`）加
+> `192.168.83.130 im.test admin.test www.test`，`.test` 是保留 TLD、不会撞公网；或用 nip.io 这类泛解析域名。
+> ★ 记得带 `--ip <部署机IP>`：手机按 IP 直连时，SAN 里没这个 IP 就一定是名称不匹配。
+> 推过来的证书旁会留一个 `certs/.managed-by-push`，`bootstrap.sh` ⑤ 见到它就不再自签（否则重跑一次 bootstrap 就把真证书盖回了自签）。
+
+想要外部工具：`mkcert` 是同一套思路（`mkcert -install` 建的也是本地根），代价是多一个依赖（Go + libnss3-tools）、
+根与叶子同机、续期得自己记着：
+
+```bash
+sudo apt install -y libnss3-tools        # 去 releases 下 mkcert 二进制，或 git clone 后 go build
+mkcert -install                          # 在客户端机器上信任本地根 CA
+mkcert -cert-file im.test.pem -key-file im.test-key.pem im.test admin.test www.test
+mkdir -p /opt/im-docker/certs/live/im.test
+cp im.test.pem /opt/im-docker/certs/live/im.test/fullchain.pem
+cp im.test-key.pem /opt/im-docker/certs/live/im.test/privkey.pem
 ```
 
 > 三个站共用一张多 SAN 证书也行：把同一对 pem 拷进每个 `certs/live/<域名>/` 即可。
-> 用「本地虚拟域名」（`im.test` 等）联调时，在**客户端** `/etc/hosts`（Windows 的
-> `C:\Windows\System32\drivers\etc\hosts`）加 `127.0.0.1 im.test admin.test www.test`，`.test` 是保留顶级域、不会撞公网。
 
 ### 方案 C：云厂商 / 已有证书
 
@@ -321,7 +345,103 @@ echo | openssl s_client -connect im.example.com:443 -servername im.example.com 2
 
 ---
 
-## 十、日常运维
+## 十、数据库初始化（首次建库与失败排查）
+
+> ★ 这一节为什么单开：`docker compose ps` 四个全绿**不等于库建好了**。空库不影响**任何** healthcheck（mysql
+> 自己只看能不能连上），四个容器照常 healthy、`doc.html` 照常能翻，**直到第一次有人登录**才炸出
+> `Table 'im_db.im_user' doesn't exist`。而本篇 §三 教的正是「只把 `Docker/` 这一层拷上服务器」，
+> 恰好是 SQL 最容易整块漏掉的那种做法。本节把它拆成「判据 → 两条导入路线 → 失败对照表 → 收尾护栏」。
+
+### 10.1 先判 SQL 到没到位（一分钟，只读）
+
+```bash
+cd /opt/im-docker
+ls -l sql-init/*.sql            # 只有 .gitkeep、或干脆 No such file → 就是没到位
+[ -d ../sql ] && echo "有 ../sql，bootstrap.sh 会自动拷" || echo "没有 ../sql，得手动补"
+# 卷里到底有没有表（期望 41，不是 0）
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"im_db\""'
+```
+
+为什么会漏：`bootstrap.sh` 那一步包在 `if [[ -d ../sql ]]` 里。在仓库里跑（`cd 仓库/Docker`）能命中 `../sql`，
+自动拷成 `01_/02_`；`scp -r Docker/*` 只搬一层时该判断为假，**一声不吭跳过，不报也不 warn**。
+
+> 至于「用 SQL 客户端手动连进去执行」那一条：本形态下 **3306 没发布到宿主机**（§〇 的端口约束），外部客户端根本
+> 连不上。要逐条手贴就进容器：`docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" im_db'`。
+> 确实要用 Navicat/DBeaver 就得临时发布 `127.0.0.1:3306:3306` + SSH 隧道，**用完把那一行注释掉**。
+
+### 10.2 路线 A（首选，但只在**卷还空**时有效）：挂 `initdb.d` 自动导
+
+适用条件：刚 `up -d` 就发现 `sql-init/` 是空的（卷里还没东西），或者是可以丢数据的试用环境。卷一旦非空就改走 10.3。
+
+```bash
+# SQL 没到位先手动补（从开发机 scp 上来，或 git clone 仓库后拷）
+scp sql/im_schema.sql sql/im_data.sql deploy@<服务器IP>:/opt/im-docker/
+mv im_schema.sql sql-init/01_im_schema.sql
+mv im_data.sql   sql-init/02_im_data.sql
+# ★ 前缀 01_/02_ 是字典序：建表必须早于插数据；后缀只能是 .sql/.sh/.sql.gz，其他名字被静默忽略
+docker compose up -d mysql
+docker compose logs -f mysql      # 看得见 01_im_schema.sql 被执行的过程才算真导入
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SHOW TABLES FROM im_db"'   # 目视一遍表名
+docker compose up -d               # ★ 数对了（41）再起全栈，别只看 ps 四个绿
+```
+
+补完 SQL 时 mysql 已经跑过一轮（卷非空）的话，`initdb.d` 不会再跑：试用环境可以 `docker compose down -v`
+删卷重来（★ 数据全没），正式库一律走 10.3。
+
+`im_schema.sql` 自带 `CREATE DATABASE IF NOT EXISTS im_db` 与 `USE im_db;`，`im_data.sql` 也自带 `USE`，
+所以不需要额外 `--database` 参数。
+
+### 10.3 路线 B（卷已非空、或不能删）：`cp` 进容器再 `-e "source"`
+
+`initdb.d` **只在数据目录为空时跑一次**，`docker compose restart mysql` 不会重放。已起过一轮的库走这条：
+
+```bash
+docker compose cp sql-init/01_im_schema.sql mysql:/tmp/01_im_schema.sql
+docker compose cp sql-init/02_im_data.sql   mysql:/tmp/02_im_data.sql
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 im_db -e "source /tmp/01_im_schema.sql"'
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 im_db -e "source /tmp/02_im_data.sql"'
+docker compose exec mysql sh -c 'rm -f /tmp/01_im_schema.sql /tmp/02_im_data.sql'
+bash scripts/clear-perm-cache.sh        # ★ 全量建库会新插 im_permission / im_role_permission，导完必跑（症状见 10.4 倒第二行）
+```
+
+★ 两条禁令：
+
+- **不能用管道**：`docker exec -i im-mysql mysql -uroot -p<密码> im_db < ./02_im_data.sql` 这种写法会把中文与 emoji
+  **静默刷成 `?`**（命令返回 0、行数还都对得上，事后极难发现）；`cat x.sql | docker compose exec -T mysql …` 同理，heredoc 同理。
+- **`scripts/import-sql.sh` 在这里用不了**：它 grep 到 `^\s*DROP\s+TABLE` 就 `exit 3`，而 `im_schema.sql` 正是它拦的对象
+  （设计意图是防你把全量建库脚本灌进生产库）。空库手工补建表是它唯一放行不了的合理场景，**不要为了顺手去改那道护栏**。
+
+> 密码一律写成 `sh -c '… -p"$MYSQL_ROOT_PASSWORD" …'` 让**容器内**的 shell 展开：compose 不对 `exec` 的命令行做插值，
+> 而 `.env` 不进宿主 shell 环境，所以宿主侧直接写 `-p"${MYSQL_ROOT_PASSWORD}"` 会展开成**空串**，症状是「密码明明对，
+> 却回 Access denied / 反复让你输密码」。
+
+### 10.4 如果失败：按症状定位
+
+| 症状 | 真正原因 | 处置 |
+|---|---|---|
+| 四个容器全 healthy，**一登录就** `Table 'im_db.im_user' doesn't exist`；数表为 0 | `sql-init/` 是空的（§三 只拷了一层，`bootstrap.sh` 静默跳过） | 回 10.1 拿判据，卷空走 10.2（补文件后 `docker compose down -v && up -d`，★ 仅试用环境），卷非空走 10.3 |
+| `Unknown database 'im_db'` / `Access denied for user 'im'`，im-server 无限重启 | ① 建库压根没跑；② `.env` 与 `conf/im.env` 同一个密码不一致 | 先数表区分这两种；改过 `.env` 里的密码必须**重跑** `bash scripts/bootstrap.sh`（它负责把凭据灌进 `conf/im.env`），再 `docker compose up -d` **重建**（`restart` 不重读 `env_file`） |
+| 只导了 `02` 就报「表不存在」，或只有部分表 | 文件名前缀顺序错（`initdb.d` 按字典序执行） | 改成 `01_im_schema.sql` / `02_im_data.sql`；后缀不是 `.sql`/`.sh`/`.sql.gz` 会被**静默忽略** |
+| `docker compose logs mysql` 里看不见 SQL 被执行 | ① 卷已非空（`initdb.d` 只跑一次）；② 文件没挂进去 | 走 10.3；或确认 compose 里 `./sql-init:/docker-entrypoint-initdb.d:ro` 未被注释 |
+| 中文、表注释、种子数据里的中文变成 `?` | 用了管道/heredoc 导入；或服务端字符集退回 latin1 | 重导走 10.3；复核 `SELECT @@character_set_server, @@collation_server;` 应为 `utf8mb4` / `utf8mb4_general_ci`，抽查 `SELECT name FROM im_db.im_gift LIMIT 3;` |
+| 改了 `sql-init/` 里的 SQL，`restart mysql` 没生效 | `initdb.d` 只在空卷跑一次 | 10.3 手工导；试用环境才可 `down -v` 重建（★ 数据全没） |
+| `-p"$MYSQL_ROOT_PASSWORD"` 回 Access denied 而密码是对的 | 变量被**宿主 shell** 展开成空串 | 整个命令放进 `sh -c '…'` 让容器内展开（10.3 末的注） |
+| 库建好了、后台菜单还是旧的，点进去 403 | 权限缓存 `im:auth:perm:{userId}` TTL 30 分钟且**登录不刷新** | `bash scripts/clear-perm-cache.sh`，删完复跑一次确认残留 = 0（极易误判成代码 bug） |
+| 这些命令在 Windows PowerShell 里跑不了（`chmod` / `bash` / 服务名解析） | 本节命令全部在**部署机（Ubuntu）**上跑 | 先 `ssh deploy@<服务器IP>` 再执行；只有 `scp` 那几条在开发机跑 |
+
+### 10.5 收尾护栏（建完库必做，30 秒）
+
+```bash
+# 把挂载行注释掉：防止将来卷被重建（down -v / 换机器 / 改了 name:）时这 43 条 DROP TABLE 静默清库
+grep -n 'sql-init' docker-compose.yml            # 先看到它在 mysql 服务的 volumes 下
+vi docker-compose.yml                            # 注释 - ./sql-init:/docker-entrypoint-initdb.d:ro
+rm -f sql-init/*.sql                             # 目录里只留 .gitkeep
+docker compose up -d mysql                       # ★ 改了 compose 要 up -d 才生效（restart 不重读定义）
+```
+
+---
+
+## 十一、日常运维
 
 ### 升级 / 回滚后端镜像
 
@@ -361,7 +481,7 @@ sudo systemctl enable --now im-docker
 
 ---
 
-## 十一、常见坑速查
+## 十二、常见坑速查
 
 | 症状 | 根因 / 处置 |
 |---|---|
@@ -374,10 +494,11 @@ sudo systemctl enable --now im-docker
 | 观众端直播黑屏 403，推流/列表正常 | `IM_LIVE_SIGN_SECRET` 与 nginx `secure_link_md5` 不一致（`.env` 只填一次即为防这个） |
 | 换镜像 tag 后行为没变 | 覆盖用了同名 tag。升级到新版本号，或 `docker compose pull` 确认拉到新 digest |
 | `docker compose down -v` | ★ 一字之差清库。systemd 的 ExecStop 里特意没有 `-v` |
+| **四个容器全 healthy，但登录就报 `Table 'im_db.im_user' doesn't exist`** | 只拷了 `Docker/` 一层上服务器，`bootstrap.sh` 的 `if [[ -d ../sql ]]` 不成立，`sql-init/` 里根本没 SQL，于是建出**空库**（不报不 warn）。按 **§十** 走：`ls -l sql-init/*.sql` 拿判据 → 数表（期望 41）→ 卷空走 10.2、卷非空走 10.3 |
 
 ---
 
-## 十二、一页速查（生产全新机，最小路径）
+## 十三、一页速查（生产全新机，最小路径）
 
 ```bash
 # 1 装 docker
@@ -401,4 +522,6 @@ docker compose pull && docker compose up -d
 
 # 7 验证
 docker compose ps && bash scripts/health.sh && curl -kI https://im.example.com
+# ★ 还要数表（四个全绿不等于库建好了，见 §十）：期望 41
+docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=\"im_db\""'
 ```

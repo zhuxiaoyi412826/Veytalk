@@ -4,6 +4,7 @@ import { useConversationStore } from './conversation'
 import { useFriendStore } from './friend'
 import { useReportStore } from './report'
 import { useAnnounceStore } from './announce'
+import { useAgreementStore } from './agreement'
 
 /**
  * 退出登录的完整流程。
@@ -28,4 +29,6 @@ export async function signOut() {
   // 待确认公告与那个「本会话弹过通知」的内存集合同样按账号存在：本地已确认记录是按 userId 分键的，
   // 不清只会让下一个人看一眼不该给他的公告栏
   useAnnounceStore().reset()
+  // 协议弹窗可能正开着：不清掉，下一个人会先被上一份待签清单拦住（本地跳过标记是按设备存的，不按账号）
+  useAgreementStore().reset()
 }

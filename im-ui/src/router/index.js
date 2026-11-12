@@ -20,6 +20,19 @@ const routes = [
     component: () => import('@/views/Login.vue'),
     meta: { public: true, title: '登录' }
   },
+  {
+    path: '/legal',
+    redirect: '/legal/terms',
+    meta: { public: true }
+  },
+  // 法定文本公示页：公开整屏页，注册页勾选行、应用内设置页、官网页脚都指向这里。
+  // 必须 public —— 「已公示」的前提是没登录的人也能打开全文。
+  {
+    path: '/legal/:code',
+    name: 'legal',
+    component: () => import('@/views/LegalView.vue'),
+    meta: { public: true, title: '法律文本' }
+  },
   // 网页端扫码登录 + 文件传输助手：公开整屏页，本机出码轮询，登录成功后跳进助手会话
   {
     path: '/transfer',

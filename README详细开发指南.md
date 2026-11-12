@@ -4,6 +4,8 @@
 
 | 文档                                                         | 内容                                                         |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [`md/项目长期遵守规范.md`](md/项目长期遵守规范.md)         | **长期规矩的唯一出处**（铁律 / 数据库与缓存 / 后端架构 / 前端交互 / 构建与命令行 / 文档纪律 / 排查方法论 / 实测数字基线 / 已废弃口径清单）。开工前先读；**要立或改规矩只改这一份文件** |
+| [`md/SQL变更文档.md`](md/SQL变更文档.md)                   | **SQL 变更台账**（起始版本 1.0.0）。动过 `sql/**` 就必须新增一条带版本号的记录，标注 ★清除 / ★增加 / ★修改 与「是否已并回两份全量脚本」 |
 | [`md/项目启动流程.md`](md/项目启动流程.md)                   | 从零跑起来的分步流程（对应本文「三 ~ 七」章）                |
 | [`md/架构与请求链路图.md`](md/架构与请求链路图.md)           | 三层架构、HTTP / WebSocket 链路、登录鉴权、文件上传下载、远程控制、AI、直播，以及**举报与后台链路（第十二节）**等专项时序图 |
 | [`md/多端入口与缓存全链路图.md`](md/多端入口与缓存全链路图.md) | 四端入口（手机浏览器 / 安卓 APK / PC 浏览器 / Electron，另加第五个入口管理后台 `im-admin-ui`）+ 端侧 IndexedDB·本地 SQLite·服务端 L1 Caffeine + L2 Redis + L3 MySQL 全链路 |
@@ -157,7 +159,7 @@ WS 协议通信，没有任何编译期依赖，所以能单独拷走运行。
 
 | 依赖 | 何时需要 | 说明 |
 |---|---|---|
-| MinIO | 想用对象存储而非本地磁盘时 | ★ `im.file.storage` 的默认值是 **`minio`**（`application.yml` L370），而 `MinioFileStorage` 连不上桶会抛 `IllegalStateException` 让启动 fail-fast。因此**要么装 MinIO（不需额外设变量），要么显式设 `IM_FILE_STORAGE=local`**（文件落 `${user.home}/im-files`），两个都不做后端起不来 |
+| MinIO | 想用对象存储而非本地磁盘时 | ★ `im.file.storage` 的默认值是 **`minio`**（`application.yml` 里 `storage: ${IM_FILE_STORAGE:minio}` 那一行），而 `MinioFileStorage` 连不上桶会抛 `IllegalStateException` 让启动 fail-fast。因此**要么装 MinIO（不需额外设变量），要么显式设 `IM_FILE_STORAGE=local`**（文件落 `${user.home}/im-files`），两个都不做后端起不来 |
 | ffmpeg | 直播推流 / 远程控制 H.264 硬件编码 | Electron 桌面客户端已内置（`electron/bin`）；被控端 Agent 与本机自测直播需本机可执行 `ffmpeg`（缺失时远控自动回落 JPEG，直播则无法推流） |
 | Android Studio + SDK | 打包安卓 APK 时 | Capacitor 方案，见 [`md/打包/打包为EXE和Android指南.md`](md/打包/打包为EXE和Android指南.md) |
 
@@ -239,8 +241,8 @@ export MYSQL_PASSWORD=your-password
 
 | 脚本 | 作用 | 规模 | 重跑安全性 |
 |---|---|---|---|
-| `im_schema.sql` | 建库 + 建表 + 索引 + 虚拟生成列 | `im_db` 库、**34 张表**（分属 10 个模块） | ⚠️ 头部 `DROP TABLE` 会清空数据，**仅限全新库** |
-| `im_data.sql` | 灌演示种子数据 | 写入 **16 张表**，其余 18 张建好即空 | ✅ 只删自己的种子 ID 段，**可安全重跑** |
+| `im_schema.sql` | 建库 + 建表 + 索引 + 虚拟生成列 | `im_db` 库、**43 张表**（分属 10 个模块） | ⚠️ 头部 `DROP TABLE` 会清空数据，**仅限全新库** |
+| `im_data.sql` | 灌演示种子数据 | 写入 **17 张表**，其余 26 张建好即空 | ✅ 只删自己的种子 ID 段，**可安全重跑** |
 
 > ⚠️ **`im_schema.sql` 头部是 `DROP TABLE IF EXISTS` + 重建，重跑一次就会清空全库数据**。
 > 它的「幂等」指的是重复执行得到同一套表结构，不是「不会动你的数据」。
@@ -260,32 +262,33 @@ mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
 
-### 34 张表分属 10 个模块
+### 43 张表分属 10 个模块
 
 | 模块 | 表 |
 |---|---|
-| 用户权限与钱包（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` `im_user_wallet` `im_gift` `im_wallet_transaction` |
+| 用户权限、钱包与法定文本（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` `im_user_wallet` `im_gift` `im_wallet_transaction` **`im_agreement` `im_user_agreement`** |
 | 好友（im-friend） | `im_friend` `im_friend_request` |
 | 会话（im-conversation） | `im_conversation` `im_conversation_member` |
 | 消息（im-message） | `im_message` `im_message_read` `im_message_delete` `im_message_reaction` `im_message_vote` `im_message_essence` `im_message_favorite` |
 | 群组（im-group） | `im_group` `im_group_member` `im_group_join_request` `im_group_robot` |
-| 文件（im-file） | `im_file` |
+| 文件（im-file） | `im_file` `im_moderation_log` |
 | 远程控制（im-remote） | `im_remote_device` `im_remote_session` `im_remote_audit_log` |
-| AI 面试（im-ai） | `im_interview_session` `im_interview_message` `im_interview_event` |
-| 直播（im-live） | `im_live_room` `im_live_video` `im_gift_record` |
-| 管理后台（im-admin） | `im_report` |
+| AI 面试与护栏（im-ai） | `im_interview_session` `im_interview_message` `im_interview_event` `im_ai_usage` `im_ai_guard` |
+| 直播与内容板块（im-live） | `im_live_room` `im_live_video` `im_gift_record` `im_article` |
+| 管理后台（im-admin） | `im_report` `im_config` `im_sensitive_word` `im_announcement` |
 
 > 消息模块那四张 `im_message_*` 附属表都是「标记 / 互动」的载体，**唯一键按可见维度选**：Reaction / 投票 / 收藏挂人（一人一行、各人可见范围不同），精华挂消息（一群一行、全群共享）。逐表字段与选型理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §7.4 ~ §7.7。
 
 ### `im_data.sql` 灌了哪些演示数据
 
 - **3 个账号**（密码统一 `123456`）：`admin`（超管，持全部权限点；`user_id=1000`、绑 `admin` 角色）/ `alice`（userId 1001）/ `bob`（userId 1002）
-- **4 个角色 + 11 个权限点 + 21 条角色权限绑定**（admin 全量 11 点；user 除「撤回任意消息」「系统管理」外 5 点；moderator 2 点；operator 3 点）；另有 4 条用户角色绑定（admin、alice、bob 及两个后台示范角色挂载）
+- **4 个角色 + 25 个权限点（101~125）+ 35 条角色权限绑定**（admin 全量 25 点，6001~6025；user 除「撤回任意消息」「系统管理」与后台各点外 5 点，6101~6105；moderator 2 点；operator 3 点）；另有 5 条用户角色绑定（admin、alice、bob 及两个后台示范角色挂载）
+- **三份法定文本的 v1 正文**（`im_agreement` id 1301~1303，均为已发布态）：用户协议与隐私政策必签、服务条款可拒。**同意留痕表一行不种**——伪造的演示证据比没有证据更糟（逐列与理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §十六）
 - **alice ↔ bob 一对好友**（双向 2 行）+ 1 条已同意的历史申请
 - **1 个单聊会话**：3 条消息（seq 1~3）+ 送达/已读回执（bob 留 1 条未读，用于演示未读角标）
 - **4 场 AI 面试演示会话**（id 2301~2304）：覆盖 status 四种取值（进行中 / 正常结束 / 违规达阈值强制结束 / 未完成），含逐轮问答与违规事件流水，计数列与事件流水严格对账
 
-> 其余 **18 张表**（消息附属五表、群组四表、文件、远程三表、直播两表、钱包流水与送礼流水、举报工单）**建好即空**，运行期由业务写入，脚本不预置任何数据。
+> 其余 **26 张表**（消息附属五表、群组四表、文件与审核命中两表、远程三表、AI 护栏两表、直播与文章四表（房间 / 短视频 / 送礼流水 / 文章）、后台工单与配置四表、钱包账本 `im_wallet_transaction`、**同意留痕 `im_user_agreement`**）**建好即空**，运行期由业务写入，脚本不预置任何数据。
 
 > ⚠️ **PowerShell 5.1 不要用 `<` 重定向导入 SQL**：它不识别 `<`（报
 > *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
@@ -310,7 +313,7 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 ### 已有库的增量升级
 
-本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
+本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 与本批的 `migration_agreement.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
 
 | 脚本 | 引入的变更 | 不跑会怎样 |
 |---|---|---|
@@ -321,6 +324,9 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 | `migration_user_ban_duration.sql` | 后台四期·第三批：`im_user.disable_until` 列 + `idx_disable_until` 索引（**本批唯一 DDL**，零 RBAC 改动、因此不需清权限缓存） | ★ **不是「少了限时封禁」而是整条登录链路一起挂**：实体 `User` 带上这一列后 MyBatis-Plus 生成的 SELECT 清单就含它，库里没有就报 `Unknown column 'disable_until'`（登录校验、用户列表、举报处置都走这张表）。MySQL 没有 `ADD COLUMN IF NOT EXISTS`，**不能无脑重跑**（重跑报 1060 且会中断后面那条 `ADD KEY`），先跑脚本第 1 段的 `information_schema` 只读预检 |
 | `migration_admin_system_config.sql` | 后台四期·第四批：三张新表 `im_config` / `im_sensitive_word` / `im_announcement` + 权限点 118 `system:announcement`（与 admin 绑定） | 三张表都只被 im-admin 读，**没跑就是「这一屏不能用」而不是功能残缺**：配置页拿不到覆盖信息、在线词库读不到（**文件词库照常生效、聊天不受影响**）、公告页与聊天端补拉都报表不存在；后端不会以失败启动（读取失败只记 warn、按当前运行态接着跑）。★ **与上一批相反，本批必须清一次 `im:auth:*` 权限缓存**（新开了权限点 118，`PermissionProviderImpl` 按用户缓存 30 分钟且登录动作不刷新），不清就是「插了权限行却处处 1003」。建表段用 `CREATE TABLE IF NOT EXISTS`、权限段全 `INSERT IGNORE`，可重跑 |
 | `migration_admin_wallet_interview_group_message.sql` | 后台四期·第五批：四个权限点 119~122（`system:wallet` / `system:interview` / `system:group:manage` / `system:message:manage`）+ admin 绑定 6019~6022。**★ 全批零 DDL**：四屏读的全是早已存在的业务表（`im_user_wallet` / `im_wallet_transaction` / `im_gift` / `im_gift_record` / `im_interview_*` / `im_group*` / `im_message`），连「这条是后台撤的」那个问责标记都没补列——它写在 `im_message.extra` 这个 JSON 列的 `recalledByAdmin` 键上 | 四个新页面整页 1003（HTTP 仍是 200），**其余后台一切如旧**；`im-admin-ui` 的菜单与路由守卫按同一个点判，所以表现是「菜单自动少四项」而不是四项全灰。★ 与第四批同一口径：**跑完必须清一次 `im:auth:*`**（新开四个点，`PermissionProviderImpl` 按用户缓存 30 分钟且登录动作不刷新）。权限段全 `INSERT IGNORE`、可重跑；但脚本第 0 段那条「119~122 / 6019~6022 主键位是否空闲」的只读预检**不能跳**：这几个号若被本库自己占用过（例如手工插过别的点），`INSERT IGNORE` 会静默跳过那一行，得到「跑了但没生效」这种最难查的现象 |
+| `migration_moderation_log.sql` | 后台五期·路线 2：新表 `im_moderation_log`（图片审核命中流水，与 `MODERATION/moderation.log` 双写）。**★ 零权限变更**（后台那屏复用既有的 `system:log` 115） | 不跑什么都不会坏：建表用 `CREATE TABLE IF NOT EXISTS`，而后端启动不预检表存在，命中上报的落库那一路整体包 try/catch **静默降级**（审计文件照写、接口照回 200，只多一条 WARN）。唯一后果是后台「审核记录」页永远查不到数据。排查时记住一句：**表比 `moderation.log` 少行是设计不是事故**（没建表那段时间的命中只在文件里） |
+| `migration_moderation_evidence.sql` | 本轮（审核记录查看图片）：给 `im_moderation_log` 加 `evidence_file_id`（BIGINT NULL，指向隔离区那行 `im_file`）。★ 同样**零权限变更、不需清 `im:auth:*`**，只需重启后端 | ⚠️ **与上面那张表必须按顺序一起跑**，只跑建表这一份是最坑的中间态：命中上报照落库（MyBatis-Plus 只把非 null 字段写进 `INSERT`，新建时这一列总是 null，所以连 `Unknown column` 都报不出来），碎的只有挂证据那次 `UPDATE`，而发送端对它是尽力而为——表现为后台**每一行都显示「无图」**、隔离区一张也存不下。验一句：`DESC im_moderation_log;` 看得到 `evidence_file_id` 才算升完 |
+| `migration_agreement.sql` | 本批（面向公众的法定文本与入口）：两张新表 `im_agreement` / `im_user_agreement` + 权限点 125 `system:agreement:manage`（admin 绑定 6025）+ 三份 v1 正文（1301~1303）。不带 `DROP TABLE`，建表 `IF NOT EXISTS`、种子与权限段全 `INSERT IGNORE`，**可重跑** | ★ **后果不是「这一屏不好用」而是「新账号注册不了」**：表不存在时 `im_agreement` 的每个查询都抛 `BadSqlGrammarException`，而注册校验就要查它——不降级时它会冒到全局兜底变 5000，把全站新账号入口打没（本轮已给用户侧三条读路径加 `selectForUser` 降级：公示页回 2022、注册放行、不弹窗，日志一条 warn 指回本脚本；**后台那条路故意不降级**，发布合同的人必须看见真实报错而不是一个看起来「一稿都没有」的空列表）。★ 本批新开了权限点，**跟第五批同一口径：跑完必须清一次 `im:auth:*`**（不清则 admin 菜单里就是少「法定文本」那一项，地址栏直接打 `/agreements` 回 1003）。另记一句：**不能拿界面当验收依据**——没跑 SQL 时这一屏也是满屏正常（列表空、留痕空、不报错），要看的是 `SELECT COUNT(*) FROM im_agreement;` 是否回 3（逐列与理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §十六） |
 | `migration_missing_tables.sql` | **对账补丁**：一次补齐 `im_message_reaction` / `im_message_vote` / `im_message_essence` / `im_message_favorite` / `im_group_join_request` / `im_group_robot` / `im_report` 七张表，与 `im_group` 的 `invite_code` + `join_approval` 两列一索引 | ⚠️ 同样**不是「只有这几个功能不好用」**：表情回应 / 投票 / 群精华都挂在 `toViewList` 的末尾，缺任意一张表就会把历史分页 / 离线拉取 / 消息检索 / 群相册一起打成 1007；而 `im_group` 缺 `invite_code` 列会让**所有群查询**报 `Unknown column`（MyBatis-Plus 按实体列生成 SELECT 清单）。这几项当初只更新了全量 `im_schema.sql`、没留增量脚本，而全量那份开头是一串 `DROP TABLE`（跑它等于清库），所以补了这个汇总包。**跑过它之后就不要再去跑上面 `migration_message_favorite.sql` / `migration_report.sql`** |
 | `migration_admin_phase2.sql` | **数据补丁**：补后台二期的四个权限点（`im_permission` 108~111）、给 admin 角色绑定它们（`im_role_permission` 6008~6011），并补上 `moderator` / `operator` 两个示范角色与它们的授权行 | 后台存成一期权限数据的库上，admin 登录会**提示成功却处处 1003**：后端四个控制器已细化到 `system:dashboard` 等四个点，而 Sa-Token 里 `system:manage` 是精确串不是通配，匹配不上；前端却仍认伞权限（它比后端宽），所以菜单四项全部可见、点进去全部被拦。★ 补完**必须清一次 Redis 权限缓存**（`im:auth:perm:{userId}` / `im:auth:role:{userId}`，TTL 30 分钟且登录动作不刷新）—— 退登重登不管用，只能 `redis-cli DEL` 或等 TTL），否则看起来像「补了没生效」；不必重启后端。另注意这个症状可能叠加 `migration_missing_tables.sql` 的缺口（库里也没 `im_report`），那种情形下工单屏补完权限仍会报表不存在 |
 
@@ -375,7 +381,7 @@ mvn spring-boot:run
 
 | 地址 | 用途 |
 |---|---|
-| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分成 9 个分组（01-09，含 AI 面试与远程控制） |
+| http://localhost:8080/doc.html | Knife4j 接口文档，按模块分组（组数由 `Knife4jConfig` 的 `GroupedOpenApi` Bean 个数决定，不写死；`GET /v3/api-docs/swagger-config` 看 `urls` 数组就是当前分组清单，覆盖率自查 `python scripts/api-doc-check.py`） |
 | http://localhost:8080/v3/api-docs | OpenAPI 3 原始 JSON |
 | ws://localhost:8080/ws | WebSocket 端点（需先取票据） |
 | http://localhost:8080/api/ | 全部 REST 接口 |
@@ -741,7 +747,8 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | GET | `/{id}/url` | 临时访问地址（MinIO 预签名时为对象存储直链） |
 | GET | `/download/{id}` | 下载（`satoken` 头或 URL `ticket`；带 `If-None-Match` 命中返回 304） |
 | GET | `/moderation/policy` | 图片审核策略下发（总开关 + 各类别阈值，供发送端本机识别用） |
-| POST | `/moderation/report` | 审核命中上报（图片已被本机拒发，只落审计通道，服务端不采信其结论） |
+| POST | `/moderation/report` | 审核命中上报（图片已被本机拒发，只落审计通道，服务端不采信其结论；**返回流水 ID**） |
+| POST | `/moderation/evidence/{logId}` | 隔离区证据上传（multipart，字段名 `file`）：发送端拦下后把原图另传一份。服务端不采信客户端的 bizType，固定写 `moderation_quarantine`；只能挂自己那条记录、一条只挂一次、不超 `quarantine-max-size`；限流 20/分钟·用户。★ 受 `im.moderation.quarantine-enabled` 控制，关掉时直接返回不存字节 |
 
 ### WS 票据 `/api/ws` —— 需登录
 
@@ -1638,6 +1645,7 @@ spring-boot-duomokuia/
 | 后台侧（四期第三批） | **无新端点**：`POST /api/admin/user/{userId}/disable` 多一个可选 query 参数 `minutes`；`POST /api/admin/report/{id}/handle` 的请求体多一个可选字段 `disableMinutes` | **零新权限点**——还是走 `system:user:manage`（109）与 `system:report:handle`（110），所以这一批**不用清 `im:auth:*` 缓存**（前两批都得清，这批是唯一不用的）。★ 但本批有一处 DDL（`im_user.disable_until`）：不跑 `sql/migration_user_ban_duration.sql` 不是「少个新功能」，而是 MyBatis 带上这个列后登录链路与用户列表一起报 1054 |
 | 后台侧（四期第四批） | 配置目录 `GET /api/admin/config/item`、`PUT /api/admin/config/item?key=&value=`、`DELETE /api/admin/config/item?key=`（+ 第一批保留的 `GET/PUT /api/admin/config/sensitive-filter`）；在线词库 `GET /api/admin/sensitive-word/page`、`POST /api/admin/sensitive-word`、`DELETE /api/admin/sensitive-word/{id}`；公告 `GET /api/admin/announcement/page`、`GET /api/admin/announcement/{id}`、`POST /api/admin/announcement`、`PUT /api/admin/announcement/{id}`、`POST .../{id}/publish`、`POST .../{id}/revoke`、`DELETE .../{id}`；**用户侧只一条** `GET /api/announcement/active` | 配置与词库沿用 `system:config`（116——那一点管的就是「调全服内容过滤与旋钮」，加一个词与改一个开关是同一类动作）；**公告单开 `system:announcement`（118）**：改旋钮改错了可以立刻改回来，发公告则弹出去的通知收不回来，可撤销性不是一个量级，分开才能让「能调开关」与「能发公告」是两个人。★ 因为是新点，**跑完 SQL 必须清 `im:auth:*`**（上一批封禁时长零 RBAC 改动、明确不用清，不能照抄那一句）。用户侧那一条类上**没有任何权限注解**（只靠全局拦截器保证登录），`/api/admin/announcement/**` 才是要 118 的那一边；`PUT /item` 的值一律以字符串传（`true` / `120`），不在白名单的 key 回 14010、超范围回 400 |
 | 后台侧（四期第五批） | 钱包 `GET /api/admin/wallet/overview`、`/page`、`/{userId}`、`/tx/page`、`/gifts`、`/gift-record/page`，`POST /api/admin/wallet/{userId}/adjust?delta=&reason=`、`POST /api/admin/wallet/gift/{giftId}/status?onShelf=`；面试（**三个端点全 GET**）`GET /api/admin/interview/page`、`/{sessionId}`、`/overview`；群 `GET /api/admin/group/page`、`/{groupId}`、`/member/page`，`POST /api/admin/group/{groupId}/dismiss`、`/mute-all?muteAll=`；消息 `GET /api/admin/message/page`、`/{messageId}`、`/overview`，`POST /api/admin/message/{messageId}/recall` | **一次四个点（119~122），四期以来唯一一批加不止一个点的**：四屏是四种不同能力——119 是全后台唯一能凭空造出货币的写权限（`adjust` 不受 `im.wallet.recharge-max` 约束，那条只管用户自助充值）、120 读的是候选人作答原文、121 挂着「关掉一个百人群」、122 能读任意两个人的聊天正文（与 115 `system:log` 同级）。**互不顺带**：给了 121 不等于给 122，给了 109（能禁号）也不等于给 119——「管一个人能不能登录」与「管他余额是多少」是两种风险。**★ 零新错误码**：拒绝全用既有的 `BAD_REQUEST`(400) / `MESSAGE_NOT_FOUND`(5001) / `GROUP_NOT_FOUND`(6001) / `AI_INTERVIEW_NOT_FOUND`(10001) / `GIFT_NOT_FOUND`(13003) / `WALLET_DISABLED`。四个 `POST` 的标量入参一律 `@RequestParam`（`delta` / `reason` / `onShelf` / `muteAll`），前端因此必须 `http.post(url, null, { params })`——发 JSON body 会被当成空值 |
+| 后台侧（五期） | `GET /api/admin/log/archives?key=`；`GET /api/admin/log/content` 多两个可选参数 `date` / `index`；`GET /api/admin/log/moderation/page`；★ 本轮再加 `GET /api/admin/log/moderation/{id}/image`（隔离区图片回显） | **零新权限点**：四条全部沿用日志那一屏的 `system:log`（115），所以跑完 SQL **不需清 `im:auth:*`**。为什么不单开一个点给「审核记录」：日志页本来就能读 `moderation.log` 原文，这一屏只是同一份现场的结构化版本，拆两个点只会造出「半个现场看不到」。安全口径与归档浏览同源：**前端永远不传文件名**，只传严格校验（`uuuu-MM-dd` + `ResolverStyle.STRICT`）的 `date` 与夹在 0~9999 的 `index`，路径由服务端按白名单映射表拼、再经 `safeResolve` 越界断言。★ 取图那条也不接受路径参数：外界只传审核记录 ID，元数据走 `AdminModerationSpi` 查库、字节走 `FileStorageSpi.openStream`，**不走 im-file 那套「上传者 / 同会话成员」校验**（管理员两者都不是），响应头 `inline` + `nosniff` + `no-store` |
 
 聊天端**不调 `/api/admin/**` 里的任何一个**，后台也只调 `/api/report/config`（拿处置动作字典）而不调 `/api/report`——路径前缀就是那道墙，真正的把关在 service 里（举报人只取登录态、`/mine` 只查自己那部分）。`POST /api/report` 有两道闸：按用户 10 次/分钟的限流（防脚本空转）与服务端每日配额（防把队列刷满）。
 
@@ -1904,6 +1912,14 @@ spring-boot-duomokuia/
 `ERR wrong number of arguments for 'eval' command`（第五批清缓存时实测——这条原本就是为了绕开前一个坑写进文档的，
 结果它自己也没跑过）。另：`--scan --pattern "im:auth:*" | Measure-Object -Line` 数出 0 **不代表清干净了**（管道吞输出），
 复核残留只认 `keys`。
+
+★ 上面那三步只说了怎么删得动，还要一条**只删得干净**的前提：模式必须带 `im:` 前缀，不能图省事写宽。
+2026-11-08 实测一台开发机的 6379：`DBSIZE=321`，其中本项目只占 39 个（`im:conv` 36 / `im:ai` 2 / `im:live` 1），
+其余是 `music:*`、`qp:seckill:*`、`audit:pushed`，而且**有一个名字极像本项目权限键的 `auth:privileges` 哈希**（属于另一个项目，
+内容全是 `/teachers/{id}`、`/staffs/{id}` 这类路径，本仓 grep `privileges` 为 0 命中）——所以 `KEYS *auth*` 配合删除、或一把 `FLUSHDB`，
+清掉的不是缓存而是别人的业务数据（会话与计数器类键被清是会出事的，见 `RedisUtil` 里 `incrementIfPresent` 那段注释）。
+键名模板以 `RedisKeys.AUTH_PERMISSION` / `AUTH_ROLE` 为准，不凭文档与记忆拼前缀；`sql/migration_agreement.sql` 与
+`sql/migration_ai_guard.sql` 头部原来那句「或 FLUSHDB 仅限开发库」已于 2026-11-08 改掉（共用 Redis 时「只是开发库」不是安全条件）。
 
 配套 SQL 与新页面：`sql/migration_admin_system_config.sql`（三张表 + 118 与 admin 绑定 + **清缓存**）与
 `im-admin-ui` 的 `ConfigView.vue`（一卡扩成三卡）、`AnnounceView.vue`（第十一屏）。

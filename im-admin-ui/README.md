@@ -4,7 +4,9 @@ Vue 3 + Vite + Element Plus 的**独立 npm 工程**，对应后端的 `im-admin
 它**不参与 Maven 构建**（根 `pom.xml` 里没有它），和 `im-ui` 一样是纯前端目录。
 
 一期三个页面（**数据看板 / 用户管理 / 举报工单**），二期加**角色管理**，三期再加四页
-（**视频管理 / 直播管理 / 监控告警 / 日志管理**）。
+（**视频管理 / 直播管理 / 监控告警 / 日志管理**），四期一路加到十五屏。
+本工程的**第十六屏是「审核记录」**（五期·路线 2，★ 不开新权限点，复用日志那一屏的 `system:log`），
+同时给第三期的「日志管理」加了**归档浏览**（五期·路线 1）。
 
 ---
 
@@ -119,7 +121,17 @@ POST /api/auth/logout
 | 监控 | `GET /api/admin/monitor/overview` | JVM/HTTP/连接池/健康/慢接口一屏快照，取不到的指标为 `null`（前端渲染「—」）；手动刷新不做轮询 |
 | 监控 | `GET /api/admin/monitor/slow` | 只回慢接口分组，比整屏便宜 |
 | 日志 | `GET /api/admin/log/files` | 七个逻辑档的存在性/大小/修改时间；**前端只认 key 不传路径** |
-| 日志 | `GET /api/admin/log/content?key=&tail=&keyword=` | 尾读；tail 服务端夹上限（`im.admin.log-tail-max-lines`），关键词只在尾读窗口内过滤（不是全文件搜索）、不下载 |
+| 日志 | `GET /api/admin/log/content?key=&tail=&keyword=&date=&index=` | 尾读；tail 服务端夹上限（`im.admin.log-tail-max-lines`），关键词只在尾读窗口内过滤（不是全文件搜索）、不下载；`date`（`yyyy-MM-dd`，服务端 STRICT 校验）非空时读那一天的归档，`index` 选同日分段（缺省 0），归档不存在回 `exists=false` 而不是报错 |
+| 日志 | `GET /api/admin/log/archives?key=` | 某档已滚存的带日期归档清单（日期/段号/大小/时间）；**只回结构化 date+index，文件名仅作展示**，拉取失败前端静默降级成只剩「当天」一个选项 |
+| 审核记录 | `GET /api/admin/log/moderation/page` | 图片审核命中流水（`im_moderation_log`）按 用户 / 场景 / 类别 / 时间区间 翻页，固定主键倒序（雪花即时间序），**单页上限 50**（服务端夹）；★ 复用 `system:log`，本屏与日志屏同一道闸 |
+| 审核记录 | `GET /api/admin/log/moderation/{id}/image` | 隔离区图片回显（★ 本轮新增）：返回体是图字节本体，`inline` + `nosniff` + `no-store`，不走 JSON 信封。前端用 `fetchMedia` 带登录头取 blob 而不是 `<img src>`（带不了自定义头，Cookie 读取为规避 CSRF 已关）；无图回 `NOT_FOUND(1004)` 带原因文案 |
+| 法定文本 | `GET /api/admin/agreement/page` | 版本列表（含草稿/已发布/已归档全状态），入参 `code / status / keyword / current / size`；固定 `code` 升序 + `version` 倒序，**列表项不含正文** |
+| 法定文本 | `GET /api/admin/agreement/{id}` | 版本详情，含 `content` 原文，供预览弹框与草稿编辑器回填 |
+| 法定文本 | `POST /api/admin/agreement/draft` | 在指定 `code` 下追加一个草稿，版本号由服务端取「历史最大 + 1」（前端不传 version，传了也不认） |
+| 法定文本 | `PUT /api/admin/agreement/{id}` | **只能改草稿**；已发布与已归档行后端直接拒（改了会让既有同意留痕变成伪证），所以前端对这两类状态根本不给「保存」按钮 |
+| 法定文本 | `POST /api/admin/agreement/{id}/publish?remark=` | ★ 全端即时生效的高危动作：草稿→已发布并盖生效时间，同 `code` 原生效版自动转归档。**没有撤回**，且 `remark` 是 `@RequestParam` 不是 body（同 `disable/adjust/muteAll` 那个坑） |
+| 同意留痕 | `GET /api/admin/agreement/consent/page` | 入参 `userId / agreementId / code / action / startTime / endTime`，固定同意时间倒序；**`action=0` 的拒签行也在这里**，它是「这个人明确没同意过」的证据 |
+| 同意留痕 | `GET /api/admin/agreement/consent/user/{userId}` | 单个人的完整同意链（版本号/时刻/IP/设备），不分页、服务端硬截 200 条；监管与工单问到「他同意过哪一版」时给的就是这一份 |
 | 字典 | `GET /api/report/config` | 理由 / 对象类型 / 处置动作三份码表，**后台与用户侧共用这一个接口** |
 
 各 `/api/admin/**` 控制器类上都是 `@SaCheckLogin` + `@SaCheckPermission(...)`，二期从伞权限
@@ -129,6 +141,10 @@ POST /api/auth/logout
 `system:log` 单独设点是因为日志原文可能含敏感内容，能看指标的人不必能看正文）。
 `/api/report/**`（提交举报、我的举报）是**任何登录用户都能调**的用户侧接口，
 后台界面不调它们——路径前缀就是那道权限边界。
+法定文本那一屏（七个 mapping，版本侧五个 + 留痕侧两个只读）用本批新开的 `system:agreement:manage`（125）。
+★ 它**没有**并进相邻的 `system:announcement`（118）：公告发错了可以随时撤，协议发出去就改不了，
+而且这一屏带着可举证的个人信息留痕，「能调开关」与「能改合同」不是一个量级的授权。
+跑完 `sql/migration_agreement.sql` 必须清一次 Redis `im:auth:*`（见 §9 那条）。
 
 ## 6. 各页面在做什么
 
@@ -181,9 +197,47 @@ streamKey 后端不下发、前端也不留字段位。
 健康检查大卡片 + JVM/HTTP/连接池/慢接口四张指标卡 + 最近慢接口明细表。手动刷新不做轮询；
 所有空值走「—」口径（`metric()` 统一兜），堆水位进 `el-progress`（≥90% 红、≥75% 黄）。
 
-**日志管理**（`LogsView.vue`，三期新增）
+**日志管理**（`LogsView.vue`，三期新增 / 五期加归档浏览）
 左边七个逻辑档的清单（存在性/大小/修改时间，敏感档打标），右边尾读查看器（tail 下拉 + 窗口内关键词过滤，
 黑底等宽字体区，行序旧→新与 `tail -f` 肌肉记忆一致）。没有任何路径输入口，选档只传 key。
+读取栏最前那个「数据源」下拉是五期补的：默认读当天活动文件，选归档后读 `name-yyyy-MM-dd.N.log`；
+归档清单按档懒加载（切档时拉一次），**切档同时把数据源拨回当天**——上一个档的日期对下一个档未必存在，
+留着只会读出一个让人误以为「没日志」的空页。
+
+**审核记录**（`ModerationView.vue`，五期·路线 2 新增）
+纯读的一屏：谁在什么时候试过什么图、撞在哪一类上、概率多少。筛选是用户 ID / 场景 / 命中类别 / 时间区间，
+表格带评分明细 tag（命中那一类标红）。两个写死的本地字典（六个类别名 + 三个图片类场景）
+**而不是从库里 distinct**：后端不校验类别名，distinct 会把某次异常上报里的脏字符串也变成候选项。
+没有删除与修改入口——销毁追责现场的口子从表结构上就不留。权限复用 `system:log`，
+所以这一屏在菜单里的显隐与日志管理永远一致。
+
+**★ 本轮加的「图片」列**：行上有 `evidenceFileId` 才给「查看」按钮，否则灰字「无图」；点开一个
+`el-dialog` + `el-image`（`preview-src-list` 支持点击放大）。三个口径得记着：
+
+- **为「无图」是常态不是 bug**：隔离区开关关掉、图超过 `quarantine-max-size`、副本上传失败都算。
+  历史命中（本轮之前落库的那些）**永远不会回头补图**——那时还没有往上传副本这一步。
+- **快速连点两行要靠一个自增 seq 防竞态**：`fetchMedia` 先回的会覆盖后开的，`openImage` 里的
+  `viewerSeq` 就是拿来说「这个结果已经过期了」。
+- **顶部那条 `el-alert` 文案已按隔离区后的真实口径改写**：以前写的是「被拦下的图片从未离开本机」，
+  现在它是说谎。识别仍在发送端跑，本行记的是判定结果，图本体靠行末那个「查看」按钮。
+
+**法定文本与同意留痕**（`AgreementView.vue`，本批新增，一个屏两个 tab）
+
+版本那一页是筛选（文本 / 状态 / 标题关键词）+ 表格 + 原文预览弹框，动作列按状态分支：草稿给「编辑 + 发布」，
+已发布只给「起草新版」，已归档什么都不给（文本仍永久可查）。**这一屏没有删除按钮，也不是界面偷懒**：
+后端根本不开删除与改已发布这两个端点（语义上等于销毁一份对用户生效过的合同原件，理由写在
+`AdminAgreementController` 的类注释里），前端摆一个点了必报错的按钮更糟。
+发布用 `ElMessageBox.prompt` 现填变更说明：那一句是对「v3 比 v2 改了什么」的正式回答，起草时往往还说不准。
+
+留痕那一页是举证材料：表态时间 / 用户 / 协议版本 / 同意或拒绝 / 场景 / IP，行展开里补全 User-Agent，
+两个跳转是「同意链」（单个人那份不分页的完整链）与「他同意的原文」（按 `agreementId` 反查那一版正文）——
+现场问的一定是这两者的对应关系。**拒签行也在这一页**（`action=0`），它是「这个人明确没同意过」的证据，
+不是一个需要过滤掉的噪声。
+
+两处依赖得记着：① 筛选下拉用的 `CODE_OPTIONS` 是本仓少见的**前端拷一份码表**（后端下发 `codeName` 用的是
+同一份映射 `Agreement.nameOf`），为三个常量单开一个字典端点不划算，**加第四份协议时要两边都改**；
+② 正文渲染与 `im-ui` 公示页、文章管理同一口径（`marked` + `DOMPurify` 净化），缺 DOMPurify 就等于把后台
+变成存储型 XSS 的执行现场（草稿可能由低权限运营人员起草，读者是管理员）。
 
 ## 7. 目录
 
@@ -202,7 +256,9 @@ im-admin-ui/
    ├─ stores/auth.js           # 权限闸门在这一层，与 request.js 的 1003 处理成对
    ├─ styles/index.css         # 只放跨页面复用的少数几条
    ├─ utils/{token,format}.js
-   └─ views/{Login,Dashboard,Users,Reports,Roles,Videos,Lives,Monitor,Logs}View.vue
+   └─ views/{Login,Dashboard,Users,Reports,Roles,Videos,Lives,Monitor,Logs,Moderation}View.vue
+      （四期又加了 Wallet/Group/Interview/Message/Config/Remote/Articles/AiGuard 等，本批再加
+      Agreement，以目录为准）
 ```
 
 ## 8. 上线部署（还没做，步骤留在这）
@@ -227,9 +283,15 @@ im-admin-ui/
   这只能证明代码能编译打包、模板指令与 import 不报错。
 - 一期时的构建记录（供对照）：`npm install` 成功，`npm run build` EXIT=0（built in 8.86s，主包
   `dist/assets/index-*.js` 1,189.29 kB / gzip 382.81 kB）。
+- **五期两条路线的构建已实测通过**（2026-11-02）：`node node_modules/vite/bin/vite.js build` 输出 `✓ built in 10.57s`、1729 模块，产物里 `ModerationView-*.js`（5.94 kB）与重建后的 `LogsView-*.js`（5.41 kB）都在；后端 `mvn -q compile -pl im-common,im-file,im-admin -am` 通过。本批**零新权限点**，所以不需要清 `im:auth:*`，只要跑 `sql/migration_moderation_log.sql` + 重启后端。
+- **「审核记录查看图片」这一轮也已跑过构建**（同日稍后）：`node node_modules/vite/bin/vite.js build` → **built in 10.58s**；后端 `mvn -o -q compile -pl im-common,im-file,im-admin -am` 通过（`im-ui` 同步重构建 → built in 23.09s）。★ 本轮同样**零新权限点**，但比上一轮多一个条件：得按顺序跑 `sql/migration_moderation_log.sql` **与** `sql/migration_moderation_evidence.sql` 两份，只跑前一份就是「每一行都无图」（后果推导见《README详细开发指南》的增量升级表）。浏览器实测仍未做。
+- **★ 本轮实跑抓到的一个现场**：后端没重启就刷后台，日志管理页会弹一条「请求的资源不存在」——那是 `ResultCode.NOT_FOUND(1004)`，新前端在调旧进程里不存在的 `GET /api/admin/log/archives`。它**不是路由配错也不是没权限**：同一个页面上老端点全正常、只有新端点 404，就是「代码没进进程」的形状（归档下拉此时静默降级成只剩「当天」）。另注意这条提示目前仍会弹：`LogsView` 的 catch 只吞异常，而 `request.js` 拦截器在 catch 之前就已经弹了 toast。
 - **仍然没有做浏览器实测**：登录、看板数字、举报处置二次确认、三期四页的交互路径，
   都需要跑着的后端 + 已执行 `sql/migration_admin_phase3.sql` 并清过权限缓存的库，
   本批不具备这个条件。接口形状是照 Controller / VO 源码抄的，不是猜的。
+- **★ 本批（法定文本与同意留痕）构建已实测通过**（2026-11-06）：`node node_modules/vite/bin/vite.js build` → **built in 10.45s**，产物里 `AgreementView-DaWfq6ni.js`（18.14 kB / gzip 6.53 kB）与它引用的 `purify.es-*.js`（78.00 kB / gzip 25.71 kB，DOMPurify 单独成 chunk）都在；后端 `mvn -o -DskipTests compile -pl im-user -am` EXIT=0（`AdminAgreementController` 在 im-admin，但本轮给它补降级时只动了 im-user）。
+  ★ 本批**新开一个权限点 125**，所以上线口径与四期第五批同一条：**跑完 `sql/migration_agreement.sql` 必须清一次 Redis `im:auth:*`**（`PermissionProviderImpl` 按用户缓存 30 分钟且**登录动作不刷新**，退登重登不管用），不清就是菜单里少那一项、直接地址栏打 `/agreements` 回 1003——而新菜单项的显隐文就是 `auth.can('system:agreement:manage')`，看起来像「前端没加上」。
+  另记一句本批特有的验证坑：**没跑 SQL 的库上这一屏看起来是正常的**（列表空、留痕空，不报错），所以不能拿界面当验收依据；要验就跑 `SELECT COUNT(*) FROM im_agreement;` 期望回 3。
 - 已知会踩的第一个坑（一期记的那条至今有效）：如果 `sql/migration_report.sql` 没跑就直接启动后端，
   登录仍正常，但一进后台就会看到「Table 'im_db.im_report' doesn't exist」——
   那张表只有 `im-admin` 用，别的模块不受影响。
