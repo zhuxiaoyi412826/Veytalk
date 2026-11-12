@@ -80,9 +80,9 @@ class LiveViewModel @Inject constructor(
     fun mediaUrl(path: String?): String = session.resolveUrl(path) ?: ""
 
     /**
-     * playUrl 可能是相对路径（/hls/{roomId}/{streamKey}/index.m3u8?...，走 8088 流媒体口），
+     * playUrl 可能是相对路径（/hls/{roomId}/{streamKey}/index.m3u8?...），
      * 直接喂 ExoPlayer 不是合法 URI 必挂。对齐 Web 端 Live.vue setupPlayer：
-     * /^https?:/ 直接用，否则 livePlayBase() + playUrl（= 后端 host + 8088，见 env.js）。
+     * /^https?:/ 直接用，否则 livePlayBase() + playUrl（https 域名同源 443，局域网 http 走 8088，见 mediaBase）。
      */
     fun resolvePlayUrl(playUrl: String?): String? {
         if (playUrl.isNullOrEmpty()) return null

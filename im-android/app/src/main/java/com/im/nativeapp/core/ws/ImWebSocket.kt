@@ -4,6 +4,7 @@ import android.util.Log
 import com.im.nativeapp.core.config.SessionStore
 import com.im.nativeapp.core.network.ApiClient
 import com.im.nativeapp.core.network.ApiError
+import com.im.nativeapp.core.network.TlsCompat
 import com.im.nativeapp.core.network.WsTicketVO
 import com.im.nativeapp.core.network.unwrap
 import kotlinx.coroutines.CoroutineScope
@@ -63,9 +64,10 @@ class ImWebSocket @Inject constructor(
     data class WsEvent(val type: String, val packet: JsonObject)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val wsClient = OkHttpClient.Builder()
-        .pingInterval(0, TimeUnit.SECONDS) // 关掉 OkHttp 协议层 ping，用心跳帧与应用层对齐
-        .build()
+    private val wsClient = TlsCompat.install(
+        OkHttpClient.Builder()
+            .pingInterval(0, TimeUnit.SECONDS) // 关掉 OkHttp 协议层 ping，用心跳帧与应用层对齐
+    ).build()
 
     private val _status = MutableStateFlow(Status.CLOSED)
     val status: StateFlow<Status> = _status

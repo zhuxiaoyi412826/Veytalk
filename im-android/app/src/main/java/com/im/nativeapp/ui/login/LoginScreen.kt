@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,14 +28,13 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
@@ -53,6 +54,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -94,23 +96,14 @@ fun LoginScreen(
             Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp)) {
                 Brand()
 
-                // 服务器地址：显示当前值 + 设置入口（原生端唯一的换地址入口，热点换网段免重打包）
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = ui.serverUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = { vm.openServerDialog() }) {
-                        Icon(Icons.Default.Settings, contentDescription = "服务器地址设置")
-                    }
-                }
+                // 服务器环境：生产（域名反代）/ 测试（局域网直连）/ 自定义
+                ServerEnvPicker(
+                    current = ui.serverUrl,
+                    onPick = { vm.selectEnv(it) },
+                    onCustom = { vm.openServerDialog() }
+                )
 
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(8.dp))
 
                 val tabIndex = if (ui.tab == "sms") 1 else 0
                 TabRow(selectedTabIndex = tabIndex) {
@@ -165,6 +158,43 @@ fun LoginScreen(
     }
     if (ui.showRegister) {
         RegisterDialog(ui, vm)
+    }
+}
+
+/**
+ * 服务器环境选择：生产（域名反代）/ 测试（局域网直连）/ 自定义。
+ * 生产与测试点一下立即生效，自定义走弹窗输入；下方小字回显当前实际地址。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ServerEnvPicker(
+    current: String,
+    onPick: (String) -> Unit,
+    onCustom: () -> Unit
+) {
+    val activeKey = SessionStore.envKeyOf(current)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SessionStore.SERVER_ENVS.forEach { env ->
+                FilterChip(
+                    selected = activeKey == env.key,
+                    onClick = { if (activeKey != env.key) onPick(env.url) },
+                    label = { Text(env.label) }
+                )
+            }
+            FilterChip(
+                selected = activeKey == null,
+                onClick = onCustom,
+                label = { Text("自定义") }
+            )
+        }
+        Text(
+            text = current,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.secondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -353,15 +383,17 @@ private fun SubmitButton(text: String, loading: Boolean, onClick: () -> Unit) {
 private fun ServerDialog(ui: LoginUiState, vm: LoginViewModel) {
     AlertDialog(
         onDismissRequest = { vm.update { it.copy(showServerDialog = false) } },
-        title = { Text("服务器地址") },
+        title = { Text("自定义服务器地址") },
         text = {
             Column {
                 OutlinedTextField(
                     value = ui.serverInput,
                     onValueChange = { v -> vm.update { it.copy(serverInput = v) } },
                     label = { Text("后端地址") },
-                    placeholder = { Text(SessionStore.DEFAULT_SERVER) },
-                    supportingText = { Text("留空保存 = 恢复默认 ${SessionStore.DEFAULT_SERVER}") },
+                    placeholder = { Text(SessionStore.PROD_SERVER) },
+                    supportingText = {
+                        Text("留空保存 = 恢复默认 ${SessionStore.DEFAULT_SERVER}；测试环境 ${SessionStore.TEST_SERVER}")
+                    },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth()

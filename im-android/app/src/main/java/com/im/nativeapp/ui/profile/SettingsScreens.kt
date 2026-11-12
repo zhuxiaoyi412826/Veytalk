@@ -1150,8 +1150,12 @@ private fun AdvancedPage(vm: SettingsViewModel) {
             title = { Text("服务器地址") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(raw, { raw = it }, label = { Text("如 http://192.168.1.2:8080") }, singleLine = true)
-                    Text("留空恢复默认地址", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    OutlinedTextField(raw, { raw = it }, label = { Text("如 https://im.dsaol.asia") }, singleLine = true)
+                    Text(
+                        "留空恢复默认地址（生产 ${SessionStore.PROD_SERVER} / 测试 ${SessionStore.TEST_SERVER}）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
                 }
             },
             confirmButton = { TextButton(onClick = { serverDialog = false; vm.setServer(raw.trim()) {} }) { Text("保存") } },
