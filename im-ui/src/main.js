@@ -9,6 +9,7 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 import router from './router'
 import { useSettingsStore } from './stores/settings'
+import { ensureServerBase } from './utils/env'
 import './styles/index.css'
 
 const app = createApp(App)
@@ -57,4 +58,8 @@ if (visualViewport) {
   visualViewport.addEventListener('scroll', settleViewport)
 }
 
-app.mount('#app')
+// Tauri / 安卓壳首屏前探一次域名：被备案拦截的网络切到内置公网 IP 回落，
+// 让 axios / WS 从一开始就拿可达地址算 baseURL；Web / Electron 立即返回，不多等
+ensureServerBase().finally(() => {
+  app.mount('#app')
+})

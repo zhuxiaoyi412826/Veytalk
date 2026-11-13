@@ -1,7 +1,7 @@
-# IM 桌面端 — Tauri 打包指南（EXE / Windows）
+# IM 桌面端 — Tauri 打包指南（EXE / Windows / macOS）
 
 > **适用**：想用一个**几 MB 的原生壳**（而非 Electron 自带 Chromium 的 ~90 MB）加载 `im-ui` 前端产物、
-> 连远程 Spring Boot 后端，产出 Windows `.exe`（NSIS 安装包 + 免安装 exe）。
+> 连远程 Spring Boot 后端，产出 Windows `.exe`（NSIS 安装包 + 免安装 exe）；macOS `.dmg` 走 GitHub Actions 自动构建（第十三节）。
 > **事实来源**：`im-ui/src/utils/env.js`、`im-ui/vite.config.js`、`im-ui/package.json`；
 > 后端与中间件仍独立部署、**不进 exe**（与 Electron 方案同构，见 `./Electron打包指南.md` 第一节）。
 > **Tauri 版本**：本指南按 **Tauri v2** 编写（`@tauri-apps/cli` 2.x、配置 schema `2`）。
@@ -24,6 +24,7 @@
 - [十、能力差异与限制（务必先读）](#十能力差异与限制务必先读)
 - [十一、踩坑与解决](#十一踩坑与解决)
 - [十二、重新打包速查](#十二重新打包速查)
+- [十三、macOS包（GitHub Actions构建）：域名与IP回落、证书信任、调试弹窗](#十三macos包github-actions构建域名与ip回落证书信任调试弹窗)
 
 ---
 
@@ -522,6 +523,67 @@ npm run tauri build          # beforeBuildCommand 自动重跑 vite 构建
 
 **换了电脑**：重装 VS Build Tools + rustup + WebView2，重配 `.cargo\config.toml` 与 `RUSTUP_*` 环境变量，
 再 `npm install` 前端依赖，然后走第八节。
+
+---
+
+## 十三、macOS包（GitHub Actions构建）：域名与IP回落、证书信任、调试弹窗
+
+mac 包不占本地工具链：`.github/workflows/desktop-macos.yml` 在 GitHub 的 `macos-15`（arm64）runner 上直接构建，
+产出 `.dmg`（打 tag `v*` 自动发 Release，手动 Run workflow 亦可）。前端与 Windows 包**同一份 `im-ui` 代码**，
+所以域名、IP 回落、调试弹窗这三件在 mac 包上自动就有；mac 真正独有的只有一件事——**证书信任**（13.3）。
+
+### 13.1 地址三件套（与 Windows 包同源，落点都在代码里）
+
+| 层 | 值 / 来源 | 说明 |
+|---|---|---|
+| 编译期默认域名 | `VITE_IM_SERVER_URL`：workflow 注入（手动输入 > 仓库 Variables > 默认 `https://im.dsaol.asia`） | 即弹窗里「安装包内置默认」与「公网域名」快填 |
+| IP 回落层 | `im-ui/src/utils/env.js` 的 `IM_FALLBACK_BASE = https://120.78.126.132`（与 Electron 的 `BUILT_IN_FALLBACK_BASE` 同口径） | 首屏前 `ensureServerBase()`（`main.js`）探一次域名，不可达（被备案拦截 reset 等）就写 `localStorage.IM_SERVER_FALLBACK_ACTIVE=1` 切 IP；下次启动域名又通会自动切回 |
+| 运行时覆盖 | `localStorage.IM_SERVER_URL_OVERRIDE` | 调试弹窗写入，优先级最高，保存后重载页面生效、**免重打包** |
+
+直播媒体地址同套路：回落激活时 `livePlayBase()` 跟随 `IM_FALLBACK_BASE`（流媒体与聊天同域复用 443 证书）。
+
+### 13.2 调试弹窗（与 Electron 同入口同 UI）
+
+- 入口：登录页底部「开发调试」链接、设置页「后端地址」行；Web 同源部署整条隐藏（`canDebug(getServerBridge())`）。
+- Tauri 壳的落点是 **localStorage**（`utils/serverBridge.js` 的 `localBridge`），不是 Electron 的主进程配置文件：
+  弹窗「配置文件」一行显示 `localStorage:IM_SERVER_URL_OVERRIDE`；「打开所在目录」是 Electron 独有（`canReveal`），mac 上不显示。
+- 「保存并重载」「恢复内置默认」成功后都自动重载页面；恢复默认会连回落标记一起清，回到「下次启动重新探域名」的干净状态。
+- 「测试连接」走 WebView 真实 fetch：mac 上**证书不受信与网络被拦都表现为「连不上」**（见 13.3），探测文案已把这点写明。
+
+### 13.3 ★ 证书信任（mac 与 Electron / Windows 包的最大差异，分发前必读）
+
+WKWebView **没有任何证书绕过出口**：既没有 Electron 的 `certificate-error` 定向白名单，也没有浏览器「仍要继续」——
+证书不受信就是硬失败，现象与「后端没起 / 地址写错」完全一样。生产证书走两级 CA 路线（`Docker/scripts/gen-selfca.sh`），两个硬要求：
+
+1. **叶子证书 SAN 同时含域名与公网 IP**，否则 13.1 的 IP 回落路径在 mac 上必撞主机名不匹配：
+
+   ```bash
+   # 在【签发机】跑（不在部署机）；叶子还在有效期内也要改 SAN 就必须 --force；加 IP 不动根 CA，客户端不用重装
+   bash scripts/gen-selfca.sh --ip 120.78.126.132 --force
+   bash scripts/push-cert.sh user@120.78.126.132 /opt/im-docker
+   ```
+
+2. **mac 客户端一次性安装根 CA**（根 10 年有效；叶子 30 天由签发机 cron 自动续期推送，mac 端无感）：
+
+   ```bash
+   # 从签发机取根证书（唯一允许外传的文件；rootCA.key 永不出签发机）
+   scp <签发机用户>@<签发机地址>:<部署目录>/certs/ca/rootCA.pem ./
+   # 方式一：命令行装进系统钥匙串并信任
+   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rootCA.pem
+   # 方式二：双击 rootCA.pem 进「钥匙串访问」→ 找到 IM Local Root CA → 双击 → 信任 → 「始终信任」
+   ```
+
+   没装根的表现：mac 上域名与 IP **都**是「连不上」（TLS 握手全被拒），同一台后端在 Electron 上却正常（白名单放行）——
+   遇到这个组合先查根 CA 装没装，别去怀疑后端。
+
+验证：装根后开 mac 包 → 登录页「开发调试」→「测试连接」出「后端连通（1002 未登录）」即链路与证书都通；
+或在 mac 上 `curl --cacert rootCA.pem https://im.dsaol.asia/api/auth/me` 回 `code:1002` 的 JSON 即证书链成立。
+
+### 13.4 与 Windows 包 / Electron 的分工
+
+- 能力差异仍按第十节：屏幕共享开播 / 防截屏 / 被控端 Agent 在 Tauri 缺失，mac 不例外；
+- 地址三件套与调试弹窗是**三壳共用**（Electron / Tauri / Capacitor），源码就三处：`utils/env.js`、`utils/serverBridge.js`、`components/ServerDebugDialog.vue`；
+- 重打 mac 包＝重跑 workflow（tag 或手动），不需要本地 mac 机；包里永远是该次 commit 的 `im-ui` 代码，改回落 IP / 弹窗逻辑无需动 workflow。
 
 ---
 

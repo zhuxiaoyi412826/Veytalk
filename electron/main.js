@@ -7,7 +7,7 @@ const { setupLocalDb } = require('./localdb')
 const { setupDirectBridge, closeDirectLink } = require('./direct')
 const { setupRecorder, closeRecording } = require('./recorder')
 const { setupLiveBridge, closeLivePush } = require('./live')
-const { setupServerConfig, resolve: resolveServerBase } = require('./server-config')
+const { setupServerConfig, resolve: resolveServerBase, resolveWithProbe, BUILT_IN_BASE, BUILT_IN_FALLBACK_BASE } = require('./server-config')
 
 /**
  * 远程后端根地址（协议 + host + 端口，不含 /api、不含 /ws）。
@@ -17,7 +17,7 @@ const { setupServerConfig, resolve: resolveServerBase } = require('./server-conf
  * 注入到渲染进程的 window.__IM_SERVER__.baseUrl，前端 utils/env.js 据此拼 /api 与 ws。
  *
  * ★ 地址现在不再烤死在本文件里，而是运行期三层回落（见 server-config.js）：
- *   userData/server-config.json → 环境变量 IM_SERVER_BASE → 内置默认 http://localhost:8080。
+ *   userData/server-config.json → 环境变量 IM_SERVER_BASE → 内置默认 https://im.dsaol.asia。
  *   登录页的「开发调试」入口与设置页的「后端地址」行改的就是第一层，
  *   所以分发给别人之后换后端不必重打包；内置默认值保留是为了开发机本机起后端时零配置可用。
  */
@@ -32,6 +32,44 @@ let mainWindow = null
 let quitting = false
 /** 托盘实例：创建失败（无图标可用）时为 null，那时关窗口就按老行为直接退进程 */
 let tray = null
+
+/* ------------------------------ 证书定向白名单 ------------------------------ */
+
+/**
+ * 自签证书 + IP 回落的定向证书白名单：线上证书是自签的 CN=im.dsaol.asia（SAN 只含域名、不含 IP），
+ * 没装根 CA 的公网机器连域名必报 authority-invalid，连 IP 再叠一层主机名不匹配。
+ * 这里只放行「目标 host ∈ {域名, 回落 IP} 且证书 CN 正是域名」：等于把自家证书身份钉在客户端，
+ * 别的身份的 MITM 证书仍走默认校验被拒，不是全局关证书校验。
+ * WebSocket（wss）握手的证书错也走这个事件，一处注册 HTTP 与 WS 都覆盖。
+ */
+function setupCertWhitelist() {
+  let domainHost = ''
+  let fallbackHost = ''
+  try {
+    domainHost = new URL(BUILT_IN_BASE).hostname
+  } catch { /* 内置值写坏时白名单不生效，忽略 */ }
+  try {
+    fallbackHost = new URL(BUILT_IN_FALLBACK_BASE).hostname
+  } catch { /* 同上 */ }
+  app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+    let host = ''
+    try {
+      host = new URL(url).hostname
+    } catch {
+      return callback(false)
+    }
+    const isOurHost = host === domainHost || host === fallbackHost
+    // 只认两种可修复错：自签无 CA（authority）与连 IP 的主机名不匹配（common name）；
+    // 过期、用途不对等错误照旧拒绝，白名单不能变成一律放行
+    const fixable = error === 'net::ERR_CERT_AUTHORITY_INVALID' || error === 'net::ERR_CERT_COMMON_NAME_INVALID'
+    const certIsOurs = domainHost !== '' && String((certificate && certificate.subjectName) || '').includes(domainHost)
+    if (isOurHost && fixable && certIsOurs) {
+      event.preventDefault()
+      return callback(true)
+    }
+    return callback(false)
+  })
+}
 
 function createWindow() {
   // 启动时解析一次，作为 additionalArguments 的兜底值；页面加载时的实时值由 preload
@@ -672,7 +710,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   /**
    * Windows 的 Toast 通知靠 AUMID 找到「该用哪个应用的名字与图标」，
    * 不设的话通知要么根本不弹、要么显示为“Electron”。这个值必须与打包时
@@ -684,6 +722,7 @@ app.whenReady().then(() => {
   }
   // 先注册地址解析通道，后建窗口：preload 在页面脚本之前就要能 sendSync 拿到地址
   setupServerConfig(ipcMain)
+  setupCertWhitelist()
   setupDownload()
   setupVideoCompress()
   setupLocalDb()
@@ -695,6 +734,9 @@ app.whenReady().then(() => {
   setupDesktopConfig()
   setupNotify()
   setupAgentAutostart()
+  // 建窗口前先探域名：被备案拦截的网络会切到内置 IP 回落，preload 第一次 resolve 拿到的就是可达地址；
+  // 正常网络代价是一次 TLS 握手（几百毫秒），被拦网络 reset 包约百毫秒回来，不拖启动
+  await resolveWithProbe()
   createWindow()
   // 托盘在建窗口之后：close 钩子已经挂上，这时 tray 不是 null，「关窗口」才会落到收进托盘那一路
   setupTray()

@@ -10,6 +10,10 @@ Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
 }
 列出所有内网链接IP地址
 
+cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
+npm run build:electron
+cd ..\electron
+npm run build
 
 前端页面模块 
 1. im-ui — 用户端（Vue3 + Vite + Element Plus + Pinia，同时用于 Electron/Tauri/Capacitor 打包）
@@ -199,3 +203,5 @@ Get-Process | Where-Object { $_.ProcessName -like 'IM*' } | Stop-Process -Force
 # ③ 打包
 cd d:\daima\Lianshi\spring-boot-duomokuia\electron
 node node_modules/electron-builder/cli.js --win
+
+桌面端和网页端 都走域名访问  im..dsaol.asia 1
