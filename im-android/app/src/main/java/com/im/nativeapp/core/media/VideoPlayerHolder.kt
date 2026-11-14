@@ -25,8 +25,11 @@ class VideoPlayerHolder @Inject constructor(
     var player: ExoPlayer? = null
         private set
 
-    /** 预建并缓冲（鉴权数据源：受控接口需 satoken 头） */
-    fun prepare(fileUrl: String?) {
+    /**
+     * 预建并缓冲（鉴权数据源：受控接口需 satoken 头）。
+     * autoPlay=false 时只 prepare 首帧不自动播，由播放页等用户点播放（设置项「视频自动播放」）。
+     */
+    fun prepare(fileUrl: String?, autoPlay: Boolean = true) {
         release()
         val url = session.resolveUrl(fileUrl) ?: ""
         if (url.isEmpty()) return
@@ -34,7 +37,7 @@ class VideoPlayerHolder @Inject constructor(
         player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dsFactory))
             .build().apply {
-                playWhenReady = true
+                playWhenReady = autoPlay
                 setMediaItem(MediaItem.fromUri(url))
                 prepare()
             }

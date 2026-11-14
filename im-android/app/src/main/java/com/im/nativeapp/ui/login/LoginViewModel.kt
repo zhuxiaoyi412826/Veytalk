@@ -16,7 +16,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import javax.inject.Inject
 
 /**
@@ -221,6 +224,22 @@ class LoginViewModel @Inject constructor(
                     showServerDialog = false
                 )
             }
+            // 图形验证码与原服务器会话绑定，换地址后必须重新取
+            loadCaptcha()
+        }
+    }
+
+    /** 切换环境预设（生产/测试）：写入覆盖地址并刷新图形验证码 */
+    fun selectEnv(url: String) {
+        viewModelScope.launch {
+            session.setServer(url)
+            _ui.update {
+                it.copy(
+                    serverUrl = session.currentServer(),
+                    serverInput = session.currentServer()
+                )
+            }
+            loadCaptcha()
         }
     }
 
@@ -228,10 +247,18 @@ class LoginViewModel @Inject constructor(
 
     // ------------------------------ 错误翻译 ------------------------------
 
-    /** 对齐 request.js 的错误文案口径 */
+    /**
+     * 对齐 request.js 的错误文案口径。
+     * 注意顺序：SSLException / UnknownHostException / ConnectException / SocketException
+     * 都是 IOException 的子类，必须排在 IOException 之前，否则会被父类兜底成一条模糊文案。
+     */
     private fun toMessage(e: Throwable): String = when (e) {
         is ApiError -> e.message ?: "请求失败"
         is SocketTimeoutException -> "请求超时，请检查网络后重试"
+        is javax.net.ssl.SSLException -> "HTTPS 握手失败，请检查证书或域名是否被拦截"
+        is UnknownHostException -> "域名解析失败，请检查 DNS 或地址拼写"
+        is ConnectException -> "连接被拒绝，请确认服务器端口与后端状态"
+        is SocketException -> "连接被重置，请检查网络或域名是否被拦截"
         is HttpException -> "服务异常（HTTP ${e.code()}）"
         is IOException -> "无法连接服务器，请确认后端已启动"
         else -> e.message ?: "请求失败"

@@ -50,11 +50,12 @@ class ApiClient @Inject constructor(
      * 不随服务器地址重建：头是拦截时动态读的，base URL 由调用方拼。
      */
     val mediaHttpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .addInterceptor(authInterceptor)
-            .build()
+        TlsCompat.install(
+            OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .addInterceptor(authInterceptor)
+        ).build()
     }
 
     fun <T> service(api: Class<T>): T {
@@ -84,12 +85,13 @@ class ApiClient @Inject constructor(
     fun api(): AuthApi = service(AuthApi::class.java)
 
     private fun build(apiBase: String): Retrofit {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .addInterceptor(authInterceptor)
-            .build()
+        val client = TlsCompat.install(
+            OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
+                .addInterceptor(authInterceptor)
+        ).build()
 
         return Retrofit.Builder()
             .baseUrl("$apiBase/")

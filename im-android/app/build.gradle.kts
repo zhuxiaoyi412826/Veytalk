@@ -90,5 +90,14 @@ dependencies {
     // M3：图内文字 OCR（ML Kit 端侧中文识别，替代 Web 端 tesseract.js，无 wasm 依赖）
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 
+    // M4：扫一扫（扫码登录网页）。CameraX 负责预览/取帧，ML Kit 负责二维码解码——
+    // 与 zxing 相比不用自己扛相机生命周期与旋转，端侧解码也不上传画面
+    val cameraxVersion = "1.4.2"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }

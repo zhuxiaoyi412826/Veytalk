@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
@@ -28,9 +29,8 @@ import com.im.nativeapp.ui.live.LiveTab
 import com.im.nativeapp.ui.profile.ProfileTab
 
 /**
- * 登录后的主容器：底部四 Tab（消息 / 好友 / 直播 / 我的）。
- * 群聊并入好友页内双板块切换（对齐 Web 端 FriendList 的 好友|群聊 tabs）；
- * 手机端只观看不开播，直播页对齐 Web /live 的 直播|视频 双板块。
+ * 登录后的主容器：底部四 Tab（消息 / 好友 / 视频 / 我的）。
+ * 群聊并入好友页的「群聊」入口（对齐微信通讯录）；直播列表已下线，仅保留视频板块。
  * 各 Tab 内容保活：用 when 切换会把离开的组合销毁，这里用「全部常驻 + 显隐」保住滚动位置与输入态。
  */
 @Composable
@@ -40,9 +40,11 @@ fun MainScreen(
     onOpenAddFriend: () -> Unit,
     onOpenCreateGroup: () -> Unit,
     onOpenLiveRoom: (String) -> Unit,
+    onOpenScan: () -> Unit = {},
     onOpenVideoPlayer: (com.im.nativeapp.core.network.VideoVO) -> Unit = {},
     onOpenAi: () -> Unit = {},
     onOpenProfile: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onLogout: () -> Unit,
     vm: MainViewModel = hiltViewModel()
 ) {
@@ -98,6 +100,13 @@ fun MainScreen(
                     selected = tab == 3,
                     onClick = { tab = 3 },
                     colors = navItemColors,
+                    icon = { Icon(Icons.Default.SmartToy, contentDescription = "AI") },
+                    label = { Text("AI") }
+                )
+                NavigationBarItem(
+                    selected = tab == 4,
+                    onClick = { tab = 4 },
+                    colors = navItemColors,
                     icon = { Icon(Icons.Default.AccountCircle, contentDescription = "我的") },
                     label = { Text("我的") }
                 )
@@ -106,7 +115,12 @@ fun MainScreen(
     ) { padding ->
         androidx.compose.foundation.layout.Box(modifier = Modifier.padding(padding)) {
             when (tab) {
-                0 -> ConversationTab(onOpenChat = onOpenChat)
+                0 -> ConversationTab(
+                    onOpenChat = onOpenChat,
+                    onOpenScan = onOpenScan,
+                    onOpenAddFriend = onOpenAddFriend,
+                    onOpenCreateGroup = onOpenCreateGroup
+                )
                 1 -> FriendTab(
                     onOpenChat = onOpenChat,
                     onOpenRequests = onOpenFriendRequests,
@@ -114,7 +128,9 @@ fun MainScreen(
                     onOpenCreateGroup = onOpenCreateGroup
                 )
                 2 -> LiveTab(onOpenRoom = onOpenLiveRoom, onOpenVideoPlayer = onOpenVideoPlayer)
-                3 -> ProfileTab(onLogout = onLogout, onOpenAi = onOpenAi, onOpenProfile = onOpenProfile)
+                // AI 与「视频」并列成一个 Tab（对应用户要求：AI 放在视频和我的之间并改名 AI）
+                3 -> com.im.nativeapp.ui.ai.AiScreen(onBack = {})
+                4 -> ProfileTab(onOpenSettings = onOpenSettings, onOpenProfile = onOpenProfile)
             }
         }
     }

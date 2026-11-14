@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,11 +84,17 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 主题用可变状态承接：「我的」里改完立即重排生效，不必重启
             var themeMode by remember { mutableStateOf(settings.themeMode) }
+            // 主题色/字号等本机设置变化时触发重组（UiPrefs 是同步快照，rev 只是刷新信号）
+            val prefsRev by com.im.nativeapp.core.config.UiPrefs.rev.collectAsState()
             // 设置页改完回写这个状态（SettingsStore 已是单一事实源，这里只做触发）
             LaunchedEffect(Unit) {
                 com.im.nativeapp.ui.theme.ThemeEvents.changes.collect { themeMode = settings.themeMode }
             }
-            ImTheme(themeMode = themeMode) {
+            ImTheme(
+                themeMode = themeMode,
+                accent = com.im.nativeapp.core.config.UiPrefs.themeColor,
+                fontScale = com.im.nativeapp.core.config.UiPrefs.fontScale
+            ) {
                 val nav = rememberNavController()
                 // 冷启动：有 token 先进行为主页（各仓库首拉失败会由 1002/2010 回登录页）
                 val start = if (session.isLoggedIn()) "main" else "login"
@@ -125,9 +132,10 @@ class MainActivity : ComponentActivity() {
                             onOpenAddFriend = { nav.navigate("add-friend") },
                             onOpenCreateGroup = { nav.navigate("group-create") },
                             onOpenLiveRoom = { roomId -> nav.navigate("live/$roomId") },
+                            onOpenScan = { nav.navigate("scan") },
                             onOpenVideoPlayer = { v ->
                                 // 点击即预建播放器缓冲，导航转场期间完成首帧 → 无缝切入
-                                videoPlayerHolder.prepare(v.fileUrl)
+                                videoPlayerHolder.prepare(v.fileUrl, com.im.nativeapp.core.config.UiPrefs.autoPlayVideo)
                                 val url = java.net.URLEncoder.encode(v.fileUrl ?: "", "UTF-8")
                                 val title = java.net.URLEncoder.encode(v.title ?: "视频", "UTF-8")
                                 val cover = java.net.URLEncoder.encode(v.coverUrl ?: "", "UTF-8")
@@ -135,9 +143,29 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenAi = { nav.navigate("ai") },
                             onOpenProfile = { nav.navigate("profile-edit") },
+                            onOpenSettings = { nav.navigate("settings") },
                             onLogout = {
                                 nav.navigate("login") { popUpTo("main") { inclusive = true } }
                             }
+                        )
+                    }
+                    composable("settings") {
+                        com.im.nativeapp.ui.profile.SettingsScreen(
+                            page = "home",
+                            onBack = { nav.popBackStack() },
+                            onNavigate = { p -> nav.navigate("settings/$p") },
+                            onLoggedOut = { nav.navigate("login") { popUpTo(0) { inclusive = true } } }
+                        )
+                    }
+                    composable(
+                        route = "settings/{page}",
+                        arguments = listOf(navArgument("page") { type = NavType.StringType })
+                    ) { entry ->
+                        com.im.nativeapp.ui.profile.SettingsScreen(
+                            page = entry.arguments?.getString("page") ?: "home",
+                            onBack = { nav.popBackStack() },
+                            onNavigate = { p -> nav.navigate("settings/$p") },
+                            onLoggedOut = { nav.navigate("login") { popUpTo(0) { inclusive = true } } }
                         )
                     }
                     composable(
@@ -174,6 +202,10 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("ai") {
                         com.im.nativeapp.ui.ai.AiScreen(onBack = { nav.popBackStack() })
+                    }
+                    // 扫一扫：识别电脑网页上的登录二维码，确认后让网页免密登录
+                    composable("scan") {
+                        com.im.nativeapp.ui.scan.QrScanScreen(onBack = { nav.popBackStack() })
                     }
                     composable(
                         route = "video-player?url={url}&title={title}&cover={cover}&w={w}&h={h}",

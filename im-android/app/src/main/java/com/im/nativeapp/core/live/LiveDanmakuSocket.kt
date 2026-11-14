@@ -1,6 +1,7 @@
 package com.im.nativeapp.core.live
 
 import android.util.Log
+import com.im.nativeapp.core.network.TlsCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,9 +41,10 @@ class LiveDanmakuSocket {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val client = OkHttpClient.Builder()
-        .pingInterval(0, TimeUnit.SECONDS)
-        .build()
+    private val client = TlsCompat.install(
+        OkHttpClient.Builder()
+            .pingInterval(0, TimeUnit.SECONDS)
+    ).build()
 
     private val _frames = MutableSharedFlow<JsonObject>(extraBufferCapacity = 64)
     val frames: SharedFlow<JsonObject> = _frames

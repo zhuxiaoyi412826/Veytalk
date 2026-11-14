@@ -78,6 +78,9 @@ const http = axios.create({
 })
 
 http.interceptors.request.use((config) => {
+  // 每次请求实时解析 baseURL：原生壳（Tauri/Capacitor）里登录页改服务器地址后要「立即生效」。
+  // 原先进程启动时算一次，改地址必须重启 WebView（原生 App 的 SessionStore 是每次读，这里对齐它）
+  config.baseURL = apiBaseURL()
   const token = getToken()
   if (token) {
     // 头名取自后端下发的 tokenName，而不是写死 satoken

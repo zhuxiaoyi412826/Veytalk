@@ -5,7 +5,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 
 /**
  * 微信风配色（对齐微信移动端视觉规范）：
@@ -30,6 +33,23 @@ object WxColors {
     val ChatBg = Color(0xFFEDEDED)
     val ChatBgDark = Color(0xFF111111)
 }
+
+/** 主题色预设（设置页的色块；green 为默认微信绿） */
+val AccentPresets: List<Pair<String, Color>> = listOf(
+    "green" to Color(0xFF07C160),
+    "blue" to Color(0xFF1E90FF),
+    "purple" to Color(0xFF8A2BE2),
+    "orange" to Color(0xFFFF8C00),
+    "red" to Color(0xFFE64340),
+    "dark" to Color(0xFF333333)
+)
+
+fun accentColor(name: String): Color =
+    AccentPresets.firstOrNull { it.first == name }?.second ?: WxColors.Brand
+
+/** "#RRGGBB" → Color；非法值返回 null（自定义气泡色为空时回落到主题默认） */
+fun colorFromHex(hex: String): Color? =
+    runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrNull()
 
 private val WxLightColors = lightColorScheme(
     primary = WxColors.Brand,
@@ -56,17 +76,31 @@ private val WxDarkColors = darkColorScheme(
 )
 
 /**
- * 应用主题。themeMode 取 light/dark/system，默认跟随系统。
+ * 应用主题：themeMode 取 light/dark/system（默认跟随系统）；
+ * accent 为主题色名（AccentPresets 的 key）；fontScale 为全局字号倍率。
  */
 @Composable
-fun ImTheme(themeMode: String = "system", content: @Composable () -> Unit) {
+fun ImTheme(
+    themeMode: String = "system",
+    accent: String = "green",
+    fontScale: Float = 1.0f,
+    content: @Composable () -> Unit
+) {
     val dark = when (themeMode) {
         "dark" -> true
         "light" -> false
         else -> isSystemInDarkTheme()
     }
-    MaterialTheme(
-        colorScheme = if (dark) WxDarkColors else WxLightColors,
-        content = content
+    val base = if (dark) WxDarkColors else WxLightColors
+    val scheme = base.copy(
+        primary = accentColor(accent),
+        onPrimary = Color.White,
+        primaryContainer = accentColor(accent).copy(alpha = 0.15f)
     )
+    val density = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(density.density, density.fontScale * fontScale)
+    ) {
+        MaterialTheme(colorScheme = scheme, content = content)
+    }
 }

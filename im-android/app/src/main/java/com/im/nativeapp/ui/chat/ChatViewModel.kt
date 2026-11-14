@@ -97,6 +97,14 @@ class ChatViewModel @Inject constructor(
 
     fun resolveUrl(path: String?): String? = session.resolveUrl(path)
 
+    /** 水印文案：账号 + 当天日期（设置里打开后叠在聊天页右上角） */
+    fun watermarkText(): String {
+        val who = session.currentTokenName() ?: ""
+        val day = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        return "$who · $day"
+    }
+
     /**
      * 下载文件消息：换带短时票据的直链交给系统下载管理器。
      * DownloadManager 不能自定义鉴权头，走 /file/{id}/url 票据直链（对齐 Web 端 resolveDirectDownloadUrl）。
@@ -104,7 +112,42 @@ class ChatViewModel @Inject constructor(
     fun downloadFile(msg: MessageVO) {
         val fileId = msg.extra?.fileId ?: msg.content
         if (fileId.isNullOrBlank()) return
-        val fileName = msg.extra?.fileName ?: "file-${fileId}"
+        enqueueDownload(
+            fileId = fileId,
+            fileName = msg.extra?.fileName ?: "file-$fileId",
+            publicDir = android.os.Environment.DIRECTORY_DOWNLOADS,
+            mime = null,
+            done = "已开始下载"
+        )
+    }
+
+    /** 长按图片 → 保存到相册（走同一条票据直链，只是落到 Pictures 目录） */
+    fun saveImage(msg: MessageVO) {
+        val fileId = msg.extra?.fileId ?: msg.content
+        if (fileId.isNullOrBlank()) {
+            _toast.tryEmit("保存失败：图片地址缺失")
+            return
+        }
+        val fallbackName = "IMG-${System.currentTimeMillis()}.jpg"
+        val name = msg.extra?.fileName?.takeIf { it.isNotBlank() && it.contains('.') }
+            ?: msg.extra?.fileUrl?.substringAfterLast('/')?.takeIf { it.contains('.') }
+            ?: fallbackName
+        enqueueDownload(
+            fileId = fileId,
+            fileName = name,
+            publicDir = android.os.Environment.DIRECTORY_PICTURES,
+            mime = "image/*",
+            done = "已保存到相册"
+        )
+    }
+
+    private fun enqueueDownload(
+        fileId: String,
+        fileName: String,
+        publicDir: String,
+        mime: String?,
+        done: String
+    ) {
         viewModelScope.launch {
             try {
                 val signed: String = apiClient.service(FileApi::class.java)
@@ -119,12 +162,10 @@ class ChatViewModel @Inject constructor(
                     .setTitle(fileName)
                     .setDescription("IM 文件下载")
                     .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    .setDestinationInExternalPublicDir(
-                        android.os.Environment.DIRECTORY_DOWNLOADS,
-                        fileName
-                    )
+                    .setDestinationInExternalPublicDir(publicDir, fileName)
+                mime?.let { request.setMimeType(it) }
                 dm.enqueue(request)
-                _toast.tryEmit("已开始下载：$fileName")
+                _toast.tryEmit("$done：$fileName")
             } catch (e: Exception) {
                 _toast.tryEmit(if (e is ApiError) e.message ?: "下载失败" else "下载失败：${e.message ?: ""}")
             }
