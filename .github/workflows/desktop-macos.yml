@@ -1,0 +1,192 @@
+# ==============================================================================
+# macOS 桌面端（Tauri）自动构建
+#
+# 打 tag 或手动触发 → 在 Apple Silicon(arm64) 的 macos-15 runner 上，用系统 WebView
+# 打包 im-ui 前端 + Rust 壳，产出 .dmg / .app；配了 Apple 证书就自动「代码签名 + 公证」，
+# 成品可直接分发（用户首次打开不被 Gatekeeper 拦）。tag 触发时还会把 .dmg 附到 GitHub Release。
+#
+# ★ 与 build-and-package.yml 的分工：那份是后端 jar + 三站 web dist + Docker 镜像（全 ubuntu）；
+#   这份只管 macOS 桌面客户端（Tauri），跑在 macos-15（arm64），互不影响。
+#
+# 需要在 Settings → Secrets and variables → Actions 里配（用户已选「正式签名 + 公证」）：
+#   APPLE_CERTIFICATE           base64 的 .p12 —— openssl base64 -A -in cert.p12 -out b64.txt 的全文
+#   APPLE_CERTIFICATE_PASSWORD  导出 .p12 时设的密码
+#   APPLE_SIGNING_IDENTITY      形如 "Developer ID Application: 名字 (TEAMID)"（security find-identity -v -p codesigning 可查；留空则 Tauri 自动选第一个 Developer ID 身份）
+#   APPLE_ID                    Apple 账号邮箱（公证用）
+#   APPLE_PASSWORD              app 专用密码（appleid.apple.com 生成，不是账号登录密码）
+#   APPLE_TEAM_ID               团队 ID（Apple Developer 会员页可查）
+# 可选：Variables 里配 IM_SERVER_URL 覆盖桌面端要连的后端根地址（默认 https://im.dsaol.asia）
+#
+# ★ 证书前提（mac 独有，WKWebView 无证书绕过）：生产证书须为两级 CA 且叶子 SAN 同时含域名与公网 IP，
+#   签发机：bash scripts/gen-selfca.sh --ip 120.78.126.132 --force && bash scripts/push-cert.sh user@部署机 /opt/im-docker；
+#   mac 客户端一次性装根 CA（certs/ca/rootCA.pem，钥匙串「始终信任」）。步骤与验证见 md/打包/Tauri打包指南.md 第十三节。
+#
+# 触发方式：
+#   打 tag v1.2.3 → 自动构建 + 传 artifact + 发 Release；
+#                   配齐了 APPLE_* secrets 就自动签名公证，没配就自动出【未签名】包（不报错、不中断）
+#   手动 Run workflow → 同上；也可显式取消勾选「签名公证」强制出未签名包
+#
+# 说明：Tauri 是「换壳不换功能」，屏幕共享直播 / 防截屏 / 被控端 Agent 在桌面壳下退化或缺失
+#       （见 md/打包/Tauri打包指南.md 第十节）；主聊天 / 文件 / 语音观看 / 通话可用，定位轻客户端。
+# ==============================================================================
+name: desktop-macos
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: '是否签名公证：默认自动（配齐 APPLE_* secrets 才签，否则出未签名包，不报错）；取消勾选则强制不签名'
+        type: boolean
+        default: true
+      server_url:
+        description: '桌面端连的后端根地址（不含 /api）；留空则用 vars.IM_SERVER_URL 或默认 https://im.dsaol.asia'
+        type: string
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # tag 构建可能正在发同一系列 Release，不取消
+  cancel-in-progress: false
+
+permissions:
+  contents: write          # 仅 tag 触发时用 GITHUB_TOKEN 建/传 Release 需要写权限
+
+env:
+  NODE_VERSION: '20'       # 与 build-and-package.yml 保持一致
+
+jobs:
+  build-macos:
+    # macos-15 = Apple Silicon(arm64)，host triple 默认 aarch64-apple-darwin，产出即 arm64 成品
+    # （macos-14 已于 2026-11-02 退役，runner 不可用会报 "configuration ... is not supported" 并 cancelled）
+    runs-on: macos-15
+    # 首次公证 notarytool 往返可能较慢，留足超时
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------- 决定是否签名（secrets 齐全才签，否则自动降级未签名）
+      - name: 决定是否签名（secrets 齐全才签，否则自动降级未签名，不报错）
+        id: sign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # 签名所需的 5 项（APPLE_SIGNING_IDENTITY 可省，Tauri 会自动选第一个 Developer ID 身份）
+          MISSING=""
+          [[ -n "$APPLE_CERTIFICATE" ]]          || MISSING="$MISSING APPLE_CERTIFICATE"
+          [[ -n "$APPLE_CERTIFICATE_PASSWORD" ]] || MISSING="$MISSING APPLE_CERTIFICATE_PASSWORD"
+          [[ -n "$APPLE_ID" ]]                   || MISSING="$MISSING APPLE_ID"
+          [[ -n "$APPLE_PASSWORD" ]]             || MISSING="$MISSING APPLE_PASSWORD"
+          [[ -n "$APPLE_TEAM_ID" ]]              || MISSING="$MISSING APPLE_TEAM_ID"
+          # 手动触发显式取消勾选 → 强制不签名；否则「secrets 齐全就签名，不齐就自动降级未签名」（永不 fail）
+          if [[ '${{ inputs.sign }}' == 'false' ]]; then
+            WANT=false
+          elif [[ -z "$MISSING" ]]; then
+            WANT=true
+          else
+            WANT=false
+          fi
+          if [[ "$WANT" == true ]]; then
+            echo "sign=true"  >> "$GITHUB_OUTPUT"
+            echo "suffix=signed" >> "$GITHUB_OUTPUT"
+            echo "::notice::APPLE_* secrets 齐全，本次执行代码签名 + 公证"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "suffix=unsigned" >> "$GITHUB_OUTPUT"
+            if [[ -n "$MISSING" ]]; then
+              echo "::warning::未配齐签名 secrets（缺:${MISSING}），本次出【未签名】包：本机测试没问题；分发给他人首次打开会被 Gatekeeper 拦，需右键→打开或终端 xattr -cr 去隔离。将来配齐 6 个 APPLE_* 后重跑即可自动签名，无需改 workflow。"
+            else
+              echo "::notice::按手动选择强制出【未签名】包"
+            fi
+          fi
+
+      # ---------------------------------------------------------- 工具链
+      - name: 准备 Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: im-ui/package-lock.json
+
+      # stable 满足 src-tauri/Cargo.toml 的 rust-version = 1.90 与 edition 2024
+      - name: 准备 Rust（stable）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 构建缓存（第二次起大幅提速）
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: im-ui/src-tauri -> target
+
+      - name: 安装前端依赖（npm ci）
+        working-directory: im-ui
+        run: npm ci
+
+      # ---------------------------------------------------------- 构建 + 打包（含签名公证）
+      - name: Tauri 构建 + 打包 .dmg / .app
+        working-directory: im-ui
+        env:
+          # 桌面端连的后端根地址：手动输入 > 仓库 Variable > 默认（手册 §11 的公网聊天端入口）
+          # vite 的 loadEnv 会优先采用 process.env 里 VITE_ 前缀变量，故此处注入即进 import.meta.env
+          VITE_IM_SERVER_URL: "${{ inputs.server_url || vars.IM_SERVER_URL || 'https://im.dsaol.asia' }}"
+          # 以下 6 个仅签名时有值：Tauri CLI 检测到 APPLE_CERTIFICATE 会自动导入临时 keychain 并签名，
+          # 检测到 APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID 会自动提交 notarytool 公证并 staple 回 .app/.dmg
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          echo "后端地址 VITE_IM_SERVER_URL=$VITE_IM_SERVER_URL"
+          # beforeBuildCommand(npm run build:tauri) 会自动先跑 vite 构建到 ../dist，无需单独执行
+          # --bundles 覆盖 tauri.conf.json 里的 targets(nsis)：官方文档「Space or comma separated list」
+          if [[ '${{ steps.sign.outputs.sign }}' == 'true' ]]; then
+            npm run tauri -- build --bundles app,dmg
+          else
+            npm run tauri -- build --bundles app,dmg --no-sign
+          fi
+
+      - name: 列出产物
+        run: |
+          set -euo pipefail
+          BUNDLE=im-ui/src-tauri/target/release/bundle
+          ls -lh "$BUNDLE"/dmg/*.dmg 2>/dev/null || echo "未发现 .dmg"
+          ls -lhd "$BUNDLE"/macos/*.app 2>/dev/null || echo "未发现 .app"
+
+      # ---------------------------------------------------------- 成品：Actions Artifact
+      # 只收 .dmg —— 它是标准分发物，内部 .app 权限完整且已 staple；
+      # upload-artifact 用 zip 存目录会丢 Unix 可执行位，故不单独传 .app（要 .app 挂载 .dmg 拖出即可）
+      - name: 上传成品 .dmg（Artifact，留 14 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-desktop-macos-arm64-${{ github.ref_name }}-${{ steps.sign.outputs.suffix }}
+          path: im-ui/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      # ---------------------------------------------------------- 成品：GitHub Release（仅 tag）
+      - name: 发布到 GitHub Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DMG="$(ls im-ui/src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+          TAG="${{ github.ref_name }}"
+          # Release 已存在就补传（--clobber 覆盖同名文件），不存在才新建（--generate-notes 自动汇总本次 commit）
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" --clobber
+          else
+            gh release create "$TAG" "$DMG" \
+              --title "IM通讯 ${TAG} (macOS arm64)" \
+              --generate-notes
+          fi
+          echo "::notice::已发布到 Release ${TAG}：${DMG}"

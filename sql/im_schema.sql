@@ -14,6 +14,12 @@
 --    3. 时间列统一 DATETIME，由 MyBatis-Plus 自动填充，同时给出数据库默认值兜底
 -- =====================================================================================
 
+-- ★ 强制会话字符集为 utf8mb4：客户端默认字符集不对（latin1 / GBK）时，表注释、列注释里的
+--   中文会被按错误字符集解释、存成双重编码乱码。这一行让 source 本文件时会话字符集恒为
+--   utf8mb4，与客户端默认值解耦。注意它救不了 PowerShell 管道（Get-Content | mysql 在 shell
+--   层就把中文刷成 ?），那种仍须用 -e "source" 或 scripts/import-sql.sh。
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS `im_db`
     DEFAULT CHARACTER SET utf8mb4
     DEFAULT COLLATE utf8mb4_general_ci;
@@ -22,6 +28,8 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_user_agreement`;
+DROP TABLE IF EXISTS `im_agreement`;
 DROP TABLE IF EXISTS `im_announcement`;
 DROP TABLE IF EXISTS `im_sensitive_word`;
 DROP TABLE IF EXISTS `im_config`;
@@ -33,12 +41,15 @@ DROP TABLE IF EXISTS `im_gift`;
 DROP TABLE IF EXISTS `im_user_wallet`;
 DROP TABLE IF EXISTS `im_live_video`;
 DROP TABLE IF EXISTS `im_article`;
+DROP TABLE IF EXISTS `im_ai_guard`;
+DROP TABLE IF EXISTS `im_ai_usage`;
 DROP TABLE IF EXISTS `im_interview_event`;
 DROP TABLE IF EXISTS `im_interview_message`;
 DROP TABLE IF EXISTS `im_interview_session`;
 DROP TABLE IF EXISTS `im_remote_audit_log`;
 DROP TABLE IF EXISTS `im_remote_session`;
 DROP TABLE IF EXISTS `im_remote_device`;
+DROP TABLE IF EXISTS `im_moderation_log`;
 DROP TABLE IF EXISTS `im_file`;
 DROP TABLE IF EXISTS `im_group_member`;
 DROP TABLE IF EXISTS `im_group_join_request`;
@@ -436,7 +447,7 @@ CREATE TABLE `im_file`
 (
     `id`            BIGINT       NOT NULL COMMENT '文件 ID',
     `uploader_id`   BIGINT       NOT NULL COMMENT '上传者用户 ID',
-    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice / video / video_cover',
+    `biz_type`      VARCHAR(32)  NOT NULL COMMENT '业务类型：avatar / chat_image / chat_file / chat_voice / video / video_cover / article_cover / article_img / call_record / moderation_quarantine（图片审核隔离区），全集见 FileBizType',
     `storage_type`  VARCHAR(16)  NOT NULL DEFAULT 'local' COMMENT '存储实现：local / minio',
     `bucket`        VARCHAR(64)           DEFAULT NULL COMMENT '存储桶，本地实现为空',
     `object_key`    VARCHAR(512) NOT NULL COMMENT '对象键 / 相对路径',
@@ -455,6 +466,36 @@ CREATE TABLE `im_file`
     KEY `idx_uploader` (`uploader_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='文件元数据表';
+
+-- 图片审核命中流水（五期）：审计文件 MODERATION/moderation.log 只留 30 天且不能按维度检索，
+-- 追责数据挪进表里才能按「谁 / 哪个场景 / 哪一类」翻页。继承 AuditEntity（流水表只增不改不删，
+-- 没有 deleted 列）。概率与阈值用 DECIMAL(5,4)：客户端上报已收敛到 0~1，定长小数事后排序省事。
+-- 排序固定按主键倒序（雪花 ID 即时间序），所以二级索引都带 id 收尾，不再单建 create_time 索引。
+-- ★ evidence_file_id（五期·查看图片）：命中后发送端把原图复制一份进隔离区（biz_type=moderation_quarantine），
+--   这一列指向那行 im_file。它是对判定结果的「补写」而不是修改：只有 NULL → 有值这一个方向，
+--   判定字段（类别/概率/阈值/评分）永远不再被改，所以「只增不改」的口径不受影响。
+CREATE TABLE `im_moderation_log`
+(
+    `id`              BIGINT       NOT NULL COMMENT '主键（雪花，兼时间排序键）',
+    `user_id`         BIGINT       NOT NULL COMMENT '上报用户 ID（发图人 / 设头像的人）',
+    `scene`           VARCHAR(32)  NOT NULL COMMENT '业务场景：avatar / chat_image / video_cover 等图片类 FileBizType',
+    `hit_class`       VARCHAR(32)  NOT NULL COMMENT '命中类别名（模型输出原名）：Porn / Hentai / Violent 等',
+    `hit_probability` DECIMAL(5, 4) NOT NULL DEFAULT 0 COMMENT '命中类别概率（0~1，服务端夹后落库）',
+    `threshold`       DECIMAL(5, 4)         DEFAULT NULL COMMENT '上报时前端实际使用的阈值，事后核对阈值改动的影响',
+    `file_name`       VARCHAR(200)          DEFAULT NULL COMMENT '原始文件名（客户端报的，已洗成单行）；图片本体见 evidence_file_id',
+    `file_size`       BIGINT                DEFAULT NULL COMMENT '文件字节数',
+    `conversation_id` BIGINT                DEFAULT NULL COMMENT '会话 ID，聊天场景非空',
+    `scores`          JSON                  DEFAULT NULL COMMENT '模型完整评分 [{className,probability}]，上限 16 条，仅留痕',
+    `evidence_file_id` BIGINT               DEFAULT NULL COMMENT '隔离区图片的 im_file.id（biz_type=moderation_quarantine）：未开启/超大/上传失败为 NULL',
+    `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '命中时间',
+    `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（仅挂证据时被动一次，判定字段不回改）',
+    PRIMARY KEY (`id`),
+    -- 「这个人试过几次」：按用户过滤后天然按主键倒序取一页
+    KEY `idx_user` (`user_id`, `id`),
+    -- 按场景看分布（比如头像位有没有人试毒）
+    KEY `idx_scene` (`scene`, `id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='图片审核命中流水（追责数据落库，判定字段只增不改；与审计文件双写）';
 
 -- =====================================================================================
 --  七、远程控制（im-remote）
@@ -613,6 +654,40 @@ CREATE TABLE `im_interview_event`
     KEY `idx_session_violation` (`session_id`, `violation`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='AI 面试操作与违规事件流水（只增不改不删）';
+
+-- =====================================================================================
+--  九之二、AI 用量护栏（im-ai · 四期第六批）
+-- =====================================================================================
+
+CREATE TABLE `im_ai_usage`
+(
+    `id`          BIGINT       NOT NULL COMMENT '主键（雪花）',
+    `user_id`     BIGINT       NOT NULL COMMENT '发起人用户 ID',
+    `scene`       VARCHAR(32)  NOT NULL COMMENT '计费场景：interview_chat 面试对话 / interview_asr 面试语音转文字 / interview_tts 文字合成朗读 / message_to_text 聊天语音转文字',
+    `duration_ms` BIGINT       NOT NULL DEFAULT 0 COMMENT '模型调用实际耗时（毫秒，服务端单调时钟）：护栏的计费口径',
+    `success`     TINYINT      NOT NULL DEFAULT 1 COMMENT '是否成功：1 成功（扣预算） 0 失败（只留痕不扣）',
+    `error_msg`   VARCHAR(255)          DEFAULT NULL COMMENT '失败原因摘要（成功为空），写入前截到 255',
+    `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '调用完成时间',
+    `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（流水不更，列形同虚设，与面试事件表同构）',
+    PRIMARY KEY (`id`),
+    -- 按人重建 Redis 预算计数器与后台聚合：WHERE user_id=? [AND success=1] SUM(duration_ms)
+    KEY `idx_user_time` (`user_id`, `create_time`),
+    -- 明细页按场景筛
+    KEY `idx_scene_time` (`scene`, `create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 付费模型调用用量流水（只增不改不删）';
+
+CREATE TABLE `im_ai_guard`
+(
+    `user_id`     BIGINT      NOT NULL COMMENT '被管控的用户 ID，同时是主键：一行一人，没封禁的人根本没有这一行',
+    `banned`      TINYINT     NOT NULL DEFAULT 1 COMMENT '是否封禁 AI 功能：0 未封禁（解封写 0 不删行，留 reason 供追溯） 1 已封禁',
+    `reason`      VARCHAR(200)         DEFAULT NULL COMMENT '封禁原因（展示给被封者与管理台）',
+    `update_by`   BIGINT               DEFAULT NULL COMMENT '最后一次封/解操作的后台操作人 ID（问责用）',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次封禁时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后一次封/解时间',
+    PRIMARY KEY (`user_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='AI 功能封禁状态表（只停付费模型调用，不动账号登录）';
 
 -- =====================================================================================
 --  十、直播（im-live）
@@ -906,3 +981,77 @@ CREATE TABLE `im_announcement`
     KEY `idx_status_publish` (`status`, `publish_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='全服公告（后台唯一主动广播通道，状态 0→1→2；无已读回执表，去重记在客户端本地）';
+
+-- =====================================================================================
+--  十五、法定文本与同意留痕（im-user）
+-- =====================================================================================
+
+-- 面向公众的三份法定文本（用户协议 / 隐私政策 / 服务条款），一个版本一行。
+-- 为什么建表而不是把 md 文件塞进 im-website：改一份对外生效的合同是一次**有操作人、有生效时刻、
+-- 需要留下变更说明**的行为，而这些正好是文件系统给不了的三样；同时官网页脚、App 内公示页、
+-- 注册勾选行必须读到同一份文本，两处各存一份 markdown 迟早出现「弹窗里是旧的、官网上是新的」。
+-- ★ 不启 deleted：这一列一旦生效就是一份对用户履行过的合同原件，销毁原件不是「删除」能表达的动作。
+--   法务要改文案只能发一个版本号更大的新版本，旧行转 status=2 归档，文本永久按 code+version 可查
+--   （一个已经注销的账号当初点开的链接，今天仍然要能打开）——所以后台控制器压根没有删除端点。
+-- version 由服务端取「该 code 下历史最大值 + 1」（含草稿与归档，号段永不复用），客户端传来的版本号
+--   一律不认：它是 im_user_agreement 里那条留痕的对账依据，可写就等于允许留痕和账对不上。
+-- required 分两档不是随便定的：隐私政策与用户协议不签就不能用（法定门槛），而服务条款只覆盖钱包 /
+--   打赏 / 远程协助这类增值服务，拒签只该关掉这些入口，不该拦住注册——拒签同样要落一行留痕。
+-- 索引两条就够：status 全表扫那一下命中行数就是「发布过的版本数」（个位到十几），而
+--   idx_code_version 这个唯一键同时服务「按 code 取生效版」与「按 code+version 取历史版」两种查法。
+CREATE TABLE `im_agreement`
+(
+    `id`             BIGINT        NOT NULL COMMENT '协议版本 ID（雪花）；im_user_agreement.agreement_id 指向的就是这一行，它一旦发布过就不可被替换',
+    `code`           VARCHAR(32)   NOT NULL COMMENT '协议标识：terms 用户协议 / privacy 隐私政策 / service 服务条款。白名单在服务端（Agreement#isKnownCode），不建 ENUM——将来加一份新的法定文本不该动表结构',
+    `version`        INT           NOT NULL COMMENT '同一 code 内单调递增的版本号，服务端算，客户端传来的值一律不认',
+    `title`          VARCHAR(120)  NOT NULL COMMENT '文档标题，公示页的 h1；发布后不可改，标题也是那份被同意的文本的一部分',
+    `summary`        VARCHAR(500)           DEFAULT NULL COMMENT '一句话摘要：注册页勾选行下面与再同意弹窗里那行小字',
+    `content`        MEDIUMTEXT    NOT NULL COMMENT 'Markdown 正文原文，渲染端 marked + DOMPurify 净化（与文章同一口径）。用 MEDIUMTEXT 而不是 VARCHAR(65535)：后者上限按字节算，utf8mb4 下中文实际只装得下两万多字，一份带信息清单表格的隐私政策轻松过线',
+    `required`       TINYINT       NOT NULL DEFAULT 1 COMMENT '是否必签：1 必须同意才能注册与继续使用 0 可拒（只影响对应增值服务的入口）',
+    `status`         TINYINT       NOT NULL DEFAULT 0 COMMENT '状态（单向，没有撤回这条边）：0 草稿（仅后台可见，对外等于不存在） 1 已发布（同一 code 至多一行） 2 已归档（被新版本顶替，文本仍永久可查）',
+    `effective_time` DATETIME               DEFAULT NULL COMMENT '生效时刻，发布时盖；公示页那行「本版生效于」取它，也是判断「某次同意是否发生在文本改版之前」的唯一依据',
+    `publish_time`   DATETIME               DEFAULT NULL COMMENT '发布时刻，草稿为空',
+    `publish_by`     BIGINT                 DEFAULT NULL COMMENT '发布人（后台账号 ID）：出了争议要能问出「这一版是谁放出去的」',
+    `remark`         VARCHAR(255)           DEFAULT NULL COMMENT '本版变更说明：「v3 比 v2 改了什么」唯一能直接答上的字段，发布时可补写一次',
+    `create_time`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '起草时间',
+    `update_time`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（只有草稿阶段会被改，已发布行的这两列应当相等或只差一次发布动作）',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_code_version` (`code`, `version`),
+    KEY `idx_code_status` (`code`, `status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='法定文本版本表（发布后正文不可改、无删除端点，改文案等于发新版本）';
+
+-- 同意留痕：一行 = 某个用户在某个时刻对某个**具体版本**的一次表态。整个合规链路里唯一拿得出证据的
+-- 就是这张表——官网上挂一份公示文本不构成「取得单独同意」，监管和对方律师要看的是能逐行对上的记录：
+-- 谁、什么时候、从哪个入口、对着哪一版、点了同意还是拒绝、从哪个 IP 与设备。少任何一列，
+-- 举证时都要现编说辞。三个 source 的举证强度并不相同：register 是账号本身就是那次点击的产物，
+-- login 是验证码登录自动建号（他从未勾过东西，靠之后那次弹窗补齐），dialog 是文本改版后的再同意。
+-- ★ 不启 deleted 且后台无删除端点：法定留存期内没有任何角色有权删这一行，清理只跟日志留存策略走、
+--   不跟业务走。注销账号也不连带删它——「他当初同意过什么」与「账号还在不在」是两件事，
+--   所以这里刻意不建外键（建了就得允许级联删，或者让注销报错，两个都错）。
+-- ★ 刻意不加唯一键：同一版重复同意在技术上能插两条，但服务层每次先查「这一版表过态没有」再决定写不写；
+--   换成唯一键会把「先拒了服务条款、后来改主意同意」这条正常路径撞成主键冲突。
+-- code 与 version 是从主表抄下来的冗余快照：留痕要能整表导出成一份自足的材料，不该依赖主表当时
+--   长成什么样（也不必为了补这两个字段去 join 一次几百万行的表）。
+CREATE TABLE `im_user_agreement`
+(
+    `id`           BIGINT      NOT NULL COMMENT '留痕 ID（雪花）',
+    `user_id`      BIGINT      NOT NULL COMMENT '表态的用户 ID。注销后仍保留，且不建外键：级联删等于销毁证据',
+    `agreement_id` BIGINT      NOT NULL COMMENT '指向 im_agreement 的具体版本行：点进去能看到他当时同意的那份原文',
+    `code`         VARCHAR(32) NOT NULL COMMENT '协议标识快照（冗余），整表导出时不必 join 主表',
+    `version`      INT         NOT NULL COMMENT '版本号快照（冗余），「他同意的是 v2」全靠这一列，不看主表当前值',
+    `action`       TINYINT     NOT NULL COMMENT '动作：1 同意 0 拒绝。0 同样是有价值的证据——它证明这个人明确没同意过，也是「必签项没勾」与「勾了不同意」在服务端合成的同一种失败',
+    `source`       VARCHAR(16) NOT NULL COMMENT '场景：register 注册勾选 / login 验证码登录自动建号 / dialog 登录后强制再同意弹窗。三个入口的举证强度不同，出了争议要先问这一行是怎么产生的',
+    `ip`           VARCHAR(64)          DEFAULT NULL COMMENT '来源 IP，与登录日志同一口径（含反代头，写入前截到列宽）',
+    `user_agent`   VARCHAR(255)         DEFAULT NULL COMMENT 'User-Agent，写入前截到列宽：判断「是不是本人设备点的」的唯一线索',
+    `create_time`  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '表态时刻（本表只有 INSERT，这一列就是事件时间）',
+    `update_time`  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（流水不更，列形同虚设，与 im_ai_usage 同一口径）',
+    PRIMARY KEY (`id`),
+    -- 每次登录后判断「要不要弹框」与「同一版是否已表过态」都是这个组合：WHERE user_id=? AND agreement_id IN (...)
+    KEY `idx_user_agreement` (`user_id`, `agreement_id`),
+    -- 后台反查「这一版有多少人同意过」（发布效果与同意率统计）
+    KEY `idx_agreement` (`agreement_id`),
+    -- 留痕按时间范围翻页（监管取证常给一个起止日期）；个人同意链按 user_id 排序取，行数是个位量级
+    KEY `idx_create_time` (`create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='同意留痕（一次表态一行、只 INSERT；无删除端点、无唯一键、无外键）';

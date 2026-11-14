@@ -71,6 +71,57 @@ function devHttps() {
 }
 
 /**
+ * 开发期代理的统一错误处理：后端没起来时回一段「读得懂」的响应，而不是 vite 默认的裸 500。
+ *
+ * 起因：2026-11-08 那次「点击注册报 GET /api/agreement/list 500」，实际是 ImApplication 正在重启
+ * （后端日志 15:06:04 graceful shutdown → 15:07:12 才 Started，中间 68 秒 8080 根本没人监听）。
+ * 代码没有一行是坏的，但页面上看不出来。
+ *
+ * 实测（vite 7.3.6 的 dist/node/chunks/config.js:21998-22004）：target 连不上时 vite 只在自己终端
+ * 打一行 `http proxy error`，然后 `res.writeHead(500, { 'Content-Type': 'text/plain' }).end()`——
+ * **空 body**。浏览器因此只看到一行 `500 (Internal Server Error)`，axios 那边只能拼出
+ * 「服务异常（HTTP 500）」，究竟是「后端没启动」还是「这个接口真坏了」谁也分不清。
+ *
+ * 这里改成回 HTTP 502（语义就是网关连不上上游）+ 一段与后端 Result 同形状的 JSON，
+ * message 里写清 target 与 errno，再加一句该去检查哪个服务（hint，每个前缀自己的那个）；
+ * request.js 的错误分支会优先读这个 message 显示出来。
+ * 注意 configure 的回调在 vite 注册它自己的 error 监听之前执行（同文件 21997 行），
+ * 响应先被我们写完，vite 那个监听因 headersSent 为真就不再重复响应，它的日志照旧会打。
+ *
+ * @param target 上游地址，写进报错文案里让人一眼对上端口
+ * @param hint   该去检查哪个服务；不说这句的话，直播媒体服务挂了也会被人当成后端没起
+ */
+function devProxy(target, hint) {
+  return {
+    // target 必须是 localhost：proxy 请求是 vite 进程自己发的，永远在电脑本机，
+    // 与浏览器用什么地址访问无关，改成局域网 IP 反而会绕一圈网卡。
+    target,
+    changeOrigin: true,
+    configure(proxy) {
+      proxy.on('error', (err, _req, res) => {
+        // /ws 那类升级请求的 res 是 Socket 而不是 ServerResponse，没有 writeHead；
+        // 只处理普通 HTTP，Socket 那种交给 vite 自己的日志
+        if (!res || typeof res.writeHead !== 'function' || res.headersSent || res.writableEnded) {
+          return
+        }
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(
+          JSON.stringify({
+            code: 502,
+            message: `后端未就绪：dev server 连不上 ${target}（${err.code || err.message}）。` +
+              `若正在启动请稍后重试；否则${hint}。`,
+            data: null,
+            success: false,
+            traceId: '',
+            timestamp: Date.now()
+          })
+        )
+      })
+    }
+  }
+}
+
+/**
  * 前端独立运行，不参与 Maven 构建。
  *
  * 开发期所有后端流量都走这里的 proxy 转发到 8080，好处是浏览器看到的
@@ -141,12 +192,7 @@ export default defineConfig(({ mode, command }) => {
     //   'Cross-Origin-Embedder-Policy': 'credentialless'
     // },
     proxy: {
-      '/api': {
-        // target 必须是 localhost：proxy 请求是 vite 进程自己发的，永远在电脑本机，
-        // 与浏览器用什么地址访问无关，改成局域网 IP 反而会绕一圈网卡。
-        target: 'http://localhost:8080',
-        changeOrigin: true
-      },
+      '/api': devProxy('http://localhost:8080', '请检查 ImApplication 是否已启动、是否监听 8080'),
       // WebSocket 握手同样经代理转发。ws:true 是必需的，
       // 否则 vite 只代理普通 HTTP 请求，/ws 的 Upgrade 会被当成 404。
       '/ws': {
@@ -158,10 +204,8 @@ export default defineConfig(({ mode, command }) => {
       // 本机 8088 的 live-media-server.js。播放地址因此永远跟随前端访问地址（https://IP:5173），
       // DHCP 换 IP 无需改任何配置，且与页面同源、复用 dev server 的 https 证书，不触发 mixed content。
       // 前缀用 /hls 而非 /live——/live 是前端路由（直播页），代理它会劫持页面导航。
-      '/hls': {
-        target: 'http://localhost:8088',
-        changeOrigin: true
-      }
+      // 连不上时报的也是连不上 8088，并且指向媒体服务而不是 ImApplication，不会误导人重启后端
+      '/hls': devProxy('http://localhost:8088', '请检查直播媒体服务 live-media-server.js 是否已启动')
     }
   },
   build: {

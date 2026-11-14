@@ -17,15 +17,32 @@ const STORAGE_KEY = 'im_settings'
 
 /** 可选主题色，Settings 页以色块形式展示 */
 export const THEME_COLORS = [
-  { label: '蓝色', value: '#409eff' },
-  { label: '绿色', value: '#67c23a' },
-  { label: '紫色', value: '#722ed1' },
-  { label: '橙色', value: '#e6a23c' },
-  { label: '红色', value: '#f56c6c' },
-  { label: '青色', value: '#13c2c2' }
+  { label: '经典蓝', value: '#409eff' },
+  { label: '靛蓝', value: '#3367d6' },
+  { label: '天青', value: '#38bdf8' },
+  { label: '湖蓝', value: '#0e7490' },
+  { label: '松绿', value: '#10b981' },
+  { label: '翠绿', value: '#67c23a' },
+  { label: '茶棕', value: '#92650a' },
+  { label: '暖橙', value: '#e6a23c' },
+  { label: '朱红', value: '#ef4444' },
+  { label: '玫瑰', value: '#f56c6c' },
+  { label: '暗紫', value: '#722ed1' },
+  { label: '靓紫', value: '#a855f7' },
+  { label: '灰石', value: '#64748b' },
+  { label: '石墨', value: '#1e293b' }
 ]
 
-/** 消息字号缩放倍率 */
+/** 字体栈映射：key → CSS font-family 值 */
+export const FONT_FAMILIES = [
+  { label: '系统默认', value: 'system', stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' },
+  { label: '苹方 / 微软雅黑', value: 'pingfang', stack: '"PingFang SC", "Microsoft YaHei", sans-serif' },
+  { label: '思源宋体', value: 'serif', stack: '"Noto Serif SC", "Source Han Serif", Georgia, serif' },
+  { label: '等宽编程', value: 'mono', stack: '"JetBrains Mono", "Fira Code", Consolas, monospace' },
+  { label: '圆体', value: 'rounded', stack: '"Varela Round", "ZCOOL KuaiLe", sans-serif' }
+]
+
+/** 消息字号缩放倍率（兼容旧三档快捷预设） */
 const FONT_SCALE = { small: 0.9, default: 1, large: 1.15 }
 
 /** 会话列表头像边长（px） */
@@ -35,12 +52,18 @@ const DEFAULTS = {
   // ---------- 外观 ----------
   themeMode: 'system', // light | dark | system
   themeColor: '#409eff',
-  fontSize: 'default', // small | default | large
+  fontSize: 'default', // small | default | large (快捷预设)
+  globalFontPx: 14, // 全局基础字号 8-22 px
+  bubbleFontPx: 14, // 消息气泡内文字字号 8-22 px
+  fontFamily: 'system', // 字体栈 key（见 FONT_FAMILIES）
   chatBgType: 'default', // default | color | image
   chatBgValue: '', // 纯色值或图片 data URL
+  chatBgOpacity: 100, // 背景图不透明度 0-100（100=完全不透明）
   listWidth: 300, // 会话列表宽度 px
   avatarSize: 'medium', // small | medium | large
   bubbleStyle: 'rounded', // rounded | simple
+  bubbleColorSelf: '#95ec69', // 我方气泡底色
+  bubbleColorOther: '#ffffff', // 对方气泡底色
   // ---------- 消息行为 ----------
   sendKey: 'enter', // enter | ctrlEnter
   autoLoadHistory: true,
@@ -93,6 +116,22 @@ const DEFAULTS = {
   callRecordDir: '',
   /** 通话录制文件上传留存的大小上限（MB），超限则不上传、仅本地保留 */
   callRecordMaxMb: 200,
+  // ---------- 直播录制（仅桌面端） ----------
+  /** 直播录制开关：开启后在直播播放页显示录制按钮 */
+  liveRecordEnabled: false,
+  /** 直播录制保存目录，留空表示用默认「视频\IM远程录屏」 */
+  liveRecordDir: '',
+  // ---------- 桌面端配置（仅 Electron 生效） ----------
+  /** 文件下载目录，留空表示每次弹出保存对话框 */
+  downloadDir: '',
+  /** 网络代理开关 */
+  proxyEnabled: false,
+  /** 代理地址（格式 http://host:port 或 socks5://host:port） */
+  proxyUrl: '',
+  /** 全局快捷键配置 */
+  shortcutMinimize: 'CommandOrControl+Shift+M',
+  shortcutAlwaysOnTop: 'CommandOrControl+Shift+T',
+  shortcutToggleVisible: 'CommandOrControl+Shift+W',
   // ---------- 高级 ----------
   debugLog: false
 }
@@ -126,6 +165,14 @@ function mix(base, target, ratio) {
     g: a.g + (b.g - a.g) * ratio,
     b: a.b + (b.b - a.b) * ratio
   })
+}
+
+/**
+ * 把 key 解析为 CSS font-family 堆栈。未识别时回退系统默认。
+ */
+function resolveFontStack(key) {
+  const found = FONT_FAMILIES.find((f) => f.value === key)
+  return found ? found.stack : FONT_FAMILIES[0].stack
 }
 
 /* ------------------------------ store ------------------------------ */
@@ -242,13 +289,36 @@ export const useSettingsStore = defineStore('settings', {
       }
       root.style.setProperty('--el-color-primary-dark-2', mix(color, '#000000', 0.2))
 
+      // 字号：保留旧 font-scale 兼容，同时写入新的精确 px 变量
       root.style.setProperty('--im-font-scale', String(this.fontScale))
+      root.style.setProperty('--im-global-font-px', String(this.globalFontPx || 14))
+      root.style.setProperty('--im-bubble-font-px', String(this.bubbleFontPx || 14))
+      // 字体族
+      root.style.setProperty('--im-font-family', resolveFontStack(this.fontFamily))
+      // 列表宽度
       root.style.setProperty('--im-list-width', `${Math.max(220, Math.min(460, Number(this.listWidth) || 300))}px`)
+      // 气泡圆角
       root.style.setProperty('--im-bubble-radius', this.bubbleStyle === 'simple' ? '2px' : '8px')
+      // 气泡颜色：深色模式下对方气泡强制暗色，避免纯白刺眼
+      root.style.setProperty('--im-bubble-self', this.bubbleColorSelf || DEFAULTS.bubbleColorSelf)
+      root.style.setProperty('--im-bubble-other', this.isDark ? '#2c2d2e' : (this.bubbleColorOther || DEFAULTS.bubbleColorOther))
+      // 聊天背景不透明度（CSS 变量存储 0~1 分数，配合 calc 使用）
+      root.style.setProperty('--im-chat-bg-opacity', String((this.chatBgOpacity ?? 100) / 100))
 
       setDebugEnabled(this.debugLog)
       // 标签页图标的角标底色跟主题色走，换色后要按当前未读数重画一次
       refreshFavicon()
+      // 桌面端：把下载目录/代理/快捷键同步给主进程
+      if (typeof window !== 'undefined' && window.imBridge?.desktop) {
+        window.imBridge.desktop.applySettings({
+          downloadDir: this.downloadDir,
+          proxyEnabled: this.proxyEnabled,
+          proxyUrl: this.proxyUrl,
+          shortcutMinimize: this.shortcutMinimize,
+          shortcutAlwaysOnTop: this.shortcutAlwaysOnTop,
+          shortcutToggleVisible: this.shortcutToggleVisible
+        })
+      }
     },
 
     /**

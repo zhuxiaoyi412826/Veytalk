@@ -2,10 +2,15 @@
  * 图片内容审核工具（发送端 NSFW 识别）。
  *
  * 用 nsfwjs + TensorFlow.js 在本机浏览器里给图片打分，命中违规就直接拒发——
- * 图片字节根本不离开本机，也就没有「先传到服务器再删掉」那段窗口。
+ * 图不会作为消息发出去，也就没有「先传到服务器再删掉」那段窗口。
  * 选本地推理的理由与 OCR 一致：不依赖任何第三方识别服务，内网无外网出口也能跑
  * （模型权重以 base64 形式内置在 npm 包里，随前端构建产物一起分发，运行期零外部请求），
  * 也不占服务端一份 GPU/CPU。
+ *
+ * ★ 口径修正：开启隔离区后，被拦下的原图会被另传一份作为证据（见 quarantine）。所以
+ *   「图片从不离开本机」只对「作为消息的那份」成立。它只在后端
+ *   im.moderation.quarantine-enabled 为 true 时发生，关掉后本地拦下的字节一张也不上传；
+ *   无论开关如何，这条副本都不是消息、不会被任何收件人看到。
  *
  * 必须清楚它的边界：这是「正常使用路径上的闸门」，不是对抗性防御。判定跑在客户端，
  * 绕过它只需要绕开这个页面直接调上传接口。要变成真防线，得在服务端补一条同样的推理链路
@@ -29,11 +34,19 @@
  * skipped（照常发送），绝不因为审核环节出问题把用户的话卡住。
  */
 
-import { fetchModerationPolicy, reportModerationHit } from '@/api/moderation'
+import { fetchModerationPolicy, reportModerationHit, uploadModerationEvidence } from '@/api/moderation'
 
 /** 与后端 application.yml 的 im.moderation.thresholds 默认值一致：策略接口拉不到时用它兜底 */
 const FALLBACK_THRESHOLDS = { Porn: 0.8, Hentai: 0.8 }
-const FALLBACK_POLICY = { enabled: true, auditEnabled: true, thresholds: FALLBACK_THRESHOLDS }
+/** 兜底的隔离区上限也与后端默认值（10MB）对齐：拉不到策略时不能因为「不知道上限」就无限传 */
+const FALLBACK_QUARANTINE_MAX_SIZE = 10 * 1024 * 1024
+const FALLBACK_POLICY = {
+  enabled: true,
+  auditEnabled: true,
+  thresholds: FALLBACK_THRESHOLDS,
+  quarantineEnabled: true,
+  quarantineMaxSize: FALLBACK_QUARANTINE_MAX_SIZE
+}
 
 /** MobileNetV2 的训练尺寸，同时是喂给模型的画布边长 */
 const IMAGE_SIZE = 224
@@ -340,7 +353,27 @@ export async function inspectImage(file) {
 }
 
 /**
- * 发送/上传前的那道闸门：识别 + 命中即上报审计。
+ * 命中后把原图副本递进隔离区（后台「审核记录」因此能看到图本体）。
+ *
+ * 三个条件不满足就静默跳过：拿不到 logId（没落库就没有可挂的记录，
+ * 传上去只会变成没人引用的孤儿字节）、开关关掉、图超过上限（比一下而不是
+ * 传上去让服务端拒，省掉一次注定失败的上传）。
+ *
+ * 失败不做任何处理：这跟拦图、上报一样都是旁路动作，用户看到的已经是「拒发」。
+ */
+function quarantine(policy, logId, file) {
+  if (!logId || !policy.quarantineEnabled) {
+    return
+  }
+  const max = Number(policy.quarantineMaxSize) || FALLBACK_QUARANTINE_MAX_SIZE
+  if (file.size > max) {
+    return
+  }
+  uploadModerationEvidence(logId, file).catch(() => {})
+}
+
+/**
+ * 发送/上传前的那道闸门：识别 + 命中即上报审计，再把原图副本递进隔离区。
  *
  * @param {File|Blob} file 图片文件
  * @param {object} options { scene: chat_image/avatar/video_cover, conversationId? }
@@ -353,7 +386,7 @@ export async function guardImage(file, options = {}) {
     return { pass: true, result }
   }
   const policy = await getPolicy().catch(() => FALLBACK_POLICY)
-  // 拦与报是两件事：audit-enabled=false 时照旧拒发，只是不落审计
+  // 拦与报是两件事：audit-enabled=false 时照旧拒发，只是不落审计（没记录也就没副本）
   if (policy.auditEnabled) {
     // 尽力而为：这个请求失败不重试也不提示，图已经在本地被拦下了
     reportModerationHit({
@@ -367,7 +400,10 @@ export async function guardImage(file, options = {}) {
       // 不按 TOP_K 截：多个模型的评分是拼在一起的，截前五个会把后一个模型的证据全部丢掉。
       // 条目上限由服务端的 max-score-entries（默认 16）兜着，两个模型合计最多 7 条
       scores: (result.scores || []).map((s) => ({ className: s.className, probability: s.probability }))
-    }).catch(() => {})
+    })
+      // 不 await：副本与拒发提示是并行的，上传几十 MB 的时长不该算在「拒发响应」的延迟里
+      .then((logId) => quarantine(policy, logId, file))
+      .catch(() => {})
   }
   return { pass: false, message: CONTENT_UNSAFE_MESSAGE, result }
 }

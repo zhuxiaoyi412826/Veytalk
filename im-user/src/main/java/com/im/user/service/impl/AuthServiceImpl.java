@@ -25,6 +25,8 @@ import com.im.user.dto.vo.LoginVO;
 import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.dto.vo.UserVO;
 import com.im.user.entity.User;
+import com.im.user.entity.UserAgreement;
+import com.im.user.service.AgreementService;
 import com.im.user.service.AuthService;
 import com.im.user.service.CaptchaService;
 import com.im.user.service.UserService;
@@ -56,6 +58,7 @@ public class AuthServiceImpl implements AuthService {
     private final CaptchaService captchaService;
     private final PasswordEncryptor passwordEncryptor;
     private final OnlineStatusSpi onlineStatusSpi;
+    private final AgreementService agreementService;
     private final ObjectProvider<PushSpi> pushSpiProvider;
     private final ObjectProvider<FriendRelationSpi> friendRelationSpiProvider;
 
@@ -107,8 +110,15 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO register(RegisterRequest request) {
+        // 先把协议问清楚再建号：校验不过就是 2024 / 2023，一个字节都没写进库。
+        // 反过来（先建号再补同意）会留下「号活着、证据没有」的半成品，而那一半靠删用户收尾
+        // 等于把刚拿到的那条留痕一起删掉
+        agreementService.validateForRegister(request.getAgreements());
         User user = userService.createUser(request.getUsername(), request.getPassword(),
                 request.getNickname(), request.getPhone(), request.getEmail());
+        // 留痕与建号是两个事务：这一步失败（例如恰好在他提交这几毫秒里发布了新版）不会回滚账号，
+        // 代价是这个号下次登录会再弹一次框——比让他注册失败更合理，毕竟文本确实变了
+        agreementService.recordConsents(user.getId(), request.getAgreements(), UserAgreement.SOURCE_REGISTER);
         return doLogin(user, null);
     }
 
@@ -195,7 +205,7 @@ public class AuthServiceImpl implements AuthService {
         }
         // 旧 token 注销会触发监听器清理在线状态，这里重新标记当前设备在线
         onlineStatusSpi.setOnline(userId, device);
-        return buildLoginVO(info, device, userService.getProfile(userId));
+        return buildLoginVO(info, device, userService.getProfile(userId), agreementService.needConsent(userId));
     }
 
     @Override
@@ -246,6 +256,12 @@ public class AuthServiceImpl implements AuthService {
     /**
      * 手机号首次短信登录时自动建号：账号取 {@code u + 手机号}，密码写入哨兵（未知），
      * 用户后续可在个人中心首次设置密码与昵称。
+     *
+     * <p>这里<b>不</b>要求请求带同意项，与 {@code register} 的路口径不一样，是刻意的：
+     * 短信登录那个页面上没有勾选框，硬加一个会把两件事一起弄坏——老用户只是回来登个录，
+     * 却被要求先读一遍合同；而把勾选框做成登录必填，等于给已经在线几年的账号补一道它们从没见过的门。
+     * 合规上站得住的做法是让建号照常通过，但返回体的 {@code agreementPending} 必为 true，
+     * 进主界面那一刻的强制弹窗把同意补齐（弹窗不可关，不同意就退回登录页）。
      */
     private User autoRegisterByPhone(String phone) {
         String username = "u" + phone;
@@ -297,16 +313,18 @@ public class AuthServiceImpl implements AuthService {
         StpUtil.login(user.getId(), StpUtil.createSaLoginParameter().setDeviceType(device));
         userService.touchLogin(user.getId(), SecurityUtil.getClientIp());
         notifyOnlineState(user.getId(), true);
-        return buildLoginVO(StpUtil.getTokenInfo(), device, userService.getProfile(user.getId()));
+        return buildLoginVO(StpUtil.getTokenInfo(), device, userService.getProfile(user.getId()),
+                agreementService.needConsent(user.getId()));
     }
 
-    private LoginVO buildLoginVO(SaTokenInfo info, String device, UserVO userInfo) {
+    private LoginVO buildLoginVO(SaTokenInfo info, String device, UserVO userInfo, boolean agreementPending) {
         return LoginVO.builder()
                 .token(info.getTokenValue())
                 .tokenName(info.getTokenName())
                 .expiresIn(info.getTokenTimeout())
                 .deviceType(device)
                 .userInfo(userInfo)
+                .agreementPending(agreementPending)
                 .build();
     }
 

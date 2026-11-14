@@ -32,6 +32,7 @@ public class ImProperties {
     private Intelligence intelligence = new Intelligence();
     private Wallet wallet = new Wallet();
     private LinkMic linkmic = new LinkMic();
+    private AiGuard aiGuard = new AiGuard();
 
     @Data
     public static class Jwt {
@@ -294,8 +295,9 @@ public class ImProperties {
      *
      * <p>推理跑在发送端浏览器里，两个模型两套运行时：色情用 nsfwjs + TensorFlow.js
      * （模型权重内置在 npm 包里，随前端构建产物离线分发）；血腥 / 暴力用独立的一份 ONNX
-     * 加 onnxruntime-web（见下）。服务端只做两件事：把阈值下发给客户端、接收命中上报
-     * 并落审计通道。之所以不在服务端跑模型：内网部署无外网出口，模型文件与推理运行时
+     * 加 onnxruntime-web（见下）。服务端只做三件事：把阈值下发给客户端、接收命中上报
+     * 并落审计通道与流水表、接收被拦下图片的<b>隔离区副本</b>（见 quarantineEnabled）。
+     * 之所以不在服务端跑模型：内网部署无外网出口，模型文件与推理运行时
      * 都得随包落地，而同一份 MobileNetV2 权重在前端 WebGL 上单张只要几十毫秒，
      * 没有把它搬到服务端的收益。
      *
@@ -332,6 +334,27 @@ public class ImProperties {
         private int maxScoreEntries = 16;
         /** 上报里文件名与场景等字符串字段的最大长度 */
         private int maxTextLength = 120;
+        /**
+         * 隔离区开关：命中后除了拒发，再让发送端把<b>原图复制一份</b>上传到隔离区
+         * （{@code im_file} 里 {@code biz_type=moderation_quarantine} 的一行），后台
+         * 「审核记录」那一屏因此能直接看到图本体。
+         *
+         * <p>★ 这是一次隐私口径的变更，不只是一个开关：以前审计日志那句「被拦下的图片
+         * 从未离开本机」是字面成立的，开着它就不成立了。关掉立刻退回旧行为（只记判定结果、
+         * 不留图），已有的隔离区图片不受影响。为什么默认开着：没有图的命中记录只能证明
+         * 「有过一次判定」，判不了「判得对不对」，误拦申诉与阈值回校都无从下手。
+         *
+         * <p>它不改变「拦」这个动作本身：拦仍在发送端当场生效，图是被拒之后才作为证据
+         * 另传一次的，不会因为它多传一张本来能发出去的图。
+         */
+        private boolean quarantineEnabled = true;
+        /**
+         * 隔离区图片的字节上限（默认 10MB）：超了就直接不传副本，判定与审计照旧。
+         *
+         * <p>单独一道上限而不是复用 {@code im.file.max-size}：这张图永远不会出现在任何
+         * 聊天界面里，只给一个人看一眼，为它传 100MB 的原片既拖慢发送路径又白占存储。
+         */
+        private DataSize quarantineMaxSize = DataSize.ofMegabytes(10);
     }
 
     /**
@@ -496,6 +519,33 @@ public class ImProperties {
          * 存量在飞红包的到期时间跟着变；它是运维旋钮而不是业务约定，不要拿它做对账依据。
          */
         private int packetExpireHours = 24;
+    }
+
+    /**
+     * 大模型用量护栏（四期第六批）：约束一切按调用量计费的 AI 能力
+     * （面试对话 / 按住说话 ASR / 电话面试 TTS / 聊天语音转文字）。
+     *
+     * <p>计费用量以「模型调用实际耗时（毫秒）」为口径：token 数只有厂商知道
+     * （响应里的 usage 字段在流式下经常缺失），而耗时与账单同向且服务端自己量得出来，
+     * 不信任任何客户端上报。预算只扣成功调用：失败多半不扣费或只扣零头，
+     * 拿系统故障惩罚用户会把「体验限制」变成「投诉入口」。
+     *
+     * <p>admin 角色不受预算与封禁限制（内部开发与演示要用真链路），
+     * 判定走 {@code SecurityUtil.isAdmin()}，每次现取不缓存：角色变更要立刻反映到护栏上。
+     *
+     * <p>两个字段都是「每次调用现取」的写法（护栏服务直接读本单例），
+     * 所以进了 {@code AdminConfigKey} 白名单，后台改完即生效不需重启。
+     */
+    @Data
+    public static class AiGuard {
+        /** 护栏总开关：关掉后所有账号不限预算也不查封禁（只剩限流兜底），仅供运维应急放行 */
+        private boolean enabled = true;
+        /**
+         * 非 admin 账号的累计模型调用预算（秒），默认 180 即「3 分钟体验」。
+         * 是累计口径而不是每日重置：预算花完的人本来就不是目标用户，按天刷新等于白送。
+         * 调成 0 即对所有非 admin 一刀切停用付费 AI 能力（比关掉护栏更安全）。
+         */
+        private long trialSeconds = 180;
     }
 
     /**

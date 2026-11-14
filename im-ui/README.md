@@ -104,20 +104,24 @@ im-ui/
     ├── api/                  一个后端模块一个文件，只负责拼 URL 与参数
     │   ├── request.js        axios 实例：注入 satoken 头、统一解包 Result、登录态失效跳转
     │   ├── auth.js  user.js  friend.js  conversation.js  message.js  file.js  ws.js
+    │   ├── agreement.js      法定文本：清单 / 正文 / 待签 / 提交表态（四个端点，前两个全匿名）
     ├── stores/               Pinia，业务状态与副作用集中在这里
     │   ├── auth.js           登录态、当前用户、权限
     │   ├── conversation.js   会话列表、未读、置顶/免打扰
     │   ├── chat.js           消息列表、发送/撤回/已读、离线消息拉取
     │   ├── friend.js         好友列表、分组、申请
-    │   └── index.js          signOut()：跨 store 的统一登出清理
+    │   ├── agreement.js      已发布清单、待签项与 `dismissible`、正文缓存（本批新增）
+    │   └── index.js          signOut()：跨 store 的统一登出清理（包含 agreement.reset，
+    │                         不然上一个账号的「已同意」会残留到下一个账号）
     ├── ws/
     │   ├── socket.js         连接、30 秒心跳、指数退避重连、事件订阅
     │   └── dispatch.js       把推送帧分发给对应 store，并把新消息接给 utils/notify 提醒（见第 5 节）
     ├── router/index.js       路由表 + 登录守卫
     ├── layout/MainLayout.vue 左侧竖向导航（消息 / 好友 / 申请 / 我的）+ 连接状态
-    ├── views/                7 个页面，见下表
+    ├── views/                页面清单以目录为准，主要几个见下表
     ├── components/           UserAvatar、MessageBubble、EmojiPicker、ContextMenu、
-    │                         HoldTalkButton、CaptchaImage、Pagination
+    │                         HoldTalkButton、CaptchaImage、Pagination、
+    │                         AgreementConsentDialog（改版后的强制再同意弹窗，本批新增）
     ├── utils/                format（时间/大小/性别/脱敏）、id（雪花 ID 归一化）、
     │                         media（受控地址 → blob）、token、
     │                         title（标签页标题未读前缀）、favicon（图标角标）、
@@ -129,7 +133,8 @@ im-ui/
 
 | 路由 | 组件 | 说明 |
 | --- | --- | --- |
-| `/login` | `Login.vue` | 登录 / 短信登录 / 注册，三个 Tab |
+| `/login` | `Login.vue` | 登录 / 短信登录 / 注册，三个 Tab；注册表单底部是**必签与可拒两行勾选**（文本名与版本号从 `/api/agreement/list` 来，不写死三份，见本节末） |
+| `/legal/:code` | `LegalView.vue` | **法定文本公示页（本批新增）**：`terms` / `privacy` / `service` 三份的全文，`meta.public`——**未登录也能打开**；带 `?version=` 可查历史某一版（举证时要用）；`/legal` 裸路径重定向到 `/legal/terms` |
 | `/chat/:conversationId?` | `ChatHome.vue` + `ChatWindow.vue` | 会话列表 + 聊天窗口；附件三个入口（选 / 拖 / 粘）都先进「待发送托盘」，图片可点缩略图放大，点发送才串行上传；工具栏可切「语音」模式按住说话发语音消息（上滑取消、屏内浮层显秒数）；首页搜索框双路并行（本地全部会话消息 + 全网检索结果分节展示）；会话右键菜单可置顶/免打扰/已读/加入或移出黑名单（仅单聊且对方是好友）/删除；`:conversationId` 可选，刷新与复制链接都能落回同一会话 |
 | `/friends` | `FriendList.vue` | 好友列表，按分组展示，支持搜索、备注、分组、拉黑、删除；「黑名单」弹窗集中管理：可看已拉黑名单、逐行「移除黑名单」，也可点「添加黑名单」多选好友批量拉黑 |
 | `/friends/requests` | `FriendRequest.vue` | 搜索用户发起申请、收到的申请（同意/拒绝）、我发出的申请 |
@@ -138,6 +143,30 @@ im-ui/
 
 `ChatHome` 被 `<keep-alive>` 缓存，切换页面回来时会话列表与滚动位置都还在。但每个会话的
 `ChatWindow` 靠 `:key="conversation.activeId"` 重挂载，所以草稿与「语音/键盘」输入模式不会拖到别的会话。
+
+### 法定文本的四个入口（本批新增）
+
+同一份正文有四个地方要读：注册勾选、登录后弹窗、设置页，以及**未登录的人**（拿到公示页链接就能看）。
+它们在前端只共享一个东西——`GET /api/agreement/list` 那份清单，**不养两份真相**：文本名、版本号、`required`（哪些算必签）
+全部取自接口；`required` 是后台发布时定的法务口径，抄进前端代码就得到处跟着法务的改法同步发版。
+反过来，提交时回传的 `version` 也必须是清单里那一版——这一位是整条同意链能对上的唯一凭据。
+★ 唯一的例外是 `LegalView.vue` 里那份 `FALLBACK_ITEMS`：它只在后端清单拿到之前拿来摆导航（不让左侧三个入口空着），
+**不参与任何判定、也不进提交体**；加第四份文本时改不改它都不影响合规。
+
+四个入口各自的位置与选型理由：
+
+| 入口 | 在哪 | 为什么长这样 |
+| --- | --- | --- |
+| 公示页 | `LegalView.vue`（`/legal/:code`） | `meta.public`：「已公示」的前提是没登录也能打开全文。正文经 `components/MarkdownView.vue`（`marked` 后必过 `DOMPurify`，与文章与聊天附件同一口径，不净化就等于开一个存储型 XSS 入口）；**没有单独的「打印」按钮**，但带 `@media print` 样式（Ctrl+P 存 PDF 时去掉顶栏与背景，更接近一份正式文件） |
+| 注册勾选 | `Login.vue` 注册表单 | 必签一行（不勾不给注册）+ 可拒一行（服务条款，不勾不影响注册）；对不上版本号时后端回 2023，前端拦到后重拉清单并提醒重新勾选 |
+| 再同意弹窗 | `AgreementConsentDialog.vue` | **挂在 `MainLayout` 而不是聊天页**：改版提醒对所有页面都成立，挂在聊天页就会出现「用户在设置页时被挡住」。**能不能关不由前端判**：后端 `pending` 给了 `dismissible`（含必签项时为 `false`）。弹窗里直接渲全文而不是只放一个链接：只给「我已阅读」而读不到内容，在法律上接近无效 |
+| 设置页 | `Settings.vue`「法律与隐私」卡片 | 三行入口（新窗口打开公示页），每行带「起生效」那一行小字；清单为空时给一句兜底文案而不是摆三个点开是空页的链接 |
+
+> 两个失败口径是故意不同的：`fetchPendingAgreements` 是 `silent: true`（协议弹窗不能反过来变成
+> 「打开软件先卡一下」的故障源，拉不到就不弹）；而 `POST /api/agreement/consent` **不能静默**——
+> 静默失败等于让他以为已经同意了，那是这一整套设计里最不能出现的一种误会。
+> ★ 迁移脚本没跑时（`im_agreement` 不存在）后端把用户侧三个读路径降级成「没有已发布文本」，
+> 所以表现是「注册页没有勾选行」而不是报错；真正要看的是后台那一屏（它不降级，照报错）。
 
 ### 语音工具与组件
 

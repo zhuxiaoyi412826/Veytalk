@@ -24,7 +24,7 @@ ExecStart=/usr/bin/docker compose up -d --wait
 # ★★★ 这里绝对没有 -v：docker compose down -v 会把 mysql-data / redis-data / minio-data 一起删掉。
 #   生产只允许 down，down -v 必须先备份（指南 §10.1 那条一字之差的提醒）
 ExecStop=/usr/bin/docker compose down
-# 首次要等 mysql initdb（建 37 张表）+ 后端冷启（40~80s 是正常量级），默认 90s 不够
+# 首次要等 mysql initdb（建 43 张表）+ 后端冷启（40~80s 是正常量级），默认 90s 不够
 TimeoutStartSec=300
 TimeoutStopSec=180
 

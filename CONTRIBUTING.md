@@ -7,7 +7,7 @@
 **三条不容商量的硬性约定**（不管你是谁、改动多小）：
 
 1. **每一次更新都要在 [`md/CHANGELOG.md`](md/CHANGELOG.md) 登记一条**，无论改动大小；
-2. **改动若改变了「既有事实描述」，同轮必须把描述性文档一并同步**（改 `README详细开发指南.md`，不要往 `README.md` 里搬技术细节）；
+2. **改动若改变了「既有事实描述」，同轮必须把描述性文档一并同步**（改 `README详细开发指南.md`，不要往 `README.md` 里搬技术细节）。**接口文档也算描述性文档**：新增 / 改动后端 HTTP 接口，必须同轮把 knife4j 的 `@Tag` / `@Operation` / 分组前缀三处一起补齐（细则见「四、PR 规范」门槛第 6 条）；
 3. **任何凭据都不许进仓库**——数据库密码只从环境变量读，明文密钥 / token / 授权码一律禁止。
 
 ## 目录
@@ -63,11 +63,12 @@ git add -A; git commit           # 6）提交信息见「三、Commit 规范」
 git push -u origin feature/xxx   # 7）提 PR
 ```
 
-动手前的三个自检：
+动手前的四个自检：
 
 - **影响哪几个模块？** 14 个 Maven 子模块 + 3 个前端工程（`im-ui` / `im-admin-ui` / `im-website`）+ `electron` 桌面壳。跨模块只能经 `im-common` 的 SPI 契约调用，**不许直接依赖别的业务模块实现**。
 - **要不要动数据库？** 要的话见下一节「四、PR 规范」的 SQL 条款。
 - **要不要动配置？** 新增环境变量必须同时写进 `application.yml`（带默认值）和 `README.md` 的环境变量表，否则部署方无从得知。
+- **要不要动 HTTP 接口？** 新增控制器、改 `@RequestMapping` 前缀、加删端点，都要同轮动 `im-common` 的 `Knife4jConfig`。**只写注解不补 `pathsToMatch` 前缀，接口在 `doc.html` 上就是「不存在，而且一声不吭」**（编译、启动、`/v3/api-docs` 全部正常）。收尾跑 `python scripts/api-doc-check.py`，见「四」门槛 6。
 
 ### 非紧急 bug 修复
 
@@ -150,16 +151,22 @@ docs(readme): 添加目录导航到README
 跑了什么命令、EXIT 码、手动串测了哪些路径、截图/录屏。
 
 ## 数据库变更
-无 / 贴出 DDL 与对应 `sql/` 脚本，并说明「已有库如何增量升级」。
+无 / 贴出 DDL 与对应 `sql/` 脚本，并说明「已有库如何增量升级」；
+同时给出【md/SQL变更文档.md】里新增的那条台账记录版本号（见硬性门槛第 8 条）。
 ```
 
 硬性门槛（不满足就不进合并流程）：
 
 1. **含 CHANGELOG 条目**——本项目最常被漏的一条。
 2. **描述性文档同步**：改了架构链路、交互布局、命令与配置指引、踩坑结论，就要同步 `README详细开发指南.md`。`README.md` 只维护仓库门面（徽章 / 特性 / 截图 / 快速开始 / 路线图），且**它的「目录」是手写锚点，增删改标题必须一并维护**。
-3. **SQL 规矩**：`sql/im_schema.sql` 是全新库的完整超集（建库 + 34 表），`sql/im_data.sql` 只灌种子数据。给已有库的变更**新增 migration 脚本**，不回头改历史脚本；migration 里给 `ALTER` 加幂等护栏，并注明老库与新库分别怎么执行。
+3. **SQL 规矩**：`sql/im_schema.sql` 是全新库的完整超集（建库 + 43 表，开头带 43 条 `DROP TABLE IF EXISTS`，**存量库绝对不可执行**），`sql/im_data.sql` 只灌种子数据。给已有库的变更**新增 migration 脚本**，不回头改历史脚本；migration 里给 `ALTER` 加幂等护栏，并注明老库与新库分别怎么执行。
 4. 合并前 **rebase 到最新 `main`** 并重新编译一次。
 5. 一个 PR 只做一件事，小步提交。
+6. **接口文档覆盖率自查**：改动含后端 HTTP 接口时，本地用 **dev profile** 把服务起着，跑 `python scripts/api-doc-check.py`，**退出码必须为 0**。它拿 `GET /v3/api-docs` 的全量路径去减各分组命中集，把「进了 OpenAPI、却没进任何 knife4j 分组」的接口逐条打出来。
+   > 为什么要有这道闸：knife4j 左侧分组不是按 `@Tag` 自动生成的，而是 `Knife4jConfig` 里每个 `GroupedOpenApi` Bean 的 `pathsToMatch` 前缀切出来的。漏补前缀不报错、不警告，接口只是从文档里消失——2026-09 那次实测就是这样漏了 **96 条路径 / 107 个 mapping**（当时全量 241 条的四成），而注解本身是满的。 ★ prod 下跑不了这个脚本：`prod` profile 把 knife4j 与 springdoc 全关，`/v3/api-docs` 回 404——**这是设计如此**，上线检查清单里本身就要求 `/doc.html` 与 `/v3/api-docs` 回 404（见 `md/部署/服务器部署指南.md` 第八节）。
+7. **文档里引用配置文件只写键名，不写行号，也不写文件总行数**。`application.yml` 的注释密度是全仓最高的一档（本仓约定：每个开关都要把「为什么是这个值」写进去），加两行注释就会让下游全部行号引用集体偏位，而且**不会有任何报错**——错的数字看起来比没有数字更可信，读的人不会去复核。前科：`im.file.storage` 那行因为一次注释追加从 L370 移到 L372，**八处**文档同时变假（2026-11-08 已清完，连带被一起带错的 CORS 段区间、`im.file` 段区间、netsh 注释行与文件总行数）。写法定为：`application.yml` 的 `im.file` 段 / 搜 `storage: ${IM_FILE_STORAGE:minio}` 那一行。要拿行数做量级叙述的（如「多少个 `${ENV:默认值}` 占位符」），只写实测值并声明会漂移，不写行号。
+8. **SQL 变更必须当轮登记到 [`md/SQL变更文档.md`](md/SQL变更文档.md)**（2026-11-08 新增的台账，起始版本 `1.0.0`）。任何动了 `sql/**` 的 PR，都要在台账顶部新增一条带版本号的记录，并按硬口径标清**★ 清除 / ★ 增加 / ★ 修改** 各位动了哪些 `表.列 / 索引 / 种子 id 区间`，同时回答「是否已并回 `im_schema.sql` + `im_data.sql`（给行号）、需清哪个 Redis 键、如何回滚、用什么 SQL 验证」。
+   > 为什么要单独立一份台账而不是只写 CHANGELOG：CHANGELOG 讲的是「这一轮整体做了什么」，而库结构变更需要的是「哪个列什么时候加的、并回全量脚本没有」这种逐条可查的账。增量脚本改了、全量脚本漏并，只会在**新环境**（新同事 / 新服务器 / 演示机）上暴雷，报的是 `Unknown column` 或「后台菜单不见了」，排查成本极高。版本号升哪一位（major/minor/patch）也在该文档第二节定义好了。
 
 **模板已经就位，不用手抄**：
 
@@ -194,6 +201,8 @@ docs(readme): 添加目录导航到README
 ```powershell
 # 后端：必须能编译
 mvn clean package -DskipTests
+# 接口文档覆盖率：改动含后端 HTTP 接口时必须跑（服务用 dev profile 起着，prod 关了文档）
+python scripts/api-doc-check.py          # 退出码 0 = 没有接口漏在分组外；非 0 会列出 MISSING 的路径
 # 前端：改动哪个就 build 哪个
 cd im-ui; npm run build
 cd ../im-admin-ui; npm run build
@@ -236,6 +245,7 @@ cd ../im-website; npm run build
 会被直接打回的 PR：
 
 - 没有 CHANGELOG 条目；
+- 改了后端接口却没同步 knife4j 分组（`python scripts/api-doc-check.py` 退非 0）；
 - 纯格式化 / 全文件重排刷屏，夹带在功能改动里；
 - 引入明文密钥、把 `config.properties` / `.env` / 大体积模型提交进来；
 - 改了 `README详细开发指南.md` 的事实描述却没同步 CHANGELOG（或反之，两处口径打架）；

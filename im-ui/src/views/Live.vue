@@ -718,6 +718,80 @@ let pingTimer = null
 let webmPlayer = null
 // 当前播放器形态：'' | 'hls' | 'webm'，避免重复重建
 const playerMode = ref('')
+
+/* ==================== 直播录制（仅桌面端） ==================== */
+const liveRecording = ref(false)
+const liveRecordSeconds = ref(0)
+let liveRecTimer = null
+let liveMediaRecorder = null
+
+/** 录制是否可用：需 Electron 环境 + 设置开关开 + 直播中 */
+const canLiveRecord = computed(() => {
+  return typeof window !== 'undefined' && !!window.imBridge?.record && settings.liveRecordEnabled
+})
+
+async function toggleLiveRecord() {
+  if (liveRecording.value) {
+    await stopLiveRecord()
+  } else {
+    await startLiveRecord()
+  }
+}
+
+async function startLiveRecord() {
+  const video = videoEl.value
+  if (!video || !video.srcObject && !video.captureStream) {
+    ElMessage.warning('无法获取视频流，请稍后重试')
+    return
+  }
+  try {
+    // 从 video 元素抓取流（画面+声音）
+    const stream = video.captureStream ? video.captureStream() : video.mozCaptureStream()
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? 'video/webm;codecs=vp9,opus'
+      : 'video/webm;codecs=vp8,opus'
+    liveMediaRecorder = new MediaRecorder(stream, { mimeType })
+
+    // 启动主进程录制文件
+    const dir = settings.liveRecordDir || undefined
+    const startResult = await window.imBridge.record.start({ dir, ext: 'webm', meta: { scene: 'live-record' } })
+    liveRecordStartPath = startResult?.filePath
+
+    liveMediaRecorder.ondataavailable = async (e) => {
+      if (e.data && e.data.size > 0) {
+        const buf = await e.data.arrayBuffer()
+        await window.imBridge.record.chunk(buf)
+      }
+    }
+    liveMediaRecorder.start(1000) // 每秒一个分片
+    liveRecording.value = true
+    liveRecordSeconds.value = 0
+    liveRecTimer = setInterval(() => { liveRecordSeconds.value++ }, 1000)
+    ElMessage.success('开始录制直播')
+  } catch (e) {
+    console.error('[live-record] start failed', e)
+    ElMessage.error('录制启动失败: ' + (e.message || ''))
+  }
+}
+
+let liveRecordStartPath = null
+
+async function stopLiveRecord() {
+  if (liveMediaRecorder && liveMediaRecorder.state !== 'inactive') {
+    liveMediaRecorder.stop()
+  }
+  liveMediaRecorder = null
+  liveRecording.value = false
+  if (liveRecTimer) { clearInterval(liveRecTimer); liveRecTimer = null }
+  try {
+    const result = await window.imBridge.record.stop({ meta: { scene: 'live-record' }, reason: 'manual-stop' })
+    if (result?.filePath) {
+      ElMessage.success(`录制已保存 (${result.durationMs ? Math.round(result.durationMs / 1000) : liveRecordSeconds.value}s)`)
+    }
+  } catch (e) {
+    console.error('[live-record] stop failed', e)
+  }
+}
 /**
  * 本场流实际铺开的档位（由 hls.js 的 levels 去重而来），只用来判定「哪几档可以点」。
  * ★ 选择器不再因为档位少而整体隐藏：四个选项（自动/480p/720p/1080p/1440p）恒定出现，
@@ -1996,6 +2070,18 @@ watch(() => route.params.roomId, () => syncRoute())
           @click="onReportRoom"
         >
           举报直播间
+        </el-button>
+        <!-- 直播录制按钮（仅桌面端 + 开关开启时可见） -->
+        <el-button
+          v-if="canLiveRecord && room && room.status === 1"
+          class="live-room__record"
+          size="small"
+          :type="liveRecording ? 'danger' : 'default'"
+          :icon="liveRecording ? 'VideoPause' : 'VideoCamera'"
+          @click="toggleLiveRecord"
+        >
+          <template v-if="liveRecording">● {{ Math.floor(liveRecordSeconds / 60) }}:{{ String(liveRecordSeconds % 60).padStart(2, '0') }}</template>
+          <template v-else>录制</template>
         </el-button>
       </div>
 

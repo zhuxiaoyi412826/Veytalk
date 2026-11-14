@@ -1,6 +1,7 @@
 package com.im.user.dto.req;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -9,6 +10,7 @@ import lombok.Data;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.util.List;
 
 /**
  * 注册入参。
@@ -48,4 +50,19 @@ public class RegisterRequest implements Serializable {
 
     @Schema(description = "图形验证码答案")
     private String captchaCode;
+
+    /**
+     * 本次注册对哪几份协议的哪一版表了态。
+     *
+     * <p>不放在 {@code captchaKey} 旁边凑一个布尔位是有原因的：注册页那个
+     * 「我已阅读并同意《用户协议》和《隐私政策》」的勾选框，在合规上必须能回答
+     * 「他同意的是哪一版」。一个 {@code agreed=true} 只能证明他点过一个勾，
+     * 证明不了一份具体文本，而文本会改版。
+     *
+     * <p>服务端不要求这里把每一份都交齐：必签项缺一份直接 2024 拒注册，
+     * 可选项没交就当作没问过（下次登录再问），交了 {@code accept=false} 才算他明确拒过。
+     */
+    @Schema(description = "协议同意项，必签项（用户协议、隐私政策）一项都不能少，版本号取自 /api/agreement/list")
+    @Valid
+    private List<AgreementAcceptItem> agreements;
 }

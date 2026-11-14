@@ -163,29 +163,36 @@
       <!-- 注册入口与找回密码都放在底部 -->
       <p class="login__tip">
         未登录请
-        <el-link type="primary" :underline="false" @click="openRegister">注册</el-link>
+        <el-link type="primary" underline="never" @click="openRegister">注册</el-link>
         <span class="login__tip-sep">|</span>
-        <el-link type="primary" :underline="false" @click="openReset">忘记密码</el-link>
+        <el-link type="primary" underline="never" @click="openReset">忘记密码</el-link>
         <span class="login__tip-sep">|</span>
         <!-- 用 APP 扫码进入「文件传输助手 · 网页版」，电脑与手机互传文件 -->
-        <el-link type="primary" :underline="false" @click="$router.push({ name: 'file-helper' })">文件传输助手</el-link>
+        <el-link type="primary" underline="never" @click="goFileHelper">文件传输助手</el-link>
         <!-- 桌面端专属：后端地址不对的时候，这里是唯一的自救入口，所以必须挂在登录页
              而不是设置页（后端不通就登不进去，永远进不到设置页）。Web 部署同源，不显。 -->
         <template v-if="canServerDebug">
           <span class="login__tip-sep">|</span>
-          <el-link type="info" :underline="false" @click="serverDebugVisible = true">开发调试</el-link>
+          <el-link type="info" underline="never" @click="serverDebugVisible = true">开发调试</el-link>
         </template>
       </p>
     </div>
 
     <!-- ==================== 注册弹窗（无需验证码） ==================== -->
-    <el-dialog v-model="registerVisible" title="注册账号" width="min(420px, calc(100vw - 32px))" append-to-body>
+    <el-dialog
+      v-model="registerVisible"
+      class="im-dialog--fit"
+      title="注册账号"
+      width="min(420px, calc(100vw - 32px))"
+      append-to-body
+    >
       <el-form
         ref="registerFormRef"
         :model="registerForm"
         :rules="registerRules"
         label-position="top"
         size="large"
+        scroll-to-error
         @submit.prevent="submitRegister"
       >
         <el-form-item label="账号" prop="username">
@@ -206,6 +213,55 @@
         <el-form-item label="邮箱" prop="email">
           <el-input v-model.trim="registerForm.email" placeholder="选填，用于邮箱登录" clearable :prefix-icon="Message" />
         </el-form-item>
+        <!--
+          协议勾选。文本名与版本号都从 /api/agreement/list 来，前端不写死三份：
+          后台哪天多发布一份必签文本，这里的句子与提交的版本号会自动跟上。
+          整行按「有没有已发布的文本」决定显不显示 —— 迁移脚本没跑时后端也会放行注册（见
+          AgreementServiceImpl.validateForRegister），此时摆一个点开只能看到空页的必选框比不摆更糟。
+        -->
+        <el-form-item v-if="requiredAgreements.length" prop="agree">
+          <el-checkbox v-model="registerForm.agree">
+            我已阅读并同意
+            <router-link
+              v-for="item in requiredAgreements"
+              :key="item.code"
+              class="login__legal-link"
+              :to="{ name: 'legal', params: { code: item.code }, query: { version: item.version } }"
+              target="_blank"
+            >《{{ item.codeName }} v{{ item.version }}》</router-link>
+          </el-checkbox>
+        </el-form-item>
+        <!--
+          可选条款单独一个框，而且只在勾了的时候才提交：
+          没勾不等于「他拒绝过」，把空框翻译成 accept=false 是在伪造一份他没做过的表态。
+          没交的那一份会在首次登录的再同意弹窗里再问一次，那时才拿得到真表态。
+        -->
+        <el-form-item v-if="optionalAgreements.length" prop="agreeOptional">
+          <el-checkbox v-model="registerForm.agreeOptional">
+            （可选）同意
+            <router-link
+              v-for="item in optionalAgreements"
+              :key="item.code"
+              class="login__legal-link"
+              :to="{ name: 'legal', params: { code: item.code }, query: { version: item.version } }"
+              target="_blank"
+            >《{{ item.codeName }} v{{ item.version }}》</router-link>
+            <span class="login__legal-tip">，不勾选不影响注册</span>
+          </el-checkbox>
+        </el-form-item>
+        <!--
+          清单没拉下来时把「为什么」和「下一步做什么」摆在脸上。以前这里只会安静地什么都不显示：
+          dev 代理连不上后端（后端正在重启）与后台一份文本都没发布，在页面上是同一种样子，
+          而前者会让注册请求注定失败却看不出缘由。这一行只在「列表为空 且 拉过失败」时出现。
+        -->
+        <el-form-item v-if="agreementError">
+          <span class="login__legal-error">
+            条款未能加载：{{ agreementError }}
+            <el-link type="primary" underline="never" :disabled="agreementLoading" @click="retryAgreements">
+              {{ agreementLoading ? '重试中…' : '重试' }}
+            </el-link>
+          </span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="registerVisible = false">取消</el-button>
@@ -217,13 +273,20 @@
          两条通道共用一个弹窗：发码接口不同，但校验链路完全一样
          （图形验证码 → 6 位码 → 新密码）。图形验证码与登录 Tab 共用一份，
          因为它本来就是一次性的，分开存反而会出现“两张图都只能用一个答案”。 -->
-    <el-dialog v-model="resetVisible" title="找回密码" width="min(420px, calc(100vw - 32px))" append-to-body>
+    <el-dialog
+      v-model="resetVisible"
+      class="im-dialog--fit"
+      title="找回密码"
+      width="min(420px, calc(100vw - 32px))"
+      append-to-body
+    >
       <el-form
         ref="resetFormRef"
         :model="resetForm"
         :rules="resetRules"
         label-position="top"
         size="large"
+        scroll-to-error
         @submit.prevent="submitReset"
       >
         <el-form-item label="找回方式">
@@ -296,9 +359,9 @@
       </template>
     </el-dialog>
 
-    <!-- ==================== 后端地址（开发调试，仅桌面端） ====================
-         读写全走主进程 IPC，不发任何 HTTP 请求——这正是要修「请求发不出去」的那个场景，
-         弹窗自己不能依赖那条路。 -->
+    <!-- ==================== 后端地址（开发调试，原生壳） ====================
+         Electron 读写走主进程 IPC、Tauri / 安卓壳走 localStorage 覆盖，都不依赖后端链路可达——
+         这正是要修「请求发不出去」的那个场景，弹窗自己不能依赖那条路。 -->
     <ServerDebugDialog v-model="serverDebugVisible" />
   </div>
 </template>
@@ -311,6 +374,7 @@ import { Iphone, Key, Lock, Message, User } from '@element-plus/icons-vue'
 import CaptchaImage from '@/components/CaptchaImage.vue'
 import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
 import { canDebug } from '@/utils/servercfg'
+import { getServerBridge } from '@/utils/serverBridge'
 import {
   fetchCaptchaImage,
   sendSmsCode as sendSmsCodeApi,
@@ -320,9 +384,17 @@ import {
   resetPassword as resetPasswordApi
 } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
+import { useAgreementStore } from '@/stores/agreement'
 import { isNativeShell } from '@/utils/env'
 
 defineOptions({ name: 'Login' })
+
+/**
+ * 后端 ResultCode：2023 协议版本不符 / 2024 必签项缺一份。
+ * 两个码对应两种完全不同的引导，见 handleRegisterConsentError。
+ */
+const CODE_AGREEMENT_VERSION_MISMATCH = 2023
+const CODE_AGREEMENT_REQUIRED = 2024
 
 // 原生壳（Tauri exe / Capacitor APK）下显示「服务器地址」输入框：
 // 存 localStorage.IM_SERVER_URL_OVERRIDE，env.js 的 serverBase() 每次请求实时读取，保存后立即生效
@@ -347,18 +419,17 @@ function saveServerUrl() {
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const agreement = useAgreementStore()
 
 const tab = ref('account')
 const submitting = ref(false)
 
-/* ------------------------------ 后端地址（仅桌面端） ------------------------------ */
+/* ------------------------------ 后端地址（原生壳） ------------------------------ */
 
 const serverDebugVisible = ref(false)
-// 判定交给纯函数：没有主进程配置桥（Web 部署 / 老安装包）就整条不显，
-// 给一个点了只能报「不支持」的入口比没有入口更糟
-const canServerDebug = computed(() =>
-  canDebug(typeof window !== 'undefined' && window.__IM_NATIVE__ ? window.__IM_NATIVE__.server : null)
-)
+// 判定交给纯函数：拿不到调试桥（Web 同源部署）就整条不显，
+// 给一个点了只能报「不支持」的入口比没有入口更糟；桥在 Electron 走 IPC、Tauri / 安卓走 localStorage
+const canServerDebug = computed(() => canDebug(getServerBridge()))
 
 /* ------------------------------ 图形验证码 ------------------------------ */
 
@@ -504,7 +575,55 @@ const registerForm = reactive({
   password: '',
   confirmPassword: '',
   phone: '',
-  email: ''
+  email: '',
+  agree: false,
+  agreeOptional: false
+})
+
+/**
+ * 必签与可选各一堆，划分依据是当前生效版上的 required 字段。
+ *
+ * required 是后台发布时定的法务口径，不是前端能猜的：将来加一份「未成年人保护规则」只需
+ * 后台发一版，这里三处（勾选行、提交项、错误提示）会自动跟上。
+ */
+const requiredAgreements = computed(() => agreement.list.filter((item) => item.required !== false))
+const optionalAgreements = computed(() => agreement.list.filter((item) => item.required === false))
+const requiredNames = computed(() => requiredAgreements.value.map((item) => `《${item.codeName}》`).join('、'))
+
+/**
+ * 「清单为空 且 上一次拉取失败」才有的错误文案（成功一次就自动消失）。
+ *
+ * 为什么要附带「清单为空」这个条件：拉取失败时 store 故意留着旧 list（见 stores/agreement.js），
+ * 那种情况下勾选行照常渲染、提交带的是上一个成功版本，不必再多喊一句失败；
+ * 只有从来没成功过（典型就是后端没起、dev 代理回了 502）才真的需要解释为什么没有协议可勾。
+ */
+const agreementError = computed(() => (!agreement.list.length ? agreement.listError : ''))
+
+/** 拉清单的进行态：只用来给「重试」那个链接一个 loading 文案，避免连点发一串请求 */
+const agreementLoading = ref(false)
+
+async function loadAgreements() {
+  agreementLoading.value = true
+  try {
+    await agreement.refreshList(true)
+  } finally {
+    agreementLoading.value = false
+  }
+}
+
+/**
+ * 注册随表单一起交出去的表态项：必签那几份必然在内（不勾就上不去校验），
+ * 可选的那一份只有他主动勾了才提交。
+ *
+ * 这里不会出现 accept=false：注册页的空框是「没问过」而不是「问过且拒了」，
+ * 把前者写成后者就是往证据表里塞一条伪造的拒签记录。
+ */
+const consentItems = computed(() => {
+  const items = requiredAgreements.value.map((item) => ({ code: item.code, version: item.version, accept: true }))
+  if (registerForm.agreeOptional) {
+    optionalAgreements.value.forEach((item) => items.push({ code: item.code, version: item.version, accept: true }))
+  }
+  return items
 })
 
 /** 与后端 LoginRequest / SmsLoginRequest / EmailLoginRequest 上的注解保持一致 */
@@ -561,7 +680,19 @@ const registerRules = {
     }
   ],
   phone: [{ pattern: /^$|^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }],
-  email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }]
+  email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
+  agree: [
+    {
+      validator: (rule, value, callback) => {
+        if (!registerForm.agree) {
+          callback(new Error(`请先阅读并同意${requiredNames.value}`))
+          return
+        }
+        callback()
+      },
+      trigger: 'change'
+    }
+  ]
 }
 
 /**
@@ -663,12 +794,50 @@ async function submitEmail() {
 }
 
 function openRegister() {
+  registerForm.agree = false
+  registerForm.agreeOptional = false
   registerVisible.value = true
+  // 每次打开都重拉一次清单：可能有人正好在填表时后台发了新版，
+  // 拿旧版本号提交会被服务端挡回 2023，不如开口前先对一次真值
+  // 不 await：弹窗得立即开，拉失败会由 agreementError 那一行自己说清楚
+  loadAgreements()
+}
+
+function goFileHelper() {
+  // 盖会话级标记：本标签页内已登录则直进传文件界面；关标签即失效，需重新扫码
+  sessionStorage.setItem('im-fh-session', '1')
+  router.push({ name: 'file-helper' })
+}
+
+/**
+ * 前端校验没过时给一句 toast。
+ *
+ * 光靠表单内联红字不够：注册弹窗有 8 个表单项，实测在 490px 高的视口里首屏只露到
+ * 「确认密码」，协议那一行连它的错误文字都在屏幕外——用户点完按钮看到的就是
+ * 「什么都没发生」（这就是这个 bug 被报上来的原话）。所以内联错误之外再补一条 toast，
+ * 文案取第一条失败信息；配合 el-form 的 scroll-to-error（把出错那一项滚进视野）
+ * 与 .im-dialog--fit（让弹窗本身不超出屏幕），三处一起才把这条路铺平。
+ * 没勾协议也走这里：它是这一整套合规链路上唯一会静默拦住注册的一步，必须喊得响。
+ */
+function hintInvalid(fields) {
+  const first = fields && typeof fields === 'object' ? Object.values(fields)[0] : null
+  const message = Array.isArray(first) && first[0] ? first[0].message : '请先按提示完善表单'
+  ElMessage.warning(message)
 }
 
 async function submitRegister() {
-  const valid = await registerFormRef.value.validate().catch(() => false)
-  if (!valid) {
+  // validate() 失败时 reject 的是「字段 -> 错误」映射，接住它才能拿到第一条文案
+  const fields = await registerFormRef.value.validate().then(() => null).catch((f) => f)
+  if (fields) {
+    hintInvalid(fields)
+    return
+  }
+  // 清单从没拉到过 = 后端不可用（或迁移脚本没跑），此时不发注定失败的注册请求：
+  // 再碰一次墙只会让用户读到第二遍同样的报错，不如把「重试」这个动作直接指给他，
+  // 同时顺手重拉一次——后端刚重启完的情形在这里就能自行恢复
+  if (agreementError.value) {
+    ElMessage.error(`条款未能加载（${agreementError.value}），请确认后端已启动`)
+    loadAgreements()
     return
   }
   submitting.value = true
@@ -679,15 +848,42 @@ async function submitRegister() {
       // 昵称留空时后端会拿账号顶上，前端不必代劳
       nickname: registerForm.nickname || undefined,
       phone: registerForm.phone || undefined,
-      email: registerForm.email || undefined
+      email: registerForm.email || undefined,
+      // version 原样回传清单里的那一版：后端据此判定「他同意的是哪一份文本」，
+      // 不传或传旧版都会被拒，这一位是整条同意链能对上的唯一凭据。
+      // 必须写 .value：consentItems 是 computed，直接把 ref 本体交出去的话，axios 在
+      // JSON.stringify 阶段就抛「Converting circular structure to JSON」（ComputedRefImpl.dep
+      // → Dep.computed 成环），请求压根没发出去，却被 request.js 报成「无法连接服务器」——
+      // 2026-11-08 那次「点注册报后端没起、网络面板却一个请求都没有」就是漏了这六个字符
+      agreements: consentItems.value
     })
     registerVisible.value = false
     ElMessage.success('注册成功，已自动登录')
     // 注册成功后端直接返回登录态，跳转到聊天页面
     redirectAfterLogin()
+  } catch (e) {
+    handleRegisterConsentError(e)
   } finally {
     submitting.value = false
   }
+}
+
+/**
+ * 注册被协议环节挡下来时的两种引导（后端把两个码分开给，就是为了让这两句话能分开写）：
+ *  2023 版本不符——清单过期了，重拉一次让勾选框指向新版，他再勾一次就是同意新版；
+ *  2024 必签缺项——通常是清单没拉下来（勾选行因此被隐藏了），补拉一次把行摆出来。
+ * request.js 已经把后端文案弹过了，这里只补一句「下一步做什么」。
+ */
+async function handleRegisterConsentError(e) {
+  if (!e || (e.code !== CODE_AGREEMENT_VERSION_MISMATCH && e.code !== CODE_AGREEMENT_REQUIRED)) {
+    return
+  }
+  registerForm.agree = false
+  registerForm.agreeOptional = false
+  await loadAgreements()
+  ElMessage.warning(
+    e.code === CODE_AGREEMENT_VERSION_MISMATCH ? '条款已有更新，请重新勾选确认' : '请先阅读并勾选必签条款'
+  )
 }
 
 /* ------------------------------ 找回密码 ------------------------------ */
@@ -841,9 +1037,9 @@ async function submitReset() {
   const fields = byEmail
     ? ['email', 'code', 'newPassword', 'confirmPassword']
     : ['phone', 'code', 'newPassword', 'confirmPassword']
-  try {
-    await resetFormRef.value.validateField(fields)
-  } catch {
+  const bad = await resetFormRef.value.validateField(fields).then(() => null).catch((f) => f)
+  if (bad) {
+    hintInvalid(bad)
     return
   }
   resetting.value = true
@@ -982,5 +1178,27 @@ watch(tab, (value) => {
 .login__tip-sep {
   margin: 0 8px;
   color: var(--im-border);
+}
+
+/* 注册弹窗里的协议链接：跟在勾选框文案后面，不能把行高撑开 */
+.login__legal-link {
+  color: var(--im-primary, #409eff);
+  text-decoration: none;
+}
+
+.login__legal-link:hover {
+  text-decoration: underline;
+}
+
+.login__legal-tip {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+/* 清单加载失败那一行：得比旁边的辅助文案略略抢一眼，但不能当成错误红吓 */
+.login__legal-error {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-color-warning, #e6a23c);
 }
 </style>

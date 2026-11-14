@@ -52,6 +52,22 @@ const links = [
 ]
 
 const stack = ['Spring Boot 4', 'JDK 21', 'Vue 3 + Vite', 'Element Plus', 'MySQL 8', 'Redis', 'Netty WebSocket', 'MinIO', 'Electron', 'HLS / ffmpeg']
+
+/**
+ * 页脚的三个法定文本入口。
+ *
+ * 官网自己不抄一份协议正文：真源在数据库（后台可发布新版），
+ * 公示页是 im-ui 那个无需登录就能打开的 /legal/{code}。这里只摆链接。
+ * 应用与官网不同源时用环境变量把基址顶掉：.env 里写 VITE_APP_BASE=https://im.example.com
+ * （不写则按同源处理，适用于官网与应用挂在同一个域名根路径下的部署）。
+ * 留空与尾斜杠都归一到不带尾斜杠，否则会拼出 https://x//legal/terms 这种难看又难排的地址。
+ */
+const APP_BASE = (import.meta.env.VITE_APP_BASE || '').replace(/\/+$/, '')
+const legalDocs = [
+  { title: '用户协议', href: `${APP_BASE}/legal/terms` },
+  { title: '隐私政策', href: `${APP_BASE}/legal/privacy` },
+  { title: '服务条款', href: `${APP_BASE}/legal/service` }
+]
 </script>
 
 <template>
@@ -154,6 +170,16 @@ const stack = ['Spring Boot 4', 'JDK 21', 'Vue 3 + Vite', 'Element Plus', 'MySQL
   <footer class="footer">
     <div class="container footer-inner">
       <span>© 2026 Veytalk · IM 即时通讯系统 · Apache-2.0 License</span>
+      <!--
+        法定文本入口：应用商店上架与各类审核都要求「隐私政策链接可从官网直达」，
+        页脚那一行就是行业惯例放它的位置（审核人员不会到下载区里去找）。
+      -->
+      <span class="footer-legal">
+        <template v-for="(d, index) in legalDocs" :key="d.href">
+          <span v-if="index > 0">·</span>
+          <a :href="d.href">{{ d.title }}</a>
+        </template>
+      </span>
       <span>
         <a :href="GITHUB_URL" target="_blank" rel="noopener">GitHub</a> ·
         <a :href="DOCS_URL" target="_blank" rel="noopener">文档</a>

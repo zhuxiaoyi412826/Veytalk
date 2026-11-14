@@ -1,21 +1,49 @@
+vitge 内网地址设置和输出
 Write-Host "Vite局域网地址：http://$((Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notmatch '^(127\.|169\.254\.)'} | Select-Object -First 1 -ExpandProperty IPAddress)):5173"
 PoweShell下执行    自动拿到本机局域网 IPv4，输出 Vite 开发服务的局域网访问地址（端口固定 5173）
 Vite 默认开发端口就是 `5173`，这个地址给同一 WiFi / 局域网里其他设备（手机、别的电脑）访问你的前端项目。
-Get-NetIPAddress -AddressFamily IPv4|Where-Object{$_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'}|Select-Object -ExpandProperty IPAddress|ForEach-Object{Write-Host "Vite局域网地址：http://$_:5173"}
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+    $_.IPAddress -and
+    $_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'
+} | ForEach-Object {
+    Write-Host "Vite局域网地址：http://$($_.IPAddress):5173"
+}
 列出所有内网链接IP地址
 
+cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
+npm run build:electron
+cd ..\electron
+npm run build
+
+前端页面模块 
 1. im-ui — 用户端（Vue3 + Vite + Element Plus + Pinia，同时用于 Electron/Tauri/Capacitor 打包）
 2. im-admin-ui — 管理后台（对应后端 im-admin 模块）
 3. im-website — 官网
 4. electron — 桌面壳（im-desktop）  它把 im-ui 构建出的 dist 包成 Windows 桌面端
 5. im-ui/src/views/FileHelper.vue  微信文件传输助手页面
 
-
+htpps证书
 电脑换 IP 重签 = 只换服务器证书，手机 CA 不用更新；只有看到"根 CA：重新签发"那行输出时才需要重装 ca.pem
 npm run gen:cert 重签证书后必须重启 dev server
 npm run dev:lan 访问的是 http://localhost:5173/
 npm run dev 访问的是 https://localhost:5173/
+添加证书
+路径  im-ui\certs\ca.pem 
+certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
 
+Docker 部署侧的同一件事（内网测试要绿锁，指南 §8.4）
+scripts/gen-selfca.sh 建本地根（certs/ca/rootCA.pem，装一次管 10 年）+ 按 .env 三个域名各签 30 天叶子
+scripts/push-cert.sh <user>@<部署机> /opt/im-docker  推叶子 + 远端 nginx reload，并留 certs/.managed-by-push
+--install-cron <user>@<部署机> /opt/im-docker  每天一次，剩余不足 10 天才重签
+★ 这两个脚本在【签发机】（开发机 Git Bash 就行）跑，根私钥不落部署机；与上面 dev 端那套是两个独立的根
+
+Docker 部署侧的备份与上线护栏（指南 §10.1 / §6.3）
+scripts/backup.sh --install-cron   每天 03:30 备库（mysqldump --single-transaction 不锁表）；清理+异地都在脚本里
+  保留天数读 .env 的 BACKUP_KEEP_DAYS（默认 14）、异地目标读 BACKUP_SYNC_DIR（NAS 目录或 user@host:/path 走 rsync）
+  ★ 备份只落同一块盘等于没备份；cron 装在【部署机】（靠 docker compose exec mysql），日志 logs/backup-cron.log
+scripts/guard-sql-init.sh   建完库跑一次上护栏：把 sql-init 建库脚本挪进 sql-init.disabled/ + 落 .disabled 标记
+  让「卷被重建时静默清库」失效（重跑 bootstrap 也不会被撤销）；--status 看状态 / --unlock 解锁 / --comment-compose 再注释那行挂载
+  ★ 锁是本机状态不随仓库走，新机部署天然无锁、能正常建库
 
 
 .\minio.exe server D:\minio-data --console-address :9001 
@@ -26,7 +54,7 @@ mvn clean install -DskipTests 改了模块
 mvn -f ..\pom.xml clean install -DskipTests
 mvn spring-boot:run
 
-解决乱码  
+解决后端启动乱码  
 chcp 65001
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -48,9 +76,7 @@ npm run build
 Remove-Item .\release\win-unpacked -Recurse -Force -ErrorAction SilentlyContinue
 npm run build
 
-添加证书
-路径  im-ui\certs\ca.pem 
-certutil -addstore -f Root im-ui\certs\ca.pem  把根 CA 装进 Windows 受信任根存储
+
 
 
 
@@ -59,9 +85,10 @@ $env:MYSQL_USER='root'; $env:MYSQL_PASSWORD='412826'
 $env:JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"   # 解决控制台中文乱码
 mvn spring-boot:run    # 在 im-bootstrap 目录
 使这个环境变量永久生效
-
-
 netsh advfirewall firewall add rule name="IM Backend 8080" dir=in action=allow protocol=TCP localport=8080  开放8080端口防火墙
+
+
+
 重新打包
 # Windows exe（增量编译，很快）
 cd c:\daima\Veytalk\im-ui; 
@@ -77,26 +104,25 @@ Windows 安装包 `C:\daima\Veytalk\im-ui\src-tauri\target\release\bundle\nsis\I
 Windows 免安装版 `C:\daima\Veytalk\im-ui\src-tauri\target\release\app.exe` （37.7 MB） 
 安卓 APK `C:\daima\Veytalk\im-ui\android\app\build\outputs\apk\debug\app-debug.apk` （37.5 MB）
 
-http://192.168.17.18:8080  在笔记本电脑上修改每次手机插入固定都是这个
+
+ed浏览器UDP放行   
+New-NetFirewallRule -DisplayName "IM WebRTC media (Edge)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Profile Any
+
+账号密码
 admin            123456
 alice            123456
 bob              123456
 zhuxiaoyi        412826
 zhuxiaoyizxy     412826
 zhuxiaoyi1       412826
-
-
-ed浏览器UDP放行   
-New-NetFirewallRule -DisplayName "IM WebRTC media (Edge)" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Profile Any
-
+qwer             123456
+zzzz             123456
 
 PR冲突解决方法
-
 # 路 1：把 PR 分支拉到本地解，回推 fork → PR 自己变「可合并」，保留作者署名
 gh pr checkout 1            # 自动建本地分支 + 加 fork 远端（#1 开了 maintainerCanModify，你有权推）
 git merge origin/main       # 解冲突 → 改文件 → git add → git commit
 git push <fork远端名> HEAD:main
-
 # 路 2：直接在 main 上吃掉它（你刚才做的）
 git fetch origin pull/1/head:pr-1
 git checkout main; git merge pr-1    # 解冲突、add、commit
@@ -104,13 +130,78 @@ git push origin main                 # GitHub 会把 PR #1 自动标为 Merged
 
 
 
+docker 镜像构建部署
+注意修改配置文件的话   改 conf/im.env 必须 docker compose up -d  重跑bootstrap.sh文件     改 extra yml 只需 docker compose restart im-server
 
-cd Docker
-cp .env.example .env && chmod 600 .env
-systemctl is-active minio || sudo systemctl start minio   # 二进制 minio，minioadmin/minioadmin
-docker login ghcr.io                                      # 私有包才需要；PAT 只需 read:packages
+1.前置条件
+    MinIO 二进制本体要先装好  账号密码默认为 minioadmin  设置账号  
+   .env.example 里所有 <...> 换成真值   
+   装 Docker + compose 插件
+   打好jar包
+
+# 拷贝docker 目录到服务器  并进入docker目录
+cd Docker    
+jar包复制到  app目录下                                        
+填写  .env.example的值改为自己的                                     
+cp .env.example .env && chmod 600 .env                    # 复制文件.env.example 为 .env 并加600权限 仅属主可读写
+systemctl is-active minio || sudo systemctl start minio   # 启动二进制 minio，   
+docker login ghcr.io                                      # 向 GitHub 容器仓库认证，之后 compose pull 才拉得动
 bash scripts/bootstrap.sh                                  # 生成 conf/im.env、nginx 配置、自签证书
+
+2.把三站 dist 拷进 Docker/web/
+cd d:\daima\Lianshi\spring-boot-duomokuia
+scp -r im-ui\dist\*        zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-ui/
+scp -r im-admin-ui\dist\*  zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-admin-ui/
+scp -r im-website\dist\*   zhuxiaoyi@192.168.83.130:~/桌面/Docker/web/im-website/
+
+3.启动镜像
 docker compose pull                                        # ★ 先拉，避开本地 build
-docker compose up -d
-docker compose ps                                          # 等 im-server / nginx healthy
-bash scripts/health.sh
+docker compose up -d                                       # 启动
+docker compose ps                                          # 查看每个容器的状态  
+bash scripts/health.sh                                     # 六段分层诊断，按「哪层开始失败，问题就在它与上一层之间」来读
+
+4.数据库初始化  
+1  手动执行 SQL 文件     账号 root zhuxiaoyi   im  412826zxyZXY  
+在SQL-int文件里 把SQL拷贝到这个文件夹里，并先执行01 在执行02
+2  docker exec -i im-mysql mysql -uroot -pzhuxiaoyi im_db < ./02_im_data.sql  和 01_im_schema.sql  
+3  docker exec -it im-mysql mysql -uroot -pzhuxiaoyi -e "use im_db; show tables;"  查看导入的表
+
+
+
+5.访问测试
+本机 hosts 加上这一行
+192.168.83.130  im.example.com admin.example.com www.example.com
+站点	在浏览器里敲	落到哪个 server	磁盘目录
+聊天端	https://im.example.com/	        server_name __IM_DOMAIN__	    web/im-ui
+管理后台	https://admin.example.com/	server_name __ADMIN_DOMAIN__	web/im-admin-ui
+静态官网	https://www.example.com/	server_name __WEBSITE_DOMAIN__	web/im-website
+
+
+6. 其他docker命令 
+docker build -t local/im-server:1.0.0 Docker/app   # 构建命令
+docker logs 查看日志  
+docker
+
+
+
+
+
+
+
+
+
+electron 打包
+# ① 重出渲染包（产物直接落 electron\dist，不用手动拷贝）
+cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
+node node_modules/vite/bin/vite.js build --mode electron
+# 网页端打包
+node node_modules/vite/bin/vite.js build          # → im-ui\dist（默认模式，base '/'）
+
+# ② ★ 必须先退出正在运行的客户端，否则打包 EBUSY 中断
+Get-Process | Where-Object { $_.ProcessName -like 'IM*' } | Stop-Process -Force
+
+# ③ 打包
+cd d:\daima\Lianshi\spring-boot-duomokuia\electron
+node node_modules/electron-builder/cli.js --win
+
+桌面端和网页端 都走域名访问  im..dsaol.asia 1

@@ -57,7 +57,7 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
    * set/reset 只落盘，生效靠前端 reload 页面（preload 会重新取一次）。
    */
   server: {
-    /** → { baseUrl, source, builtIn, env, configPath, hasConfig } */
+    /** → { baseUrl, source, builtIn, fallbackBase, fallbackActive, env, configPath, hasConfig } */
     get: () => call('im:server-get', null),
     /** 只校验规整不落盘 → { baseUrl }；前端拿它统一口径后再去探连接，避免两处各写一份规则 */
     normalize: (baseUrl) => call('im:server-normalize', { baseUrl }),
@@ -167,6 +167,26 @@ contextBridge.exposeInMainWorld('__IM_NATIVE__', {
     read: (filePath, maxBytes) => call('im:record-read', { filePath, maxBytes }),
     /** 在资源管理器里定位录像文件；只给 dir 则打开目录本身 */
     openDir: (filePath, dir) => call('im:record-open-dir', { filePath, dir })
+  },
+  /**
+   * 应用调试日志落盘桥：渲染进程通过 dlog() 发出，主进程追加写入 userData/app.log。
+   * 浏览器环境下 window.imBridge 不存在，logger.js 中的 bridge 写入分支自然跳过。
+   */
+  log: {
+    /** entry: { level, message, timestamp } —— 追加写入 app.log */
+    write: (entry) => call('im:log-write', entry),
+    /** 清空 app.log（调试开关从关到开时调用，保证新会话干净） */
+    clear: () => call('im:log-clear', null)
+  },
+  /**
+   * 桌面端配置桥：渲染进程把下载目录/代理/快捷键等设置推送到主进程，
+   * 以及打开目录选择对话框。
+   */
+  desktop: {
+    /** 把当前桌面设置同步到主进程（下载目录/代理/快捷键） */
+    applySettings: (payload) => call('im:apply-desktop-settings', payload),
+    /** 弹系统目录选择框，返回所选路径或 null */
+    pickDownloadDir: () => call('im:pick-download-dir', null)
   }
 })
 

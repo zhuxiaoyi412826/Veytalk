@@ -32,6 +32,14 @@
       </el-form-item>
     </el-form>
 
+    <!-- 内置地址一键快填：域名是首选、公网 IP 是域名被备案拦截时的救命绳，
+         免得手抄长串；值来自主进程 im:server-get，单一来源不在这儿硬编码 -->
+    <div v-if="info.builtIn || info.fallbackBase" class="dbg__presets">
+      <span class="dbg__k">快填：</span>
+      <el-link v-if="info.builtIn" type="primary" underline="never" :disabled="busy" @click="draft = info.builtIn">公网域名</el-link>
+      <el-link v-if="info.fallbackBase" type="warning" underline="never" :disabled="busy" @click="draft = info.fallbackBase">公网 IP（域名被备案拦截时用）</el-link>
+    </div>
+
     <!-- 探测结论：级别不同下一步动作完全不同，所以标题、正文、配色一起分档，
          不能统一成一句「网络错误」——那正是这个入口要消灭的东西 -->
     <div v-if="probe" class="dbg__probe" :class="`dbg__probe--${probe.level}`">
@@ -49,7 +57,7 @@
 
     <div v-if="info.configPath" class="dbg__path">
       配置文件：<code>{{ info.configPath }}</code>
-      <el-link type="primary" :underline="false" :icon="FolderOpened" @click="reveal">打开所在目录</el-link>
+      <el-link v-if="info.canReveal !== false" type="primary" underline="never" :icon="FolderOpened" @click="reveal">打开所在目录</el-link>
     </div>
 
     <template #footer>
@@ -70,6 +78,7 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CircleCheckFilled, CircleCloseFilled, FolderOpened, RefreshLeft, WarningFilled } from '@element-plus/icons-vue'
 import { PROBE_LEVEL, classifyProbe, probeUrl, sourceLabel, sourceTagType } from '@/utils/servercfg'
+import { getServerBridge } from '@/utils/serverBridge'
 
 /**
  * 后端地址调试弹窗（仅桌面端）。
@@ -95,9 +104,9 @@ const visible = computed({
   set: (val) => emit('update:modelValue', val)
 })
 
-const bridge = () => (typeof window !== 'undefined' && window.__IM_NATIVE__ && window.__IM_NATIVE__.server) || null
+const bridge = () => getServerBridge()
 
-const info = ref({ source: '', baseUrl: '', configPath: '', hasConfig: false })
+const info = ref({ source: '', baseUrl: '', configPath: '', hasConfig: false, builtIn: '', fallbackBase: '' })
 const draft = ref('')
 const probe = ref(null)
 const lastError = ref('')
@@ -176,7 +185,7 @@ async function save() {
   try {
     const data = await api.set(draft.value)
     ElMessage.success(`后端地址已保存为 ${data.baseUrl}，正在重载页面…`)
-    info.value = { ...info.value, baseUrl: data.baseUrl, source: 'file', hasConfig: true }
+    info.value = { ...info.value, baseUrl: data.baseUrl, source: data.source || 'file', hasConfig: true }
     // 重载是必须的：axios 的 baseURL 在模块加载时就算定了（api/request.js），
     // 不重载会出现「地址存了、请求还往老地方发」的诡异状态
     setTimeout(() => window.location.reload(), 600)
@@ -192,7 +201,7 @@ async function resetDefault() {
   if (!api || busy.value) return
   try {
     await ElMessageBox.confirm(
-      '将删除配置文件里的地址，回落到环境变量或安装包内置默认（http://localhost:8080）。确认？',
+      `将删除配置文件里的地址，回落到环境变量或安装包内置默认（${info.value.builtIn || '内置默认'}）。确认？`,
       '恢复内置默认',
       { type: 'warning', confirmButtonText: '恢复并重载', cancelButtonText: '取消' }
     )
@@ -245,6 +254,14 @@ async function reveal() {
   font-size: 12px;
   line-height: 1.7;
   color: var(--el-text-color-secondary);
+}
+
+.dbg__presets {
+  margin: -6px 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
 }
 
 .dbg__probe {

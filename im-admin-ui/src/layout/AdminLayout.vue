@@ -50,6 +50,10 @@
           <el-icon><Reading /></el-icon>
           <span>AI 面试记录</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:ai:guard')" index="ai-guard" :route="{ name: 'ai-guard' }">
+          <el-icon><Coin /></el-icon>
+          <span>AI 用量管控</span>
+        </el-menu-item>
         <el-menu-item v-if="auth.can('system:monitor')" index="monitor" :route="{ name: 'monitor' }">
           <el-icon><Odometer /></el-icon>
           <span>监控告警</span>
@@ -57,6 +61,10 @@
         <el-menu-item v-if="auth.can('system:log')" index="logs" :route="{ name: 'logs' }">
           <el-icon><Document /></el-icon>
           <span>日志管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:log')" index="moderation-logs" :route="{ name: 'moderation-logs' }">
+          <el-icon><PictureFilled /></el-icon>
+          <span>审核记录</span>
         </el-menu-item>
         <el-menu-item v-if="auth.can('system:config')" index="config" :route="{ name: 'config' }">
           <el-icon><Setting /></el-icon>
@@ -69,6 +77,12 @@
         <el-menu-item v-if="auth.can('system:announcement')" index="announcements" :route="{ name: 'announcements' }">
           <el-icon><Bell /></el-icon>
           <span>全服公告</span>
+        </el-menu-item>
+        <!-- 放在公告之后：两屏都是「对外说话」，但公告是可撤回的日常运营，
+             协议是改一个字就得让全数人重新确认一次的合同，误操作代价不一样，排在后面 -->
+        <el-menu-item v-if="auth.can('system:agreement:manage')" index="agreements" :route="{ name: 'agreements' }">
+          <el-icon><Document /></el-icon>
+          <span>法定文本</span>
         </el-menu-item>
       </el-menu>
       <p class="muted side-note">

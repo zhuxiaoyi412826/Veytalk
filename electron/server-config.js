@@ -12,7 +12,7 @@
  *      目录名取的是 package.json 的 name「im-desktop」而不是 productName「IM通讯」，
  *      安装版与免安装版共用同一个 userData，所以两边互相能看到对方的配置）
  *   ② 环境变量 IM_SERVER_BASE（无人值守 / 多环境切换）
- *   ③ 内置默认 BUILT_IN_BASE（开发机自测用，保持和老包一致的行为）
+ *   ③ 内置默认 BUILT_IN_BASE（线上域名；本地调试用上面两层覆盖，无需改这里）
  *
  * 三层都在主进程解析，**渲染进程只读结果**：地址是「页面能不能活」级别的前提，
  * 不能让前端各存一份偏好，否则连不上后端时界面本身就是唯一出路，而它需要先知道地址。
@@ -23,10 +23,23 @@
  */
 const fs = require('fs')
 const path = require('path')
+const net = require('net')
+const tls = require('tls')
 const { app, shell } = require('electron')
 
-/** 内置默认值：与老安装包一致，开发机本机起后端时零配置可用 */
-const BUILT_IN_BASE = 'http://localhost:8080'
+/**
+ * 内置默认值：线上域名，分发包开箱即连公网后端（不再烤死 localhost、装到无本机后端的机器连不上）。
+ * 本地/开发调试无需改代码或重打包：登录页「开发调试」/设置页填 http://localhost:8080
+ * （落 server-config.json，第一层优先），或设环境变量 IM_SERVER_BASE=http://localhost:8080（第二层）。
+ */
+const BUILT_IN_BASE = 'https://im.dsaol.asia'
+/**
+ * 内置回落地址：公网 IP 直连 nginx 443，与域名同一台后端。
+ * 域名托管在未备案的大陆云上时会被运营商在 TLS 握手阶段直接 reset（客户端只看到连接被重置），
+ * 此时安装包经 resolveWithProbe() 自动切到本 IP 保证开箱可连；证书是按域名签的，
+ * 连 IP 会撞主机名不匹配 + 自签无 CA 两层证书错，由 main.js 的证书定向白名单放行。
+ */
+const BUILT_IN_FALLBACK_BASE = 'https://120.78.126.132'
 const CONFIG_FILE = 'server-config.json'
 const MAX_LEN = 200
 
@@ -104,13 +117,66 @@ function writeOverride(baseUrl) {
   fs.renameSync(tmp, file)
 }
 
+/** 本次运行是否已激活 IP 回落层（只存内存、不写配置文件）：激活后 resolve() 一律返回 IP，弹窗与请求同口径 */
+let fallbackActive = false
+
 /** 当前生效的地址与它的来源，界面据此告诉用户「这个值是从哪层来的」 */
 function resolve() {
   const fromFile = readOverride()
   if (fromFile) return { baseUrl: fromFile, source: 'file' }
   const fromEnv = normalizeBase(process.env.IM_SERVER_BASE || '')
   if (fromEnv) return { baseUrl: fromEnv, source: 'env' }
+  if (fallbackActive) return { baseUrl: BUILT_IN_FALLBACK_BASE, source: 'fallback' }
   return { baseUrl: BUILT_IN_BASE, source: 'default' }
+}
+
+/**
+ * 可达性探测：只问「TCP/TLS 握手能不能完成」，不验证书（证书信任是渲染层探测与证书白名单的事）。
+ * 域名被备案拦截时 reset 包约百毫秒就回来，被拦网络的探测代价可忽略；正常网络代价是一次握手。
+ */
+function probeBase(baseUrl, timeoutMs = 2500) {
+  return new Promise((done) => {
+    let url
+    try {
+      url = new URL(baseUrl)
+    } catch {
+      return done(false)
+    }
+    const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
+    let settled = false
+    const finish = (ok, socket) => {
+      if (settled) return
+      settled = true
+      if (socket) socket.destroy()
+      done(ok)
+    }
+    if (url.protocol === 'https:') {
+      // rejectUnauthorized:false——探测只问「有没有人在做 TLS」，证书有效性不归这层管
+      const socket = tls.connect(
+        { host: url.hostname, port, servername: url.hostname, rejectUnauthorized: false, timeout: timeoutMs },
+        () => finish(true, socket)
+      )
+      socket.on('error', () => finish(false, socket))
+      socket.on('timeout', () => finish(false, socket))
+    } else {
+      const socket = net.connect({ host: url.hostname, port, timeout: timeoutMs }, () => finish(true, socket))
+      socket.on('error', () => finish(false, socket))
+      socket.on('timeout', () => finish(false, socket))
+    }
+  })
+}
+
+/**
+ * 启动期带探测的解析：只在「内置默认」层生效时探域名，不通则切 IP 回落；
+ * 用户用配置文件/环境变量显式指定的地址原样尊重、不静默覆盖（他写错了就该在弹窗里看到错，而不是被魔法改掉）。
+ * 必须在 createWindow() 之前调用：preload 的同步通道读的是 resolve() 结果，回落状态要先定下来。
+ */
+async function resolveWithProbe(timeoutMs = 2500) {
+  const current = resolve()
+  if (current.source !== 'default') return current
+  if (await probeBase(current.baseUrl, timeoutMs)) return current
+  fallbackActive = true
+  return resolve()
 }
 
 const ok = (data) => ({ ok: true, data })
@@ -132,9 +198,12 @@ function setupServerConfig(ipcMain) {
       return ok({
         ...current,
         builtIn: BUILT_IN_BASE,
+        fallbackBase: BUILT_IN_FALLBACK_BASE,
+        fallbackActive,
         env: normalizeBase(process.env.IM_SERVER_BASE || ''),
         configPath: configPath(),
-        hasConfig: fs.existsSync(configPath())
+        hasConfig: fs.existsSync(configPath()),
+        canReveal: true
       })
     } catch (e) {
       return fail(String((e && e.message) || e))
@@ -193,8 +262,11 @@ function setupServerConfig(ipcMain) {
 
 module.exports = {
   BUILT_IN_BASE,
+  BUILT_IN_FALLBACK_BASE,
   normalizeBase,
   resolve,
+  resolveWithProbe,
+  probeBase,
   configPath,
   setupServerConfig
 }

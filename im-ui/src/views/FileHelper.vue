@@ -30,64 +30,99 @@
       </div>
     </main>
 
-    <!-- 传文件界面 -->
-    <main v-else class="fh__body">
-      <div
-        class="fh__drop"
-        :class="{ 'is-over': dragOver, 'is-busy': !!uploadingName }"
-        @dragover.prevent="dragOver = true"
-        @dragleave.prevent="dragOver = false"
-        @drop.prevent="onDrop"
-        @click="pickFiles"
-      >
-        <el-icon class="fh__drop-ico" :size="40"><UploadFilled /></el-icon>
-        <div class="fh__drop-text">
-          <template v-if="uploadingName">
-            正在上传「{{ uploadingName }}」 {{ uploadPercent }}%
-          </template>
-          <template v-else>
-            把文件拖到这里，或点击选择文件上传
-            <span class="fh__drop-sub">手机 APP 发给「文件传输助手」的文件也会显示在下面</span>
-          </template>
+    <!-- 传内容界面：消息区在上可滚动，输入区固定在底部，与微信文件传输助手同款布局 -->
+    <main
+      v-else
+      class="fh__body"
+      @dragover.prevent="dragOver = true"
+      @dragleave.prevent="onDragLeave"
+      @drop.prevent="onDrop"
+    >
+      <div ref="listEl" class="fh__list im-scroll" @scroll.passive="onListScroll">
+        <div v-if="loadingList && !items.length" v-loading="true" class="fh__list-loading"></div>
+        <div v-else-if="!items.length" class="fh__list-empty">
+          你可以使用「手机 APP &gt; 文件传输助手」与电脑互传文件、文字和语音
         </div>
-        <input ref="fileInput" type="file" multiple class="fh__file" @change="onPick" />
-      </div>
-
-      <div class="fh__list">
-        <div class="fh__list-head">
-          <span>文件（{{ files.length }}）</span>
-          <span v-if="lastSync" class="fh__list-sync">更新于 {{ lastSync }}</span>
-        </div>
-
-        <div v-if="loadingList && !files.length" v-loading="true" class="fh__list-loading"></div>
-        <el-empty v-else-if="!files.length" description="还没有文件，拖一个进来试试" :image-size="80" />
         <ul v-else class="fh__items">
-          <li v-for="f in files" :key="f.messageId" class="fh__item">
-            <el-icon class="fh__item-ico" :size="26">
-              <Picture v-if="f.isImage" />
-              <Document v-else />
-            </el-icon>
-            <div class="fh__item-main">
-              <div class="fh__item-name" :title="f.name">{{ f.name }}</div>
-              <div class="fh__item-meta">{{ formatSize(f.size) }}<template v-if="f.time"> · {{ f.time }}</template></div>
-            </div>
-            <el-button class="fh__item-dl" circle :icon="Download" title="下载" @click="download(f)" />
+          <li v-for="it in items" :key="it.messageId" class="fh__item">
+            <!-- 文字 -->
+            <template v-if="it.type === MSG_TEXT">
+              <el-icon class="fh__item-ico" :size="26"><ChatDotRound /></el-icon>
+              <div class="fh__item-main">
+                <div class="fh__item-text">{{ it.text }}</div>
+                <div class="fh__item-meta">{{ it.time }}</div>
+              </div>
+            </template>
+            <!-- 语音：内嵌播放器，src 走带鉴权的 blob 地址 -->
+            <template v-else-if="it.type === MSG_VOICE">
+              <el-icon class="fh__item-ico" :size="26"><Microphone /></el-icon>
+              <div class="fh__item-main">
+                <audio class="fh__audio" controls preload="none" :src="mediaUrl(it.url)"></audio>
+                <div class="fh__item-meta">语音{{ it.duration ? ' · ' + it.duration + 's' : '' }}<template v-if="it.time"> · {{ it.time }}</template></div>
+              </div>
+            </template>
+            <!-- 图片 / 文件 -->
+            <template v-else>
+              <el-icon class="fh__item-ico" :size="26">
+                <Picture v-if="it.isImage" />
+                <Document v-else />
+              </el-icon>
+              <div class="fh__item-main">
+                <div class="fh__item-name" :title="it.name">{{ it.name }}</div>
+                <div class="fh__item-meta">{{ formatSize(it.size) }}<template v-if="it.time"> · {{ it.time }}</template></div>
+              </div>
+              <el-button class="fh__item-dl" circle :icon="Download" title="下载" @click="download(it)" />
+            </template>
           </li>
         </ul>
       </div>
+
+      <!-- 底部输入区：文件夹图标选文件、麦克风录语音，拖拽则整个页面都是投放区 -->
+      <div class="fh__panel">
+        <div class="fh__panel-tools">
+          <el-icon class="fh__tool" :size="20" title="发送文件" @click="pickFiles"><FolderOpened /></el-icon>
+          <el-icon
+            class="fh__tool"
+            :class="{ 'is-recording': recording }"
+            :size="20"
+            :title="recording ? `录音中 ${recordSeconds}s，点击停止并发送` : '发送语音'"
+            @click="toggleRecord"
+          ><Microphone /></el-icon>
+          <span v-if="recording" class="fh__panel-status is-rec">● 录音中 {{ recordSeconds }}s，点击麦克风停止并发送</span>
+          <span v-else-if="uploadingName" class="fh__panel-status">正在上传「{{ uploadingName }}」{{ uploadPercent }}%</span>
+          <span v-else-if="sendingKind" class="fh__panel-status">正在发送…</span>
+        </div>
+        <el-input
+          v-model="draft"
+          type="textarea"
+          :rows="3"
+          resize="none"
+          maxlength="5000"
+          :disabled="!!sendingKind"
+          placeholder="输入文字传到手机；支持 Ctrl+Enter 快速发送"
+          @keydown.ctrl.enter="sendText"
+        />
+        <div class="fh__panel-foot">
+          <span v-if="lastSync" class="fh__panel-sync">更新于 {{ lastSync }}</span>
+          <el-button type="primary" :loading="sendingKind === 'text'" :disabled="!draft.trim() || !!sendingKind" @click="sendText">发送</el-button>
+        </div>
+      </div>
+
+      <div v-if="dragOver" class="fh__drop-mask">松开鼠标，上传文件到手机</div>
+      <input ref="fileInput" type="file" multiple class="fh__file" @change="onPick" />
     </main>
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, Document, Loading, Picture, Promotion, Refresh, UploadFilled } from '@element-plus/icons-vue'
+import { ChatDotRound, Download, Document, FolderOpened, Loading, Microphone, Picture, Promotion, Refresh } from '@element-plus/icons-vue'
 import { createQrLogin, pollQrLoginStatus } from '@/api/qrLogin'
 import { openAssistantSession } from '@/api/assistant'
 import { uploadFileSmart } from '@/api/file'
 import { sendMessage, fetchHistory } from '@/api/message'
-import { downloadFile } from '@/utils/media'
+import { downloadFile, mediaUrl } from '@/utils/media'
 import { clearToken, getToken, setToken } from '@/utils/token'
 
 /**
@@ -102,10 +137,16 @@ import { clearToken, getToken, setToken } from '@/utils/token'
  * 与 /transfer 的区别：/transfer 扫码后跳进完整聊天界面，这里始终停留在专用传文件页。
  */
 
+const MSG_TEXT = 1
 const MSG_IMAGE = 2
 const MSG_FILE = 3
+const MSG_VOICE = 4
 const LIST_SIZE = 50
+const RECORD_MAX_SECONDS = 60
 const LIST_POLL_MS = 6000
+// 会话级登录标记：只存 sessionStorage，关掉页签即消失，再开必须重新扫码；
+// 同页签内刷新仍有效，不至于手滑刷新就掉线
+const FH_SESSION_KEY = 'im-fh-session'
 
 /* ---------------- 登录：出码 + 轮询 ---------------- */
 const phase = ref('entering') // entering | qrcode | scanned | expired | error | transfer
@@ -161,6 +202,7 @@ async function pollOnce() {
     } else if (res.status === 2) {
       stopQr()
       setToken(res.token, res.tokenName)
+      sessionStorage.setItem(FH_SESSION_KEY, '1')
       await enterTransfer()
     } else if (res.status === 3) {
       stopQr()
@@ -177,16 +219,29 @@ async function pollOnce() {
   }
 }
 
-/* ---------------- 传文件 ---------------- */
+/* ---------------- 传内容（文字 / 图片 / 文件 / 语音） ---------------- */
 const conversationId = ref('')
-const files = ref([])
+const items = ref([])
 const loadingList = ref(false)
 const lastSync = ref('')
 const dragOver = ref(false)
 const uploadingName = ref('')
 const uploadPercent = ref(0)
 const fileInput = ref(null)
+const listEl = ref(null)
+// 用户停在列表底部附近时才自动滚到最新，翻历史时不打断阅读
+let stickBottom = true
 let listTimer = null
+
+// 文字草稿与发送中标记（'text' | 'voice' | ''），用于互斥禁用输入区按钮
+const draft = ref('')
+const sendingKind = ref('')
+// 录音状态：MediaRecorder 为浏览器原生 API，需安全上下文（https 或 localhost）
+const recording = ref(false)
+const recordSeconds = ref(0)
+let mediaRecorder = null
+let audioChunks = []
+let recordTimer = null
 
 async function enterTransfer() {
   phase.value = 'entering'
@@ -212,10 +267,15 @@ async function loadFiles(showLoading = true) {
   }
   try {
     const list = (await fetchHistory(conversationId.value, null, LIST_SIZE)) || []
-    files.value = list
-      .filter((m) => !m.recalled && (Number(m.msgType) === MSG_FILE || Number(m.msgType) === MSG_IMAGE))
+    items.value = list
+      .filter((m) => !m.recalled && [MSG_TEXT, MSG_IMAGE, MSG_FILE, MSG_VOICE].includes(Number(m.msgType)))
       .map(toItem)
     lastSync.value = new Date().toLocaleTimeString()
+    if (showLoading) {
+      // 手动刷新视为「回到底部看最新」；轮询只在用户本来就贴在底部时跟随
+      stickBottom = true
+    }
+    scrollToBottom()
   } catch (e) {
     // 轮询失败静默（下一轮会重来）；只有手动刷新才提示
     if (showLoading) {
@@ -230,14 +290,47 @@ async function loadFiles(showLoading = true) {
 
 function toItem(m) {
   const extra = m.extra || {}
+  const type = Number(m.msgType)
   return {
     messageId: m.messageId || m.clientMsgId,
+    type,
+    text: type === MSG_TEXT ? m.content || '' : '',
     name: extra.fileName || m.content || '未命名文件',
     size: extra.fileSize,
+    duration: extra.duration,
     url: extra.fileUrl || '',
-    time: (m.sendTime || '').slice(5, 16),
-    isImage: Number(m.msgType) === MSG_IMAGE || String(extra.contentType || '').startsWith('image/')
+    time: (m.sendTime || '').slice(5, 16).replace('T', ' '),
+    isImage: type === MSG_IMAGE || String(extra.contentType || '').startsWith('image/')
   }
+}
+
+function onListScroll() {
+  const el = listEl.value
+  if (!el) {
+    return
+  }
+  stickBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
+function scrollToBottom() {
+  if (!stickBottom) {
+    return
+  }
+  nextTick(() => {
+    const el = listEl.value
+    if (el) {
+      el.scrollTop = el.scrollHeight
+    }
+  })
+}
+
+// 拖拽经过子元素时父层会反复 dragleave，用 relatedTarget 判定真正离开才收起遮罩
+function onDragLeave(e) {
+  const container = e.currentTarget
+  if (e.relatedTarget && container.contains(e.relatedTarget)) {
+    return
+  }
+  dragOver.value = false
 }
 
 function pickFiles() {
@@ -305,6 +398,148 @@ function newClientMsgId() {
   return `fh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+/* ---------------- 发送文字 ---------------- */
+async function sendText() {
+  const text = draft.value.trim()
+  if (!text || sendingKind.value) {
+    return
+  }
+  sendingKind.value = 'text'
+  try {
+    await sendMessage({
+      conversationId: conversationId.value,
+      msgType: MSG_TEXT,
+      content: text,
+      clientMsgId: newClientMsgId()
+    })
+    draft.value = ''
+    await loadFiles(false)
+  } catch (e) {
+    ElMessage.error((e && e.message) || '发送文字失败')
+  } finally {
+    sendingKind.value = ''
+  }
+}
+
+/* ---------------- 录音（语音） ---------------- */
+function toggleRecord() {
+  if (recording.value) {
+    stopRecord()
+  } else {
+    startRecord()
+  }
+}
+
+async function startRecord() {
+  if (sendingKind.value) {
+    return
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+    ElMessage.error('当前浏览器不支持录音，请改用 Chrome / Edge')
+    return
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    // 优先录后端 chat_voice 白名单放行的容器（m4a / ogg 安卓与网页都能播），
+    // webm 只作兜底（需后端同步放行，见 FileBizType.CHAT_VOICE）
+    const mime = ['audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported(t)) || ''
+    mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream)
+    audioChunks = []
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size) {
+        audioChunks.push(e.data)
+      }
+    }
+    mediaRecorder.onstop = onRecorderStop
+    mediaRecorder.start()
+    recording.value = true
+    recordSeconds.value = 0
+    recordTimer = setInterval(() => {
+      recordSeconds.value += 1
+      if (recordSeconds.value >= RECORD_MAX_SECONDS) {
+        // 到达上限自动停止并发送，避免录进超大文件
+        stopRecord()
+      }
+    }, 1000)
+  } catch (e) {
+    mediaRecorder = null
+    ElMessage.error('无法访问麦克风，请检查浏览器权限')
+  }
+}
+
+function stopRecord() {
+  if (recordTimer) {
+    clearInterval(recordTimer)
+    recordTimer = null
+  }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop() // 异步触发 onstop → onRecorderStop
+  }
+  recording.value = false
+}
+
+// 放弃当前录音且不发送（退出/卸载时用）
+function cancelRecord() {
+  if (recordTimer) {
+    clearInterval(recordTimer)
+    recordTimer = null
+  }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.onstop = null
+    const s = mediaRecorder.stream
+    mediaRecorder.stop()
+    if (s) {
+      s.getTracks().forEach((t) => t.stop())
+    }
+  }
+  mediaRecorder = null
+  audioChunks = []
+  recording.value = false
+}
+
+async function onRecorderStop() {
+  const seconds = recordSeconds.value
+  const stream = mediaRecorder && mediaRecorder.stream
+  const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm'
+  const blob = new Blob(audioChunks, { type: mime })
+  audioChunks = []
+  if (stream) {
+    stream.getTracks().forEach((t) => t.stop())
+  }
+  mediaRecorder = null
+  if (!blob.size) {
+    ElMessage.warning('录音为空，已取消')
+    return
+  }
+  const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm'
+  const file = new File([blob], `voice-${Date.now()}.${ext}`, { type: mime })
+  sendingKind.value = 'voice'
+  try {
+    // 语音走 chat_voice 上传，duration 随上传参数落进文件记录
+    const vo = await uploadFileSmart(file, 'chat_voice', seconds || 1)
+    await sendMessage({
+      conversationId: conversationId.value,
+      msgType: MSG_VOICE,
+      content: String(vo.fileId),
+      clientMsgId: newClientMsgId(),
+      extra: {
+        fileId: vo.fileId,
+        fileName: vo.originalName || file.name,
+        fileSize: vo.size,
+        contentType: vo.contentType || mime,
+        ext: vo.ext || ext,
+        duration: seconds || 1,
+        fileUrl: vo.url
+      }
+    })
+    await loadFiles(false)
+  } catch (e) {
+    ElMessage.error((e && e.message) || '语音发送失败')
+  } finally {
+    sendingKind.value = ''
+  }
+}
+
 function download(f) {
   if (!f.url) {
     ElMessage.warning('该文件暂不可下载')
@@ -316,12 +551,15 @@ function download(f) {
 function logout() {
   // 只清本地登录态并回到出码；服务端 web 设备令牌随会话自然过期
   clearToken()
+  sessionStorage.removeItem(FH_SESSION_KEY)
   if (listTimer) {
     clearInterval(listTimer)
     listTimer = null
   }
+  cancelRecord()
+  draft.value = ''
   conversationId.value = ''
-  files.value = []
+  items.value = []
   lastSync.value = ''
   startQr()
 }
@@ -342,8 +580,9 @@ function formatSize(bytes) {
 }
 
 onMounted(() => {
-  // 已登录（含刷新页面）直接进传文件界面，不再出码
-  if (getToken()) {
+  // 只认「本次页签内扫码授权过」的会话（sessionStorage）：关掉页面再开，
+  // 即使 localStorage 里还有旧 token 也重新出码，符合“退出即需重新登录”
+  if (getToken() && sessionStorage.getItem(FH_SESSION_KEY) === '1') {
     enterTransfer()
     return
   }
@@ -356,12 +595,15 @@ onBeforeUnmount(() => {
     clearInterval(listTimer)
     listTimer = null
   }
+  cancelRecord()
 })
 </script>
 
 <style scoped>
 .fh {
-  min-height: 100vh;
+  /* 必须是定高而不是 min-height：全局 body{overflow:hidden} 下，min-height 会被内容撑开，
+     内部 flex 链失去高度约束，列表的 overflow-y:auto 永不触发，输入面板被顶出视口 */
+  height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--im-bg, #f5f7fa);
@@ -469,104 +711,65 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-/* ---------- 传文件主体 ---------- */
+/* ---------- 传内容主体：上消息列表、下输入面板 ---------- */
 .fh__body {
+  position: relative;
   flex: 1;
   width: 100%;
   max-width: 820px;
   margin: 0 auto;
-  padding: 20px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-height: 0;
-}
-
-.fh__drop {
-  flex: 0 0 auto;
-  border: 2px dashed var(--im-border, #dcdfe6);
-  border-radius: 12px;
-  background: var(--im-bg-card, #fff);
-  padding: 28px 20px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  cursor: pointer;
-  transition: border-color 0.2s, background 0.2s;
-}
-
-.fh__drop:hover,
-.fh__drop.is-over {
-  border-color: var(--im-primary, #409eff);
-  background: rgba(64, 158, 255, 0.04);
-}
-
-.fh__drop.is-busy {
-  cursor: progress;
-  border-color: var(--im-primary, #409eff);
-}
-
-.fh__drop-ico {
-  color: var(--im-primary, #409eff);
-}
-
-.fh__drop-text {
-  font-size: 14px;
-  color: var(--im-text);
-  text-align: center;
-  line-height: 1.6;
-}
-
-.fh__drop-sub {
-  display: block;
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--im-text-secondary);
 }
 
 .fh__file {
   display: none;
 }
 
+.fh__drop-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(64, 158, 255, 0.08);
+  border: 2px dashed var(--im-primary, #409eff);
+  color: var(--im-primary, #409eff);
+  font-size: 16px;
+  pointer-events: none;
+}
+
 .fh__list {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  overflow-y: auto;
   background: var(--im-bg-card, #fff);
   border-radius: 12px;
-  padding: 12px 16px;
-  overflow: hidden;
+  padding: 4px 16px;
 }
 
-.fh__list-head {
-  flex: 0 0 auto;
+.fh__list-empty {
+  height: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   font-size: 13px;
   color: var(--im-text-secondary);
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--im-border, #ebeef5);
-}
-
-.fh__list-sync {
-  font-size: 12px;
 }
 
 .fh__list-loading {
-  flex: 1;
+  height: 100%;
   min-height: 120px;
 }
 
 .fh__items {
-  flex: 1;
   margin: 0;
   padding: 0;
   list-style: none;
-  overflow-y: auto;
 }
 
 .fh__item {
@@ -607,5 +810,79 @@ onBeforeUnmount(() => {
 
 .fh__item-dl {
   flex: 0 0 auto;
+}
+
+/* ---------- 底部输入面板 ---------- */
+.fh__panel {
+  flex: 0 0 auto;
+  background: var(--im-bg-card, #fff);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fh__panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 22px;
+}
+
+.fh__tool {
+  color: var(--im-text-secondary);
+  cursor: pointer;
+}
+
+.fh__tool:hover {
+  color: var(--im-primary, #409eff);
+}
+
+.fh__tool.is-recording {
+  color: var(--im-danger, #f56c6c);
+  animation: fh-pulse 1s ease-in-out infinite;
+}
+
+@keyframes fh-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.fh__panel-status {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.fh__panel-status.is-rec {
+  color: var(--im-danger, #f56c6c);
+}
+
+.fh__panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.fh__panel-sync {
+  font-size: 12px;
+  color: var(--im-text-secondary);
+  margin-right: auto;
+}
+
+.fh__item-text {
+  font-size: 14px;
+  color: var(--im-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.fh__audio {
+  width: 100%;
+  max-width: 320px;
+  height: 36px;
 }
 </style>
