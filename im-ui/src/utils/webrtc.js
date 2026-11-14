@@ -40,6 +40,54 @@ export const INSECURE_HINT =
   '当前访问地址不是 HTTPS/localhost，浏览器禁止使用麦克风/摄像头：手机请用 https://<电脑IP>:5173 访问（npm run gen:cert 生成证书）'
 
 /**
+ * 建引擎失败的统一文案。SyntaxError 几乎必然不是麦照问题，而是 /api/call/config 下发的
+ * ICE 地址非法（生产实案：im.env 里把 `stun:` 前缀写成 `stun=`，或 `<公网IP>` 占位符没替换）——
+ * Chromium 构造 RTCPeerConnection 时直接抛 SyntaxError，被上层 catch 误报成「无法获取麦克风/摄像头」。
+ */
+export function mediaErrorHint(error) {
+  const name = (error && error.name) || ''
+  if (name === 'SyntaxError') {
+    return '通话初始化失败（SyntaxError）：多为服务器下发的 ICE 地址非法（必须以 stun:/turn: 开头），请核对 im.env 的 IM_CALL_STUN_URLS / IM_CALL_TURN_URLS'
+  }
+  return `无法获取麦克风/摄像头：${name}`
+}
+
+/** 合法 ICE 地址只有 stun:/stuns:/turn:/turns: 四种前缀，且不含空白与尖括号（占位符没替换的特征） */
+const ICE_URL_OK = /^(stun|stuns|turn|turns):[^\s<>]+$/i
+
+/**
+ * 清洗后端下发的 iceServers：非法地址直接丢弃并降级 console 警告。
+ * 一条配置笔误最多让通话失去打洞/中继能力（回落 host 直连），绝不把整通电话打挂——
+ * 浏览器对非法 URL 是构造即抛（SyntaxError），没有「跳过这条继续」的宽容度，所以必须在这里先滤。
+ */
+function sanitizeIceServers(list) {
+  if (!Array.isArray(list)) {
+    return []
+  }
+  const dropped = []
+  const result = list
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        dropped.push(entry)
+        return null
+      }
+      const raw = Array.isArray(entry.urls) ? entry.urls : [entry.urls]
+      const urls = raw.map((u) => String(u == null ? '' : u).trim()).filter((u) => ICE_URL_OK.test(u))
+      raw.forEach((u) => {
+        if (!ICE_URL_OK.test(String(u == null ? '' : u).trim())) {
+          dropped.push(u)
+        }
+      })
+      return urls.length ? { ...entry, urls } : null
+    })
+    .filter(Boolean)
+  if (dropped.length) {
+    console.warn('[webrtc] 已丢弃非法 ICE 地址（检查服务器 IM_CALL_STUN_URLS / IM_CALL_TURN_URLS 配置）：', dropped)
+  }
+  return result
+}
+
+/**
  * 解析一行 SDP candidate：`candidate:<foundation> <family> <proto> <priority> <ip> <port> typ <type> ...`
  *
  * 只取诊断要用的四件事，解析不出来就留空串，绝不因为诊断把主链路带崩。
@@ -107,6 +155,8 @@ export function createCallPeer(options = {}) {
     onLocalStream = () => {},
     onConnectionState = () => {}
   } = options
+  // 后端配置笔误不能把通话打挂：先滤掉非法 ICE 地址再交给浏览器（见 sanitizeIceServers）
+  const safeIceServers = sanitizeIceServers(iceServers)
 
   let pc = null
   // 共享流由调用方注入，所有权也在调用方；自己采集的才归自己停
@@ -122,7 +172,7 @@ export function createCallPeer(options = {}) {
     if (pc || closed) {
       return pc
     }
-    pc = new RTCPeerConnection({ iceServers })
+    pc = new RTCPeerConnection({ iceServers: safeIceServers })
 
     pc.onicecandidate = (event) => {
       // candidate 为 null 表示 ICE 收集结束，无需上报
@@ -329,7 +379,7 @@ export function createCallPeer(options = {}) {
   /** 完整现场（含每个候选的地址与端口），只进 console，不进界面 */
   function iceDetail() {
     return {
-      iceServers: iceServers.length,
+      iceServers: safeIceServers.length,
       local: diag.local,
       remote: diag.remote,
       queued: diag.queued,

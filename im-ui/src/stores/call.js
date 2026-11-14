@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getCallConfig } from '@/api/call'
 import { uploadFileSmart } from '@/api/file'
-import { createCallPeer, hasMediaApi, INSECURE_HINT } from '@/utils/webrtc'
+import { createCallPeer, hasMediaApi, mediaErrorHint, INSECURE_HINT } from '@/utils/webrtc'
 import { createCallRecorder, callRecordSupported } from '@/utils/callRecorder'
 import { openRecordDir, fetchDefaultRecordDir } from '@/utils/recorder'
 import { useChatStore } from '@/stores/chat'
@@ -288,7 +288,8 @@ export const useCallStore = defineStore('call', () => {
     try {
       await buildEngine()
     } catch (error) {
-      hint.value = `无法获取麦克风/摄像头：${(error && error.name) || ''}`
+      // SyntaxError 不是麦照问题而是 ICE 配置非法，文案在 mediaErrorHint 里分流
+      hint.value = mediaErrorHint(error)
       ElMessage.error(hint.value)
       teardown(false)
       return
@@ -325,7 +326,7 @@ export const useCallStore = defineStore('call', () => {
     try {
       await buildEngine()
     } catch (error) {
-      hint.value = `无法获取麦克风/摄像头：${(error && error.name) || ''}`
+      hint.value = mediaErrorHint(error)
       ElMessage.error(hint.value)
       signal('reject')
       teardown(false)

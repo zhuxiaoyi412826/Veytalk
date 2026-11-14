@@ -3,7 +3,7 @@ import { ref, shallowRef, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { fetchLinkmicConfig, fetchLinkmicList } from '@/api/live'
-import { createCallPeer } from '@/utils/webrtc'
+import { createCallPeer, mediaErrorHint } from '@/utils/webrtc'
 import { createLiveComposer, composerSupported, webmBaseFromPlayUrl } from '@/utils/liveComposer'
 import { asId } from '@/utils/id'
 import { dlog } from '@/utils/logger'
@@ -334,7 +334,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     try {
       await engine.initMedia()
     } catch (e) {
-      ElMessage.error(`无法获取麦克风/摄像头：${(e && e.name) || ''}`)
+      ElMessage.error(mediaErrorHint(e))
       teardownSession(entry.callId)
     }
   }
@@ -472,7 +472,7 @@ export const useLinkmicStore = defineStore('linkmic', () => {
     try {
       await engine.initMedia()
     } catch (e) {
-      guestHint.value = `无法获取麦克风/摄像头：${(e && e.name) || ''}`
+      guestHint.value = mediaErrorHint(e)
       ElMessage.error(guestHint.value)
       linkSend('leave', { callId: guestCallId, reason: 'media-error' })
       resetGuest()

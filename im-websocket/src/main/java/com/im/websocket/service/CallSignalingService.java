@@ -255,6 +255,32 @@ public class CallSignalingService {
     /* ==================== ICE 服务器清单 ==================== */
 
     /**
+     * 合法 ICE 地址只有 stun:/stuns:/turn:/turns: 四种前缀，且不含空白与尖括号。
+     * 浏览器（Chromium）对非法 URL 是构造 RTCPeerConnection 即抛 SyntaxError，没有逐条跳过的宽容度，
+     * 一条笔误会把整通电话打挂（前端还误报成「无法获取麦克风/摄像头」）。
+     * 生产实案：部署文档把前缀写成了 {@code stun=<公网IP>:3478}，照抄进 im.env 后所有通话全挂。
+     */
+    private static final java.util.regex.Pattern ICE_URL_PATTERN =
+            java.util.regex.Pattern.compile("^(stun|stuns|turn|turns):[^\\s<>]+$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /** 过滤非法 ICE 地址：合法的 trim 后下发，非法的跳过并留一条能定位到具体配置键的警告 */
+    private List<String> validIceUrls(List<String> urls, String sourceKey) {
+        List<String> valid = new ArrayList<>();
+        if (urls == null) {
+            return valid;
+        }
+        for (String url : urls) {
+            String trimmed = url == null ? "" : url.trim();
+            if (ICE_URL_PATTERN.matcher(trimmed).matches()) {
+                valid.add(trimmed);
+            } else {
+                log.warn("非法 ICE 地址已跳过（{}）：\"{}\" —— 必须以 stun:/turn: 开头，常见笔误：前缀写成 stun=、<公网IP> 占位符没替换", sourceKey, trimmed);
+            }
+        }
+        return valid;
+    }
+
+    /**
      * 组装 {@code RTCConfiguration.iceServers}：内网可只有 STUN 甚至都留空（host 直连够用），
      * 跨公网且配了 TURN 时追加一条带临时凭据的 TURN。
      *
@@ -263,20 +289,20 @@ public class CallSignalingService {
     public List<Map<String, Object>> buildIceServers(Long userId) {
         ImProperties.Call call = imProperties.getCall();
         List<Map<String, Object>> servers = new ArrayList<>();
-        List<String> stuns = call.getStunUrls();
-        if (stuns != null && !stuns.isEmpty()) {
+        List<String> stuns = validIceUrls(call.getStunUrls(), "IM_CALL_STUN_URLS");
+        if (!stuns.isEmpty()) {
             Map<String, Object> stun = new LinkedHashMap<>();
             stun.put("urls", stuns);
             servers.add(stun);
         }
         ImProperties.Call.Turn turn = call.getTurn();
-        if (turn != null && turn.isEnabled() && TextUtil.isNotBlank(turn.getSecret())
-                && turn.getUrls() != null && !turn.getUrls().isEmpty()) {
+        List<String> turnUrls = turn == null ? new ArrayList<>() : validIceUrls(turn.getUrls(), "IM_CALL_TURN_URLS");
+        if (turn != null && turn.isEnabled() && TextUtil.isNotBlank(turn.getSecret()) && !turnUrls.isEmpty()) {
             long expire = System.currentTimeMillis() / 1000 + Math.max(60, turn.getTtlSeconds());
             String username = expire + ":" + userId;
             String credential = hmacSha1Base64(turn.getSecret(), username);
             Map<String, Object> turnServer = new LinkedHashMap<>();
-            turnServer.put("urls", turn.getUrls());
+            turnServer.put("urls", turnUrls);
             turnServer.put("username", username);
             turnServer.put("credential", credential);
             servers.add(turnServer);

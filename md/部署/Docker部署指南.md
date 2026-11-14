@@ -518,9 +518,9 @@ IM_LIVE_PLAY_BASE_URL=/live                  # ★ 生产约定 /live（yml 默�
 IM_LIVE_PUSH_BASE_URL=http://<公网 IP 或主播可达的域名>:8088/live   # ★★ 前缀必须与 nginx 的 location /live/ 同名；且绝不能写 http://nginx:8088/...：那是容器内部 DNS，主播端在公网，解析不到
 IM_LIVE_SIGN_SECRET=<与 nginx secure_link_md5 的 secret 逐字一致>
 IM_LIVE_REPLAY_RETENTION_DAYS=1              # 与 retention sidecar 的 --days 读同一个值（第九节）
-IM_CALL_STUN_URLS=stun=<公网IP>:3478
+IM_CALL_STUN_URLS=stun:<公网IP>:3478
 IM_CALL_TURN_ENABLED=true
-IM_CALL_TURN_URLS=turn=<公网IP>:3478?transport=udp
+IM_CALL_TURN_URLS=turn:<公网IP>:3478?transport=udp
 IM_TURN_SECRET=<与 coturn 的 use-auth-secret 逐字一致>
 IM_DIRECT_ENABLED=false                      # 打开要同时发布 8947/udp 并设 IM_DIRECT_PUNCH_HOST=<公网IP>（同样不能写服务名）
 IM_DIRECT_PUNCH_HOST=
