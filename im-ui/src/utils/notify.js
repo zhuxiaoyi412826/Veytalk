@@ -99,6 +99,19 @@ export function setOpenConversationHandler(handler) {
 
 let audioCtx = null
 
+/**
+ * 媒体会话静音引用计数：通话中「叮」一声会从扬声器进麦克风再传给对方——
+ * 对方听到的是提示音加上一圈它的回声，这正是生产环境「回音大」的放大器之一
+ * （微信/QQ 通话期间同样不出提示音）。用计数而不是布尔：1:1 与群通话状态机各自
+ * 开合，布尔会在交叠时先松开的那家把声音放回来。
+ */
+let mediaSoundHold = 0
+
+/** 挂起/恢复消息提示音：on 记 +1，off 记 -1，>0 期间 playChime 直接无声 */
+export function holdMediaSound(on) {
+  mediaSoundHold = Math.max(0, mediaSoundHold + (on ? 1 : -1))
+}
+
 function ensureAudioContext() {
   const Ctor = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)
   if (!Ctor) {
@@ -127,6 +140,9 @@ function ensureAudioContext() {
  * @param {'message'|'system'} kind message 是两声上行的提示，system 是一声较平的提示
  */
 export function playChime(kind = 'message') {
+  if (mediaSoundHold > 0) {
+    return
+  }
   const ctx = ensureAudioContext()
   if (!ctx || ctx.state !== 'running') {
     return

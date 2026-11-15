@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getGroupActiveCall } from '@/api/call'
-import { createCallPeer, hasMediaApi, INSECURE_HINT } from '@/utils/webrtc'
+import { createCallPeer, hasMediaApi, mediaErrorHint, echoGuardHint, INSECURE_HINT } from '@/utils/webrtc'
+import { holdMediaSound } from '@/utils/notify'
 import { useCallStore } from '@/stores/call'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
@@ -91,6 +92,20 @@ export const useGroupcallStore = defineStore('groupcall', () => {
   /** 房间里的人数（含自己），头像墙与通话记录都用它 */
   const participantCount = computed(() => members.value.length + 1)
 
+  /**
+   * 通话进行中暂停新消息提示音（与 1:1 通话同一口径，见 utils/notify.js）：
+   * 麦开着的时候一声「叮」会带着回声被所有成员听清。incoming（邀约弹窗）不挂起：
+   * 那时还没采集，麦没开，提示音进不了链路。
+   */
+  let chimeHeld = false
+  watch(status, (val) => {
+    const inCall = val === 'dialing' || val === 'active'
+    if (inCall !== chimeHeld) {
+      chimeHeld = inCall
+      holdMediaSound(inCall)
+    }
+  })
+
   /* ------------------------------ 信令收发 ------------------------------ */
 
   function signal(action, extra = {}) {
@@ -113,6 +128,12 @@ export const useGroupcallStore = defineStore('groupcall', () => {
         ? { audio, video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } }
         : { audio, video: false }
     localStream.value = await navigator.mediaDevices.getUserMedia(constraints)
+    // 回声消除被内核忽略时（getSettings 显式回 false，X5 等安卓浏览器常见）提醒用户戴耳机，
+    // 否则其他人会各自听到一份大回音却不知道原因（见 utils/webrtc.js echoGuardHint）
+    const guard = echoGuardHint(localStream.value)
+    if (guard) {
+      ElMessage({ type: 'warning', message: guard, duration: 10000, showClose: true })
+    }
     applyMediaState()
     return localStream.value
   }
@@ -257,7 +278,9 @@ export const useGroupcallStore = defineStore('groupcall', () => {
     try {
       await ensureLocalStream()
     } catch (error) {
-      ElMessage.error(error && error.message ? error.message : '无法获取麦克风/摄像头')
+      // INSECURE_HINT 是自带文案的 Error（name==='Error'）原样透传；DOMException 走统一分流
+      // （NotReadableError 等天书报错在 mediaErrorHint 里翻译成带排查清单的人话）
+      ElMessage.error(error && error.name === 'Error' && error.message ? error.message : mediaErrorHint(error))
       reset()
       return false
     }
@@ -331,7 +354,7 @@ export const useGroupcallStore = defineStore('groupcall', () => {
     try {
       await ensureLocalStream()
     } catch (error) {
-      ElMessage.error(error && error.message ? error.message : '无法获取麦克风/摄像头')
+      ElMessage.error(error && error.name === 'Error' && error.message ? error.message : mediaErrorHint(error))
       if (wasIncoming) {
         signal('reject', { reason: 'media-unavailable' })
       }

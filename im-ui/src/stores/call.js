@@ -1,12 +1,13 @@
 import { defineStore } from 'pinia'
-import { ref, shallowRef, computed } from 'vue'
+import { ref, shallowRef, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { send as wsSend } from '@/ws/socket'
 import { getCallConfig } from '@/api/call'
 import { uploadFileSmart } from '@/api/file'
-import { createCallPeer, hasMediaApi, mediaErrorHint, INSECURE_HINT } from '@/utils/webrtc'
+import { createCallPeer, hasMediaApi, mediaErrorHint, echoGuardHint, INSECURE_HINT } from '@/utils/webrtc'
 import { createCallRecorder, callRecordSupported } from '@/utils/callRecorder'
 import { openRecordDir, fetchDefaultRecordDir } from '@/utils/recorder'
+import { holdMediaSound } from '@/utils/notify'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
 import { asId } from '@/utils/id'
@@ -70,6 +71,21 @@ export const useCallStore = defineStore('call', () => {
    * 语音通话还会连带把声音出口搞断，所以宁可让画面常驻、只是看不见。
    */
   const minimized = ref(false)
+
+  /**
+   * 通话期间暂停新消息提示音（见 utils/notify.js 的 holdMediaSound）：
+   * 那一声「叮」从扬声器进麦克风送给对端，对端听到的是提示音加一圈回声，
+   * 正是生产环境「回音大」的放大器之一。拨出/振铃/通话中挂起，其余一律恢复；
+   * 用配对标志位保证 +1/-1 严格成对（ended→idle 这种连续离开不会重复松）。
+   */
+  let chimeHeld = false
+  watch(status, (val) => {
+    const inCall = val === 'dialing' || val === 'ringing' || val === 'active'
+    if (inCall !== chimeHeld) {
+      chimeHeld = inCall
+      holdMediaSound(inCall)
+    }
+  })
 
   /* ------------------------------ 非响应式内部态 ------------------------------ */
   let engine = null
@@ -152,6 +168,13 @@ export const useCallStore = defineStore('call', () => {
       onLocalSignal: (action, data) => signal(action, data),
       onLocalStream: (stream) => {
         localStream.value = stream
+        // 回声消除可能被供应商/内核直接忽略（X5 等安卓浏览器），只在显式未生效时提醒一句，
+        // 不阻断通话：这时候软件无从消除，戴耳机是唯一解，至少让用户知道为什么对方听到回音
+        const guard = echoGuardHint(stream)
+        if (guard) {
+          dlog('[call] AEC 未生效', stream.getAudioTracks()[0] && stream.getAudioTracks()[0].getSettings())
+          ElMessage({ type: 'warning', message: guard, duration: 10000, showClose: true })
+        }
       },
       onRemoteStream: (stream) => {
         remoteStream.value = stream

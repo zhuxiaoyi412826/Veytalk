@@ -163,7 +163,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      # - "8088:8088"                    # 直播推流口（只在主播端要直连 8088 时放开；见 nginx/conf.d 里那段关于源 IP 的警告）
+      - "8088:8088"                    # 直播推流口（只在主播端要直连 8088 时放开；见 nginx/conf.d 里那段关于源 IP 的警告）
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
@@ -181,38 +181,34 @@ services:
 
   # ------------------------------------------------ 选装：直播回放保留期清理（开了直播就是必装项）
   # 后端只管 Redis 里那个入口标记，控制面一个媒体字节都不碰；分片没人删就一直吃盘
-  # （一场 2 小时四档直播约 8~10GB）。脚本从仓库 electron/live-retention.js 拷到 ./scripts/。
-  # live-retention:
-  #   image: node:${NODE_TAG:-22-alpine}
-  #   container_name: im-live-retention
-  #   restart: unless-stopped
-  #   working_dir: /app
-  #   volumes:
-  #     - ./scripts/live-retention.js:/app/live-retention.js:ro
-  #     - ./data/live:/data/live         # 与 nginx 同一个目录，才能删到真的那批分片
-  #   environment:
-  #     IM_LIVE_REPLAY_RETENTION_DAYS: 1 # ★ 与后端读同一个变量名；两边不一致＝「列表有回放、点进去 404」
-  #   # ★ 常驻形态用 --interval；要每天跑一次就注释掉本 service，改用宿主 cron（指南 9.1 的 B 方案）
-  #   command: ["node", "/app/live-retention.js", "--root=/data/live", "--interval=1800"]
-  #   depends_on:
-  #     - nginx
-
+  live-retention:
+    image: node:${NODE_TAG:-22-alpine}
+    container_name: im-live-retention
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./scripts/live-retention.js:/app/live-retention.js:ro
+      - ./data/live:/data/live         # 与 nginx 同一个目录，才能删到真的那批分片
+    environment:
+      IM_LIVE_REPLAY_RETENTION_DAYS: 1 # ★ 与后端同名变量必须同一个数
+    command: ["node", "/app/live-retention.js", "--root=/data/live", "--interval=1800"]
+    depends_on:
+      - nginx
   # ------------------------------------------------ 选装：coturn（公网跨 NAT 通话中继）
-  # coturn:
-  #   image: coturn/coturn:latest
-  #   container_name: im-coturn
-  #   restart: unless-stopped
-  #   network_mode: host                 # ★ TURN 几乎必须 host 网络：中继端口是大段 UDP，逐个 ports: 映射既难维护又会改源地址
-  #   command:
-  #     - --use-auth-secret
-  #     - --static-auth-secret=${TURN_SECRET}          # 与 conf/im.env 的 IM_TURN_SECRET 逐字一致，否则客户端拿 401
-  #     - --realm=${IM_DOMAIN}
-  #     - --listening-port=3478
-  #     - --external-ip=<公网IP>/<内网IP>               # ★ NAT 后面必须写这一对，否则下发给客户端的是内网地址，连不上
-  #     - --min-port=49160
-  #     - --max-port=49200
-  #     - --no-tls
-  #     - --no-dtls
+  coturn:
+     image: coturn/coturn:latest
+     container_name: im-coturn
+     restart: unless-stopped
+     network_mode: host                 # ★ TURN 几乎必须 host 网络：中继端口是大段 UDP，逐个 ports: 映射既难维护又会改源地址
+     command:
+       - --use-auth-secret
+       - --static-auth-secret=${TURN_SECRET}          # 与 conf/im.env 的 IM_TURN_SECRET 逐字一致，否则客户端拿 401
+       - --realm=${IM_DOMAIN}
+       - --listening-port=3478
+       - --external-ip=120.78.126.132/10.20.137.237              # ★ NAT 后面必须写这一对，否则下发给客户端的是内网地址，连不上
+       - --min-port=49160
+       - --max-port=49200
+       - --no-tls
 
 # ---------------------------------------------------------------- 命名卷（★ 必须在此声明）
 # compose 对「服务里用了但顶层没声明」的卷直接报错：

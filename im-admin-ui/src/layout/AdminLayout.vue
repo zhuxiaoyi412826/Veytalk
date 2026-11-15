@@ -184,9 +184,16 @@ async function onLogout() {
 .menu {
   border-right: none;
   flex: 1;
+  /* 菜单条数超过一屏时要能自己滚：flex 子项默认 min-height:auto 会撑到内容高、
+     不收缩，于是被外层 .side 的 overflow:hidden 直接裁掉、底部条目永远够不到。
+     min-height:0 解除这条默认，配合 overflow-y:auto 让滚轮落在菜单内部。 */
+  min-height: 0;
+  overflow-y: auto;
 }
 
+/* 侧栏注释固定在底部不跟着滚：flex:none 不参与伸缩，菜单滚到底也该一直看得见 */
 .side-note {
+  flex: none;
   line-height: 1.6;
   padding: 12px 16px 20px;
 }

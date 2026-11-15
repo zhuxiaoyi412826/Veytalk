@@ -49,11 +49,54 @@ export function mediaErrorHint(error) {
   if (name === 'SyntaxError') {
     return '通话初始化失败（SyntaxError）：多为服务器下发的 ICE 地址非法（必须以 stun:/turn: 开头），请核对 im.env 的 IM_CALL_STUN_URLS / IM_CALL_TURN_URLS'
   }
-  return `无法获取麦克风/摄像头：${name}`
+  // Windows 摄像头的典型现场：语音能通、视频报 NotReadableError——麦没事，是摄像头打不开：
+  // 被另一个程序/标签页独占（Windows 摄像头多数只允许一个应用占用），或系统隐私开关把浏览器拦了。
+  // 报错本身只有一句 Could not start video source，用户无法行动，所以把排查清单写进文案。
+  if (name === 'NotReadableError' || name === 'AbortError') {
+    return `设备被占用或不可用（${name}）：请关闭正在使用摄像头的其他程序（微信/钉钉/腾讯会议/另一个浏览器标签页），再检查 Windows「设置 → 隐私和安全 → 相机」总开关与「允许桌面应用访问相机」里浏览器已开启，然后重新拨打`
+  }
+  if (name === 'NotFoundError') {
+    return '未找到可用的摄像头/麦克风（NotFoundError）：确认设备已连接、未被系统禁用（笔记本常有物理开关/Fn 相机键）'
+  }
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    return '权限被拒绝（NotAllowedError）：在浏览器地址栏的站点权限里恢复对本站的摄像头/麦克风访问后重试'
+  }
+  if (name === 'OverconstrainedError') {
+    return '摄像头不支持请求的规格（OverconstrainedError）：换一个摄像头设备或降低分辨率再试'
+  }
+  return `无法获取麦克风/摄像头：${name || (error && error.message) || '未知错误'}`
 }
 
 /** 合法 ICE 地址只有 stun:/stuns:/turn:/turns: 四种前缀，且不含空白与尖括号（占位符没替换的特征） */
 const ICE_URL_OK = /^(stun|stuns|turn|turns):[^\s<>]+$/i
+
+/**
+ * 检查回声消除是否真的生效，返回给用户的提示文案（'' 表示无需提示）。
+ *
+ * 采集约束里写 echoCancellation: true 只是「请求」：Chromium 桌面端一般会认，
+ * 但 X5/QQ 浏览器、部分安卓内置 WebView 会直接忽略，getSettings() 明确回 false。
+ * 那种设备上扬声器放出去的声音原样被麦克风采回去送给对端，对端听到的就是大回音——
+ * 软件层面无计可施（没有参考信号可消除），只能把真相告诉用户：戴耳机是唯一解。
+ * 只在显式 false 时提示：Firefox 等内核可能根本不回这个字段（undefined），
+ * 拿不准就开口只会制造噪音。
+ * @param {MediaStream|null} stream 本端采集流
+ * @returns {string} 提示文案，空串代表 AEC 已生效或无法判定
+ */
+export function echoGuardHint(stream) {
+  try {
+    const track = stream && stream.getAudioTracks && stream.getAudioTracks()[0]
+    if (!track || typeof track.getSettings !== 'function') {
+      return ''
+    }
+    const settings = track.getSettings() || {}
+    if (settings.echoCancellation === false) {
+      return '本浏览器未启用回声消除（系统忽略了 echoCancellation 请求）：建议戴耳机、调低扬声器音量或拉开设备距离，否则对方会听到明显回音'
+    }
+  } catch {
+    /* 诊断绝不打断通话主链路 */
+  }
+  return ''
+}
 
 /**
  * 清洗后端下发的 iceServers：非法地址直接丢弃并降级 console 警告。

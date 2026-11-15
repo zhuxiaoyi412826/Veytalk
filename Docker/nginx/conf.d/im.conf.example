@@ -1,18 +1,16 @@
 # ==============================================================================
-# Nginx 配置模板（对应 Docker部署指南.md §8.2）。
-#
-# ★ 这是 .example：不要直接改它上线。跑 `bash scripts/bootstrap.sh`，
-#   它把下面这些 __TOKEN__ 换成 .env 里的真实域名/密钥，生成同目录的 im.conf：
-#     __IM_DOMAIN__ / __ADMIN_DOMAIN__ / __WEBSITE_DOMAIN__ / __LIVE_DOMAIN__
-#     __LIVE_SIGN_SECRET__
-#   为什么不直接让 nginx 读环境变量：官方镜像的 envsubst 只替换 ${VAR}，
-#   而 nginx 配置里全是 $host / $uri / $proxy_add_x_forwarded_for 这类内置变量，
-#   一视同仁地被替换成空串——配置「看起来正常」但行为全错。用不可能出现的 __X__ 形式最稳。
-#
-# 改完正式文件后的自检与生效：
-#   docker compose exec nginx nginx -t
-#   docker compose exec nginx nginx -s reload      # 若是新建文件，用 restart nginx 更稳（目录项不一定穿透 :ro 挂载）
+# ★★ 这是模板，不是生效文件。生效文件是 nginx/conf.d/im.conf，由 scripts/bootstrap.sh
+#    把下面的 __TOKEN__ 换成根 .env 里的真值后生成：
+#      __IM_DOMAIN__ / __ADMIN_DOMAIN__ / __WEBSITE_DOMAIN__ / __LIVE_DOMAIN__  ← .env 的四个域名
+#      __LIVE_SIGN_SECRET__                                                     ← .env 的 LIVE_SIGN_SECRET
+#    ★ 别在这里写死域名或密钥：一写死，--force 生成的 im.conf 就再也不跟着 .env 走了
+#      （表现：改了域名/换了密钥并 --force 重跑，im.conf 仍是旧值，观众 403 黑屏）。
+#    ★ 正则里的 {24} 必须整条加双引号（见下面两处注释）：未加引号时 nginx 把 `{` 当块开始，
+#      报 unknown directive "24}/webm/…"；写成 \{24\} 能过 -t 但永不匹配。改完先 docker compose exec nginx nginx -t。
 # ==============================================================================
+
+# 直播推流/连麦写入的限流区（必须在 http 上下文，本文件正是被 include 进 http{} 的）
+limit_req_zone $binary_remote_addr zone=livepush:10m rate=30r/s;
 
 # ---------- 80：只做 ACME 挑战、健康探针、跳转 ----------
 server {
@@ -29,7 +27,7 @@ server {
     location / { return 301 https://$host$request_uri; }
 }
 
-# ---------- 聊天端 im-ui（/api + /ws + 直播播放面）----------
+# ---------- 聊天端 im-ui（/api + /ws + 直播播放面与连麦写入口）----------
 server {
     listen 443 ssl;
     http2 on;
@@ -70,29 +68,89 @@ server {
 
     # 播放面与聊天端同域：观众端少一套 CORS 和一张证书。
     # ★ location 名必须与 conf/im.env 的 IM_LIVE_PLAY_BASE_URL 最后一段一致（那里是 /live）
+    #
+    # —— 连麦合成流的读写口（必须先于下面那个前缀 location：正则优先于前缀匹配，
+    #    才能绕开 /live/ 的只读语义、单独给它开 PUT）——
+    # 非连麦的 HLS 由 8088 明文口写入、这里只读；但连麦那一路是渲染层 liveComposer.js 直接
+    # fetch PUT，目标目录从 playUrl 推导，所以它【一定】落在这个 443 口，8088 帮不上。
+    # 缺这两条的症状：连麦接通后主播一直转圈、观众全黑，控制台一条 PUT 403/405。
+    # ★ 正则必须用双引号包起来：nginx 的词法解析在未加引号的参数里遇到 `{` 就当作块开始、
+    #   直接结束本条指令，于是报 unknown directive "24}/webm/manifest\.json$"。
+    #   写成 \{24\} 能过语法但 PCRE 会理解成「字面花括号」，location 永远匹配不上（表现为连麦 PUT 403）。
+    location ~ "^/live/[0-9]+/[0-9A-Za-z]{24}/webm/manifest\.json$" {
+        root /data;
+        types { application/json json; }
+        dav_methods PUT;
+        create_full_put_path on;
+        dav_access user:rw group:r all:r;
+        client_max_body_size 1m;
+        limit_req zone=livepush burst=60 nodelay;
+
+        # manifest.json 是观众每 1.5s 轮询的「最新片号指针」，缓存它＝观众画面永远停在旧片
+        # 且【不报任何错】，是最难查的一种卡法
+        add_header Cache-Control "no-store, must-revalidate" always;
+        add_header Access-Control-Allow-Origin  * always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS, PUT" always;
+        if ($request_method = OPTIONS) { return 204; }
+    }
+    location ~ "^/live/[0-9]+/[0-9A-Za-z]{24}/webm/[A-Za-z0-9._-]+\.webm$" {
+        root /data;
+        types { video/webm webm; }
+        dav_methods PUT;
+        create_full_put_path on;
+        dav_access user:rw group:r all:r;
+        client_max_body_size 16m;                       # 1s timeslice 的 WebM 分片
+        limit_req zone=livepush burst=60 nodelay;
+
+        add_header Cache-Control "public, max-age=3600" always;   # 片名一次一个，内容不可变
+        add_header Access-Control-Allow-Origin  * always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS, PUT" always;
+        if ($request_method = OPTIONS) { return 204; }
+    }
+
     location /live/ {
         root /data;                                     # URI /live/... → 磁盘 /data/live/...
-        types { application/vnd.apple.mpegurl m3u8; video/iso.segment m4s; video/mp4 mp4; }
-        limit_except GET HEAD OPTIONS { deny all; }
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/iso.segment             m4s;
+            video/mp4                     mp4;
+            video/webm                    webm;         # 连麦合成流分片
+            application/json              json;         # 连麦 manifest.json
+        }
+        # 跨域三件套：桌面端页面从 file:// 加载（Origin 是 null）、App WebView 也不同源，
+        # 缺这几个头观众直接黑屏【且不报错】——控制台只有一条 CORS 提示，极易被当成推流坏了
+        add_header Access-Control-Allow-Origin  * always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Range" always;
+        if ($request_method = OPTIONS) { return 204; }
+        limit_except GET HEAD OPTIONS { deny all; }      # 本口只读；写只有上面两条 + 8088
 
         # 主清单：唯一做签名校验的入口，且绝不缓存（签名带 ?expire=&sign=，缓存等于把授权期外延）
+        # ★ 下面每个嵌套块都重写一遍 CORS：add_header 不跨层继承，嵌套 location 里只要写了任何
+        #   add_header，父层的全失效。这不是冗余，是 nginx 的继承规则要求的。
+        # ★ secret 必须与 conf/im.env 的 IM_LIVE_SIGN_SECRET 逐字一致，且编码是 base64url 不是十六进制。
+        #   不一致的表现是观众端一律 403 黑屏，而推流、列表、后端日志全都正常。
         location ~ /index\.m3u8$ {
             secure_link $arg_sign,$arg_expire;
-            # ★ 这个 secret 必须与 conf/im.env 的 IM_LIVE_SIGN_SECRET 逐字一致（bootstrap.sh 从同一份 .env 灌的）。
-            #   不一致的表现是观众端一律 403 黑屏，而推流、列表、日志全都正常
             secure_link_md5 "${uri}${arg_expire}__LIVE_SIGN_SECRET__";
             if ($secure_link = "") { return 403; }
             if ($secure_link = "0") { return 410; }     # 签名对但已过期
             add_header Cache-Control "no-store, must-revalidate" always;
+            add_header Access-Control-Allow-Origin  * always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
         }
         # 变体清单（1080p/720p 各自的 m3u8）：★ 不能签——hls.js 按主清单里的相对路径拉它，不会带上 ?expire=&sign=，
         # 签了就变成「只有主清单能开、画质切换全 403」。但它同样绝不缓存（直播中内容一直在变）。
         location ~ \.m3u8$ {
             add_header Cache-Control "no-store, must-revalidate" always;
+            add_header Access-Control-Allow-Origin  * always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
         }
         # 分片：路径里那段不可猜的 streamKey 就是兜底，可以长缓存、可以挂 CDN
         location ~ \.(m4s|mp4|ts)$ {
             add_header Cache-Control "public, max-age=3600" always;
+            add_header Access-Control-Allow-Origin  * always;
+            add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
         }
     }
 }
@@ -145,24 +203,27 @@ server {
     # location /api { proxy_pass http://im-server:8080; include /etc/nginx/snippets/proxy.conf; }
 }
 
-# ---------- 直播推流口（开直播才用：取消注释 + compose 里发布 "8088:8088"）----------
-# ★★ 这层「按源 IP 白名单」在容器里天生不可靠：经 Docker NAT 进来的包，$remote_addr
-#     可能是容器网关（172.x）而不是主播的真实 IP。两个正解：
-#       a) daemon.json 设 "userland-proxy": false 后实测 nginx access log 里的 remote_addr；
-#       b) 干脆不在 nginx 上挡，交给云安全组 / iptables DOCKER-USER 链（指南 §8.3 有现成命令）。
-#     裸机那份写 allow 127.0.0.1（同机推流）在这里几乎一定匹配不上，别照抄。
-# server {
-#     listen 8088;
-#     server_name _;
-#     root /data;
-#     location /live/ {
-#         allow <主播出口IP或网段>;      # ← 手工填，bootstrap.sh 不碰这一行
-#         deny all;
-#         limit_except PUT { deny all; }
-#         dav_methods PUT DELETE;
-#         create_full_put_path on;       # {roomId}/{streamKey}/ 多级目录自动创建
-#         dav_access user:rw group:r all:r;
-#         client_max_body_size 32m;      # 单个分片上限
-#         client_body_temp_path /tmp/nginx_body;   # ★ 必须是 nginx 进程可写目录：默认路径在只读挂载下 500
-#     }
-# }
+# ---------- 直播推流口（8088 明文，只有「主播端 → 服务器」这一向）----------
+# 本块生效≠外部可连：还要 compose 发布 "8088:8088" + 云安全组放行 8088/tcp，三道闸关任意一道都不影响别的站点。
+# ★ 不做按源 IP 白名单：经 Docker NAT 进来的包 $remote_addr 可能是 172.x 网关而不是主播真实 IP，
+#   写了 allow <主播IP> 反而把自己主播挡在门外。访问控制靠两层：路径里那段一场一密、关播即作废的
+#   streamKey + 只允许 PUT（要更细就 daemon.json "userland-proxy": false 后实测 remote_addr，再上 DOCKER-USER 链）。
+server {
+    listen 8088;
+    server_name _;
+    root /data;                       # URI /live/... → 磁盘 /data/live/...，与 443 播放口同一份目录
+
+    location /live/ {
+        dav_methods PUT;              # 只给 PUT：推流端 electron/live.js 不用 DELETE，有 DELETE 就等于允许误删整场
+        create_full_put_path on;      # {roomId}/{streamKey}/ 多级目录不存在时自动创建
+        dav_access user:rw group:r all:r;
+        client_max_body_size 32m;     # 单个分片上限
+        client_body_temp_path /tmp/nginx_body;   # ★ 必须是 nginx 进程可写目录：默认路径在只读挂载下 500
+        limit_req zone=livepush burst=120 nodelay;
+
+        # ★ 只写不读：这条口没有 secure_link，一旦能 GET，/live/{roomId}/replay/index.m3u8
+        #   就绕过 443 的签名被人白看。dav 的 PUT 在 PREACCESS 阶段就处理完了，
+        #   所以这条只读规则挡得住 GET/HEAD，也不会误伤推流本身。
+        limit_except PUT { deny all; }
+    }
+}

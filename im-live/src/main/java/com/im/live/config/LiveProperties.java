@@ -43,8 +43,11 @@ public class LiveProperties {
     /**
      * 播放地址签名密钥，必须与 Nginx {@code secure_link_md5} 用的密钥一致。
      *
-     * <p>算法固定为 {@code md5(uri + expire + secret)}（小写十六进制），
+     * <p>算法固定为 {@code base64url(md5(uri + expire + secret))}（无 {@code =} 填充），
      * 与 Nginx 的 {@code secure_link_md5 "$uri$arg_expire$secret"} 逐字对应。
+     * ★ 编码形式不能自己挑：ngx_http_secure_link_module 比对的是 base64url，
+     * 若这里改成十六进制（如 {@code md5DigestAsHex}），Nginx 永远匹配不上、播放口一律 403
+     * ——而推流、房间列表、后端日志全都是正常的，极难一眼看出根因（详见 md/直播.md §10.2）。
      * 生产环境务必改成随机长串并经环境变量注入，不要用仓库里的默认值。
      */
     private String signSecret = "im-live-dev-secret-change-me";
