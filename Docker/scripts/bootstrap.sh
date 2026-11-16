@@ -148,7 +148,15 @@ fi
 say "② 建目录与权限"
 mkdir -p data/logs data/upload-tmp data/files data/knowledge data/live \
          web/im-ui web/im-admin-ui web/im-website \
-         certs/live nginx/conf.d app/extra conf sql-init scripts backup
+         certs/live nginx/conf.d app/extra conf sql-init scripts backup mysql/conf.d
+# ★ mysql 客户端字符集护栏文件：compose 以 :ro 单文件挂载它到 /etc/mysql/conf.d/。
+#   宿主缺这个文件时 Docker 会把挂载源建成一个目录，mysql 读到目录直接启动失败——所以缺就补。
+#   内容只有 [client]/[mysql] 两段 ASCII，把首启 initdb 的连接字符集无条件钉成 utf8mb4（详见仓库同名文件的头注释）。
+if [[ ! -f mysql/conf.d/zz-client-utf8mb4.cnf ]]; then
+  printf '%s\n' '[client]' 'default-character-set = utf8mb4' '' '[mysql]' 'default-character-set = utf8mb4' \
+    > mysql/conf.d/zz-client-utf8mb4.cnf
+  say "已补 mysql/conf.d/zz-client-utf8mb4.cnf（客户端默认 utf8mb4，防导入中文乱码）"
+fi
 # ★ uid 1000 与镜像里的 im 用户（Dockerfile 里 --uid 1000）对齐。不对齐的表现不是报错，
 #   而是「日志写不进卷 / 上传分片落不进目录」——logback 与 Tomcat 都不会拦住启动。
 CHOWN_TARGETS=(data/logs data/upload-tmp data/files data/live)
@@ -267,6 +275,15 @@ if [[ -d ../sql ]]; then
       手改也行：注释掉 compose 里那行 ./sql-init 挂载并清空该目录 —— 01_im_schema.sql 开头有 43 条 DROP TABLE IF EXISTS，
       一旦卷被重建就会静默清库"
   fi
+fi
+# ★ 首启导入的最后一道校验（放在 ../sql 判断之外：§4 手工 scp 进 sql-init/ 时 ../sql 不存在，上面整块会跳过）：
+#   sql-init/ 里每个 .sql 顶部要有 SET NAMES utf8mb4。缺了不一定乱（compose 已挂 mysql/conf.d 客户端护栏
+#   兜住连接字符集），但缺的多半是旧版/外部脚本——点出来，别让容器护栏成为唯一遮羞布。
+if ls sql-init/*.sql >/dev/null 2>&1 && [[ ! -f sql-init/.disabled ]]; then
+  for f in sql-init/*.sql; do
+    grep -qiE '^[[:space:]]*SET[[:space:]]+NAMES' "$f" \
+      || warn "$f 顶部没有 SET NAMES utf8mb4;（容器级客户端护栏仍会兜住不乱，但建议换成仓库 sql/ 版以自带免疫）"
+  done
 fi
 if [[ -f ../electron/live-retention.js && ! -f scripts/live-retention.js ]]; then
   cp ../electron/live-retention.js scripts/live-retention.js; say "已拷 live-retention.js（开直播时把 compose 里那段 service 取消注释）"

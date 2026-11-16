@@ -60,7 +60,12 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/robot/webhook/**",
             // 法定文本公示：只读的两条，逐路径列出（详见类注释），写的那两条留在拦截器里面
             "/api/agreement/list",
-            "/api/agreement/view/**"
+            "/api/agreement/view/**",
+            // 客户端版本公示：官网是匿名纯静态站，下载页的列表与安装包都必须免登录可达
+            // （下载是 <a href> 普通导航，列表经官网 nginx 反代 /api 同源 fetch，都不涉及跨域）。
+            // 与协议同一条规矩：只逐路径列只读的两条，不放 /api/release/** 整片
+            "/api/release/list",
+            "/api/release/download/**"
     );
 
     @Override

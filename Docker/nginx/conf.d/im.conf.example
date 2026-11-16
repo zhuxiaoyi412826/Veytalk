@@ -182,7 +182,7 @@ server {
     # prod profile 已关 knife4j/springdoc，/doc.html 回 404 是设计如此，别在 nginx 上再给它开洞。
 }
 
-# ---------- 官网（纯静态，无接口调用）----------
+# ---------- 官网（静态 + 下载页两条匿名接口）----------
 server {
     listen 443 ssl;
     http2 on;
@@ -199,8 +199,18 @@ server {
         expires 7d;
         add_header Cache-Control "public";
     }
-    # 当前 im-website 里没有任何 /api 调用，所以这里不反代后端；将来加了下载页统计再补：
-    # location /api { proxy_pass http://im-server:8080; include /etc/nginx/snippets/proxy.conf; }
+    # 下载页要拉后台启用中的版本（GET /api/release/list）与匿名下载安装包（/api/release/download/{id}），
+    # 同源反代免 CORS（官网与后端不同域名时靠这段把两者收敛到同一源）。只递 /api/release：
+    # 官网访客只该碰这两条公开端点，其余 /api/** 是带登录态的业务接口，不在官网上开洞。
+    location /api/release {
+        proxy_pass http://im-server:8080;
+        include /etc/nginx/snippets/proxy.conf;
+        # 安装包可达 GB 级：关缓冲让字节边收边吐（否则 nginx 会先把整个包落到临时文件再转发，
+        # 既慢又占盘），并放宽读超时避免大包下到一半被掐断
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
 }
 
 # ---------- 直播推流口（8088 明文，只有「主播端 → 服务器」这一向）----------

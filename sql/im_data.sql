@@ -124,6 +124,9 @@ VALUES (1, 'admin', '超级管理员', '拥有系统全部权限点', 1),
 -- 举证材料。把「能调开关」与「能改合同」发给同一张卡，等于把举证链的入口递给了调参的人。
 -- 完整理由写在 ImConstants.PERM_SYSTEM_AGREEMENT_MANAGE 的注释里。同批新增两张表
 -- （im_agreement / im_user_agreement）与下面第 11 节的三份 v1 正文。
+-- 126 是客户端版本管理批。不并进 116（system:config）：这一屏动的是「往公网递一个可执行文件」——
+-- 启用的那一行会成为官网的匿名下载口，与「调一个可以当场改回来的内部旋钮」不是一个风险量级，
+-- 应当可以授权给不同的人。同批新增一张表（im_client_release，见 im_schema.sql 第十六节）。
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_permission` (`id`, `perm_code`, `perm_name`, `module`, `description`, `status`)
 VALUES (101, 'user:profile:update', '修改个人资料', 'user', '修改昵称、头像、签名、性别、密码', 1),
@@ -150,7 +153,8 @@ VALUES (101, 'user:profile:update', '修改个人资料', 'user', '修改昵称�
        (122, 'system:message:manage', '后台消息管理', 'system', '全库消息检索（含聊天正文）与强制撤回', 1),
               (123, 'system:article:manage', '后台文章管理', 'system', '文章的检索/新建/编辑/审核通过驳回/上下架/删除', 1),
               (124, 'system:ai:guard', '后台 AI 用量管控', 'system', '付费大模型调用的用量账本与封禁闸门（封 AI 不动登录）', 1),
-              (125, 'system:agreement:manage', '后台协议管理', 'system', '隐私政策/用户协议/服务条款的版本发布与同意留痕查询', 1);
+              (125, 'system:agreement:manage', '后台协议管理', 'system', '隐私政策/用户协议/服务条款的版本发布与同意留痕查询', 1),
+              (126, 'system:release', '后台版本管理', 'system', '客户端安装包的上传/启用/停用/删除（启用即官网匿名可下载）', 1);
 
 -- admin 拥有全部权限点（二期必须补齐 108~111、三期必须补齐 112~115、四期补 116~122，
 -- 否则细化后的控制器会拦住原有全权管理员）
@@ -179,7 +183,8 @@ VALUES (6001, 1, 101),
        (6022, 1, 122),
        (6023, 1, 123),
        (6024, 1, 124),
-       (6025, 1, 125);
+       (6025, 1, 125),
+       (6026, 1, 126);
 
 -- user 拥有除「撤回任意消息」「系统管理」之外的权限点
 INSERT INTO `im_role_permission` (`id`, `role_id`, `permission_id`)

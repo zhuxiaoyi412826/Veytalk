@@ -142,6 +142,15 @@ const routes = [
         name: 'agreements',
         component: () => import('@/views/AgreementView.vue'),
         meta: { title: '法定文本', perm: 'system:agreement:manage' }
+      },
+      {
+        // 客户端版本管理：单独一个权限点 126，不并进 system:config——
+        // 启用的那一行会成为官网的匿名下载口，「往公网递一个 exe」与「调一个内部旋钮」
+        // 不是一个风险量级，应当可以授权给不同的人
+        path: 'releases',
+        name: 'releases',
+        component: () => import('@/views/ReleasesView.vue'),
+        meta: { title: '版本管理', perm: 'system:release' }
       }
     ]
   },
@@ -203,7 +212,8 @@ router.beforeEach(async (to) => {
       'config',
       'remote',
       'announcements',
-      'agreements'
+      'agreements',
+      'releases'
     ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)

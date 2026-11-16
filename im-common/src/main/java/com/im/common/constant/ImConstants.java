@@ -250,6 +250,20 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_AGREEMENT_MANAGE = "system:agreement:manage";
 
     /**
+     * 后台权限点：客户端版本管理（安装包的上传 / 启用 / 停用 / 删除）。
+     *
+     * <p>不并进 {@code system:config} 的单独理由：这一屏启用的是<b>官网下载页面向全体匿名访客
+     * 递出去的安装包</b>——传错一个包等于向公网分发可执行字节，影响面与发协议同级；
+     * 而 config 改的是可以当场改回的内部旋钮。把「换公网安装包」与「调内部旋钮」
+     * 发给同一张卡，等于把前者的入口递给任何一个能调参的人。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_client_release.sql}），否则新控制器上线即把老管理员拦在门外。
+     * 补完之后<b>必须清一次 {@code im:auth:perm:*}</b>（权限缓存 TTL 30 分钟且登录不刷新）。
+     */
+    public static final String PERM_SYSTEM_RELEASE = "system:release";
+
+    /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
      *
      * <p>读方（UserQuerySpiImpl / GroupSpiImpl）与失效方（UserServiceImpl /

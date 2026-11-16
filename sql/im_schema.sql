@@ -1055,3 +1055,45 @@ CREATE TABLE `im_user_agreement`
     KEY `idx_create_time` (`create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='同意留痕（一次表态一行、只 INSERT；无删除端点、无唯一键、无外键）';
+
+-- =====================================================================================
+--  十六、客户端版本管理（im-admin）
+-- =====================================================================================
+
+-- 一行 = 某平台某版本的一个安装包。字节不在本表：安装包经文件模块的分片上传通道
+-- （bizType=client_release，2GB 上限、MD5 秒传）落在 MinIO/本地存储，本表只持 file_id 引用，
+-- 并把展示要用的文件名/大小/MD5 冗余一份——后台列表与官网下载页都不该为每行回查一次
+-- im_file（N+1），而这三列在上传完成那一刻就已定死，冗余没有一致性代价。
+-- platform 收在服务端码表（ReleasePlatform）不建 ENUM：平台是启用互斥的分组键，
+--   允许自造平台码会出现 windows 与 windows_setup 各自「启用一个」的哑巴故障；
+--   加平台改代码而不改表，与 FileBizType 同一条规矩。
+-- 同一 platform 至多一行 status=1，由 ClientReleaseService.enable 在同一事务里
+--   「先压平同平台、再立起本行」保证；不建触发器也不建唯一索引去凑——
+--   「停用行可以多条、启用行只有一条」这种部分唯一约束 MySQL 表达不了。
+-- 删除是物理删行且只允许停用态（启用中的先停用，防「官网卡片还在、引用已消失」的半截态）；
+--   删行不删字节：同 MD5 的对象可能被另一行秒传复用，删字节会连坐。
+-- ★ 不启 deleted（继承 AuditEntity 而非 BaseEntity）：物理删行后 uk_platform_version
+--   立刻释放，同平台同版本号才能重新登记；逻辑删除会让唯一键被已删行占着。
+CREATE TABLE `im_client_release`
+(
+    `id`             BIGINT       NOT NULL COMMENT '版本 ID（雪花）',
+    `platform`       VARCHAR(32)  NOT NULL COMMENT '平台码：windows_setup / windows_portable / android / macos / linux，白名单在服务端（ReleasePlatform），启用互斥按它分组',
+    `version`        VARCHAR(32)  NOT NULL COMMENT '版本号（如 1.0.1）。只做长度校验不做语义比较：1.10 与 1.9 谁新由发版的人知道，代码不猜',
+    `release_note`   VARCHAR(500)          DEFAULT NULL COMMENT '更新说明，可空；官网卡片与后台列表原样展示，空串在写入前归一成 NULL',
+    `file_id`        BIGINT       NOT NULL COMMENT '安装包字节所在的 im_file 主键。不建外键：文件行被人工清理时本行照常可读（列表带 filePresent 提示），外键会把这个降级变成报错',
+    `file_name`      VARCHAR(255) NOT NULL COMMENT '安装包展示名（含扩展名），公开下载时 Content-Disposition 的文件名取它',
+    `file_size`      BIGINT       NOT NULL DEFAULT 0 COMMENT '安装包字节数，登记时从文件行抄来；下载响应的 Content-Length 取它',
+    `md5`            CHAR(32)              DEFAULT NULL COMMENT '整文件 MD5：官网展示供用户校验下载完整性，也是分片上传秒传命中的依据',
+    `status`         TINYINT      NOT NULL DEFAULT 0 COMMENT '状态：0 停用（官网不返回、公开下载拒绝） 1 启用（该平台官网唯一下载入口，同平台至多一行）',
+    `download_count` BIGINT       NOT NULL DEFAULT 0 COMMENT '累计下载次数：公开下载端点每成功流式输出一次加 1（setSql 原子自增），运营数字不是账，累加失败只记日志',
+    `create_by`      BIGINT                DEFAULT NULL COMMENT '创建人（后台账号 ID）',
+    `update_by`      BIGINT                DEFAULT NULL COMMENT '最后修改人（后台账号 ID）：启用/停用/换包都算修改',
+    `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 同平台版本号不可重复（服务层预检 + 这里兜底并发）；前缀 platform 同时服务列表页的平台过滤
+    UNIQUE KEY `uk_platform_version` (`platform`, `version`),
+    -- 官网公开列表只认启用行：WHERE status=1，行数就是「启用中的平台数」（个位数）
+    KEY `idx_status` (`status`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='客户端安装包版本（一行一个包，字节在文件模块；同平台同时只启用一个，官网下载页只递启用行）';

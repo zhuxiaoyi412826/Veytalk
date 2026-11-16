@@ -1,7 +1,12 @@
 <script setup>
-// Veytalk 官网：纯展示单页。数据全部数组驱动，改文案不动模板。
-// 下载链接约定指向 public/downloads/ 下的规范文件名（ASCII，无空格），
+// Veytalk 官网：展示单页。静态文案数组驱动，下载卡则由后台「客户端版本管理」驱动：
+// onMounted 拉一次 GET {APP_BASE}/api/release/list（匿名端点，只回启用中的版本），
+// 拉到了就用服务端数据渲染卡片——后台上传并启用什么版本，访客下载到的就是什么版本；
+// 拉不到（后端没起、表没建、跨域未配）则回落下面的静态数组，页面永不白屏。
+// 静态回落的链接仍指向 public/downloads/ 下的规范文件名（ASCII，无空格），
 // 产物由 scripts/fetch-downloads.ps1 从 electron/release 拷来并改名，详见该脚本与 README。
+import { onMounted, ref } from 'vue'
+
 const GITHUB_URL = 'https://github.com/zhuxiaoyi412826/Veytalk'
 const DOCS_URL = `${GITHUB_URL}/blob/main/README.md`
 const RELEASES_URL = `${GITHUB_URL}/releases`
@@ -18,9 +23,11 @@ const features = [
   { icon: '🛠️', title: '管理后台', desc: '用户 / 角色权限 / 视频 / 直播 / 监控告警 / 日志六位一体的独立后台' }
 ]
 
-const downloads = [
+// 静态回落用的三张卡。图标用 💻 而不是 🪟：后者是 Emoji 13.0（2020）的新码点，
+// Windows 10 旧字体与部分安卓机上渲染成豆腐块 □，而 💻 是 Emoji 1.0 全平台都有。
+const STATIC_DOWNLOADS = [
   {
-    icon: '🪟',
+    icon: '💻',
     title: 'Windows 安装版',
     flag: '推荐',
     desc: `NSIS 安装包，双击安装即装即用，已内置 JRE、ffmpeg 与被控端 Agent，无需任何额外依赖`,
@@ -44,6 +51,71 @@ const downloads = [
     spec: `${VERSION} · arm64 · Android 10+`
   }
 ]
+
+const downloads = ref(STATIC_DOWNLOADS)
+
+/**
+ * 平台码 → 图标/角标/一句话描述。码表与后端 ReleasePlatform 对齐；
+ * 描述只作回落文案，后台填了更新说明（releaseNote）时优先展示那个——
+ * 那才是发版的人想对访客说的话。
+ */
+const PLATFORM_META = {
+  windows_setup: { icon: '💻', flag: '推荐', desc: 'NSIS 安装包，双击安装即装即用，已内置 JRE、ffmpeg 与被控端 Agent，无需任何额外依赖' },
+  windows_portable: { icon: '📦', flag: '绿色版', desc: '解压即运行的便携版，不写注册表、不产生卸载项，适合放在 U 盘或受限环境使用' },
+  android: { icon: '🤖', flag: '移动端', desc: '手机客户端 APK，支持移动端消息、直播观看与远程控制被控端，适配全面屏手势' },
+  macos: { icon: '🍎', flag: 'macOS', desc: 'macOS 安装包' },
+  linux: { icon: '🐧', flag: 'Linux', desc: 'Linux 安装包' }
+}
+
+function formatSize(bytes) {
+  const n = Number(bytes)
+  if (!n || n <= 0) {
+    return ''
+  }
+  if (n >= 1024 * 1024 * 1024) {
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  }
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  }
+  return `${Math.max(1, Math.round(n / 1024))} KB`
+}
+
+/**
+ * 拉后台启用中的版本列表。失败一律静默回落静态卡：官网是门面，
+ * 后端没起或迁移 SQL 没跑时也不该让访客看到报错——他们只需要一个能点的下载按钮。
+ */
+async function loadReleases() {
+  try {
+    const resp = await fetch(`${APP_BASE}/api/release/list`)
+    if (!resp.ok) {
+      return
+    }
+    const body = await resp.json()
+    const list = body && body.code === 200 && Array.isArray(body.data) ? body.data : []
+    if (!list.length) {
+      return
+    }
+    downloads.value = list.map((r) => {
+      const meta = PLATFORM_META[r.platform] || { icon: '⬇️', flag: '客户端', desc: '' }
+      const size = formatSize(r.fileSize)
+      return {
+        icon: meta.icon,
+        title: r.platformName || meta.flag,
+        flag: meta.flag,
+        desc: r.releaseNote || meta.desc,
+        // downloadPath 是相对路径（/api/release/download/{id}），拼上 APP_BASE 后
+        // 同源部署走 nginx 反代、异源部署走环境变量顶掉的基址，两种形态都不需 CORS 预检（GET 简单请求）
+        file: `${APP_BASE}${r.downloadPath}`,
+        spec: [r.version, size].filter(Boolean).join(' · ')
+      }
+    })
+  } catch {
+    // 静默回落：静态卡已在 downloads 的初值里
+  }
+}
+
+onMounted(loadReleases)
 
 const links = [
   { icon: '🐙', title: 'GitHub 仓库', desc: '源码、Issue 与更新动态一站直达', href: GITHUB_URL },

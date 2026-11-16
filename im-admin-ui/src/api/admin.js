@@ -658,3 +658,52 @@ export function fetchConsentPage(params) {
 export function fetchUserConsents(userId) {
   return http.get(`/admin/agreement/consent/user/${userId}`)
 }
+
+/* ==================== 客户端版本管理（新权限点 126 system:release） ====================
+ *
+ * 安装包字节不走这组接口：先经 utils/releaseUpload.js 的分片上传通道
+ * （/file/upload/init|chunk|merge，bizType=client_release，2GB 上限、MD5 秒传）拿到 fileId，
+ * 再用下面的 create/update 登记「哪个文件是哪一个版本」。
+ * 同平台同时只启用一个：enable 在服务端同一事务里先压平同平台再立本行。
+ * 新权限点跑完 SQL 必须清一次 im:auth:perm:* 缓存，否则 admin 也看不到这一屏。
+ */
+
+/** 平台码表（code+name）：下拉选项由服务端给出，前端不自造平台串 */
+export function fetchReleasePlatforms() {
+  return http.get('/admin/release/platforms')
+}
+
+/** 版本列表：启用中恒排最前，其余按创建时间倒序；入参 platform / status / keyword / current / size */
+export function fetchReleasePage(params) {
+  return http.get('/admin/release/page', { params })
+}
+
+/** 版本详情 */
+export function fetchReleaseDetail(id) {
+  return http.get(`/admin/release/${id}`)
+}
+
+/** 新建：dto { platform, version, releaseNote, fileId, enableNow }；enableNow=true 顺带完成启用互斥 */
+export function createRelease(dto) {
+  return http.post('/admin/release', dto)
+}
+
+/** 编辑：可改版本号/说明/换包，platform 传了也被忽略（改平台等于删旧建新） */
+export function updateRelease(id, dto) {
+  return http.put(`/admin/release/${id}`, dto)
+}
+
+/** 启用：同平台原启用行自动停用，官网下载页即刻换成本行 */
+export function enableRelease(id) {
+  return http.post(`/admin/release/${id}/enable`)
+}
+
+/** 停用：官网该平台下载卡即刻消失，是「下线一个坏包」的止损动作 */
+export function disableRelease(id) {
+  return http.post(`/admin/release/${id}/disable`)
+}
+
+/** 删除：仅停用态可删；物理删行不删存储字节（同 MD5 对象可能被别的行秒传复用） */
+export function deleteRelease(id) {
+  return http.delete(`/admin/release/${id}`)
+}

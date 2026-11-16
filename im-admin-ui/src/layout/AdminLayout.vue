@@ -84,6 +84,12 @@
           <el-icon><Document /></el-icon>
           <span>法定文本</span>
         </el-menu-item>
+        <!-- 排在最后：这一屏动的是「往公网递一个可执行文件」，启用的那一行就是官网的匿名下载口，
+             误操作代价全后台最高，放在菜单末尾让「给了谁什么」一眼能看出来 -->
+        <el-menu-item v-if="auth.can('system:release')" index="releases" :route="{ name: 'releases' }">
+          <el-icon><UploadFilled /></el-icon>
+          <span>版本管理</span>
+        </el-menu-item>
       </el-menu>
       <p class="muted side-note">
         一期没有待办角标：新工单数只有登录后进看板才拿得到，为一个小红点在每个页面轮询

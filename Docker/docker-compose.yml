@@ -58,6 +58,10 @@ services:
       #   上线之后建议注释掉这两行并清空该目录——让这份 compose 失去「重建库」的能力，
       #   是很便宜的防误操作护栏（sql/im_schema.sql 开头有 43 条 DROP TABLE IF EXISTS，43 张表全部先删后建）。
       - ./sql-init:/docker-entrypoint-initdb.d:ro
+      # ★ 客户端默认字符集护栏（见该文件头注释）：把首启 initdb 那条 `mysql < 文件` 的连接
+      #   无条件钉成 utf8mb4，与 sql 里有没有 SET NAMES 脱钩——换服务器时 sql-init/ 落旧脚本也不会中文乱码。
+      #   ★ 这个宿主文件必须存在（bootstrap.sh ② 保证缺则补）：:ro 单文件挂载时宿主缺文件会被 Docker 建成目录，mysql 启动即失败。
+      - ./mysql/conf.d/zz-client-utf8mb4.cnf:/etc/mysql/conf.d/zz-client-utf8mb4.cnf:ro
     # 不发布 3306（Docker 发布的端口绕过 UFW）。临时调试：ports: ["127.0.0.1:3306:3306"]
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]

@@ -111,7 +111,21 @@ public enum FileBizType {
      * 那个端点出去，inline 与否由它自己写死。扩展名不放行 avif：它只用于取证，
      * 没必要为一种浏览器支持面还窄的格式多开一条渲染路径。
      */
-    MODERATION_QUARANTINE("moderation_quarantine", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "jfif"));
+    MODERATION_QUARANTINE("moderation_quarantine", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "jfif")),
+
+    /**
+     * 客户端安装包（后台「客户端版本管理」上传的安装包）。官网下载页递给匿名访客的就是
+     * 这一类的字节，白名单只列安装器与归档容器：exe / msi 是 Windows 双包、zip 是免安装版、
+     * apk 是安卓包，dmg / pkg / deb / rpm / appx / msix / tar / gz / tgz 留给其余分发形态。
+     *
+     * <p>与 {@link #CHAT_FILE} 里的安装包扩展名看似重复，刻意不合并：聊天里传的安装包是
+     * 两个人之间的私有字节，而这一类是「后台启用后全网匿名可下载」的公开产物，暴露面不同，
+     * 归档与清理口径也该各自独立。下载出口不走 {@code /api/file/download} 而由发布端点自己
+     * 流式输出（启用状态即鉴权），所以不开 {@code isPublic()}——那一项只作用于
+     * {@code canAccess} 的会话校验豁免，与本类的公开方式无关。
+     */
+    CLIENT_RELEASE("client_release", Set.of(
+            "exe", "msi", "zip", "apk", "dmg", "pkg", "deb", "rpm", "appx", "msix", "tar", "gz", "tgz"));
 
     private final String code;
     private final Set<String> allowedExtensions;

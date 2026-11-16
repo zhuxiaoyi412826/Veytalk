@@ -1,0 +1,29 @@
+# ==============================================================================
+# MySQL 客户端默认字符集护栏：把「首启 initdb 导入种子中文双重编码」这个坑从容器层堵死。
+#
+# 为什么单靠 sql 文件头的 `SET NAMES utf8mb4;` 不够：
+#   空卷首次启动时，镜像 entrypoint 用 `mysql < 文件` 原生重定向执行 sql-init/*.sql，
+#   这条连接的 character_set_client 由「客户端默认」决定；而 compose 里的
+#   --character-set-server=utf8mb4 只设服务端默认，管不到客户端连接字符集。
+#   一旦 sql-init/ 里落的是旧版 / 外部没写 `SET NAMES utf8mb4;` 的脚本（换服务器时最常见），
+#   文件里的 UTF-8 中文会被逐字节当 latin1 存进去，形成 æ–‡ä»¶ 式乱码（HEX 以 C3/C2 开头）。
+#
+# 本文件怎么生效：
+#   官方镜像的 /etc/mysql/my.cnf 通过 `!includedir /etc/mysql/conf.d/` 读入本目录，
+#   [client]/[mysql] 段对 mysql / mysqldump 等所有客户端程序生效 —— 于是连接字符集
+#   无条件钉成 utf8mb4，与「脚本里到底有没有 SET NAMES」彻底脱钩。这是随仓库走的容器级保险。
+#
+# 与 sql 文件头的 SET NAMES 是两层独立护栏：
+#   · SET NAMES（在 .sql 里）：管手工 source / import-sql.sh 之外的入口；
+#   · 本文件（容器级）：管 entrypoint 自动跑的那条连接。
+#   任一层在都不会乱；两层都在，换谁、怎么导都乱不了。
+#
+# ★ 文件名 zz_ 前缀：让它在 conf.d 里按字典序排最后，明确是本项目追加、便于识别与覆盖。
+# ★ 这个文件必须由 bootstrap.sh 保证存在：compose 以 :ro 单文件挂载它，宿主缺该文件时
+#   Docker 会把这个路径创建成「目录」，mysql 读到目录会直接启动失败。
+# ==============================================================================
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4

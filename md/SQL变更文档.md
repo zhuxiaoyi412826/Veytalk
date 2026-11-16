@@ -18,6 +18,7 @@
     - [基线 A：全量脚本现状（实测数字，非估算）](#基线-a全量脚本现状实测数字非估算)
     - [基线 B：43 张表清单](#基线-b43-张表清单)
     - [基线 C：存量升级补丁归档（21 份）](#基线-c存量升级补丁归档21-份)
+  - [1.0.1 新增 im_client_release 与权限点 126（客户端版本管理，2026-11-16）](#101-新增-im_client_release-与权限点-126客户端版本管理2026-11-16)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -215,6 +216,18 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 ```
 
 > 复制时**别删栏目**：写「无」也必须留字，因为「空白」和「确实没有」在复核时是两回事。
+
+### 1.0.1 新增 im_client_release 与权限点 126（客户端版本管理，2026-11-16）
+
+- **背景**：后台新增「客户端版本管理」屏：上传安装包（字节走文件模块分片上传落 MinIO/本地）、同平台同时只启用一个、官网下载页只递启用行（含匿名下载端点 /api/release/list 与 /download/{id}）。
+- **脚本文件**：`sql/migration_client_release.sql`（存量库增量，幂等可重跑）
+- **★ 清除**：无
+- **★ 增加**：表 `im_client_release`（14 列，`uk_platform_version` 唯一键 + `idx_status`）；种子 `im_permission` id 126（system:release）、`im_role_permission` id 6026（admin 绑定）
+- **★ 修改**：无
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十六节第 1059–1100 行；`im_data.sql` ☑ 第 157 行（权限）与第 187 行（绑定）
+- **需清的 Redis 键**：`im:auth:perm:*`（权限缓存 TTL 30 分钟且登录不刷新，不清则新菜单对 admin 也不显示；禁 FLUSHDB，只按清单 DEL）
+- **回滚方式**：`DELETE FROM im_role_permission WHERE id=6026; DELETE FROM im_permission WHERE id=126; DROP TABLE IF EXISTS im_client_release;`（DROP 会连带删掉已登记的版本行；只删 RBAC 两行留表是唯一安全的部分回滚）
+- **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:release';` 期望 1；`SELECT COUNT(*) FROM im_role_permission WHERE id=6026;` 期望 1；`SHOW CREATE TABLE im_client_release;` 看唯一键在位
 
 ---
 
