@@ -46,7 +46,7 @@
         <spring-boot.version>4.0.8</spring-boot.version>
 
         <!-- 内部模块版本 -->
-        <im.version>1.0.0</im.version>
+        <im.version>1.1.0</im.version>
 
         <!-- 持久层：Spring Boot 4 专用 starter，分页插件在 3.5.9+ 已拆分需显式引入 -->
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
