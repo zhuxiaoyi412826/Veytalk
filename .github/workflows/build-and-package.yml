@@ -438,7 +438,15 @@ jobs:
           cd '$DIR'
           [ -f .env ] || { echo '目标机还没跑过 bootstrap.sh（缺 .env）'; exit 1; }
           sed -i 's|^IM_SERVER_TAG=.*|IM_SERVER_TAG=$REF|' .env
-          docker compose pull im-server
+          # ★ 先查本机有没有同 tag 镜像：有 → 证明这版之前已经拉过（典型场景：上次 deploy
+          #   中途失败后重跑，或同 tag 重复部署），跳过 pull 直连进重建，省掉出境链路的
+          #   十几分钟；没有 → 正常 pull。注意这里按 tag 判断，前提是遵守「换版必换 tag」红线，
+          #   同一个 tag 永远对应同一份代码，跳过 pull 才不会漏更新。
+          if [ -n "$(docker images -q '$REF' | head -1)" ]; then
+            echo "服务器已有镜像 $REF，跳过 pull"
+          else
+            docker compose pull im-server
+          fi
           docker compose up -d --no-deps --wait im-server
           docker compose ps
           EOF
