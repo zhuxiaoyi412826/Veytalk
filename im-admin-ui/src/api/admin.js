@@ -707,3 +707,32 @@ export function disableRelease(id) {
 export function deleteRelease(id) {
   return http.delete(`/admin/release/${id}`)
 }
+
+/* ==================== 意见反馈（后台，权限点 127 system:feedback） ====================
+ * 反馈由前台用户在设置页提交，后台只能检索 / 查看 / 回复 / 删除——
+ * 没有「新建 / 编辑」：允许后台凭空造一条或改用户原文，台账就失去了凭证价值。 */
+
+/** 类型码表（code+name）：下拉由服务端给出，前端不自造类型串 */
+export function fetchFeedbackTypes() {
+  return http.get('/admin/feedback/types')
+}
+
+/** 列表：params { current, size, keyword, type, status }，按创建时间倒序 */
+export function fetchFeedbackPage(params) {
+  return http.get('/admin/feedback/page', { params })
+}
+
+/** 详情 */
+export function fetchFeedbackDetail(id) {
+  return http.get(`/admin/feedback/${id}`)
+}
+
+/** 回复：dto { reply }；写入即把该条置为已回复，再次回复覆盖旧文 */
+export function replyFeedback(id, dto) {
+  return http.post(`/admin/feedback/${id}/reply`, dto)
+}
+
+/** 删除：物理删行（清理已处置完的台账） */
+export function deleteFeedback(id) {
+  return http.delete(`/admin/feedback/${id}`)
+}

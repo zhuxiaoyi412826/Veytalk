@@ -90,6 +90,10 @@
           <el-icon><UploadFilled /></el-icon>
           <span>版本管理</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.can('system:feedback')" index="feedbacks" :route="{ name: 'feedbacks' }">
+          <el-icon><ChatDotSquare /></el-icon>
+          <span>意见反馈</span>
+        </el-menu-item>
       </el-menu>
       <p class="muted side-note">
         一期没有待办角标：新工单数只有登录后进看板才拿得到，为一个小红点在每个页面轮询

@@ -595,7 +595,65 @@
         </div>
       </section>
 
-      <!-- ==================== 九、法律与隐私 ====================
+      <!-- ==================== 九、意见反馈 ====================
+           给用户一个「有话想说」的正式入口：类型码表由服务端给出（前端不自造串），
+           正文入库前 trim、空串拒收。提交端点登录即可达、按用户限流，不设权限点——
+           加权限点等于把大多数用户挡在门外，与功能初衷相反。 -->
+      <section class="settings__card">
+        <div class="settings__card-title">意见反馈</div>
+
+        <el-form
+          ref="feedbackFormRef"
+          :model="feedbackForm"
+          :rules="feedbackRules"
+          label-position="top"
+          class="settings__feedback"
+          @submit.prevent
+        >
+          <el-form-item label="反馈类型" prop="type">
+            <el-radio-group v-model="feedbackForm.type">
+              <el-radio-button v-for="t in feedbackTypes" :key="t.code" :value="t.code">
+                {{ t.name }}
+              </el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item label="反馈内容" prop="content">
+            <el-input
+              v-model="feedbackForm.content"
+              type="textarea"
+              :rows="4"
+              maxlength="1000"
+              show-word-limit
+              resize="none"
+              placeholder="把你遇到的问题或建议告诉我们，尽量说清出现的场景与步骤"
+            />
+          </el-form-item>
+
+          <el-form-item label="联系方式（选填）" prop="contact">
+            <el-input
+              v-model="feedbackForm.contact"
+              maxlength="64"
+              placeholder="愿意被回访时才填，如手机号 / 邮箱"
+              style="max-width: 320px"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <el-button
+              type="primary"
+              :icon="Promotion"
+              :loading="feedbackSubmitting"
+              @click="onSubmitFeedback"
+            >
+              提交反馈
+            </el-button>
+            <span class="settings__desc settings__feedback-tip">提交后由后台处理，处理结果可能通过你留下的联系方式回访</span>
+          </el-form-item>
+        </el-form>
+      </section>
+
+      <!-- ==================== 十、法律与隐私 ====================
            合规要求的「便捷入口」：个保法与各类应用商店审核都要在应用内能随时看到
            隐私政策与用户协议，不能只藏在注册页那一个勾选框里（人注册完就不再看第二眼）。
            链接开在新的公示页而不是站内弹窗：那份文本要能打印、能收藏、能发给别人。 -->
@@ -639,7 +697,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, Tools, User, DeleteFilled } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Picture, Refresh, RefreshLeft, SwitchButton, Tools, User, DeleteFilled, Promotion } from '@element-plus/icons-vue'
 import ServerDebugDialog from '@/components/ServerDebugDialog.vue'
 import { canDebug, sourceLabel, sourceTagType } from '@/utils/servercfg'
 import { getServerBridge } from '@/utils/serverBridge'
@@ -656,6 +714,7 @@ import { openFilePicker } from '@/utils/picker'
 import { fetchDefaultRecordDir, openRecordDir, pickRecordDir, recordSupported } from '@/utils/recorder'
 import { exportConversationMessages } from '@/api/message'
 import { cancelAccount } from '@/api/user'
+import { submitFeedback } from '@/api/feedback'
 import { notifyCapability, requestNotifyPermission, previewChime } from '@/utils/notify'
 
 defineOptions({ name: 'Settings' })
@@ -1201,6 +1260,53 @@ async function onLogout() {
   router.replace({ name: 'login' })
 }
 
+// ==================== 意见反馈 ====================
+// 类型码表与后端 FeedbackType 一一对应（前端不自造串）：用户提交端点没有 types 接口，
+// 而后台的 /api/admin/feedback/types 要 system:feedback 权限、普通用户拿不到，故在此固化这份契约。
+const feedbackTypes = [
+  { code: 'bug', name: '功能异常' },
+  { code: 'suggestion', name: '产品建议' },
+  { code: 'experience', name: '体验问题' },
+  { code: 'other', name: '其他' },
+]
+const feedbackFormRef = ref(null)
+const feedbackSubmitting = ref(false)
+const feedbackForm = reactive({ type: 'bug', content: '', contact: '' })
+const feedbackRules = {
+  type: [{ required: true, message: '请选择反馈类型', trigger: 'change' }],
+  content: [
+    { required: true, message: '反馈内容不能为空', trigger: 'blur' },
+    { max: 1000, message: '反馈内容最多 1000 字', trigger: 'blur' },
+  ],
+  contact: [{ max: 64, message: '联系方式最多 64 个字符', trigger: 'blur' }],
+}
+
+// 提交反馈：先本地校验（后端还会再校一遍，不信任前端），成功后清空正文与联系方式、类型保留
+async function onSubmitFeedback() {
+  if (!feedbackFormRef.value) return
+  try {
+    await feedbackFormRef.value.validate()
+  } catch {
+    return // 校验不过：错误提示已由 el-form 就地渲染，不再弹一屏红条
+  }
+  feedbackSubmitting.value = true
+  try {
+    await submitFeedback({
+      type: feedbackForm.type,
+      content: feedbackForm.content.trim(),
+      contact: feedbackForm.contact.trim(),
+    })
+    ElMessage.success('反馈已提交，感谢你的意见')
+    feedbackForm.content = ''
+    feedbackForm.contact = ''
+    feedbackFormRef.value.clearValidate()
+  } catch (e) {
+    ElMessage.error(e?.message || '提交失败，请稍后再试')
+  } finally {
+    feedbackSubmitting.value = false
+  }
+}
+
 // 账号注销：先二次确认不可逆后果，再弹密码框，通过后提交。成功后本地无态可留，直接 signOut 回登录页
 async function onCancelAccount() {
   try {
@@ -1321,6 +1427,11 @@ async function onCancelAccount() {
 .settings__desc {
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* 意见反馈：提交按钮旁的一句说明，与按钮同一行、留点间距 */
+.settings__feedback-tip {
+  margin-left: 12px;
 }
 
 .settings__colors {

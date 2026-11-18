@@ -151,6 +151,14 @@ const routes = [
         name: 'releases',
         component: () => import('@/views/ReleasesView.vue'),
         meta: { title: '版本管理', perm: 'system:release' }
+      },
+      {
+        // 意见反馈：单独一个权限点 127，处置的是用户主动递上来的台账，
+        // 与举报（system:report:handle）不并：举报是「他人指控某人」，反馈是「用户说产品的事」
+        path: 'feedbacks',
+        name: 'feedbacks',
+        component: () => import('@/views/FeedbackView.vue'),
+        meta: { title: '意见反馈', perm: 'system:feedback' }
       }
     ]
   },
@@ -213,7 +221,8 @@ router.beforeEach(async (to) => {
       'remote',
       'announcements',
       'agreements',
-      'releases'
+      'releases',
+      'feedbacks'
     ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)

@@ -1097,3 +1097,35 @@ CREATE TABLE `im_client_release`
     KEY `idx_status` (`status`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='客户端安装包版本（一行一个包，字节在文件模块；同平台同时只启用一个，官网下载页只递启用行）';
+
+-- =====================================================================================
+--  十七、意见反馈（im-admin）
+-- =====================================================================================
+
+-- 用户在设置页提交、后台在「意见反馈」屏处置的一张工单表。表归 im-admin 所有
+-- （与公告、版本管理同一先例：不新增 SPI 契约、不动任何 pom 依赖）；
+-- 提交人昵称不冗余进本表，后台列表用 AdminUserSpi.listByIds 批量取——
+-- 昵称是会改的，冗余一份就会出现「台账里的名字和现在对不上」。
+-- user_id 不建外键：账号注销后反馈行仍是有效台账（提交人显示为已注销）。
+-- 状态机只有两条边：0 待处理 → 1 已回复（reply 写入即置 1，记 reply_by/reply_time）。
+-- 删除是物理删行（后台清理已处置完的台账）；反馈不是合同原件，不需要归档级保护。
+CREATE TABLE `im_feedback`
+(
+    `id`          BIGINT        NOT NULL COMMENT '反馈 ID（雪花）',
+    `user_id`     BIGINT        NOT NULL COMMENT '提交人用户 ID。不建外键：账号注销后反馈行仍是有效台账（提交人显示为已注销）',
+    `type`        VARCHAR(16)   NOT NULL COMMENT '反馈类型码：bug 功能异常 / suggestion 产品建议 / experience 体验问题 / other 其他，白名单在服务端（FeedbackType）',
+    `content`     VARCHAR(1000) NOT NULL COMMENT '反馈正文，与后端 @Size(max=1000) 同宽；入库前 trim，空串拒收',
+    `contact`     VARCHAR(64)            DEFAULT NULL COMMENT '联系方式（选填）：用户愿意被回访时才填；空串在写入前归一成 NULL',
+    `status`      TINYINT       NOT NULL DEFAULT 0 COMMENT '状态：0 待处理 1 已回复（reply 非空即置 1）',
+    `reply`       VARCHAR(1000)          DEFAULT NULL COMMENT '后台回复原文；写入即把 status 置 1 并记 reply_by/reply_time，再次回复覆盖旧文并刷新两列',
+    `reply_by`    BIGINT                 DEFAULT NULL COMMENT '回复人（后台账号 ID）',
+    `reply_time`  DATETIME               DEFAULT NULL COMMENT '最近一次回复时刻',
+    `create_time` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '提交时间',
+    `update_time` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 后台按状态过滤 + 创建时间倒序翻页；前缀 status 同时服务「待处理有多少条」的看板口径
+    KEY `idx_status_create` (`status`, `create_time`),
+    -- 「这个人提过什么」：后台处置时反查同一用户的历史反馈，判断是不是重复提交
+    KEY `idx_user` (`user_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='意见反馈（设置页提交、后台回复处置；状态 0 待处理 → 1 已回复，物理删除）';

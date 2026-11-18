@@ -19,6 +19,7 @@
     - [基线 B：43 张表清单](#基线-b43-张表清单)
     - [基线 C：存量升级补丁归档（21 份）](#基线-c存量升级补丁归档21-份)
   - [1.0.1 新增 im_client_release 与权限点 126（客户端版本管理，2026-11-16）](#101-新增-im_client_release-与权限点-126客户端版本管理2026-11-16)
+  - [1.0.2 新增 im_feedback 与权限点 127（意见反馈，2026-11-18）](#102-新增-im_feedback-与权限点-127意见反馈2026-11-18)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -228,6 +229,18 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 - **需清的 Redis 键**：`im:auth:perm:*`（权限缓存 TTL 30 分钟且登录不刷新，不清则新菜单对 admin 也不显示；禁 FLUSHDB，只按清单 DEL）
 - **回滚方式**：`DELETE FROM im_role_permission WHERE id=6026; DELETE FROM im_permission WHERE id=126; DROP TABLE IF EXISTS im_client_release;`（DROP 会连带删掉已登记的版本行；只删 RBAC 两行留表是唯一安全的部分回滚）
 - **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:release';` 期望 1；`SELECT COUNT(*) FROM im_role_permission WHERE id=6026;` 期望 1；`SHOW CREATE TABLE im_client_release;` 看唯一键在位
+
+### 1.0.2 新增 im_feedback 与权限点 127（意见反馈，2026-11-18）
+
+- **背景**：前台「设置 · 意见反馈」新增用户提交表单（类型/正文/联系方式），后台侧边栏新增「意见反馈」屏对提交的反馈做检索/查看/回复/删除（无新建编辑，反馈由用户产生）。
+- **脚本文件**：`sql/migration_feedback.sql`（存量库增量，幂等可重跑）
+- **★ 清除**：无
+- **★ 增加**：表 `im_feedback`（11 列，`idx_status_create` + `idx_user` 两个普通索引，无唯一键；继承 AuditEntity 口径物理删除、不启 deleted）；种子 `im_permission` id 127（system:feedback）、`im_role_permission` id 6027（admin 绑定）
+- **★ 修改**：无
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十七节第 1102–1130 行；`im_data.sql` ☑ 第 158 行（权限）与第 189 行（绑定）
+- **需清的 Redis 键**：`im:auth:perm:*`（权限缓存 TTL 30 分钟且登录不刷新，不清则新菜单对 admin 也不显示；禁 FLUSHDB，只按清单 DEL）
+- **回滚方式**：`DELETE FROM im_role_permission WHERE id=6027; DELETE FROM im_permission WHERE id=127; DROP TABLE IF EXISTS im_feedback;`（DROP 会连带删掉已提交的反馈台账；只删 RBAC 两行留表是唯一安全的部分回滚）
+- **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:feedback';` 期望 1；`SELECT COUNT(*) FROM im_role_permission WHERE id=6027;` 期望 1；`SHOW CREATE TABLE im_feedback;` 看两个索引在位
 
 ---
 

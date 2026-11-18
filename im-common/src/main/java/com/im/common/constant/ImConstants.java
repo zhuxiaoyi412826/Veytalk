@@ -264,6 +264,22 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_RELEASE = "system:release";
 
     /**
+     * 后台权限点：意见反馈管理（用户反馈的检索 / 查看 / 回复 / 删除）。
+     *
+     * <p>不并进 {@code system:report:handle} 的理由：举报工单是「处置违规」（带封禁、
+     * 强制撤回等危险动作），反馈是「客服台账」（只有回复与删除），风险量级不同，
+     * 应当可以授权给不同的人（客服岗只看反馈、不碰举报）。
+     *
+     * <p>用户提交端点 {@code POST /api/feedback} 不设权限点：登录即可提（全局拦截已盖住），
+     * 靠按用户的 {@code @RateLimit} 防刷——给提交设门槛等于把最愿意说话的那批用户拦在外面。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，admin 角色必须补上这一点
+     * （见 {@code sql/migration_feedback.sql}），否则新控制器上线即把老管理员拦在门外。
+     * 补完之后<b>必须清一次 {@code im:auth:perm:*}</b>（权限缓存 TTL 30 分钟且登录不刷新）。
+     */
+    public static final String PERM_SYSTEM_FEEDBACK = "system:feedback";
+
+    /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
      *
      * <p>读方（UserQuerySpiImpl / GroupSpiImpl）与失效方（UserServiceImpl /
