@@ -1,8 +1,11 @@
 package com.im.common.spi;
 
 import com.im.common.api.PageResult;
+import com.im.common.domain.AdminVideoCategoryDTO;
 import com.im.common.domain.AdminVideoDTO;
 import com.im.common.domain.AdminVideoQueryDTO;
+
+import java.util.List;
 
 /**
  * 后台短视频管理契约，由 im-live 实现（{@code VideoAdminSpiImpl}）。
@@ -49,4 +52,26 @@ public interface AdminVideoSpi {
      * @param operatorId 操作管理员，进审计日志
      */
     void delete(Long id, Long operatorId);
+
+    /* ==================== 二级分类字典（后台可增删改） ==================== */
+
+    /** 全部分类（含停用），按 sort 升序 */
+    List<AdminVideoCategoryDTO> listCategories();
+
+    /**
+     * 新增分类。
+     *
+     * @param sort 排序，{@code null} 时排到最后；同名（未删除行内）由实现方拒绝
+     */
+    AdminVideoCategoryDTO createCategory(String name, Integer sort, Long operatorId);
+
+    /**
+     * 修改分类：改名 / 调序 / 启停。参数传 {@code null} 表示该项不改。
+     *
+     * @param status 目标状态（1 启用 0 停用），{@code null} 不改
+     */
+    AdminVideoCategoryDTO updateCategory(Long id, String name, Integer sort, Integer status, Long operatorId);
+
+    /** 删除分类（逻辑删除）：仅从字典隐身，不动历史视频的 category 文本；幂等 */
+    void deleteCategory(Long id, Long operatorId);
 }

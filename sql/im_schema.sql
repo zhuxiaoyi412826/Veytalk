@@ -39,6 +39,7 @@ DROP TABLE IF EXISTS `im_gift_record`;
 DROP TABLE IF EXISTS `im_wallet_transaction`;
 DROP TABLE IF EXISTS `im_gift`;
 DROP TABLE IF EXISTS `im_user_wallet`;
+DROP TABLE IF EXISTS `im_live_video_category`;
 DROP TABLE IF EXISTS `im_live_video`;
 DROP TABLE IF EXISTS `im_article`;
 DROP TABLE IF EXISTS `im_ai_guard`;
@@ -728,6 +729,7 @@ CREATE TABLE `im_live_video`
     `id`            BIGINT        NOT NULL COMMENT '视频 ID',
     `uploader_id`   BIGINT        NOT NULL COMMENT '上传用户 ID',
     `title`         VARCHAR(60)   NOT NULL COMMENT '视频标题',
+    `category`      VARCHAR(32)   NOT NULL DEFAULT '综合' COMMENT '分类（视频板块二级分类标签，如 游戏/音乐/美食…），缺省 综合',
     `file_id`       BIGINT        NOT NULL COMMENT '视频文件 ID（im_file.id，bizType=video）',
     `file_url`      VARCHAR(1024) NOT NULL COMMENT '视频受控访问地址（/api/file/download/{fileId}，前端经 mediaUrl 取 blob 播放）',
     `cover_file_id` BIGINT                 DEFAULT NULL COMMENT '封面图文件 ID（im_file.id，bizType=video_cover），可空',
@@ -750,6 +752,31 @@ CREATE TABLE `im_live_video`
     KEY `idx_uploader_create` (`uploader_id`, `create_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='直播页视频板块（短视频信息流）';
+
+-- 视频板块二级分类字典：驱动前端顶部分类栏与发布分类下拉，后台可增删改（不硬编码在前端）。
+-- name 与 im_live_video.category 取值对齐；sort 升序即前端展示顺序；status=0 停用不在前端出现。
+CREATE TABLE `im_live_video_category`
+(
+    `id`          BIGINT      NOT NULL COMMENT '分类 ID',
+    `name`        VARCHAR(32) NOT NULL COMMENT '分类名称（与 im_live_video.category 取值对齐）',
+    `sort`        INT         NOT NULL DEFAULT 0 COMMENT '排序（升序，前端分类栏按此顺序展示）',
+    `status`      TINYINT     NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用（停用不在前端分类栏出现）',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`     TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 未删除 1 已删除',
+    PRIMARY KEY (`id`),
+    -- 分类栏主查询：按启用状态过滤后按 sort 升序
+    KEY `idx_status_sort` (`status`, `sort`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='直播页视频板块二级分类字典（后台可增删改）';
+
+-- 初始分类：与视频板块抖音化上线时的硬编码 17 项一致，保证升级后前端分类栏行为不变
+INSERT INTO `im_live_video_category` (`id`, `name`, `sort`, `status`) VALUES
+(1, '综合', 1, 1), (2, '游戏', 2, 1), (3, '二次元', 3, 1), (4, '音乐', 4, 1),
+(5, '影视', 5, 1), (6, '美食', 6, 1), (7, '知识', 7, 1), (8, '小剧场', 8, 1),
+(9, '生活vlog', 9, 1), (10, '体育', 10, 1), (11, '旅行', 11, 1), (12, '亲子', 12, 1),
+(13, '动物', 13, 1), (14, '三农', 14, 1), (15, '汽车', 15, 1), (16, '美妆穿搭', 16, 1),
+(17, '公开课', 17, 1);
 
 -- =====================================================================================
 --  直播页「文章」板块（im-live 持有）：Markdown 文章 + 审核状态机。

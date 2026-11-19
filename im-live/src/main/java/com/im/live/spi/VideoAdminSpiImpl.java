@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
+import com.im.common.domain.AdminVideoCategoryDTO;
 import com.im.common.domain.AdminVideoDTO;
 import com.im.common.domain.AdminVideoQueryDTO;
 import com.im.common.domain.UserBriefDTO;
@@ -12,7 +13,9 @@ import com.im.common.spi.AdminVideoSpi;
 import com.im.common.spi.UserQuerySpi;
 import com.im.common.util.TextUtil;
 import com.im.live.entity.LiveVideo;
+import com.im.live.entity.LiveVideoCategory;
 import com.im.live.mapper.LiveVideoMapper;
+import com.im.live.service.LiveVideoCategoryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -45,6 +48,7 @@ public class VideoAdminSpiImpl implements AdminVideoSpi {
 
     private final LiveVideoMapper videoMapper;
     private final UserQuerySpi userQuerySpi;
+    private final LiveVideoCategoryService categoryService;
 
     @Override
     public PageResult<AdminVideoDTO> pageVideos(AdminVideoQueryDTO query) {
@@ -121,6 +125,42 @@ public class VideoAdminSpiImpl implements AdminVideoSpi {
         videoMapper.deleteById(id);
         log.info("[后台视频管理] operator={} 删除视频: id={}, uploaderId={}, title={}",
                 operatorId, id, video.getUploaderId(), video.getTitle());
+    }
+
+    /* ==================== 二级分类字典 ==================== */
+
+    @Override
+    public List<AdminVideoCategoryDTO> listCategories() {
+        List<LiveVideoCategory> rows = categoryService.listAll();
+        List<AdminVideoCategoryDTO> dtos = new ArrayList<>(rows.size());
+        for (LiveVideoCategory row : rows) {
+            dtos.add(toCategoryDTO(row));
+        }
+        return dtos;
+    }
+
+    @Override
+    public AdminVideoCategoryDTO createCategory(String name, Integer sort, Long operatorId) {
+        return toCategoryDTO(categoryService.create(name, sort, operatorId));
+    }
+
+    @Override
+    public AdminVideoCategoryDTO updateCategory(Long id, String name, Integer sort, Integer status, Long operatorId) {
+        return toCategoryDTO(categoryService.update(id, name, sort, status, operatorId));
+    }
+
+    @Override
+    public void deleteCategory(Long id, Long operatorId) {
+        categoryService.delete(id, operatorId);
+    }
+
+    private AdminVideoCategoryDTO toCategoryDTO(LiveVideoCategory category) {
+        return AdminVideoCategoryDTO.builder()
+                .id(category.getId())
+                .name(category.getName())
+                .sort(category.getSort())
+                .status(category.getStatus())
+                .build();
     }
 
     private UserBriefDTO briefOf(Long userId) {

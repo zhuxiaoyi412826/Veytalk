@@ -44,17 +44,42 @@ public class LiveVideoServiceImpl implements LiveVideoService {
 
     private static final String DEFAULT_TITLE = "未命名视频";
     private static final int TITLE_MAX = 60;
+    /** 分类缺省值：前端发布时不选分类就落这个，保证列 NOT NULL 且信息流「全部」能统一回显 */
+    private static final String DEFAULT_CATEGORY = "综合";
 
     private final LiveVideoMapper videoMapper;
     private final UserQuerySpi userQuerySpi;
     private final ImProperties imProperties;
 
     @Override
-    public Page<LiveVideoVO> page(long current, long size) {
+    public Page<LiveVideoVO> page(long current, long size, String category, String keyword, String sort, boolean mine) {
         Page<LiveVideo> page = new Page<>(current, size);
+        Long me = SecurityUtil.getUserIdOrNull();
         LambdaQueryWrapper<LiveVideo> wrapper = new LambdaQueryWrapper<LiveVideo>()
-                .eq(LiveVideo::getStatus, LiveVideo.STATUS_NORMAL)
-                .orderByDesc(LiveVideo::getCreateTime);
+                .eq(LiveVideo::getStatus, LiveVideo.STATUS_NORMAL);
+        // 二级分类：精确命中（前端分类标签来自固定枚举，不做 LIKE）
+        if (TextUtil.isNotBlank(category)) {
+            wrapper.eq(LiveVideo::getCategory, category.trim());
+        }
+        // 顶部搜索：标题模糊匹配；LIKE 的关键字里带 %/_ 不额外转义，最坏只是匹配宽一些，无注入风险（预编译参数）
+        if (TextUtil.isNotBlank(keyword)) {
+            wrapper.like(LiveVideo::getTitle, keyword.trim());
+        }
+        // 左侧「我的」频道：只看本人上传；未登录时该视图自然为空
+        if (mine) {
+            if (me == null) {
+                Page<LiveVideoVO> empty = new Page<>(current, size, 0);
+                empty.setRecords(List.of());
+                return empty;
+            }
+            wrapper.eq(LiveVideo::getUploaderId, me);
+        }
+        // 排序：最热按播放量倒序（同量再按时间兜底），其余（精选/我的/分类）一律按发布时间倒序
+        if ("hot".equalsIgnoreCase(sort)) {
+            wrapper.orderByDesc(LiveVideo::getPlayCount).orderByDesc(LiveVideo::getCreateTime);
+        } else {
+            wrapper.orderByDesc(LiveVideo::getCreateTime);
+        }
         Page<LiveVideo> result = videoMapper.selectPage(page, wrapper);
 
         Page<LiveVideoVO> voPage = new Page<>(result.getCurrent(), result.getSize(), result.getTotal());
@@ -68,7 +93,6 @@ public class LiveVideoServiceImpl implements LiveVideoService {
             uploaderIds.add(video.getUploaderId());
         }
         Map<Long, UserBriefDTO> briefs = userQuerySpi.listByIds(uploaderIds);
-        Long me = SecurityUtil.getUserIdOrNull();
         List<LiveVideoVO> vos = new ArrayList<>(records.size());
         for (LiveVideo video : records) {
             vos.add(toVO(video, briefs.get(video.getUploaderId()), me));
@@ -84,6 +108,7 @@ public class LiveVideoServiceImpl implements LiveVideoService {
         LiveVideo video = new LiveVideo();
         video.setUploaderId(userId);
         video.setTitle(resolveTitle(request.getTitle()));
+        video.setCategory(resolveCategory(request.getCategory()));
         video.setFileId(request.getFileId());
         video.setFileUrl(accessUrl(request.getFileId()));
         if (request.getCoverFileId() != null) {
@@ -137,6 +162,14 @@ public class LiveVideoServiceImpl implements LiveVideoService {
     }
 
     /**
+     * 分类兜底：留空给默认值并截断到列宽，与 {@link #resolveTitle} 同理（NOT NULL 列不接受脏长度）。
+     */
+    private String resolveCategory(String category) {
+        String value = TextUtil.isBlank(category) ? DEFAULT_CATEGORY : category.trim();
+        return value.length() > 32 ? value.substring(0, 32) : value;
+    }
+
+    /**
      * 拼受控访问地址：{@code im.file.access-url-prefix + "/" + fileId}，与 {@code im-file} 生成
      * {@code im_file.url} 用的是同一前缀，保证列表里的地址与下载接口完全对得上。
      */
@@ -153,6 +186,7 @@ public class LiveVideoServiceImpl implements LiveVideoService {
             vo.setUploaderAvatar(brief.getAvatar());
         }
         vo.setTitle(video.getTitle());
+        vo.setCategory(video.getCategory());
         vo.setFileId(video.getFileId());
         vo.setFileUrl(video.getFileUrl());
         vo.setCoverFileId(video.getCoverFileId());

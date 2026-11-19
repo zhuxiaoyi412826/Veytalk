@@ -192,6 +192,28 @@ export function deleteVideo(id) {
   return http.delete(`/admin/video/${id}`)
 }
 
+/* ==================== 视频二级分类字典（控制栏可增删改） ==================== */
+
+/** 分类列表：含停用项，按 sort 升序 */
+export function fetchVideoCategories() {
+  return http.get('/admin/video/category/list')
+}
+
+/** 新增分类：name 必填，sort 为空则排最后 */
+export function createVideoCategory(name, sort) {
+  return http.post('/admin/video/category', null, { params: { name, sort } })
+}
+
+/** 修改分类：改名 / 调序 / 启停，不传的项不改 */
+export function updateVideoCategory(id, { name, sort, status } = {}) {
+  return http.put(`/admin/video/category/${id}`, null, { params: { name, sort, status } })
+}
+
+/** 删除分类（逻辑删除）：不动历史视频的分类文本，幂等 */
+export function deleteVideoCategory(id) {
+  return http.delete(`/admin/video/category/${id}`)
+}
+
 /* ==================== 直播管理（三期） ==================== */
 
 /** 场次列表：含全部历史与已封禁场次；直播中恒排最前，响应绝不含 streamKey */

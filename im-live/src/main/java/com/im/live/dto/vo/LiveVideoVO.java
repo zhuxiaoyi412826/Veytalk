@@ -38,6 +38,9 @@ public class LiveVideoVO implements Serializable {
     @Schema(description = "视频标题")
     private String title;
 
+    @Schema(description = "分类标签，缺省 综合")
+    private String category;
+
     @Schema(description = "视频文件 ID")
     private Long fileId;
 

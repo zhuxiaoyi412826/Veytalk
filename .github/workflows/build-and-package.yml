@@ -291,6 +291,9 @@ jobs:
   # ---------------------------------------------------------------- 镜像
   docker-image:
     needs: [meta, build-jar]
+    # Dependabot 升级 PR 不为每个 bump 打镜像：build-jar/build-web 能编译过即证明升级未破坏构建。
+    # 仅跳过 dependabot[bot] 发起的 pull_request；main/tag（含该 PR 合并后）照常构建推送。
+    if: github.actor != 'dependabot[bot]' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.full.outputs.ref }}      # 部署 job 拉这一个精确 ref（不是 latest，latest 会漂）
@@ -360,7 +363,7 @@ jobs:
   mirror-images:
     needs: meta
     # PR 不推（push=false）；main/tag 总跑，手动跑受 mirror_images 勾选控制；内部按 digest 比对，已同步就秒跳过
-    if: needs.meta.outputs.push == 'true' && (github.event_name != 'workflow_dispatch' || inputs.mirror_images)
+    if: needs.meta.outputs.push == 'true' && (github.event_name != 'workflow_dispatch' || inputs.mirror_images) && (github.actor != 'dependabot[bot]' || github.event_name != 'pull_request')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

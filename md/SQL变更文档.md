@@ -20,6 +20,8 @@
     - [基线 C：存量升级补丁归档（21 份）](#基线-c存量升级补丁归档21-份)
   - [1.0.1 新增 im_client_release 与权限点 126（客户端版本管理，2026-11-16）](#101-新增-im_client_release-与权限点-126客户端版本管理2026-11-16)
   - [1.0.2 新增 im_feedback 与权限点 127（意见反馈，2026-11-18）](#102-新增-im_feedback-与权限点-127意见反馈2026-11-18)
+  - [1.0.3 im_live_video 新增 category 列（视频板块抖音式分类，2026-11-19）](#103-im_live_video-新增-category-列视频板块抖音式分类2026-11-19)
+  - [1.0.4 新增 im_live_video_category 字典表（视频分类栏后台可增删改，2026-11-19）](#104-新增-im_live_video_category-字典表视频分类栏后台可增删改2026-11-19)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -241,6 +243,32 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 - **需清的 Redis 键**：`im:auth:perm:*`（权限缓存 TTL 30 分钟且登录不刷新，不清则新菜单对 admin 也不显示；禁 FLUSHDB，只按清单 DEL）
 - **回滚方式**：`DELETE FROM im_role_permission WHERE id=6027; DELETE FROM im_permission WHERE id=127; DROP TABLE IF EXISTS im_feedback;`（DROP 会连带删掉已提交的反馈台账；只删 RBAC 两行留表是唯一安全的部分回滚）
 - **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:feedback';` 期望 1；`SELECT COUNT(*) FROM im_role_permission WHERE id=6027;` 期望 1；`SHOW CREATE TABLE im_feedback;` 看两个索引在位
+
+### 1.0.3 im_live_video 新增 category 列（视频板块抖音式分类，2026-11-19）
+
+- **背景**：直播页「视频」板块重做为抖音式信息流，左侧一级（精选/热门/我的）+ 顶部二级分类 + 标题搜索需真过滤，而 `im_live_video` 原无分类字段。新增 `category` 列供发布时选择、分页按分类精确过滤（搜索走标题 LIKE、排序走 play_count，均不需改表）。
+- **脚本文件**：`sql/migration_live_video_category.sql`（存量库增量，information_schema 守卫幂等可重跑）
+- **★ 清除**：无
+- **★ 增加**：列 `im_live_video.category VARCHAR(32) NOT NULL DEFAULT '综合'`（置于 `title` 之后；有默认值，存量行自动回填为 综合，无需单独 UPDATE）
+- **★ 修改**：无
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十五节 `im_live_video` 建表块（`title` 行之后）；`im_data.sql` ☐ 无（不动种子）
+- **需清的 Redis 键**：无（不涉及 RBAC/权限，纯业务表加列）
+- **回滚方式**：`ALTER TABLE im_live_video DROP COLUMN category;`（★清除列会连带丢失已选分类，回滚前确认无依赖）
+- **验证 SQL**：`SHOW COLUMNS FROM im_live_video LIKE 'category';` 期望 1 行；`SELECT category, COUNT(*) FROM im_live_video GROUP BY category;` 存量应全落 综合
+
+---
+
+### 1.0.4 新增 im_live_video_category 字典表（视频分类栏后台可增删改，2026-11-19）
+
+- **背景**：上条只给视频加了 `category` 列，但分类取值仍硬编码在前端 `Live.vue`（`VIDEO_CATEGORIES`），admin 无法自定义增减。新建二级分类字典表驱动前端分类栏与发布下拉，后台可增删改/排序/启停。
+- **脚本文件**：`sql/migration_live_video_category_dict.sql`（存量库增量：`CREATE TABLE IF NOT EXISTS` + `INSERT IGNORE` 灌初始 17 项，幂等可重跑）
+- **★ 清除**：无
+- **★ 增加**：表 `im_live_video_category`（`id/name VARCHAR(32)/sort INT/status TINYINT` + 审计列 + `deleted`，索引 `idx_status_sort`）；种子 17 行（与上线时硬编码一致，主键 1~17）
+- **★ 修改**：无（`im_live_video.category` 列不动，本表只是字典，两者靠 name 文本对齐、无外键）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十五节 `im_live_video` 建表块之后（含种子 INSERT）；`im_data.sql` ☐ 无（种子随建表脚本走）
+- **需清的 Redis 键**：无（不涉及 RBAC/权限，复用已有 `system:video:manage`；分类读的是实时查、无缓存）
+- **回滚方式**：`DROP TABLE im_live_video_category;`（只删字典，不影响任何已发布视频的 category 文本）
+- **验证 SQL**：`SHOW TABLES LIKE 'im_live_video_category';` 期望 1 行；`SELECT name, sort, status FROM im_live_video_category ORDER BY sort;` 期望 17 行均 status=1
 
 ---
 

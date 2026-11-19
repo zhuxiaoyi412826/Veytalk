@@ -2,6 +2,7 @@ package com.im.admin.service;
 
 import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
+import com.im.common.domain.AdminVideoCategoryDTO;
 import com.im.common.domain.AdminVideoDTO;
 import com.im.common.domain.AdminVideoQueryDTO;
 import com.im.common.exception.BusinessException;
@@ -10,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 /**
  * 后台视频管理：全部状态翻页、下架/恢复、管理员删除。
@@ -44,6 +47,30 @@ public class AdminVideoService {
     public void delete(Long id, Long operatorId) {
         requireSpi().delete(id, operatorId);
         log.info("[后台视频管理] 视频 {} 已删除: operator={}", id, operatorId);
+    }
+
+    /* ==================== 二级分类字典 ==================== */
+
+    public List<AdminVideoCategoryDTO> listCategories() {
+        return requireSpi().listCategories();
+    }
+
+    public AdminVideoCategoryDTO createCategory(String name, Integer sort, Long operatorId) {
+        AdminVideoCategoryDTO category = requireSpi().createCategory(name, sort, operatorId);
+        log.info("[后台视频管理] 新增分类 {}: operator={}", category.getName(), operatorId);
+        return category;
+    }
+
+    public AdminVideoCategoryDTO updateCategory(Long id, String name, Integer sort, Integer status, Long operatorId) {
+        AdminVideoCategoryDTO category = requireSpi().updateCategory(id, name, sort, status, operatorId);
+        log.info("[后台视频管理] 修改分类 {}（name={}, sort={}, status={}）: operator={}",
+                id, category.getName(), category.getSort(), category.getStatus(), operatorId);
+        return category;
+    }
+
+    public void deleteCategory(Long id, Long operatorId) {
+        requireSpi().deleteCategory(id, operatorId);
+        log.info("[后台视频管理] 删除分类 {}: operator={}", id, operatorId);
     }
 
     private AdminVideoSpi requireSpi() {

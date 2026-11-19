@@ -30,6 +30,10 @@ public class LiveVideoCreateRequest implements Serializable {
     @Size(max = 60, message = "视频标题最多 60 字")
     private String title;
 
+    @Schema(description = "分类标签（视频板块二级分类），可空——空则服务端落 综合", example = "生活vlog")
+    @Size(max = 32, message = "分类最多 32 字")
+    private String category;
+
     @Schema(description = "视频文件 ID（已通过 bizType=video 上传）")
     @NotNull(message = "视频文件 ID 不能为空")
     private Long fileId;

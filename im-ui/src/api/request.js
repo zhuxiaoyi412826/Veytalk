@@ -80,7 +80,14 @@ const http = axios.create({
 http.interceptors.request.use((config) => {
   // 每次请求实时解析 baseURL：原生壳（Tauri/Capacitor）里登录页改服务器地址后要「立即生效」。
   // 原先进程启动时算一次，改地址必须重启 WebView（原生 App 的 SessionStore 是每次读，这里对齐它）
-  config.baseURL = apiBaseURL()
+  //
+  // 例外：二进制媒体请求（fetchBlob / fetchBlobMeta）自带 skipBaseRefresh。它们的 url 已含 /api 前缀
+  // （后端落库的受控地址 /api/file/download/{id}），并在调用处逐次传好了 mediaBaseURL()；若在这里再
+  // 覆盖成 apiBaseURL()（Web 为 /api），axios 会拼成 /api/api/file/download/{id}，后端无此路由、
+  // 全局异常处理器返回 1004「请求的资源不存在」，表现就是图片/视频/语音全部「加载失败」。
+  if (!config.skipBaseRefresh) {
+    config.baseURL = apiBaseURL()
+  }
   const token = getToken()
   if (token) {
     // 头名取自后端下发的 tokenName，而不是写死 satoken
@@ -166,7 +173,8 @@ function isErrorEnvelope(parsed) {
  * 注意区分真 .json 附件（同样是 application/json）：靠错误体的固定形状判别，见 isErrorEnvelope。
  */
 export async function fetchBlob(url, config = {}) {
-  const response = await http.get(url, { ...config, responseType: 'blob', silent: true })
+  // skipBaseRefresh：url 已是含 /api 的受控地址，前缀由调用处传入的 baseURL 决定，不让拦截器再叠一次
+  const response = await http.get(url, { ...config, responseType: 'blob', silent: true, skipBaseRefresh: true })
   const blob = response instanceof Blob ? response : response.data
   if (blob && blob.type && blob.type.includes('application/json')) {
     const text = await blob.text()
@@ -200,6 +208,8 @@ export async function fetchBlob(url, config = {}) {
 export async function fetchBlobMeta(url, { ifNoneMatch, baseURL = '' } = {}) {
   const response = await http.get(url, {
     baseURL,
+    // 同 fetchBlob：rawUrl 自带 /api，mediaBaseURL() 已在调用处算好，禁止拦截器覆盖成 apiBaseURL() 造成双前缀
+    skipBaseRefresh: true,
     responseType: 'blob',
     silent: true,
     withResponse: true,

@@ -27,8 +27,9 @@ on:
   push:
     branches: [main]
   schedule:
-    # 每周一 03:17 UTC 全量扫一次（即使没改依赖，NVD 也可能给老版本新判 CVE）
-    - cron: '17 3 * * 1'
+    # 每周日 03:17 UTC 触发一次；真正的「本月最后一个周日」判定交给下面的 gate job，
+    # 非最后一个周日时 gate 把两个扫描 job 短路跳过（只花几秒，不真扫）。
+    - cron: '17 3 * * 0'
   workflow_dispatch:
 
 # 同一 ref 上新提交取消旧扫描；定时/手动不互相取消
@@ -44,8 +45,41 @@ env:
   JAVA_VERSION: '21'
 
 jobs:
+  # ---------------------------------------------------------------- 定时闸门：只在「本月最后一个周日」放行定时扫描
+  # ★ GitHub cron 没有「每月最后一个周日」的原生写法（day-of-month 与 day-of-week 同时限定是
+  #   「或」关系，会多触发），所以用「每周日都触发 + 这里判定」的方式精确实现。
+  #   非 schedule 事件（PR / push main / 手动）不受此闸门限制，照常扫。
+  #   cutoff 20261201：用户要求「从下个月开始算」，故 2026-12-01 之前（含本月最后一个周日 11/29）不放行。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.chk.outputs.run }}
+    steps:
+      - name: 判断今天是否本月最后一个周日
+        id: chk
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "非定时事件，直接放行扫描"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dow="$(date -u +%u)"          # 1=周一 … 7=周日
+          thism="$(date -u +%-m)"
+          nextm="$(date -u -d '+7 days' +%-m)"   # 今天 +7 天若跨到下月 → 今天是本月最后一个周日
+          ymd="$(date -u +%Y%m%d)"
+          if [ "$dow" = "7" ] && [ "$thism" != "$nextm" ] && [ "$ymd" -ge 20261201 ]; then
+            echo "✅ 本月最后一个周日，放行定时漏洞扫描"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "今天不是本月最后一个周日（或未到起算月 2026-12），跳过定时扫描"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ---------------------------------------------------------------- 前端三站依赖审计
   npm-audit:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -103,6 +137,8 @@ jobs:
 
   # ---------------------------------------------------------------- 后端 Maven 依赖漏洞（OWASP dependency-check）
   dependency-check:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

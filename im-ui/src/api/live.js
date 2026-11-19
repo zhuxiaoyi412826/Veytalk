@@ -240,16 +240,25 @@ export function fetchCurrentPk(roomId) {
  * ========================================================================== */
 
 /**
- * 视频分页：仅正常状态视频，按发布时间倒序。
- * @param {{ current?: number, size?: number }} params
+ * 视频分页（抖音式信息流）：仅正常状态视频。
+ * @param {{ current?: number, size?: number, category?: string, keyword?: string, sort?: 'hot'|'', mine?: boolean }} params
+ *   category 二级分类精确过滤；keyword 标题模糊搜索；sort=hot 按播放量最热、缺省按最新；mine=true 只看本人
  */
 export function fetchVideoPage(params) {
   return http.get('/live/video/page', { params })
 }
 
 /**
+ * 分类列表：视频板块顶部分类栏与发布分类下拉的数据源（后台可增删改，不再硬编码）。
+ * @returns {Promise<string[]>} 启用分类名，按 sort 升序
+ */
+export function fetchVideoCategories() {
+  return http.get('/live/video/categories', { silent: true })
+}
+
+/**
  * 发布视频：先用 bizType=video 上传拿到 fileId（可选再用 video_cover 传封面），再建信息流记录。
- * @param {{ title: string, fileId: string, coverFileId?: string, duration?: number,
+ * @param {{ title: string, category?: string, fileId: string, coverFileId?: string, duration?: number,
  *           width?: number, height?: number, size: number, ext?: string, contentType?: string }} body
  */
 export function createVideo(body) {

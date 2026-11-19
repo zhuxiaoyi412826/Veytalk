@@ -14,9 +14,14 @@ import com.im.live.dto.vo.LiveVideoVO;
 public interface LiveVideoService {
 
     /**
-     * 信息流分页：仅 {@code status=1} 的正常视频，按发布时间倒序；批量补全上传者昵称/头像。
+     * 信息流分页：仅 {@code status=1} 的正常视频，批量补全上传者昵称/头像。
+     *
+     * @param category 二级分类精确过滤，空则不限分类
+     * @param keyword  标题模糊搜索，空则不过滤
+     * @param sort     {@code hot}=按播放量倒序（最热），其余按发布时间倒序（最新）
+     * @param mine     {@code true}=只看当前登录用户上传的视频（左侧「我的」频道）
      */
-    Page<LiveVideoVO> page(long current, long size);
+    Page<LiveVideoVO> page(long current, long size, String category, String keyword, String sort, boolean mine);
 
     /**
      * 发布：据前端上传返回的 fileId/coverFileId 建一行信息流记录，服务端拼受控访问地址。

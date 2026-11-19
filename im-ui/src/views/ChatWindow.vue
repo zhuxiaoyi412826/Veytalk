@@ -200,10 +200,10 @@
              文件选择框（隔离测试页证实连原生可见 input 都不弹，微信内正常），
              属浏览器站点级风控，非代码问题 -->
         <el-tooltip v-if="canUpload" content="添加图片到输入框（可一次勾多个，也能把图片拖进窗口或 Ctrl+V 粘贴截图）" placement="top">
-          <el-button text :icon="Picture" :disabled="uploading" @click="pickImage" />
+          <el-button text :icon="Picture" @click="pickImage" />
         </el-tooltip>
         <el-tooltip v-if="canUpload" content="添加文件到输入框（可拖进窗口或 Ctrl+V 粘贴；音频会作为语音消息）" placement="top">
-          <el-button text :icon="FolderOpened" :disabled="uploading" @click="pickFile" />
+          <el-button text :icon="FolderOpened" @click="pickFile" />
         </el-tooltip>
         <el-tooltip content="发送名片（把一位好友的资料卡发到当前会话）" placement="top">
           <el-button text :icon="Postcard" @click="openCardPicker" />
@@ -332,20 +332,24 @@
           </span>
         </el-tooltip>
 
-        <span
-          v-if="uploading"
-          class="chat-window__progress"
-          :title="uploadFileName"
-        >
-          <el-progress
-            :percentage="uploadPercent"
-            :stroke-width="4"
-            :show-text="false"
-            :status="uploadStage === 'instant' || uploadStage === 'done' ? 'success' : undefined"
-            style="width: 120px"
-          />
-          <span class="chat-window__progress-text">{{ uploadStageText }}</span>
-        </span>
+        <!-- 后台上传进度：每个在传附件一行，仅提示不阻塞；传完自行从队列消失 -->
+        <div v-if="uploading" class="chat-window__progress-stack">
+          <span
+            v-for="t in uploadTasks"
+            :key="t.id"
+            class="chat-window__progress"
+            :title="t.name"
+          >
+            <el-progress
+              :percentage="t.percent"
+              :stroke-width="4"
+              :show-text="false"
+              :status="t.stage === 'instant' || t.stage === 'done' ? 'success' : undefined"
+              style="width: 120px"
+            />
+            <span class="chat-window__progress-text">{{ t.name }} · {{ taskStageText(t) }}</span>
+          </span>
+        </div>
       </div>
 
       <!-- 被禁言时的提示 -->
@@ -413,7 +417,7 @@
         </div>
         <div class="chat-window__tray-side">
           <span class="chat-window__tray-count">待发送 {{ tray.length }} / {{ MAX_PENDING_FILES }}</span>
-          <el-button text size="small" :disabled="uploading" @click="clearTray">清空</el-button>
+          <el-button text size="small" @click="clearTray">清空</el-button>
         </div>
       </div>
 
@@ -436,7 +440,7 @@
         v-if="talkActive"
         class="chat-window__talk"
         label="按住说话"
-        :busy="uploading"
+        :busy="transcribing"
         busy-label="发送中…"
         @result="onTalkResult"
         @state="onTalkState"
@@ -475,7 +479,7 @@
       </el-popover>
 
       <div class="chat-window__send-row">
-        <el-button type="primary" :loading="sending || uploading" :disabled="!canSend" @click="sendMessage">
+        <el-button type="primary" :loading="sending" :disabled="!canSend" @click="sendMessage">
           {{ editingMessage ? '保存' : '发送' }}<span v-if="!editingMessage && tray.length">（{{ pendingCount }} 条）</span>
         </el-button>
       </div>
@@ -2021,14 +2025,14 @@ function onTalkResult({ blob, action }) {
 
 /**
  * 录音右滑「转文字」：把刚录的 WAV 直接调 ASR 转写，成功即作为文本消息发出。
- * 复用上传态 `uploading` 占住按钮（busy），转写期间不让连按。
+ * 用独立的 `transcribing` 忙锁占住按钮（busy），转写期间不让连按；与附件后台上传解耦。
  * 识别为空 → 提示「没有识别到文字」；服务未配置/失败 → 弹后端原因（与微信一致，不静默吞）。
  */
 async function transcribeVoiceToTextAndSend(blob) {
-  if (uploading.value) {
+  if (transcribing.value) {
     return
   }
-  uploading.value = true
+  transcribing.value = true
   try {
     const text = ((await transcribeAudio(blob)) || '').trim()
     if (!text) {
@@ -2044,7 +2048,7 @@ async function transcribeVoiceToTextAndSend(blob) {
       ElMessage.error(error?.message || '转文字失败，请稍后重试')
     }
   } finally {
-    uploading.value = false
+    transcribing.value = false
   }
 }
 
@@ -2091,7 +2095,7 @@ function useQuickReply(text) {
  * 网络类失败由占位气泡红叹号 + 离线队列兜住，业务类拒绝（敏感词/限流）弹原因。
  */
 async function sendQuickReply(text) {
-  if (quickEditing.value || sending.value || uploading.value) {
+  if (quickEditing.value || sending.value) {
     return
   }
   quickVisible.value = false
@@ -2403,14 +2407,15 @@ async function sendText() {
 /**
  * 发送 = 文字 + 托盘里的附件一批走。
  *
- * 顺序是先文字后附件：文字是主句、图是补充，气泡的时间戳顺序也与输入顺序一致。
- * 附件严格串行：uploadAndSend 自带占位气泡与单槽进度条，并行会互相搅乱。
- * 先把托盘腾空再发：发送过程中新粘进来的文件属于下一批，不会跟着这次莫名其妙地发出去。
+ * 先文字后附件：文字是主句、图是补充。附件不再串行阻塞，而是逐个投递到后台上传队列
+ * （uploadAndSend 自带占位气泡与按任务进度，并发不互捣）：sendMessage 发完立即返回，
+ * 传图/大文件期间用户能继续打字、发文字、再挑附件（需求 L40）。
+ * 先把托盘腾空再投递：发送过程中新粘进来的文件属于下一批，不会跟着这次发出去。
  * 失败不回摆托盘：uploadAndSend 已经把 File 存进 store，消息上的红叹号「重发」会直接复用。
  */
 async function sendMessage() {
   const items = tray.value
-  if (sending.value || uploading.value || (!draft.value.trim() && !items.length)) {
+  if (sending.value || (!draft.value.trim() && !items.length)) {
     return
   }
   // 编辑态：无论托盘如何，本次只提交对新正文的编辑，不发送附件
@@ -2427,9 +2432,12 @@ async function sendMessage() {
   }
   tray.value = []
   syncTray()
+  // 并发投递到后台队列：不 await 整批，每个任务自管理进度与出队；
+  // uploadAndSend 内部已吞掉业务/网络错误，这里再兜一层防未处理 rejection
   for (const item of items) {
-    await uploadAndSend(item.file)
+    uploadAndSend(item.file).catch(() => {})
   }
+  // 托盘缩略图的 objectURL 可立即释放：上传用的是 File 本体，不依赖预览地址
   releaseTrayUrls(items)
 }
 
@@ -2626,21 +2634,23 @@ function parseMentions(text) {
 
 const imageInputRef = ref(null)
 const fileInputRef = ref(null)
-const uploading = ref(false)
-const uploadPercent = ref(0)
-/** 上传阶段：hash 计算文件中 / upload 传分片 / merge 服务端合并 / instant 秒传 / done 完成 */
-const uploadStage = ref('upload')
-/** 分片计数 { loaded, total }，仅 upload 阶段有值，用于展示「已传 x/y 片」 */
-const uploadChunkInfo = ref(null)
-/** 正在上传的文件名，挂在进度提示的 title 上 */
-const uploadFileName = ref('')
+/**
+ * 后台上传队列：每个在传的附件一个任务对象，进度/阶段各记各的，多个附件并发上传互不覆盖。
+ * 发送时并发投递、不阻塞输入区——传图片/大文件期间照常打字、发文字、再挑文件（需求 L40）。
+ */
+const uploadTasks = ref([])
+let uploadTaskSeq = 0
+/** 是否还有后台上传在跑：只驱动顶部提示条，不再锁住任何输入控件 */
+const uploading = computed(() => uploadTasks.value.length > 0)
+/** 语音「转文字」的独立忙锁：与附件上传解耦，转写期间不让连按 */
+const transcribing = ref(false)
 
 /**
- * 把上传阶段翻译成人话：分片上传时额外带上分片进度，秒传/合并阶段没有百分比意义直接用文案覆盖。
+ * 把某个上传任务的阶段翻译成人话：分片上传时额外带上分片进度，秒传/合并阶段没有百分比意义直接用文案覆盖。
  */
-const uploadStageText = computed(() => {
-  const p = uploadPercent.value
-  switch (uploadStage.value) {
+function taskStageText(task) {
+  const p = task.percent
+  switch (task.stage) {
     case 'compress':
       return `压缩中 ${p}%`
     case 'nsfw':
@@ -2656,13 +2666,13 @@ const uploadStageText = computed(() => {
     case 'done':
       return '上传完成'
     case 'upload': {
-      const info = uploadChunkInfo.value
+      const info = task.chunkInfo
       return info ? `上传中 ${info.loaded}/${info.total} 片 · ${p}%` : `上传中 ${p}%`
     }
     default:
       return `上传中 ${p}%`
   }
-})
+}
 
 /** 没有上传权限就把入口藏掉：种子数据里 user 角色是有 file:upload 的，管理员同样有 */
 const canUpload = computed(() => auth.hasPermission('file:upload'))
@@ -2890,65 +2900,59 @@ async function uploadAndSend(file, retryClientMsgId = null) {
       flashSecs = flashSeconds.value
     }
   }
-  // 内容审核闸门：跑在挂占位气泡之前——被拒发的图不该在聊天记录里留下一条带「重发」按钮的
-  // 失败气泡（重发必然再被拦一次），拦下就只给一句提示。OCR 排在它后面：识别一张
-  // 反正要被拦掉的图纯属白花时间（OCR 首次要加载十几 MB，比本模型贵得多）。
-  if (kind === 'image') {
-    let guard
-    try {
-      uploading.value = true
-      uploadStage.value = 'nsfw'
-      uploadFileName.value = file.name || ''
-      guard = await guardImage(file, { scene: 'chat_image', conversationId: props.conversationId })
-    } finally {
-      uploading.value = false
-      uploadStage.value = 'upload'
-      uploadFileName.value = ''
-    }
-    if (!guard.pass) {
-      // 重发路径上占位气泡已经挂着了，把它落到失败态并撤掉本地 File，免得网络恢复又被自动补传
-      if (retryClientMsgId) {
-        chat.markFailed(props.conversationId, retryClientMsgId)
-        chat.forgetRetryFile(retryClientMsgId)
-      }
-      ElMessage.error(guard.message)
-      return
-    }
-  }
-  const clientMsgId = retryClientMsgId || newClientMsgId()
-  chat.appendMessage(
-    props.conversationId,
-    {
-      clientMsgId,
-      conversationId: props.conversationId,
-      fromUserId: auth.userId,
-      fromNickname: auth.nickname,
-      fromAvatar: auth.avatarRaw,
-      msgType,
-      content: file.name || '',
-      extra: {
-        fileName: file.name || '',
-        fileSize: file.size,
-        contentType: file.type || '',
-        flash: flashOn ? true : undefined,
-        flashSeconds: flashOn ? flashSecs : undefined
-      },
-      seq: null,
-      status: 0,
-      recalled: false,
-      sendTime: new Date().toISOString()
-    },
-    true
-  )
-  chat.rememberRetryFile(clientMsgId, file, props.conversationId)
-  // 桌面端视频压缩后，真正上传的是压缩产物；其余情况就是原文件
-  let uploadTarget = file
-  uploading.value = true
-  uploadPercent.value = 0
-  uploadStage.value = 'upload'
-  uploadChunkInfo.value = null
-  uploadFileName.value = file.name || ''
+  // 后台上传任务：进度/阶段各记各的，多个附件并发上传互不覆盖；出队由最外层 finally 统一负责
+  const task = reactive({ id: ++uploadTaskSeq, name: file.name || '附件', percent: 0, stage: 'upload', chunkInfo: null })
+  uploadTasks.value = [...uploadTasks.value, task]
+  let clientMsgId = retryClientMsgId || null
   try {
+    // 内容审核闸门：跑在挂占位气泡之前——被拒发的图不该在聊天记录里留下一条带「重发」按钮的
+    // 失败气泡（重发必然再被拦一次），拦下就只给一句提示。OCR 排在它后面：识别一张
+    // 反正要被拦掉的图纯属白花时间（OCR 首次要加载十几 MB，比本模型贵得多）。
+    if (kind === 'image') {
+      task.stage = 'nsfw'
+      const guard = await guardImage(file, { scene: 'chat_image', conversationId: props.conversationId })
+      task.stage = 'upload'
+      if (!guard.pass) {
+        // 重发路径上占位气泡已经挂着了，把它落到失败态并撤掉本地 File，免得网络恢复又被自动补传
+        if (retryClientMsgId) {
+          chat.markFailed(props.conversationId, retryClientMsgId)
+          chat.forgetRetryFile(retryClientMsgId)
+        }
+        ElMessage.error(guard.message)
+        return
+      }
+    }
+    clientMsgId = retryClientMsgId || newClientMsgId()
+    chat.appendMessage(
+      props.conversationId,
+      {
+        clientMsgId,
+        conversationId: props.conversationId,
+        fromUserId: auth.userId,
+        fromNickname: auth.nickname,
+        fromAvatar: auth.avatarRaw,
+        msgType,
+        content: file.name || '',
+        extra: {
+          fileName: file.name || '',
+          fileSize: file.size,
+          contentType: file.type || '',
+          flash: flashOn ? true : undefined,
+          flashSeconds: flashOn ? flashSecs : undefined
+        },
+        seq: null,
+        status: 0,
+        recalled: false,
+        sendTime: new Date().toISOString()
+      },
+      true
+    )
+    chat.rememberRetryFile(clientMsgId, file, props.conversationId)
+    // 桌面端视频压缩后，真正上传的是压缩产物；其余情况就是原文件
+    let uploadTarget = file
+    task.percent = 0
+    task.stage = 'upload'
+    task.chunkInfo = null
     const extra = {}
     let duration = null
     if (kind === 'image') {
@@ -2962,7 +2966,7 @@ async function uploadAndSend(file, retryClientMsgId = null) {
       // 任何异常只会得到空串（照常发送），不阻断主流程；闪照不跑 OCR，
       // 否则图内文字成了销毁后还能看到内容的后门
       if (!flashOn) {
-        uploadStage.value = 'ocr'
+        task.stage = 'ocr'
         const ocrText = await ocrImageText(file)
         if (ocrText) {
           extra.ocrText = ocrText
@@ -2988,17 +2992,17 @@ async function uploadAndSend(file, retryClientMsgId = null) {
       if (isElectron() && native && typeof native.compressVideo === 'function') {
         const inputPath = native.getPathForFile(file)
         if (inputPath) {
-          uploadStage.value = 'compress'
-          uploadPercent.value = 0
+          task.stage = 'compress'
+          task.percent = 0
           try {
             const res = await native.compressVideo(
               inputPath,
               { duration: (meta && meta.duration) || 0 },
-              (pct) => { uploadPercent.value = Math.min(99, Math.max(0, pct | 0)) }
+              (pct) => { task.percent = Math.min(99, Math.max(0, pct | 0)) }
             )
             if (res && res.compressed && res.data) {
               uploadTarget = new File([res.data], res.name || 'video.mp4', { type: 'video/mp4' })
-              uploadFileName.value = uploadTarget.name
+              task.name = uploadTarget.name
             }
           } catch {
             // 压缩异常不阻断发送，回退原片直传
@@ -3009,11 +3013,11 @@ async function uploadAndSend(file, retryClientMsgId = null) {
 
     const bizType = kind === 'image' ? 'chat_image' : kind === 'voice' ? 'chat_voice' : 'chat_file'
     const vo = await uploadFileSmart(uploadTarget, bizType, duration, (percent, stage, chunkInfo) => {
-      uploadPercent.value = percent
+      task.percent = percent
       if (stage) {
-        uploadStage.value = stage
+        task.stage = stage
       }
-      uploadChunkInfo.value = chunkInfo || null
+      task.chunkInfo = chunkInfo || null
     })
     // 文件已经在服务器上，本地不用再留字节：后续失败由 pending 队列与手动重发接管
     chat.forgetRetryFile(clientMsgId)
@@ -3041,16 +3045,16 @@ async function uploadAndSend(file, retryClientMsgId = null) {
   } catch (error) {
     // sendMessage 与上传链路都已 silent：业务类拒绝要在这里弹出原因；
     // 网络类只标失败（红叹号 + 恢复后自动重发），不弹「网络有问题」toast
-    chat.markFailed(props.conversationId, clientMsgId)
+    // 审核闸门在挂占位气泡之前就被拦下时 clientMsgId 仍为空，无需标失败气泡
+    if (clientMsgId) {
+      chat.markFailed(props.conversationId, clientMsgId)
+    }
     if (isBusinessError(error)) {
       ElMessage.error(sendErrorText(error))
     }
   } finally {
-    uploading.value = false
-    uploadPercent.value = 0
-    uploadStage.value = 'upload'
-    uploadChunkInfo.value = null
-    uploadFileName.value = ''
+    // 无论成功、失败、还是审核拦下早退，都把这个任务移出后台队列（uploading 随之回落）
+    uploadTasks.value = uploadTasks.value.filter((t) => t.id !== task.id)
   }
 }
 
@@ -4066,6 +4070,18 @@ watch(key, async () => {
   align-items: center;
   gap: 8px;
   margin-left: 8px;
+}
+
+/* 后台上传堆叠：多个并发任务竖排，每个一行；不占满整行，仅做提示 */
+.chat-window__progress-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.chat-window__progress-stack .chat-window__progress {
+  margin-left: 0;
 }
 
 .chat-window__progress-text {

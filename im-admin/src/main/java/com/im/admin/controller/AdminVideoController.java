@@ -6,6 +6,7 @@ import com.im.admin.service.AdminVideoService;
 import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
+import com.im.common.domain.AdminVideoCategoryDTO;
 import com.im.common.domain.AdminVideoDTO;
 import com.im.common.domain.AdminVideoQueryDTO;
 import com.im.common.util.SecurityUtil;
@@ -17,9 +18,12 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 后台的视频管理（三期）。
@@ -70,5 +74,42 @@ public class AdminVideoController {
     public Result<Void> delete(@Parameter(description = "视频记录 ID") @PathVariable("id") Long id) {
         adminVideoService.delete(id, SecurityUtil.getUserId());
         return Result.ok(null, "视频已删除");
+    }
+
+    /* ==================== 二级分类字典（控制栏可增删改） ==================== */
+
+    @Operation(summary = "分类列表",
+            description = "视频板块顶部分类栏的全部项（含停用），按 sort 升序；用户端另走 /api/live/video/categories 只拉启用项")
+    @GetMapping("/category/list")
+    public Result<List<AdminVideoCategoryDTO>> categoryList() {
+        return Result.ok(adminVideoService.listCategories());
+    }
+
+    @Operation(summary = "新增分类",
+            description = "name 必填（未删除行内不允许同名）；sort 为空则排到最后；新分类默认启用")
+    @PostMapping("/category")
+    public Result<AdminVideoCategoryDTO> createCategory(
+            @Parameter(description = "分类名称") @RequestParam("name") String name,
+            @Parameter(description = "排序，空则排最后") @RequestParam(value = "sort", required = false) Integer sort) {
+        return Result.ok(adminVideoService.createCategory(name, sort, SecurityUtil.getUserId()), "分类已新增");
+    }
+
+    @Operation(summary = "修改分类",
+            description = "改名 / 调序 / 启停；参数不传表示该项不改。停用仅从前端分类栏隐身，不动历史视频的分类文本")
+    @PutMapping("/category/{id}")
+    public Result<AdminVideoCategoryDTO> updateCategory(
+            @Parameter(description = "分类 ID") @PathVariable("id") Long id,
+            @Parameter(description = "新名称，空不改") @RequestParam(value = "name", required = false) String name,
+            @Parameter(description = "新排序，空不改") @RequestParam(value = "sort", required = false) Integer sort,
+            @Parameter(description = "状态 1 启用 0 停用，空不改") @RequestParam(value = "status", required = false) Integer status) {
+        return Result.ok(adminVideoService.updateCategory(id, name, sort, status, SecurityUtil.getUserId()), "分类已保存");
+    }
+
+    @Operation(summary = "删除分类",
+            description = "逻辑删除：仅从字典隐身，不动任何已发布视频的 category 文本；幂等")
+    @DeleteMapping("/category/{id}")
+    public Result<Void> deleteCategory(@Parameter(description = "分类 ID") @PathVariable("id") Long id) {
+        adminVideoService.deleteCategory(id, SecurityUtil.getUserId());
+        return Result.ok(null, "分类已删除");
     }
 }

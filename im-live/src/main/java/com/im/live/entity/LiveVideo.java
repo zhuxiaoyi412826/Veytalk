@@ -42,6 +42,9 @@ public class LiveVideo extends BaseEntity {
 
     private String title;
 
+    /** 分类（视频板块抖音式信息流的二级分类标签，如 游戏/音乐/美食…），缺省 综合 */
+    private String category;
+
     /** 视频文件 ID（im_file.id，bizType=video） */
     private Long fileId;
 

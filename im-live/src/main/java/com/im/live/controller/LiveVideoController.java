@@ -6,6 +6,7 @@ import com.im.common.api.Result;
 import com.im.common.security.ratelimit.RateLimit;
 import com.im.live.dto.req.LiveVideoCreateRequest;
 import com.im.live.dto.vo.LiveVideoVO;
+import com.im.live.service.LiveVideoCategoryService;
 import com.im.live.service.LiveVideoService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -19,6 +20,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 直播页「视频」板块 REST 接口：短视频信息流的分页、发布、删除与播放计数。
@@ -38,12 +41,24 @@ import org.springframework.web.bind.annotation.RestController;
 public class LiveVideoController {
 
     private final LiveVideoService videoService;
+    private final LiveVideoCategoryService categoryService;
 
-    @Operation(summary = "视频分页", description = "仅正常状态视频，按发布时间倒序；分页上限 100")
+    @Operation(summary = "分类列表",
+            description = "视频板块顶部分类栏与发布分类下拉的数据源：仅启用项、按 sort 升序；不再硬编码在前端")
+    @GetMapping("/categories")
+    public Result<List<String>> categories() {
+        return Result.ok(categoryService.enabledNames());
+    }
+
+    @Operation(summary = "视频分页", description = "仅正常状态视频；category 二级分类精确过滤、keyword 标题模糊搜索、sort=hot 按播放量否则按时间、mine=true 只看本人；分页上限 100")
     @GetMapping("/page")
     public Result<Page<LiveVideoVO>> page(@RequestParam(defaultValue = "1") long current,
-                                          @RequestParam(defaultValue = "24") long size) {
-        return Result.ok(videoService.page(current, Math.min(size, 100)));
+                                          @RequestParam(defaultValue = "24") long size,
+                                          @RequestParam(required = false) String category,
+                                          @RequestParam(required = false) String keyword,
+                                          @RequestParam(required = false) String sort,
+                                          @RequestParam(defaultValue = "false") boolean mine) {
+        return Result.ok(videoService.page(current, Math.min(size, 100), category, keyword, sort, mine));
     }
 
     @Operation(summary = "发布视频",

@@ -39,6 +39,7 @@ import {
   stopLive,
   abortLive,
   fetchVideoPage,
+  fetchVideoCategories,
   createVideo,
   deleteVideo,
   reportVideoPlay,
@@ -137,16 +138,55 @@ function openReplayRoom(item) {
 /** 顶层板块：live 直播间（默认），video 短视频信息流 */
 const activeTab = ref('live')
 
-/* ---------- 视频板块：信息流列表 ---------- */
+/* ---------- 视频板块：抖音式信息流（左一级频道 + 顶二级分类 + 搜索 + 自适应网格） ---------- */
 const videos = ref([])
 const videoLoading = ref(false)
-const videoQuery = reactive({ current: 1, size: 24, total: 0 })
+// 参考抖音「一行 5 个 × 三行」= 15；列数按屏宽 auto-fill 自适应，每页取 15 条正好铺满该布局
+const videoQuery = reactive({ current: 1, size: 15, total: 0 })
 let videoLoaded = false
+/** 左侧一级频道：featured 精选（最新）/ hot 热门（按播放量）/ mine 我的（本人） */
+const videoChannel = ref('featured')
+const VIDEO_CHANNELS = [
+  { key: 'featured', label: '精选' },
+  { key: 'hot', label: '热门' },
+  { key: 'mine', label: '我的' }
+]
+/** 顶部二级分类 + 发布可选分类：数据源改为后台字典（/live/video/categories），
+ *  初始值为上线时的 17 项作兑底（接口异常/未返回时仍能渲染），拉到非空则整体替换 */
+const videoCategories = ref([
+  '综合', '游戏', '二次元', '音乐', '影视', '美食', '知识', '小剧场', '生活vlog',
+  '体育', '旅行', '亲子', '动物', '三农', '汽车', '美妆穿搭', '公开课'
+])
+let videoCategoriesLoaded = false
+
+/** 拉一次启用分类（进视频板块时调）；失败或空那么保留兑底值，不致分类栏空掉 */
+async function loadVideoCategories() {
+  try {
+    const list = await fetchVideoCategories()
+    if (Array.isArray(list) && list.length) {
+      videoCategories.value = list
+    }
+    videoCategoriesLoaded = true
+  } catch {
+    // silent 接口，拉不到就吃兑底，不打扰观看
+  }
+}
+/** 分类过滤值：'全部' 表示不带 category，其余精确命中 */
+const videoFilter = reactive({ category: '全部', keyword: '' })
 
 async function loadVideos() {
   videoLoading.value = true
   try {
-    const page = await fetchVideoPage({ current: videoQuery.current, size: videoQuery.size })
+    const params = { current: videoQuery.current, size: videoQuery.size }
+    // 一级频道映射后端排序/归属：hot→按播放量最热、mine→只看本人，featured→默认最新
+    if (videoChannel.value === 'hot') params.sort = 'hot'
+    if (videoChannel.value === 'mine') params.mine = true
+    // 二级分类：'全部' 不过滤，其余精确命中 category 列
+    if (videoFilter.category && videoFilter.category !== '全部') params.category = videoFilter.category
+    // 顶部搜索：标题关键词，走后端 LIKE
+    const kw = videoFilter.keyword.trim()
+    if (kw) params.keyword = kw
+    const page = await fetchVideoPage(params)
     videos.value = page?.records || []
     videoQuery.total = page?.total || 0
     videoLoaded = true
@@ -155,6 +195,28 @@ async function loadVideos() {
   } finally {
     videoLoading.value = false
   }
+}
+
+/** 切一级频道：回到第一页重拉 */
+function switchVideoChannel(key) {
+  if (videoChannel.value === key) return
+  videoChannel.value = key
+  videoQuery.current = 1
+  loadVideos()
+}
+
+/** 切二级分类：回到第一页重拉 */
+function switchVideoCategory(cat) {
+  if (videoFilter.category === cat) return
+  videoFilter.category = cat
+  videoQuery.current = 1
+  loadVideos()
+}
+
+/** 顶部搜索：回车 / 清空即回到第一页重拉 */
+function onVideoSearch() {
+  videoQuery.current = 1
+  loadVideos()
 }
 
 /* ---------- 视频板块：播放区（点卡片在此内联播放） ---------- */
@@ -231,7 +293,7 @@ const videoFile = ref(null)
 const videoMeta = reactive({ duration: null, width: null, height: null })
 const coverFile = ref(null)
 const coverPreview = ref('')
-const uploadForm = reactive({ title: '' })
+const uploadForm = reactive({ title: '', category: '综合' })
 const uploading = ref(false)
 const uploadPercent = ref(0)
 const uploadStage = ref('')
@@ -254,6 +316,7 @@ function resetUploadForm() {
   videoMeta.width = null
   videoMeta.height = null
   uploadForm.title = ''
+  uploadForm.category = '综合'
   uploadPercent.value = 0
   uploadStage.value = ''
   clearCoverPreview()
@@ -394,6 +457,7 @@ async function submitUpload() {
     }
     await createVideo({
       title: uploadForm.title.trim(),
+      category: uploadForm.category || '综合',
       fileId: vo.fileId,
       coverFileId,
       duration: videoMeta.duration,
@@ -416,8 +480,13 @@ async function submitUpload() {
 
 // 首次切到视频板块才拉列表，避免进大厅就多打一次请求
 watch(activeTab, (tab) => {
-  if (tab === 'video' && !videoLoaded) {
-    loadVideos()
+  if (tab === 'video') {
+    if (!videoCategoriesLoaded) {
+      loadVideoCategories()
+    }
+    if (!videoLoaded) {
+      loadVideos()
+    }
   }
 })
 
@@ -2646,57 +2715,101 @@ watch(() => route.params.roomId, () => syncRoute())
       </div>
       </template>
 
-      <!-- ===== 视频板块：短视频信息流 ===== -->
+      <!-- ===== 视频板块：抖音式信息流（左一级频道 + 顶搜索/二级分类 + 自适应网格）===== -->
       <template v-else-if="activeTab === 'video'">
-        <div class="live-video__head">
-          <span class="live-video__count">共 {{ videoQuery.total }} 个视频</span>
-          <el-button type="primary" @click="openUpload">上传视频</el-button>
-        </div>
-
-        <!-- 播放区：点下方卡片在此内联播放 -->
-        <div v-if="playingVideo" class="live-video__player">
-          <div class="live-video__player-bar">
-            <UserAvatar :src="playingVideo.uploaderAvatar" :name="playingVideo.uploaderName" :size="26" />
-            <div class="live-video__player-info">
-              <div class="live-video__player-title im-ellipsis">{{ playingVideo.title }}</div>
-              <div class="live-video__player-meta">{{ playingVideoMeta }}</div>
+        <div class="video-feed">
+          <!-- 左侧一级频道栏：精选（最新）/ 热门（最热）/ 我的（本人） -->
+          <aside class="video-feed__nav">
+            <div
+              v-for="ch in VIDEO_CHANNELS"
+              :key="ch.key"
+              class="video-feed__nav-item"
+              :class="{ 'is-active': videoChannel === ch.key }"
+              @click="switchVideoChannel(ch.key)"
+            >
+              {{ ch.label }}
             </div>
-            <el-button text @click="closePlayer">关闭 ✕</el-button>
-          </div>
-          <video ref="playerEl" class="live-video__video" :src="playSrc" controls autoplay playsinline></video>
-        </div>
+          </aside>
 
-        <div v-loading="videoLoading" class="live-grid live-grid--video">
-          <div v-for="v in videos" :key="v.id" class="video-card" @click="openVideo(v)">
-            <div class="video-card__cover">
-              <img v-if="coverSrc(v)" :src="coverSrc(v)" alt="" />
-              <div v-else class="video-card__placeholder">
-                <el-icon :size="34"><VideoCamera /></el-icon>
+          <div class="video-feed__main">
+            <!-- 顶部：搜索 + 上传 -->
+            <div class="video-feed__top">
+              <el-input
+                v-model="videoFilter.keyword"
+                class="video-feed__search"
+                placeholder="搜索视频标题"
+                clearable
+                @keyup.enter="onVideoSearch"
+                @clear="onVideoSearch"
+              >
+                <template #prefix><el-icon><Search /></el-icon></template>
+              </el-input>
+              <el-button type="primary" @click="openUpload">上传视频</el-button>
+            </div>
+
+            <!-- 顶部二级分类标签：全部 + 各分类，精确过滤 category -->
+            <div class="video-feed__cats">
+              <span
+                class="video-feed__cat"
+                :class="{ 'is-active': videoFilter.category === '全部' }"
+                @click="switchVideoCategory('全部')"
+              >全部</span>
+              <span
+                v-for="cat in videoCategories"
+                :key="cat"
+                class="video-feed__cat"
+                :class="{ 'is-active': videoFilter.category === cat }"
+                @click="switchVideoCategory(cat)"
+              >{{ cat }}</span>
+            </div>
+
+            <!-- 播放区：点下方卡片在此内联播放 -->
+            <div v-if="playingVideo" class="live-video__player">
+              <div class="live-video__player-bar">
+                <UserAvatar :src="playingVideo.uploaderAvatar" :name="playingVideo.uploaderName" :size="26" />
+                <div class="live-video__player-info">
+                  <div class="live-video__player-title im-ellipsis">{{ playingVideo.title }}</div>
+                  <div class="live-video__player-meta">{{ playingVideoMeta }}</div>
+                </div>
+                <el-button text @click="closePlayer">关闭 ✕</el-button>
               </div>
-              <span class="video-card__play">▶ {{ v.playCount || 0 }}</span>
-              <span class="video-card__duration">{{ fmtDuration(v.duration) }}</span>
-              <span v-if="playingVideo && playingVideo.id === v.id" class="video-card__playing">播放中</span>
-              <span v-if="v.mine" class="video-card__del" @click.stop="onRemoveVideo(v)">删除</span>
+              <video ref="playerEl" class="live-video__video" :src="playSrc" controls autoplay playsinline></video>
             </div>
-            <div class="video-card__info">
-              <div class="video-card__title">{{ v.title }}</div>
-              <div class="video-card__uploader">
-                <UserAvatar :src="v.uploaderAvatar" :name="v.uploaderName" :size="20" />
-                <span class="im-ellipsis video-card__name">{{ v.uploaderName }}</span>
+
+            <!-- 内容网格：一行约 5 个 × 三行，列数按屏宽 auto-fill 自适应 -->
+            <div v-loading="videoLoading" class="video-feed__grid">
+              <div v-for="v in videos" :key="v.id" class="video-card" @click="openVideo(v)">
+                <div class="video-card__cover">
+                  <img v-if="coverSrc(v)" :src="coverSrc(v)" alt="" />
+                  <div v-else class="video-card__placeholder">
+                    <el-icon :size="34"><VideoCamera /></el-icon>
+                  </div>
+                  <span class="video-card__play">▶ {{ v.playCount || 0 }}</span>
+                  <span class="video-card__duration">{{ fmtDuration(v.duration) }}</span>
+                  <span v-if="playingVideo && playingVideo.id === v.id" class="video-card__playing">播放中</span>
+                  <span v-if="v.mine" class="video-card__del" @click.stop="onRemoveVideo(v)">删除</span>
+                </div>
+                <div class="video-card__info">
+                  <div class="video-card__title">{{ v.title }}</div>
+                  <div class="video-card__uploader">
+                    <UserAvatar :src="v.uploaderAvatar" :name="v.uploaderName" :size="20" />
+                    <span class="im-ellipsis video-card__name">{{ v.uploaderName }}</span>
+                  </div>
+                </div>
               </div>
+              <el-empty v-if="!videoLoading && !videos.length" description="该频道下还没有视频" class="live-grid__empty" />
+            </div>
+
+            <div v-if="videoQuery.total > videoQuery.size" class="live-lobby__pager">
+              <el-pagination
+                layout="prev, pager, next"
+                :total="videoQuery.total"
+                :page-size="videoQuery.size"
+                :current-page="videoQuery.current"
+                @current-change="(p) => { videoQuery.current = p; loadVideos() }"
+              />
             </div>
           </div>
-          <el-empty v-if="!videoLoading && !videos.length" description="还没有视频，点右上角上传" class="live-grid__empty" />
-        </div>
-
-        <div v-if="videoQuery.total > videoQuery.size" class="live-lobby__pager">
-          <el-pagination
-            layout="prev, pager, next"
-            :total="videoQuery.total"
-            :page-size="videoQuery.size"
-            :current-page="videoQuery.current"
-            @current-change="(p) => { videoQuery.current = p; loadVideos() }"
-          />
         </div>
       </template>
 
@@ -2824,6 +2937,11 @@ watch(() => route.params.roomId, () => syncRoute())
         </el-form-item>
         <el-form-item label="标题">
           <el-input v-model="uploadForm.title" maxlength="60" show-word-limit placeholder="给视频起个标题" />
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-select v-model="uploadForm.category" placeholder="选择分类（默认综合）" style="width: 200px">
+            <el-option v-for="cat in videoCategories" :key="cat" :label="cat" :value="cat" />
+          </el-select>
         </el-form-item>
         <el-form-item label="封面">
           <div class="live-up__cover">
@@ -4196,6 +4314,93 @@ watch(() => route.params.roomId, () => syncRoute())
 }
 
 /* ------------------------------ 视频板块 ------------------------------ */
+/* 抖音式信息流布局：左侧一级频道栏 + 右侧主体（顶搜索/二级分类 + 自适应网格） */
+.video-feed {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.video-feed__nav {
+  flex: none;
+  width: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: sticky;
+  top: 12px;
+}
+
+.video-feed__nav-item {
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-size: 15px;
+  color: #18191c;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.video-feed__nav-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.video-feed__nav-item.is-active {
+  background: #fff2f5;
+  color: #fe2c55;
+  font-weight: 600;
+}
+
+.video-feed__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.video-feed__top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.video-feed__search {
+  max-width: 360px;
+}
+
+.video-feed__cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.video-feed__cat {
+  padding: 5px 14px;
+  border-radius: 16px;
+  background: #f2f3f5;
+  font-size: 13px;
+  color: #4e5969;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.video-feed__cat:hover {
+  background: #e5e6eb;
+}
+
+.video-feed__cat.is-active {
+  background: #fe2c55;
+  color: #fff;
+}
+
+/* 内容网格：列数按屏宽 auto-fill，宽屏约 5 列；窄屏自动降列，卡片 16:9 竖排 */
+.video-feed__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px 12px;
+  min-height: 120px;
+}
+
 .live-video__head {
   display: flex;
   align-items: center;
