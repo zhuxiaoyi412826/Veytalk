@@ -43,7 +43,7 @@ jobs:
       matrix:
         language: [java, javascript-typescript]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Java 需要编译期信息做数据流分析；autobuild 会调用 Maven，故先备好 JDK。
       # 对 javascript-typescript 这一步无害（只是多装一个 JDK）。

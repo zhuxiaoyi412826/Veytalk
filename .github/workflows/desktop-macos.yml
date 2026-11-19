@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ---------------------------------------------------------- 决定是否签名（secrets 齐全才签，否则自动降级未签名）
       - name: 决定是否签名（secrets 齐全才签，否则自动降级未签名，不报错）
