@@ -33,7 +33,7 @@
     "marked": "^18.0.14",
     "nsfwjs": "^4.3.0",
     "onnxruntime-web": "^1.30.0",
-    "pinia": "^3.0.4",
+    "pinia": "^4.1.0",
     "spark-md5": "^3.0.2",
     "sql.js": "^1.13.0",
     "tesseract.js": "^7.0.0",
