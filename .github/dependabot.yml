@@ -1,0 +1,84 @@
+# ==============================================================================
+# Dependabot：定期给「GitHub Actions」与「项目依赖」开升级 PR
+#
+# 覆盖三个生态：
+#   github-actions  —— 本仓 4 份工作流里所有 uses: 引用的 Action（含已固定到 SHA 的那些，
+#                       Dependabot 会连 SHA 带注释一起 bump，正好配合我们的 SHA 固定策略）；
+#   maven           —— 后端依赖。版本集中在根 pom 的 properties / dependencyManagement 管理，
+#                       所以只扫根目录 `/` 一处即可覆盖全反应堆；
+#   npm             —— 三个前端站（im-ui / im-admin-ui / im-website）的 package.json + lock。
+#
+# 策略取向：
+#   - 只开 minor/patch 的分组聚合 PR（一次一个 PR 把同类小版本合并升），降低 PR 噪音；
+#   - major 升级各自单独成 PR，交给人判断（major 常带破坏性变更）；
+#   - 上限 10 个未合并 PR，避免堆积。
+# 升级 PR 合入前，仍会照常触发 build-and-package / security / codeql 三条流水线把关。
+# ==============================================================================
+version: 2
+
+updates:
+  # ---------------------------------------------------------------- GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: 'chore(deps)'
+      include: scope
+    groups:
+      actions-minor:
+        update-types:
+          - minor
+          - patch
+
+  # ---------------------------------------------------------------- Maven（后端）
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:10'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - backend
+    commit-message:
+      prefix: 'chore(deps)'
+      include: scope
+    groups:
+      maven-minor:
+        update-types:
+          - minor
+          - patch
+
+  # ---------------------------------------------------------------- npm（三个前端站）
+  - package-ecosystem: npm
+    directories:
+      - /im-ui
+      - /im-admin-ui
+      - /im-website
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:20'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: 'chore(deps)'
+      include: scope
+    groups:
+      npm-minor:
+        update-types:
+          - minor
+          - patch

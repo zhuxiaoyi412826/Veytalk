@@ -1,0 +1,71 @@
+# ==============================================================================
+# CodeQL 静态代码扫描（SAST）：Java（后端）+ JavaScript/TypeScript（前端）
+#
+# 与 security.yml 的分工：
+#   - security.yml  查的是「依赖组件有没有已知 CVE」（SCA，看 lock/pom）；
+#   - 本文件        查的是「我们自己写的代码有没有注入/越权/空指针等缺陷」（SAST，做数据流分析）。
+#   两者互补，缺一不可，是「生产七要素」里 SCA 那一环的两半。
+#
+# 结论去向：sarif 上传到仓库的 Security → Code scanning 面板，PR 上会以行内批注显示。
+#   ★ 本工作流默认不阻断合入（CodeQL 存量告警通常较多，先建基线再逐步收敛）；
+#     若要变成硬门，去分支保护里勾选该 status check 即可，无需改本文件。
+# ==============================================================================
+name: codeql
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # 每周二 04:07 UTC 全量扫一次（即便代码没动，CodeQL 引擎/规则更新也可能新增告警）
+    - cron: '7 4 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write     # 上传 SARIF 到 Code scanning
+  actions: read              # 供 CodeQL 读取构建配置
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  JAVA_VERSION: '21'
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [java, javascript-typescript]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Java 需要编译期信息做数据流分析；autobuild 会调用 Maven，故先备好 JDK。
+      # 对 javascript-typescript 这一步无害（只是多装一个 JDK）。
+      - name: 准备 JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: 初始化 CodeQL
+        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        with:
+          languages: ${{ matrix.language }}
+          # 用默认安全查询集；如需扩展可加 queries: 指向自定义 qls，不必改这里
+
+      # ★ autobuild 只对 java 真正跑 Maven 编译；javascript-typescript 无需构建，
+      #   CodeQL 直接对源码做提取，这一步对 JS 是空操作（保留以便矩阵统一）。
+      - name: 自动构建（Java 需要）
+        uses: github/codeql-action/autobuild@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+
+      - name: 执行分析并上传
+        uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        with:
+          category: '/language:${{ matrix.language }}'

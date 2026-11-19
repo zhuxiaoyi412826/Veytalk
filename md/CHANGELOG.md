@@ -16,6 +16,10 @@
 
 ## 未发布（Unreleased）
 
+### 安全 Security
+
+- **★ CI/CD 安全与质量闸门加固（用户选定实现「跑测试 / SCA / SHA 固定 / SBOM」四项）**。`build-and-package.yml`：所有 `uses:` 由浮动标签改**固定到 commit SHA**（供应链防 Action 被劫持），新增 `test` job 跑 `mvn test` 作 PR 编译/测试门（★ 当前 Maven 模块暂无 JUnit 单测，补上即自动纳入），build-jar 追加 CycloneDX 聚合 SBOM 并上传 artifact。新增三份独立配置：`security.yml`（npm audit + OWASP dependency-check，口径 **PR 只报告 / main·定时 high·critical 阻断**）、`codeql.yml`（Java + JS/TS SAST）、`dependabot.yml`（actions/maven/npm 每周升级 PR）。★ 可选配 `NVD_API_KEY` secret（不配则 dependency-check 走匿名拉取、runner 共享 IP 易被限流）；CodeQL 默认不阻断合入（先建基线，要变硬门去分支保护勾选该 check）。涉及：`.github/workflows/{build-and-package,security,codeql}.yml`、`.github/dependabot.yml`（4 份 YAML 均过 safe_load 校验）。
+
 ### 新增 Added
 
 - **★ 意见反馈全链路（im-admin + 两前端）：前台设置页提交 + 后台回复处置（用户原话：「在设置中增加一个意见反馈功能，填写好表单提交上去，同时后台管理侧边栏也增加意见反馈，对前台用户提交的表单进行 CRUD 操作」）**。前台「设置 · 意见反馈」新 section（类型单选 bug/suggestion/experience/other + 正文≤1000 字 + 联系方式选填），提交走 `POST /api/feedback`（`@SaCheckLogin` 但**不设权限点**：任何登录用户都能提，防刷靠 `@RateLimit(Dimension.USER)` 1 分钟 5 条；提交人一律取登录态不接受入参 userId）；后台新增「意见反馈」屏 `FeedbackView.vue` 做检索/查看/回复/删除（**无新建编辑**：允许后台凭空造或改用户原文就失去台账凭证价值），走 `/api/admin/feedback/**` + `@SaCheckPermission(system:feedback)`。表 `im_feedback` 归 im-admin（与公告/版本管理同例，不新增 SPI 契约、不动 pom），继承 AuditEntity 物理删除；提交人昵称不冗余进表，后台列表用 `AdminUserSpi.listByIds` **批量**解析（堵 N+1，注销显示「已注销」）；状态机 `0 待处理 → 1 已回复`，回复写入即置 1 并记回复人/时刻，再次回复覆盖旧文。★ 新权限点 `system:feedback`（id 127），跑完 `sql/migration_feedback.sql`（幂等；建表 + RBAC 6027）**必须清 Redis `im:auth:perm:*`**，否则 admin 也看不到这一屏；MySQL 写由本人执行。★ 需重启后端、两前端重新 build 生效（两侧 `npm run build` 均 EXIT=0，`mvn -pl im-admin -am compile` BUILD SUCCESS）。涉及：im-admin（entity/mapper/enums/service/双控制器 + 4 DTO/VO 共 9 新文件）、im-common（ImConstants 加 `PERM_SYSTEM_FEEDBACK`）、`im_schema.sql` 第十七节 + `im_data.sql` 种子 + 新 migration、im-ui（Settings.vue 新 section + api/feedback.js）、im-admin-ui（FeedbackView.vue/api/admin.js/router/菜单）、`md/SQL变更文档.md`（1.0.2）。

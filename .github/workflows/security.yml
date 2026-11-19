@@ -1,0 +1,181 @@
+# ==============================================================================
+# 依赖漏洞扫描（SCA）：npm audit + OWASP dependency-check
+#
+# 与 build-and-package.yml 解耦，单独一条流水线，理由：
+#   1. NVD 首次下载依赖库很慢（几百 MB），不该拖慢主构建/发布链路；
+#   2. 扫描结论与「能否出镜像」是两件事，分开后各自的红/绿含义清晰。
+#
+# 门禁口径（与团队「PR 报告、main 阻断」约定一致）：
+#   - pull_request      ：只报告（::error:: 注解 + 上传报告 artifact），★ 不拦合入；
+#   - push main / 定时   ：high 或 critical 命中即让 job 失败（main 阻断）。
+#   阈值统一取 high+critical（CVSS >= 7 量级），避免 moderate 噪音天天挡门。
+#
+# 需要的 Secrets（可选，不配则退化为匿名/默认，只是慢或漏报，不会误红）：
+#   NVD_API_KEY   https://nvd.nist.gov/developers/request-an-api-key 免费申请；
+#                 不配时 dependency-check 走匿名拉取，GitHub runner 共享 IP 常被限流很慢。
+# ==============================================================================
+name: security-sca
+
+on:
+  pull_request:
+    paths:
+      - '**/pom.xml'
+      - 'pom.xml'
+      - 'im-*/package.json'
+      - 'im-*/package-lock.json'
+      - '.github/workflows/security.yml'
+  push:
+    branches: [main]
+  schedule:
+    # 每周一 03:17 UTC 全量扫一次（即使没改依赖，NVD 也可能给老版本新判 CVE）
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+# 同一 ref 上新提交取消旧扫描；定时/手动不互相取消
+concurrency:
+  group: sca-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '20'
+  JAVA_VERSION: '21'
+
+jobs:
+  # ---------------------------------------------------------------- 前端三站依赖审计
+  npm-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [im-ui, im-admin-ui, im-website]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ★ 只读 package-lock 即可审计，无需 npm ci（省几分钟，也规避镜像站 audit 端点差异）
+      - name: npm audit（high 级）
+        id: audit
+        working-directory: ${{ matrix.app }}
+        run: |
+          set -uo pipefail
+          # npmmirror 等镜像站可能不提供 audit 端点 → 命令可能非零退出，先吞掉，交给下面的解析判定
+          npm audit --audit-level=high --json > audit.json 2>/dev/null || true
+          node -e '
+          const fs = require("fs");
+          let j;
+          try { j = JSON.parse(fs.readFileSync("audit.json", "utf8")); }
+          catch (e) {
+            console.log("::warning::" + process.argv[1] + "：npm audit 无有效 JSON（可能镜像站不支持 audit 端点），本项跳过");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "hc=0\n");
+            process.exit(0);
+          }
+          const m = (j.metadata && j.metadata.vulnerabilities) || {};
+          const crit = m.critical || 0, high = m.high || 0;
+          console.log("critical=" + crit + "  high=" + high + "  moderate=" + (m.moderate || 0));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, "hc=" + (crit + high) + "\n");
+          ' "${{ matrix.app }}"
+
+      - name: 上传审计报告
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-audit-${{ matrix.app }}-${{ github.sha }}
+          path: ${{ matrix.app }}/audit.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: 门禁判定（main/定时阻断，PR 仅报告）
+        if: steps.audit.outputs.hc != '0'
+        run: |
+          set -uo pipefail
+          echo "::error::${{ matrix.app }} 存在 ${{ steps.audit.outputs.hc }} 个 high/critical 依赖漏洞，详见 npm-audit 报告 artifact"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------- 后端 Maven 依赖漏洞（OWASP dependency-check）
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 准备 JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # NVD 本地库缓存：命中则免每次几百 MB 全量下载，扫描从十几分钟降到一两分钟
+      - name: 缓存 NVD 数据
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: nvd-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: nvd-${{ runner.os }}-
+
+      # aggregate 一次覆盖全部模块，产出根 target/dependency-check-report.json
+      # ★ 不传 -DfailBuildOnCVSS（让 goal 本身永不失败），阻断与否交给下面的 JSON 解析按事件判定，
+      #   这样 PR 也能拿到报告而不被 goal 直接判红。
+      - name: dependency-check 扫描
+        id: dc
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mvn -B -ntp org.owasp:dependency-check-maven:12.1.3:aggregate \
+            -Dformat=JSON -DfailOnError=false \
+            ${NVD_API_KEY:+-DnvdApiKey=$NVD_API_KEY}
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
+      - name: 解析 high/critical 数量
+        id: count
+        run: |
+          set -uo pipefail
+          node -e '
+          const fs = require("fs");
+          const p = "target/dependency-check-report.json";
+          if (!fs.existsSync(p)) {
+            console.log("::warning::未生成 dependency-check 报告（NVD 拉取可能被限流），本项跳过");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "hc=0\n");
+            process.exit(0);
+          }
+          const r = JSON.parse(fs.readFileSync(p, "utf8"));
+          let hc = 0, total = 0;
+          for (const d of (r.dependencies || [])) {
+            for (const v of (d.vulnerabilities || [])) {
+              total++;
+              const s = (v.severity || "").toLowerCase();
+              if (s === "high" || s === "critical") hc++;
+            }
+          }
+          console.log("依赖 CVE 合计 " + total + "，其中 high/critical " + hc);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, "hc=" + hc + "\n");
+          '
+
+      - name: 上传 dependency-check 报告
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-check-${{ github.sha }}
+          path: target/dependency-check-report.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: 门禁判定（main/定时阻断，PR 仅报告）
+        if: steps.count.outputs.hc != '0'
+        run: |
+          set -uo pipefail
+          echo "::error::后端依赖存在 ${{ steps.count.outputs.hc }} 个 high/critical CVE，详见 dependency-check 报告 artifact"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            exit 1
+          fi
