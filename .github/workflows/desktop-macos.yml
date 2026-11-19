@@ -165,7 +165,7 @@ jobs:
       # 只收 .dmg —— 它是标准分发物，内部 .app 权限完整且已 staple；
       # upload-artifact 用 zip 存目录会丢 Unix 可执行位，故不单独传 .app（要 .app 挂载 .dmg 拖出即可）
       - name: 上传成品 .dmg（Artifact，留 14 天）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: im-desktop-macos-arm64-${{ github.ref_name }}-${{ steps.sign.outputs.suffix }}
           path: im-ui/src-tauri/target/release/bundle/dmg/*.dmg
