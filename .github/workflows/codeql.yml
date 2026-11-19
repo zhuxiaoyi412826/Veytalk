@@ -63,7 +63,7 @@ jobs:
       # ★ autobuild 只对 java 真正跑 Maven 编译；javascript-typescript 无需构建，
       #   CodeQL 直接对源码做提取，这一步对 JS 是空操作（保留以便矩阵统一）。
       - name: 自动构建（Java 需要）
-        uses: github/codeql-action/autobuild@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        uses: github/codeql-action/autobuild@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
       - name: 执行分析并上传
         uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
