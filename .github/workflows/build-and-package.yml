@@ -310,7 +310,7 @@ jobs:
           [[ -f Docker/app/im-server.jar ]] || { echo "::error::jar 没取到"; exit 1; }
 
       - name: 设置 buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: 登录 GHCR
         if: needs.meta.outputs.push == 'true'
