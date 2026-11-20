@@ -280,6 +280,18 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_FEEDBACK = "system:feedback";
 
     /**
+     * 后台权限点（台账 1.0.5）：SQL 版本管理。
+     *
+     * <p>全后台最高危的一点：拿到它就能应用/回滚 {@code sql/versions} 下的脚本，等于直接改库结构。
+     * 所以种子只授 admin 角色，moderator/operator 一律不给；页面上的回滚按 LIFO 只允许最近一个
+     * 已应用版本，且执行人昵称逐条落进 {@code im_schema_migration_log} 流水便于事后对账。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定，种子在
+     * {@code sql/migration_schema_version.sql}，跑完必须清 {@code im:auth:perm:*} 权限缓存。
+     */
+    public static final String PERM_SYSTEM_SCHEMA_MANAGE = "system:schema:manage";
+
+    /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
      *
      * <p>读方（UserQuerySpiImpl / GroupSpiImpl）与失效方（UserServiceImpl /

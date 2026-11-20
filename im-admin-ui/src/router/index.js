@@ -159,6 +159,14 @@ const routes = [
         name: 'feedbacks',
         component: () => import('@/views/FeedbackView.vue'),
         meta: { title: '意见反馈', perm: 'system:feedback' }
+      },
+      {
+        // SQL 版本管理（台账 1.0.5）：权限点 128，全后台唯一能直接改库结构的页面，
+        // 种子只授 admin；与应用/回滚按钮的二次确认一起构成「人点按钮才动库」的闸门
+        path: 'schema',
+        name: 'schema',
+        component: () => import('@/views/SchemaView.vue'),
+        meta: { title: 'SQL 版本', perm: 'system:schema:manage' }
       }
     ]
   },
@@ -222,7 +230,8 @@ router.beforeEach(async (to) => {
       'announcements',
       'agreements',
       'releases',
-      'feedbacks'
+      'feedbacks',
+      'schema'
     ].find((name) => {
       const target = routes[1].children.find((child) => child.name === name)
       return target?.meta?.perm && auth.can(target.meta.perm)

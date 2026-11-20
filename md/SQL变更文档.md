@@ -22,6 +22,7 @@
   - [1.0.2 新增 im_feedback 与权限点 127（意见反馈，2026-11-18）](#102-新增-im_feedback-与权限点-127意见反馈2026-11-18)
   - [1.0.3 im_live_video 新增 category 列（视频板块抖音式分类，2026-11-19）](#103-im_live_video-新增-category-列视频板块抖音式分类2026-11-19)
   - [1.0.4 新增 im_live_video_category 字典表（视频分类栏后台可增删改，2026-11-19）](#104-新增-im_live_video_category-字典表视频分类栏后台可增删改2026-11-19)
+  - [1.0.5 新增 SQL 版本管理两张表与权限点 128（自研 C 方案，2026-11-20）](#105-新增-sql-版本管理两张表与权限点-128自研-c-方案2026-11-20)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -269,6 +270,20 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 - **需清的 Redis 键**：无（不涉及 RBAC/权限，复用已有 `system:video:manage`；分类读的是实时查、无缓存）
 - **回滚方式**：`DROP TABLE im_live_video_category;`（只删字典，不影响任何已发布视频的 category 文本）
 - **验证 SQL**：`SHOW TABLES LIKE 'im_live_video_category';` 期望 1 行；`SELECT name, sort, status FROM im_live_video_category ORDER BY sort;` 期望 17 行均 status=1
+
+---
+
+### 1.0.5 新增 SQL 版本管理两张表与权限点 128（自研 C 方案，2026-11-20）
+
+- **背景**：落地自研 C 方案（`sql/versions/` V/U 配对脚本 + 后台「SQL 版本」页应用/一键回滚 + 操作流水），本条是**最后一份需要手动 source 的建表引导**——它建的台账表自己没法登记进自己（鸡生蛋），1.0.6 起新变更一律走页面点「应用」，不再手写本台账条目（流水自动进 `im_schema_migration_log`）。首对页面接管的脚本 `V1.0.4/U1.0.4__live_video_category_dict.sql` 只是把上一条已执行过的变更复制进 versions 目录作样例，**不重复执行**。
+- **脚本文件**：`sql/migration_schema_version.sql`（存量库引导，幂等可重跑）；新增 `sql/versions/` 目录（V1.0.4/U1.0.4 样例对）
+- **★ 清除**：无
+- **★ 增加**：表 `im_schema_migration`（版本台账，`uk_version` 唯一键）+ `im_schema_migration_log`（操作流水，`idx_version`/`idx_create_time`）；基线种子 `im_schema_migration` id 1（version 1.0.0，operator SYSTEM，把历史 27 个增量脚本收拢为一行、不可回滚）与流水 id 1（action=MARK）；种子 `im_permission` id 128（system:schema:manage，最高危只授 admin）、`im_role_permission` id 6028
+- **★ 修改**：无（顺带修脚本自身：`im_schema.sql` DROP 块历史上漏了 `im_client_release`/`im_feedback` 两行，本次补齐，不重跑全量则无影响）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十八节第 1165–1224 行（建表 + 基线种子）+ DROP 块第 31–32 行；`im_data.sql` ☑ 第 159 行（权限）与第 191 行（绑定）
+- **需清的 Redis 键**：`im:auth:perm:*` / `im:auth:role:*`（新增权限点 128，不清则「SQL 版本」菜单对 admin 也不显示；禁 FLUSHDB，只 DEL 这两个键）
+- **回滚方式**：`DELETE FROM im_role_permission WHERE id=6028; DELETE FROM im_permission WHERE id=128; DROP TABLE IF EXISTS im_schema_migration_log; DROP TABLE IF EXISTS im_schema_migration;`（删两张台账表只退回页面功能，不动任何业务表结构）
+- **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:schema:manage';` 期望 1；`SELECT version,status,operator_name FROM im_schema_migration;` 期望仅 1.0.0/APPLIED/SYSTEM 一行；`SHOW TABLES LIKE 'im_schema_migration%';` 期望 2 行
 
 ---
 

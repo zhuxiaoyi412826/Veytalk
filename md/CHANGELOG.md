@@ -22,6 +22,12 @@
 
 ### 新增 Added
 
+- **★ 脚本原文弹窗加大并支持复制/导出**。弹窗宽改 `min(1280px, 94vw)`、高度随视口（dvh，vh 兜老内核）；页脚新增一键复制（clipboard API + 非安全上下文 execCommand 兜底）与导出 SQL 文件（Blob 直下，沿用仓库真实脚本名）。零后端零 SQL，需 admin-ui 重新 build 生效（本轮 dist 已重建）。涉及：im-admin-ui（SchemaView.vue）。
+
+- **★「SQL 版本」页脚本名可点开看原文**。台账表 V/U 脚本列变链接，弹窗展示将要执行的 SQL 全文（新只读端点 `GET /api/admin/schema/script`，文件名由服务端扫目录解析防路径穿越；历史基线无实体文件不可点）；需重启后端 + admin-ui 重新 build 生效。涉及：im-admin（SchemaScriptVO/SchemaMigrationService/AdminSchemaController）、im-admin-ui（SchemaView.vue/admin.js）。
+
+- **★ SQL 版本管理与一键回滚（用户选定自研 C 方案）**。新增 `sql/versions/` V/U 配对脚本目录 + 台账表 `im_schema_migration` / 流水表 `im_schema_migration_log`，后台新增「SQL 版本」屏：按版本展示谁/何时应用或回滚了哪个脚本（LIFO 只回最近已应用版，二次确认要求输版本号），改库从「手动 source」变成页面点按钮。★ 存量库须跑最后一份手动引导 `sql/migration_schema_version.sql`（MySQL 写由本人执行）；新权限点 128 需清 Redis `im:auth:perm:*`/`im:auth:role:*`；需重启后端 + admin-ui 重新 build 生效。涉及：im-admin（SchemaMigrationService/AdminSchemaController/2实体2Mapper3VO）、im-admin-ui（SchemaView.vue/router/菜单/admin.js）、`sql/versions/` + 引导脚本 + schema/data 并回、`md/SQL变更文档.md`（1.0.5）、`md/开发/SQL版本管理与一键回滚.md`。
+
 - **★ 视频板块二级分类栏改为后台可增删改（用户原话：「admin 后台管理增加控制栏修改，可以自定义修改增加或者减少」）**。分类不再硬编码在前端 `Live.vue`：新建字典表 `im_live_video_category`（name/sort/status），后台「视频管理·分类管理」页签可新增/改名/排序/启停/删除（复用 `system:video:manage` 权限，不新增权限点）；用户端 `Live.vue` 进视频板块时拉 `GET /api/live/video/categories`（只回启用项、按 sort），拉不到则吃前端 17 项兑底。停用/删除只影响新展示，不动历史视频的 category 文本。★ 存量库须跑 `sql/migration_live_video_category_dict.sql`（建表+种子，MySQL 写由本人执行）；需重启后端 + 两前端重新 build 生效。涉及：im-live（entity/mapper/service/Controller 新端点 + VideoAdminSpiImpl）、im-common（AdminVideoSpi 4 方法 + AdminVideoCategoryDTO）、im-admin（AdminVideoController/Service）、im-admin-ui（VideosView 页签 + admin.js）、im-ui（Live.vue + api/live.js）、`sql/im_schema.sql` + migration、`md/SQL变更文档.md`（1.0.4）。
 
 - **★ 直播页「视频」板块重做为抖音式信息流（待开发清单 L41）**。左侧一级频道栏（精选=最新 / 热门=按播放量 / 我的=本人）+ 顶部标题搜索 + 二级分类标签 + 一行约 5 个 × 三行、列数按屏宽 auto-fill 自适应的网格；发布视频对话框加分类选择。后端 `im_live_video` 新增 `category` 列，分页接口 `/live/video/page` 增 `category/keyword/sort/mine` 真过滤（搜索走标题 LIKE、排序走 play_count，均不改表）。★ 存量库须跑 `sql/migration_live_video_category.sql`（MySQL 写由本人执行）；需重启后端 + 前端重新 build 生效。涉及：im-live（entity/VO/CreateRequest/Service/Impl/Controller）、`sql/im_schema.sql` + 新 migration、`md/SQL变更文档.md`（1.0.3）、im-ui（Live.vue 视频板块 + api/live.js）。
@@ -51,6 +57,8 @@
 
 
 ### 修复 Fixed
+
+- **★ 修复后台「法定文本」页整屏崩溃并卡死路由（点别的菜单只变 URL 不换页）**。`AgreementView.vue` 的「版本管理」初始激活页给表格挂了 `v-loading`，在「挂载 + 首次异步拉数」同时发生时 loading 的 true→false 多触发一次重渲染，连带把同屏 `el-select` 的内部指令数组（`vnode.dirs`）新旧对不齐，`invokeDirectiveHook` 读 `oldBindings[i].value` 抛 `Cannot read properties of undefined (reading 'value')`，整屏崩溃并把裸 `router-view` 卡死（实测挂到外层 div 仍崩，因为触发点是 v-loading 多出的那次重渲染而非指令挂在哪）。改为去掉表格区的 `v-loading`（加载反馈由「查询」按钮 `:loading` 承担）+ 给未激活的「同意留痕」页签加 `lazy`。纯前端，需 admin-ui 重新 build 生效。涉及：im-admin-ui（AgreementView.vue）。
 
 - **★ 修复图片/视频/语音「加载失败」（后端返 1004 请求的资源不存在）**。`request.js` 的请求拦截器原无条件 `config.baseURL = apiBaseURL()`，把二进制媒体请求逐次传入的 `mediaBaseURL()` 覆盖掉：`rawUrl` 已含 `/api`，再叠 `apiBaseURL()`（Web 为 `/api`）拼成 `/api/api/file/download/{id}`，后端无此路由 → 1004。改为普通请求照旧重算，`fetchBlob`/`fetchBlobMeta` 带 `skipBaseRefresh` 标记让拦截器不插手（同时修好待开发清单 L39 图片与 L41 网页视频播放；文件下载走 `<a>` 不经此链所以一直正常）。纯前端，vite HMR 即生效、无需重启后端。涉及：`im-ui/src/api/request.js`。
 

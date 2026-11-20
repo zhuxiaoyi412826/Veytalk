@@ -94,6 +94,11 @@
           <el-icon><ChatDotSquare /></el-icon>
           <span>意见反馈</span>
         </el-menu-item>
+        <!-- SQL 版本管理：全后台唯一按钮直接改库结构的一页，永远放菜单最后一项 -->
+        <el-menu-item v-if="auth.can('system:schema:manage')" index="schema" :route="{ name: 'schema' }">
+          <el-icon><Tickets /></el-icon>
+          <span>SQL 版本</span>
+        </el-menu-item>
       </el-menu>
       <p class="muted side-note">
         一期没有待办角标：新工单数只有登录后进看板才拿得到，为一个小红点在每个页面轮询

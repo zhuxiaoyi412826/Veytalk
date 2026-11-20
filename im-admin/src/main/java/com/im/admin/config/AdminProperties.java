@@ -97,4 +97,16 @@ public class AdminProperties {
      * 所以只给尾读；需要全文时走服务器本地文件，后台不做下载端点（多一条把日志外带的路径）。
      */
     private int logTailMaxLines = 2000;
+
+    /* ==================== SQL 版本管理（台账 1.0.5） ==================== */
+
+    /**
+     * 版本脚本目录（装着 V*.sql / U*.sql 配对脚本）。
+     *
+     * <p>留空时从工作目录逐级向上找 {@code sql/versions}：从仓库根启动直接命中，
+     * 从 im-bootstrap 启动经 {@code ../sql/versions} 命中。生产部署在 jar 外部跑时
+     * 建议显式写绝对路径，别赌启动目录。找不到目录时页面只提示不报错，
+     * 但应用/回滚两个动作端点会拒绝执行。
+     */
+    private String schemaDir = "";
 }

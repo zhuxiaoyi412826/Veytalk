@@ -50,7 +50,14 @@
         </div>
 
         <el-card shadow="never">
-          <el-table v-loading="vLoading" :data="vRows">
+          <!--
+            不用 v-loading 指令遮罩这张表：本项目 Vue 3.5.x 下，el-tabs 初始激活页里的表格
+            在「挂载 + 首次异步拉数」同时发生时，v-loading 的 true→false 会多触发一次重渲染，
+            连带把同屏 el-select 的内部指令数组（vnode.dirs）新旧对不齐，invokeDirectiveHook
+            读 oldBindings[i].value 抛错、整屏崩溃并把裸 router-view 卡死。加载反馈改由上方
+            「查询」按钮的 :loading 转圈承担（见 filters 区），不再给表格区挂自定义指令。
+          -->
+          <el-table :data="vRows">
             <el-table-column label="文本" width="120">
               <template #default="{ row }">
                 <span>{{ row.codeName }}</span>
@@ -94,7 +101,7 @@
                 <span class="ellipsis muted">{{ row.remark || EMPTY_TEXT }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="190">
+            <el-table-column label="操作" width="230">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button link type="primary" @click="openPreview(row)">原文</el-button>
@@ -102,7 +109,15 @@
                     <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
                     <el-button link type="success" @click="confirmPublish(row)">发布</el-button>
                   </template>
-                  <el-button v-else-if="row.status === 1" link @click="openDraft(row.code)">起草新版</el-button>
+                  <template v-else-if="row.status === 1">
+                    <!--
+                      已发布版不能原地改（后端 PUT 只认草稿，改了会让既有同意留痕变伪证）。
+                      这里的「编辑」= 把这一版原文取回来当底稿、另存为一份新草稿，改完再发布顶替它；
+                      与右边「起草新版」的唯一区别是本稿预填了原文，不用从空白重写。
+                    -->
+                    <el-button link type="primary" @click="openRevise(row)">编辑</el-button>
+                    <el-button link @click="openDraft(row.code)">起草新版</el-button>
+                  </template>
                   <!-- 已归档的那一版仍然永久可查，只是没有下一步动作了 -->
                   <span v-else class="muted">已归档，仍可查</span>
                 </div>
@@ -128,7 +143,11 @@
       </el-tab-pane>
 
       <!-- ==================== 同意留痕 ==================== -->
-      <el-tab-pane label="同意留痕" name="consents">
+      <!--
+        lazy：留痕表带 type="expand" 展开列，未激活时没必要提前渲染（el-tabs 默认会 eager 渲
+        每个 pane，只是用 display:none 藏起来）。加 lazy 让它首次切到这一页才挂载，省一次无谓渲染。
+      -->
+      <el-tab-pane label="同意留痕" name="consents" lazy>
         <div class="filters">
           <el-select v-model="cQuery.code" class="code" clearable placeholder="全部文本" @change="reloadConsents">
             <el-option v-for="item in CODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
@@ -163,7 +182,7 @@
         </div>
 
         <el-card shadow="never">
-          <el-table v-loading="cLoading" :data="cRows">
+          <el-table :data="cRows">
             <el-table-column type="expand">
               <template #default="{ row }">
                 <div class="detail">
@@ -240,7 +259,7 @@
     <!-- 起草 / 编辑草稿：Markdown + 实时预览，与文章管理那屏同一套两栏 -->
     <el-dialog
       v-model="editor.visible"
-      :title="editor.id ? `编辑草稿：${editor.codeName} v${editor.version}` : '起草新版本'"
+      :title="editorTitle"
       width="960px"
       top="5vh"
       :close-on-click-modal="false"
@@ -249,14 +268,14 @@
       <el-form label-position="top">
         <el-form-item label="协议文本">
           <!--
-            编辑草稿时文本锁定：草稿已经带上了 code 与版本号，
+            编辑草稿 / 基于已发布版改稿时文本都锁定：这一稿已经归属某份 code，
             改文本等于把这一行挪到另一份协议下面去，那应该重新起一稿而不是改这一稿。
           -->
-          <el-select v-model="editor.code" :disabled="!!editor.id" class="code">
+          <el-select v-model="editor.code" :disabled="!!editor.id || !!editor.reviseFrom" class="code">
             <el-option v-for="item in CODE_OPTIONS" :key="item.value" :value="item.value" :label="item.label" />
           </el-select>
           <div class="note">
-            {{ editor.id ? '本稿所属文本不可更改' : '版本号由服务端取「历史最大 + 1」，这里不用填' }}
+            {{ editor.id ? '本稿所属文本不可更改' : (editor.reviseFrom ? `基于 v${editor.reviseFrom} 原文修改，保存后另存为新草稿（版本号服务端取历史最大 + 1）` : '版本号由服务端取「历史最大 + 1」，这里不用填') }}
           </div>
         </el-form-item>
         <el-form-item label="文档标题（必填，最多 120 字）">
@@ -434,6 +453,8 @@ const editor = reactive({
   saving: false,
   id: null,
   version: null,
+  // reviseFrom：非空表示本稿是「基于某已发布版原文另起的新草稿」，仅用于标题/文案，保存仍走 createDraft
+  reviseFrom: null,
   codeName: '',
   code: 'privacy',
   title: '',
@@ -450,6 +471,17 @@ const chain = reactive({ visible: false, loading: false, title: '', rows: [] })
 const editorReady = computed(
   () => editor.code.trim() !== '' && editor.title.trim() !== '' && editor.content.trim() !== ''
 )
+
+/** 弹框标题三态：改已有草稿 / 基于已发布版改稿 / 全新起草 */
+const editorTitle = computed(() => {
+  if (editor.id) {
+    return `编辑草稿：${editor.codeName} v${editor.version}`
+  }
+  if (editor.reviseFrom) {
+    return `修改 ${editor.codeName} v${editor.reviseFrom} 原文（另存为新草稿）`
+  }
+  return '起草新版本'
+})
 
 function statusText(status) {
   if (status === 0) {
@@ -554,6 +586,7 @@ function openDraft(code) {
   const preset = typeof code === 'string' ? code : ''
   editor.id = null
   editor.version = null
+  editor.reviseFrom = null
   editor.code = preset || 'privacy'
   editor.codeName = CODE_OPTIONS.find((item) => item.value === editor.code)?.label || ''
   editor.title = ''
@@ -584,6 +617,33 @@ async function openEdit(row) {
   }
   editor.id = vo.id
   editor.version = vo.version
+  editor.reviseFrom = null
+  editor.code = vo.code
+  editor.codeName = vo.codeName
+  editor.title = vo.title
+  editor.summary = vo.summary || ''
+  editor.content = vo.content || ''
+  editor.required = vo.required === 0 ? 0 : 1
+  editor.html = toHtml(vo.content)
+  editor.visible = true
+}
+
+/**
+ * 「在原文基础上修改」：把某一版已发布文本的正文取回来当底稿，另开一份新草稿。
+ *
+ * 已发布版不可原地改（后端 PUT 只认草稿），所以这里刻意不把 id 带进编辑器——
+ * editor.reviseFrom 只用于标题与文案提示，保存走的仍是 createDraft，版本号服务端取历史最大 + 1。
+ */
+async function openRevise(row) {
+  let vo
+  try {
+    vo = await fetchAgreementDetail(row.id)
+  } catch {
+    return
+  }
+  editor.id = null
+  editor.version = null
+  editor.reviseFrom = vo.version
   editor.code = vo.code
   editor.codeName = vo.codeName
   editor.title = vo.title

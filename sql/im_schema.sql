@@ -28,6 +28,10 @@ USE `im_db`;
 
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_schema_migration_log`;
+DROP TABLE IF EXISTS `im_schema_migration`;
+DROP TABLE IF EXISTS `im_feedback`;
+DROP TABLE IF EXISTS `im_client_release`;
 DROP TABLE IF EXISTS `im_user_agreement`;
 DROP TABLE IF EXISTS `im_agreement`;
 DROP TABLE IF EXISTS `im_announcement`;
@@ -1156,3 +1160,63 @@ CREATE TABLE `im_feedback`
     KEY `idx_user` (`user_id`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COMMENT ='意见反馈（设置页提交、后台回复处置；状态 0 待处理 → 1 已回复，物理删除）';
+
+-- =====================================================================================
+--  十八、SQL 版本管理（im-admin）
+-- =====================================================================================
+
+-- 把「手写 SQL 人肉执行」升级为「版本脚本配对（sql/versions 的 V/U）+ 后台可视化 + 一键回滚」。
+-- 台账表一行 = 一个版本号的当前态（按 version 唯一收敛）；checksum 用于发现「已应用的脚本
+-- 后来被人改过」的漂移。undo_name 为 NULL 表示不可一键回滚（基线行就是 NULL：它对应的是一批
+-- 历史脚本的合集，没有配对的 U 文件，页面不给它画回滚按钮）。
+-- 操作人存 ID + 昵称快照：昵称会改，台账里的名字必须定格在当时，否则「谁执行的」会随改名失真。
+CREATE TABLE `im_schema_migration`
+(
+    `id`             BIGINT       NOT NULL COMMENT '记录 ID（雪花；基线行固定 1）',
+    `version`        VARCHAR(32)  NOT NULL COMMENT '版本号，与 md/SQL变更文档.md 台账同一序列（如 1.0.4）',
+    `script_name`    VARCHAR(128) NOT NULL COMMENT '向前脚本文件名（sql/versions/V*.sql）；基线行写合集说明文本',
+    `undo_name`      VARCHAR(128)          DEFAULT NULL COMMENT '回滚脚本文件名（U*.sql）；NULL 表示该版本不可一键回滚',
+    `description`    VARCHAR(255)          DEFAULT NULL COMMENT '一句话说明（与台账条目对应）',
+    `checksum`       CHAR(64)              DEFAULT NULL COMMENT '向前脚本文件 SHA-256 小写；基线行为 NULL，重算不一致=脚本被偷改',
+    `status`         TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 已应用 0 已回滚 2 应用失败（半截脚本，人工修补后重放）',
+    `operator_id`    BIGINT                DEFAULT NULL COMMENT '执行人用户 ID；SYSTEM 引导行为 NULL',
+    `operator_name`  VARCHAR(64)           DEFAULT NULL COMMENT '执行人昵称快照（昵称后来改了不影响历史可读）；基线行写 SYSTEM',
+    `applied_at`     DATETIME              DEFAULT NULL COMMENT '最近一次应用成功时刻',
+    `rolled_back_at` DATETIME              DEFAULT NULL COMMENT '最近一次回滚成功时刻',
+    `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_version` (`version`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='SQL 版本台账（谁/何时应用了哪个版本；一键回滚与漂移检测的依据）';
+
+-- 流水与台账分两张表的原因：台账按 version 唯一收敛当前态，流水原样保留每一次尝试（含失败）——
+-- 半途炸掉的脚本正是最需要留痕的，两张表读写形状不一样，塞一张两边都别扭。只 INSERT。
+CREATE TABLE `im_schema_migration_log`
+(
+    `id`              BIGINT       NOT NULL COMMENT '日志 ID（雪花；基线行固定 1）',
+    `version`         VARCHAR(32)  NOT NULL COMMENT '被操作的版本号',
+    `action`          VARCHAR(16)  NOT NULL COMMENT '动作：APPLY 应用 / ROLLBACK 回滚 / MARK 手工登记基线',
+    `result`          VARCHAR(16)  NOT NULL COMMENT '结果：SUCCESS / FAILED（失败也记行）',
+    `statement_count` INT          NOT NULL DEFAULT 0 COMMENT '成功执行的语句条数（FAILED 时为挂掉前跑掉的条数）',
+    `duration_ms`     BIGINT       NOT NULL DEFAULT 0 COMMENT '整个脚本耗时（毫秒）',
+    `message`         VARCHAR(1000)         DEFAULT NULL COMMENT '失败原因或备注，写入前截到列宽',
+    `operator_id`     BIGINT                DEFAULT NULL COMMENT '操作人用户 ID',
+    `operator_name`   VARCHAR(64)           DEFAULT NULL COMMENT '操作人昵称快照',
+    `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发生时刻（本表只 INSERT，这一列就是事件时间）',
+    PRIMARY KEY (`id`),
+    KEY `idx_version` (`version`),
+    KEY `idx_create_time` (`create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='SQL 版本操作流水（变更过程时间线；只 INSERT 不更新不删除）';
+
+-- 基线行：1.0.0~1.0.3 的存量变更（历史 migration_*.sql 合集）已由人肉执行完毕，一次性补登，
+-- 页面从 1.0.4 起接管。与 sql/migration_schema_version.sql 第 3 段逐字一致。
+INSERT INTO `im_schema_migration` (`id`, `version`, `script_name`, `undo_name`, `description`, `checksum`, `status`,
+                                   `operator_name`, `applied_at`)
+VALUES (1, '1.0.0', '历史脚本合集（im_schema.sql + im_data.sql + migration_*.sql）', NULL,
+        '2026-11-08 库结构现状起至台账 1.0.3 的全部存量变更，引导时一次性补登', NULL, 1, 'SYSTEM', NOW());
+
+INSERT INTO `im_schema_migration_log` (`id`, `version`, `action`, `result`, `statement_count`, `duration_ms`,
+                                       `message`, `operator_name`)
+VALUES (1, '1.0.0', 'MARK', 'SUCCESS', 0, 0, '引导脚本补登基线，详见 md/SQL变更文档.md 1.0.0~1.0.3 条目', 'SYSTEM');

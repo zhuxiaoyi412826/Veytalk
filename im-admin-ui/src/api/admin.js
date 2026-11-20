@@ -758,3 +758,30 @@ export function replyFeedback(id, dto) {
 export function deleteFeedback(id) {
   return http.delete(`/admin/feedback/${id}`)
 }
+
+/* ==================== SQL 版本管理（台账 1.0.5） ==================== */
+
+/** 整屏：台账行 × sql/versions 目录合并清单（dirFound/tableReady/LIFO 队头都在返回体标志里） */
+export function fetchSchemaOverview() {
+  return http.get('/admin/schema/overview')
+}
+
+/** 变更流水（倒序）：谁、何时、对哪个版本做了什么、结果如何 */
+export function fetchSchemaLogs(limit = 100) {
+  return http.get('/admin/schema/logs', { params: { limit } })
+}
+
+/** 查看脚本原文：undo=true 读 U 回滚脚本，否则读 V 向前脚本（历史基线无实体文件会 404） */
+export function fetchSchemaScript(version, undo = false) {
+  return http.get('/admin/schema/script', { params: { version, undo } })
+}
+
+/** 应用某版本的 V 脚本（version 走 query，对齐后端 @RequestParam 口径） */
+export function applySchemaVersion(version) {
+  return http.post('/admin/schema/apply', null, { params: { version } })
+}
+
+/** 一键回滚某版本（执行 U 脚本；服务端只认最近一次已应用版本，LIFO） */
+export function rollbackSchemaVersion(version) {
+  return http.post('/admin/schema/rollback', null, { params: { version } })
+}
