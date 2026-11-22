@@ -1,0 +1,14 @@
+@use '@/styles/variables.scss' as *;
+
+.page { min-height: 100vh; display: flex; flex-direction: column; background: #1c1c1e; color: #fff; }
+.stage { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
+.remote { position: absolute; inset: 0; width: 100%; height: 100%; }
+.audioStage { display: flex; flex-direction: column; align-items: center; gap: $spacing-lg; }
+.peerName { font-size: $font-size-xl; font-weight: $font-weight-medium; }
+.status { position: absolute; top: 140rpx; left: 0; right: 0; text-align: center; font-size: $font-size-sm; color: rgba(255,255,255,.85); z-index: 2; }
+.local { position: absolute; right: $page-padding; top: 200rpx; width: 220rpx; height: 320rpx; border-radius: $radius-md; overflow: hidden; z-index: 3; }
+.audioPusher { width: 1px; height: 1px; opacity: 0; position: absolute; left: -10px; top: -10px; }
+.controls { display: flex; align-items: center; justify-content: space-around; padding: $spacing-xl $page-padding; }
+.controlButton { @include button-reset; width: 140rpx; height: 88rpx; border-radius: $radius-button; background: rgba(255,255,255,.16); color: #fff; font-size: $font-size-sm; }
+.hangup { @include button-reset; width: 180rpx; height: 96rpx; border-radius: 48rpx; background: $color-error; color: #fff; font-size: $font-size-md; font-weight: $font-weight-medium; }
+.hint { padding: 0 $page-padding $spacing-xl; text-align: center; color: rgba(255,255,255,.45); font-size: $font-size-xs; }
