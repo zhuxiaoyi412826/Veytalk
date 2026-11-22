@@ -22,7 +22,7 @@
 ## 二、链路总览
 
 ```
-主叫                                    服务端                              被叫
+主叫                                    服 务端                              被叫
  │  POST /api/call/config（查开关）        │                                   │
  │  WS  call/invite ───────────────────▶ │ ────────────── call-signal ─────▶ │
  │  GET /api/call/trtc-user-sig ───────▶ │ 签发 UserSig                      │
