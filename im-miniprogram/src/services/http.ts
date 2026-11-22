@@ -63,6 +63,12 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   }
   if (options.auth !== false && token) header[getTokenName()] = token
   const query = options.query || {}
+  // wx.request 会把 undefined 序列化成字符串 "undefined"，
+  // 后端 @RequestParam Long 无法转换 →「参数 xxx 类型不正确」。GET 参数先过滤空值。
+  const cleanQuery: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== '') cleanQuery[key] = value
+  }
   const url = `${getApiBase()}${path.startsWith('/') ? path : `/${path}`}`
 
   let response: Taro.request.ApiResponse<unknown>
@@ -70,7 +76,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     response = await Taro.request({
       url,
       method: options.method || 'GET',
-      data: (options.method === 'GET' || !options.data ? query : options.data) as object,
+      data: (options.method === 'GET' || !options.data ? cleanQuery : options.data) as object,
       header,
       timeout: 20000
     })

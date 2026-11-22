@@ -247,6 +247,12 @@ export interface CallConfig {
   groupMaxSlots?: number
 }
 
+export interface TrtcUserSig {
+  sdkAppId: number
+  userId: string
+  userSig: string
+}
+
 export interface AiStatus {
   enabled?: boolean
   model?: string

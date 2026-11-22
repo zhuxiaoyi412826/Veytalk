@@ -5,7 +5,7 @@ import classNames from 'classnames'
 import Avatar from '@/components/Avatar'
 import RemoteImage from '@/components/RemoteImage'
 import { callApi, conversationApi, messageApi } from '@/services/api'
-import { send as sendSignal } from '@/services/websocket'
+import { getDiagnostic, send as sendSignal } from '@/services/websocket'
 import { uploadFile } from '@/services/upload'
 import { useAppStore } from '@/store/useAppStore'
 import type { FileInfo, Message, MessageExtra } from '@/types/im'
@@ -265,9 +265,9 @@ export default function ChatPage() {
   }
 
   /**
-   * 发起呼叫：通过主 WebSocket 的 call invite 信令把呼叫送达对端。
-   * 微信小程序没有 RTCPeerConnection / getUserMedia，无法承载实时音视频，
-   * 因此实际接听由手机 App 或桌面端完成，这里只负责发起与提示。
+   * 发起呼叫：call invite 信令送达对端后进入 TRTC 通话页。
+   * 小程序没有 RTCPeerConnection，媒体走腾讯云 TRTC（live-pusher/live-player），
+   * 信令仍复用 IM 主 WebSocket，与 Web/App 端共用 invite/accept/hangup 词表。
    */
   const startCall = async (mediaType: 'audio' | 'video'): Promise<void> => {
     if (!conversation) return Taro.showToast({ title: '会话信息加载中', icon: 'none' })
@@ -281,20 +281,26 @@ export default function ChatPage() {
       if (!config || config.enabled === false) {
         return Taro.showToast({ title: '通话服务未开启', icon: 'none' })
       }
+      const callId = createClientMsgId()
       const sent = sendSignal({
         type: 'call',
         action: 'invite',
-        callId: createClientMsgId(),
+        callId,
         calleeUserId: String(calleeUserId),
         mediaType
       })
-      if (!sent) return Taro.showToast({ title: '实时连接未就绪，请稍后重试', icon: 'none' })
-      await Taro.showModal({
-        title: mediaType === 'video' ? '视频通话' : '语音通话',
-        content: '已向对方发起呼叫。小程序端无法承载实时音视频，请让对方在手机 App 或桌面端接听。',
-        showCancel: false,
-        confirmText: '知道了'
-      })
+      if (!sent) {
+        return Taro.showModal({
+          title: '实时连接未就绪',
+          content: `${getDiagnostic()}\n构建2031`,
+          showCancel: false,
+          confirmText: '知道了'
+        })
+      }
+      const query = `role=caller&callId=${callId}&mediaType=${mediaType}&peerUserId=${calleeUserId}`
+        + `&peerName=${encodeURIComponent(conversation.title || '对方')}`
+        + `&peerAvatar=${encodeURIComponent(conversation.avatar || '')}`
+      void Taro.navigateTo({ url: `/pages/call/index?${query}` })
     } catch (error) {
       console.error('[Call] invite failed', error)
       showError(error, '呼叫失败')

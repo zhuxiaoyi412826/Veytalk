@@ -19,7 +19,8 @@ export default defineAppConfig({
     'pages/scan/index',
     'pages/profile-edit/index',
     'pages/settings/index',
-    'pages/article/index'
+    'pages/article/index',
+    'pages/call/index'
   ],
   window: {
     backgroundTextStyle: 'dark',

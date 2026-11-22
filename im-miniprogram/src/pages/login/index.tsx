@@ -4,6 +4,7 @@ import Taro from '@tarojs/taro'
 import classNames from 'classnames'
 import { DEFAULT_SERVER, getServer, isIpServer, normalizeServer, setServer } from '@/config/runtime'
 import { authApi } from '@/services/api'
+import { getDiagnostic } from '@/services/websocket'
 import { useAppStore } from '@/store/useAppStore'
 import type { CaptchaInfo } from '@/types/im'
 import { showError } from '@/utils/ui'
@@ -11,6 +12,7 @@ import styles from './index.module.scss'
 
 export default function LoginPage() {
   const acceptLogin = useAppStore((state) => state.acceptLogin)
+  const connection = useAppStore((state) => state.connection)
   const [mode, setMode] = useState<'account' | 'sms'>('account')
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
@@ -150,6 +152,7 @@ export default function LoginPage() {
         </View>
       )}
       <Text className={styles.foot}>登录即代表你同意平台服务与隐私规范</Text>
+      <Text className={styles.foot} onClick={() => Taro.showModal({ title: '连接诊断', content: getDiagnostic(), showCancel: false })}>构建2031 · 连接:{connection}（点击查看诊断）</Text>
     </View>
   )
 }

@@ -22,6 +22,10 @@
 
 ### 新增 Added
 
+- **新增 `md/音视频/TRTC小程序音视频通话实现规范.md`**：面向「仅小程序」的落地规范，含硬边界（只能小程序↔小程序、需直播类目）、链路图、后端实现（配置键、UserSig 四步算法、接口契约与未配置降级）、小程序房间号派生与推拉流格式、部署五步、排错对照表，并澄清调试栈 `app-service.js:18148` 是行号不是端口。涉及：新增该文档。
+- **小程序新增界面化连接诊断（构建标记 2030）**：真机 vConsole 看不到日志、也没有 Network 面板，改为登录页/会话页直接显示构建号与连接状态、点击查看诊断并可手动重连，聊天页发送信令失败改为弹窗展示 ticket/socket 具体错误；诊断保留「上次失败原因」并给取票加 12s 超时，避免被重连重置冲掉。涉及：`im-miniprogram/src/services/websocket.ts`、`pages/{login,conversations,chat}/index.tsx`。
+- **新增小程序 TRTC 通话页（仅小程序端；后端签名接口已按要求全部回滚）**：小程序新增通话页（Taro `LivePusher`/`LivePlayer`，标准 TRTC 推拉流地址，房间号由 callId 派生、信令复用 IM WebSocket 的 `call`/`call-signal`），聊天页语音/视频按钮改为直接进通话页，App 入口新增全局来电接听弹窗。★ 后端 `GET /api/call/trtc-user-sig`、`TLSSigAPIv2`、`TrtcUserSigVO` 与 `im.call.trtc` 配置项**已回滚，仓库不含后端实现**；未部署该接口时通话页提示「服务器端未部署通话接口」，实现口径见 `md/音视频/TRTC小程序音视频通话实现规范.md`。涉及：`im-miniprogram/pages/call`、`services/incoming-call.ts`、`pages/chat`、`app.tsx`。
+
 - **新增 `im-miniprogram` 视频页三 Tab（视频 / 直播 / 文章）与文章详情页**：直播改为页内列表直达直播间，文章走 `/api/article/page`、`/api/article/{id}` 并做轻量 Markdown 渲染；聊天页补齐语音/视频通话入口（经 WebSocket `call invite` 信令发起，小程序端无法承载实时音视频，接听由 App/桌面端完成）。涉及：`src/pages/videos`、新增 `src/pages/article`、`src/pages/chat`、`src/services/{api,websocket,upload}.ts`、`src/types/im.ts`、`src/utils/ui.ts`。
 
 - **新增 `im-miniprogram`：以 Android 功能为基准落地 Taro 小程序，复用线上 Java 后端并覆盖消息、好友/群、视频/直播、AI SSE、个人资料与扫码授权**。默认使用 `https://im.dsaol.asia`，可切换 `https://120.78.126.132`（HTTPS 443）；WebRTC 通话与小程序开播明确标注未开放。涉及：`im-miniprogram/**`、`README详细开发指南.md`。
@@ -46,10 +50,8 @@
 
 ### 修复 Fixed
 
-- **★ 修复后台「法定文本」页整屏崩溃并卡死路由（点别的菜单只变 URL 不换页）**。`AgreementView.vue` 的「版本管理」初始激活页给表格挂了 `v-loading`，在「挂载 + 首次异步拉数」同时发生时 loading 的 true→false 多触发一次重渲染，连带把同屏 `el-select` 的内部指令数组（`vnode.dirs`）新旧对不齐，`invokeDirectiveHook` 读 `oldBindings[i].value` 抛 `Cannot read properties of undefined (reading 'value')`，整屏崩溃并把裸 `router-view` 卡死（实测挂到外层 div 仍崩，因为触发点是 v-loading 多出的那次重渲染而非指令挂在哪）。改为去掉表格区的 `v-loading`（加载反馈由「查询」按钮 `:loading` 承担）+ 给未激活的「同意留痕」页签加 `lazy`。纯前端，需 admin-ui 重新 build 生效。涉及：im-admin-ui（AgreementView.vue）。
-
-- **★ 修复图片/视频/语音「加载失败」（后端返 1004 请求的资源不存在）**。`request.js` 的请求拦截器原无条件 `config.baseURL = apiBaseURL()`，把二进制媒体请求逐次传入的 `mediaBaseURL()` 覆盖掉：`rawUrl` 已含 `/api`，再叠 `apiBaseURL()`（Web 为 `/api`）拼成 `/api/api/file/download/{id}`，后端无此路由 → 1004。改为普通请求照旧重算，`fetchBlob`/`fetchBlobMeta` 带 `skipBaseRefresh` 标记让拦截器不插手（同时修好待开发清单 L39 图片与 L41 网页视频播放；文件下载走 `<a>` 不经此链所以一直正常）。纯前端，vite HMR 即生效、无需重启后端。涉及：`im-ui/src/api/request.js`。
-
+- **修复小程序点通话报「请求的资源不存在」时提示含糊**：`/api/call/trtc-user-sig` 返回 1004 说明线上后端未部署该接口，改为明确提示「服务器端未部署通话接口，请更新后端」并结束通话页，不再笼统显示“初始化失败”。涉及：`im-miniprogram/src/pages/call/index.tsx`。
+- **修复小程序实时连接永远建不起来（提示「实时连接未就绪」）**：真机日志显示 `[WS] ticket 获取成功, endpoint: /ws` 后立刻 `TypeError: d.onOpen is not a function`，根因是 `Taro.connectSocket` 该环境返回的是 `Promise<SocketTask>` 而非 `SocketTask`，代码直接调 `onOpen/onClose/close` 全部落空。改为兼容两种返回形态（是 thenable 则 await），并对 `close` 做存在性判断。涉及：`im-miniprogram/src/services/websocket.ts`。
 - **★ 三个建库/种子 SQL 头部各加一行 `SET NAMES utf8mb4;`，从源头免疫「客户端默认字符集不对 → 中文双重编码乱码」（会话列表显示成 `æ–‡ä»¶ä¼ è¾“åŠ©æ‰‹` 那种）**。改了什么：`sql/im_schema.sql` / `sql/im_data.sql` / `sql/im_system_contact_patch.sql` 在头部注释之后、第一条语句之前各插一行 `SET NAMES utf8mb4;`（附中文缘由注释）。为什么：客户端以 latin1/GBK 连接时，表注释、种子昵称、权限名里的 UTF-8 字节会被逐字节当单字节字符转存进 utf8mb4 列 = 双重编码；这一行让 `source` 时会话字符集恒为 utf8mb4、与客户端默认解耦。★ 两点提醒：① 救不了 PowerShell 管道（`Get-Content | mysql` 在 shell 层就把中文刷成 `?`），仍须 `-e "source"` 或 `scripts/import-sql.sh`；② 只保未来导入，**已入库的乱码行不会自动修复**（需重导或 `CONVERT(CAST(CONVERT(col USING latin1) AS BINARY) USING utf8mb4)` 反向解码，且直接改库绕过了应用、须清 `im:cache:user:brief:{id}` 缓存或重启后端才生效）。涉及：上述三个 SQL 文件。
 
 - **★ 备份/护栏脚本实测挖出两条真缺陷（纸面看不出、只有真跑才暴露）**：① `backup.sh` 原本 `mysqldump | gzip > 正式名`，当 mysqldump 一行都没输出就失败时，gzip 仍产出一个极小、且 `gzip -t` 能通过的空包——cron 里能连攒十几天「看着全绿」的假备份；改为先写 `.partial`、`verify_dump` 验完「解压后 ≥1024 字节」再 `mv`，不达标记失败并删掉。② `guard-sql-init.sh --comment-compose` 用 `sed` 注释 compose 挂载行时漏写 YAML 列表项的 `- ` 前缀，注释后成 `# ./sql-init:…`，日后手工取消注释得到非法 YAML；改为 `\1# - \2` 并加「取消注释后能变回合法活挂载行」的自检。顺带两条口径：`find -mtime +N` 实为「至少 N+1 天前」（留 N 天要传 `N-1`）、失败残留的 `.partial` 不匹配 `im-*.sql.gz` 需单独清（脚本已按此写）。涉及：`Docker/scripts/backup.sh`、`Docker/scripts/guard-sql-init.sh`。

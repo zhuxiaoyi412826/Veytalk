@@ -6,6 +6,7 @@ import Avatar from '@/components/Avatar'
 import EmptyState from '@/components/EmptyState'
 import PageHeader from '@/components/PageHeader'
 import { conversationApi } from '@/services/api'
+import { getDiagnostic, reconnect } from '@/services/websocket'
 import { useAppStore } from '@/store/useAppStore'
 import type { Conversation } from '@/types/im'
 import { conversationTitle, formatTime, messageSummary } from '@/utils/format'
@@ -76,6 +77,11 @@ export default function ConversationsPage() {
     }
   }
 
+  const showDiagnostic = async (): Promise<void> => {
+    const result = await Taro.showModal({ title: '连接诊断（构建2031）', content: getDiagnostic(), confirmText: '重新连接', cancelText: '关闭' })
+    if (result.confirm) reconnect()
+  }
+
   const addAction = async (): Promise<void> => {
     const result = await Taro.showActionSheet({ itemList: ['添加好友', '创建群聊', '文件传输助手'] })
     if (result.tapIndex === 0) return Taro.navigateTo({ url: '/pages/add-friend/index' })
@@ -95,7 +101,7 @@ export default function ConversationsPage() {
   return (
     <View className={styles.page}>
       <PageHeader title='消息' subtitle={totalUnread ? `${totalUnread} 条未读消息` : '保持联系，分享此刻'} right={<View className={styles.add} onClick={() => void addAction()}>+</View>} />
-      {connection !== 'connected' && <View className={styles.connection}>{connection === 'connecting' || connection === 'reconnecting' ? '正在连接实时消息服务…' : '实时服务未连接，下拉可刷新消息'}</View>}
+      {connection !== 'connected' && <View className={styles.connection} onClick={() => void showDiagnostic()}>{connection === 'connecting' || connection === 'reconnecting' ? '正在连接实时消息服务…' : '实时服务未连接，点击诊断/重连'}（构建2031）</View>}
       <View className={styles.searchWrap}><Input className={styles.search} value={keyword} onInput={(event) => setKeyword(event.detail.value)} placeholder='搜索会话或消息内容' placeholderClass='placeholder' /></View>
       <View className={styles.quick}>
         <View className={styles.quickItem} onClick={() => Taro.navigateTo({ url: '/pages/friend-requests/index' })}>新的朋友</View>

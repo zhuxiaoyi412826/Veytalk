@@ -16,6 +16,7 @@ import type {
   LoginResult,
   Message,
   PageResult,
+  TrtcUserSig,
   UserInfo,
   VideoItem
 } from '@/types/im'
@@ -139,7 +140,8 @@ export const articleApi = {
 }
 
 export const callApi = {
-  config: () => get<CallConfig>('/call/config')
+  config: () => get<CallConfig>('/call/config'),
+  userSig: () => get<TrtcUserSig>('/call/trtc-user-sig')
 }
 
 export const userApi = {
