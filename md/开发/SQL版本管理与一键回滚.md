@@ -118,6 +118,14 @@ ReentrantLock.tryLock()            ← 进程内互斥，占用中直接拒绝�
 
 执行人姓名来自 `SecurityUtil.getUserId()` → 查 `im_user` 的 `IFNULL(nickname, username)`，查不到降级 `user:{id}`。
 
+★ **逐条 execute 是「每条语句各自借还一次连接」，不是一个会话**：脚本里的 `SET @var` 与紧随的
+`PREPARE stmt FROM @var` 有可能落在不同连接上。实测 HikariCP 7.0.2 + `minimumIdle=5` 的空闲池
+连续 10 次借还会拿到同一条连接（2026-11-22 探针），但只要有并发请求在中间插一次借出就会换人。
+所以凡用 information_schema 守卫的动态 DDL，**必须显式判 `@var IS NULL` 并指向一张不存在的表让它报错**：
+`IF(NULL = 0, 跳过, 执行)` 取的是 else 分支，会静默跳过 ALTER，页面记 SUCCESS、库里却没改，
+下一次点开功能就是 1007。先例见 `V1.0.6/U1.0.6` 的 CASE 写法（U 脚本尤其要紧：那边静默跳过
+意味着备份没落成却照样往下 `DROP TABLE`）。
+
 ### 3.4 回滚（rollback）的三道闸
 
 1. **LIFO**：只有「版本号最高且 status=APPLIED」的行才允许回滚（service 末尾统一把其余行的 canRollback 置 false）。
@@ -154,6 +162,8 @@ knife4j 归入「16-管理后台」分组。脚本目录解析：`im.admin.schem
 3. 后台「SQL 版本」页对该行点「应用」（确认框里先勾备份）；
 4. 出问题点「回滚」，逐字输版本号确认；
 5. 1.0.6 起**不再手写** `md/SQL变更文档.md` 台账条目——流水自动进 `im_schema_migration_log`，页面即台账。
+6. 但如果这一版是**手工 source** 进库的（没走页面），台账不会自动登记，页面仍显示「待应用」；
+   补登记就在页面再点一次「应用」——幂等脚本会全走「已存在，跳过」分支，只落台账与流水。
 
 ### 3.8 部署顺序（本次上线 1.0.5 要走的路）
 
@@ -163,6 +173,14 @@ knife4j 归入「16-管理后台」分组。脚本目录解析：`im.admin.schem
 ③ admin-ui npm run build 并部署
 ④ 清 Redis：DEL im:auth:perm:1000、im:auth:role:1000   ← 不清则菜单对 admin 也不显示（助手可代做）
 ```
+
+### 3.9 升完版后报 1007 / 1003 的判读（2026-11-22 三板块上线实测）
+
+| 现象 | 日志里的真因 | 处置 |
+|---|---|---|
+| 前端点新板块 → 1007「系统繁忙，请稍后重试」 | `Table 'im_db.im_live_xxx' doesn't exist` 或 `Unknown column 'type' in 'field list'` | 脚本没落到**应用连着的那个库**（先 `SELECT @@port, DATABASE()` 对上下文，本机有 30+ 个 schema）。1007 是 `BadSqlGrammarException` 被全局兜底，不是后端代码 bug；看 `${im.log.home}/warn.log` 里的 `### SQL:` 行最快 |
+| 后台新菜单页 → 1003「无此权限：xxx」，可菜单又看得见 | 库里 129~131 已在，但 `im:auth:perm:{userId}` 还是旧快照（TTL 30 分钟且登录不刷新） | 按 userId 点名 `DEL im:auth:perm:1000 im:auth:role:1000`（禁 FLUSHDB），刷新页面即可，**不用重新登录**。「菜单看得见」是前端 `can()` 额外放行伞权限 `system:manage`，而后端是字符串精确匹配——两边口径本就不同，不是缓存之外的第二个 bug |
+| 页面「应用」报「第 N/M 条语句失败」 | 两种：① 上面 §3.3 的会话变量问题（已改成报错）；② 在**没选库**的窗口里手工跑→ 1046 No database selected | 手工 source 必须带库名：`mysql -u root -p --default-character-set=utf8mb4 im_db -e "source sql/versions/V1.0.6__xxx.sql"`；重放前先只读核对 |
 
 ---
 

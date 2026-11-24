@@ -466,6 +466,13 @@ public class MessageAdminSpiImpl implements AdminMessageSpi {
                     + (TextUtil.isBlank(extra.getTransferMemo()) ? "" : "，附言：" + extra.getTransferMemo()));
             case RED_PACKET -> parts.add("红包 " + (extra.getPacketAmount() == null ? 0 : extra.getPacketAmount())
                     + " 积分 / " + (extra.getPacketCount() == null ? 1 : extra.getPacketCount()) + " 份");
+            // 动态分享：只出定格快照，不回去查 im_moment——原动态很可能已被作者删掉，
+            // 而管理员要看的正是「当时发出去的那张卡片长什么样」，快照才是证据
+            case MOMENT -> parts.add("动态：" + fallback(extra.getMomentAuthor(), "好友")
+                    + (TextUtil.isBlank(extra.getMomentSummary()) ? ""
+                    : " 「" + extra.getMomentSummary() + "」")
+                    + (extra.getMomentMediaCount() == null || extra.getMomentMediaCount() <= 0
+                    ? "" : "（" + extra.getMomentMediaCount() + " 个附件）"));
             case SYSTEM -> {
                 if (TextUtil.isNotBlank(extra.getAction())) {
                     parts.add("动作：" + extra.getAction());

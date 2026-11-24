@@ -376,9 +376,10 @@ function quarantine(policy, logId, file) {
  * 发送/上传前的那道闸门：识别 + 命中即上报审计，再把原图副本递进隔离区。
  *
  * @param {File|Blob} file 图片文件
- * @param {object} options { scene: chat_image/avatar/video_cover, conversationId? }
+ * @param {object} options { scene: chat_image/avatar/video_cover/image_work/music_cover/novel_cover/dating_photo/moment_image, conversationId? }
  * @returns {Promise<{ pass: boolean, message?: string, result: object }>}
- *   pass=true 表示可以照常上传（含「未判定」的放行）；pass=false 时 message 是给用户的提示文案
+ *   pass=true 表示可以照常上传（含「未判定」的放行）；pass=false 时 message 是给用户的提示文案。
+ *   需要服务端据此分「机器已过 / 还得人工」的调用方读 result.skipped（见 Profile.vue 的照片墙）
  */
 export async function guardImage(file, options = {}) {
   const result = await inspectImage(file)

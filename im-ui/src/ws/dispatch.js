@@ -434,6 +434,37 @@ function handleNotify(data, { conversation, friend, group, auth }) {
     return
   }
 
+  /**
+   * 交友配对成功：后端给两个人都推这一帧。
+   *
+   * 发起滑动那一侧的交友页已经拿 HTTP 返回弹了「去聊天 / 继续刷」的框，所以这里不再
+   * 补一个 toast（一次喜欢弹三层是穿帮），但通知与系统消息仍旧发：它是那张
+   * 「以后能从通知历史里找回这个会话」的凭证，两边的历史都要留得下。
+   */
+  if (data.bizType === 'match-success') {
+    // 会话是刚建的，本地列表里没有，不刷一下点进通知会看到一个找不到归属的会话 id
+    conversation.fetchList()
+    ElNotification({
+      title: '配对成功',
+      message: `${data.nickname || '有人'} 和你互相喜欢了`,
+      type: 'success',
+      onClick: () => {
+        if (data.conversationId) {
+          router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
+        }
+      }
+    })
+    notifySystem('配对成功', `${data.nickname || '有人'} 和你互相喜欢了`, {
+      tag: 'match-success',
+      onOpen: () => {
+        if (data.conversationId) {
+          router.push({ name: 'chat', params: { conversationId: asId(data.conversationId) } })
+        }
+      }
+    })
+    return
+  }
+
   // 全服公告：判重、通知、待确认列表都在 stores/announce 里（补拉那一路共用同一个集合），
   // 这一层只负责把 WS 那一帧交过去，不在这里自己记「弹过没有」——两处各记一份必然漂移
   if (data.action === 'announce') {

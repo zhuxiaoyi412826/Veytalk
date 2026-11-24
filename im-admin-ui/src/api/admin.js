@@ -81,7 +81,27 @@ import http from './request'
  *  - /api/admin/agreement/consent/user/{userId} GET，个人同意链，不分页（服务端硬截 200 条）
  *  这一批与公告那一屏长得像，但【没有删除也没有改已发布版本】：那两个动作在语义上等于
  *  销毁一份对用户生效过的合同原件，所以后端根本不开这两个端点，前端也就没有对应按钮（见 AgreementView）。
- *  新的权限点 125 system:agreement:manage：跑完 SQL 必须清一次 im:auth:* 缓存，否则已登录的 admin 看不到这一屏。
+ * 新的权限点 125 system:agreement:manage：跑完 SQL 必须清一次 im:auth:* 缓存，否则已登录的 admin 看不到这一屏。
+ *
+ * 直播三板块新增（图片 / 音乐 / 小说，一套端点按 type 分发）：
+ *  - /api/admin/work/{type}/page | /{id}   GET；POST /{type} 代建；PUT /{type}/{id} 编辑
+ *  - /api/admin/work/{type}/{id}/offline | /online  POST，reason 是 @RequestParam；/{type}/{id}  DELETE
+ *  - /api/admin/work/{type}/category/list | POST | /{id}(PUT|DELETE)   分类字典，与视频那组同形状
+ *  - /api/file/upload       媒体先上传拿 fileId 再提交表单（bizType=image_work / music / music_cover / novel_cover）
+ *  新的三个权限点 129~131（system:image:manage / system:music:manage / system:novel:manage）：
+ *  跑完 V1.0.6 同样必须清一次 im:auth:perm:*。权限是在方法体里按 URL 的 {type} 动态校的
+ *  （注解里的权限串必须是编译期常量），所以三个薄壳页面共用一组端点（见 components/WorkManage.vue）。
+ *
+ * 交友三屏新增（V1.0.7，三个权限点 132~134）：
+ *  - /api/admin/dating/profile/page  GET；/profile/{userId}/hide | /reveal | /quality  POST，
+ *    reason 与 flag 都是 @RequestParam；/api/admin/dating/photo/page | /{id}/approve |
+ *    /{id}/reject  POST | /{id}  DELETE
+ *  - /api/admin/dating/dict/tag/*   标签字典（list 不分页）；/icebreaker/*  破冰文案
+ *  - /api/admin/moment/page | /{id}  GET；/{id}/offline | /online  POST；/{id}  DELETE；
+ *    /comment/page | /comment/{id}/offline | /online  POST | /comment/{id}  DELETE
+ *  学历 / 收入 / 婚恋 / 交友目的这四处码表<b>复用用户侧的 /api/dating/dict</b>（只要登录态，
+ *  与 /api/report/config 同一做法）：同一份枚举开两个端点，两份就会开始漂移。
+ *  跑完 V1.0.7 必须清一次 im:auth:perm:*，否则已登录的 admin 三屏全是 1003。
  *
  * disable 的 reason 用 params 而不是 data 传：后端没写 @RequestBody，
  * 发一个 JSON body 过去它会当成「reason 为空」而打回「请填写禁用事由」，
@@ -212,6 +232,91 @@ export function updateVideoCategory(id, { name, sort, status } = {}) {
 /** 删除分类（逻辑删除）：不动历史视频的分类文本，幂等 */
 export function deleteVideoCategory(id) {
   return http.delete(`/admin/video/category/${id}`)
+}
+
+/* ==================== 作品管理（图片 / 音乐 / 小说，新权限点 129~131） ====================
+ *
+ * 一套端点按 type 分发：/api/admin/work/{type}/**。视频板块仍走上面那组 /api/admin/video/**，
+ * 传 type=video 会被后端守卫拒（400），不是权限问题而是路由归属。
+ * 三个板块共用一个 AdminWorkDTO：不适用的字段为 null（图集只有 imageUrls、音乐只有 fileUrl、
+ * 小说只有 content），列表格时按板块取自己那一列。
+ *
+ * 权限点是动态的（后端 WorkAuthGuard 把 type 映射到 129/130/131 之一），所以
+ * 「只有图片权限」的管理员换个 type 请求会拿到 1003，与一屏一个权限点的约定对齐。
+ */
+
+/** 作品列表：含已下架（status=2）；纯数字关键词额外认作品 ID / 作者 ID；小说列表不含正文 */
+export function fetchWorkPage(type, params) {
+  return http.get(`/admin/work/${type}/page`, { params })
+}
+
+/** 作品详情：不拒已下架的行；小说带 Markdown 正文，供编辑弹窗回填 */
+export function fetchWorkDetail(type, id) {
+  return http.get(`/admin/work/${type}/${id}`)
+}
+
+/** 代建作品：发布即可见，归属记在当前管理员名下 */
+export function createWork(type, body) {
+  return http.post(`/admin/work/${type}`, body)
+}
+
+/** 编辑作品：只改传了值的字段（null 即不改），不改归属不改状态；coverFileId 传 0 表示去掉封面 */
+export function updateWork(type, id, body) {
+  return http.put(`/admin/work/${type}/${id}`, body)
+}
+
+/** 下架作品：reason 走 query 参数进服务端审计日志，与下架视频同一口径 */
+export function offlineWork(type, id, reason) {
+  return http.post(`/admin/work/${type}/${id}/offline`, null, { params: { reason } })
+}
+
+/** 恢复上架，幂等 */
+export function onlineWork(type, id) {
+  return http.post(`/admin/work/${type}/${id}/online`)
+}
+
+/** 逻辑删除，不可自助恢复——前端必须二次确认 */
+export function deleteWork(type, id) {
+  return http.delete(`/admin/work/${type}/${id}`)
+}
+
+/* ---------- 作品分类字典（四板块共用一张表，按 type 取本板块那一段） ---------- */
+
+/** 分类列表：含停用项，按 sort 升序；type 也认 video，所以视频那一屏不必改调用 */
+export function fetchWorkCategories(type) {
+  return http.get(`/admin/work/${type}/category/list`)
+}
+
+/** 新增分类：name 必填，sort 为空则排最后（同板块内同名才拒，跨板块可重名） */
+export function createWorkCategory(type, name, sort) {
+  return http.post(`/admin/work/${type}/category`, null, { params: { name, sort } })
+}
+
+/** 修改分类：改名 / 调序 / 启停，不传的项不改；id 不属于该板块时后端拒绝 */
+export function updateWorkCategory(type, id, { name, sort, status } = {}) {
+  return http.put(`/admin/work/${type}/category/${id}`, null, { params: { name, sort, status } })
+}
+
+/** 删除分类（逻辑删除）：不动历史作品的分类文本，幂等 */
+export function deleteWorkCategory(type, id) {
+  return http.delete(`/admin/work/${type}/category/${id}`)
+}
+
+/**
+ * 代建/编辑作品时的媒体上传：走通用单请求上传，bizType 必传 image_work / music /
+ * music_cover / novel_cover 之一（服务端按 bizType 收扩展名白名单，传错会被拒）。
+ *
+ * 不移植 im-ui 那套分片秒传：后台这一屏传的是几十 MB 以内的图与曲，而分片通道要额外的
+ * MD5 计算与三个往返，收益不抵多一处要维护的失效逻辑；安装包那条大文件通道见 utils/releaseUpload.js。
+ */
+export function uploadWorkFile(file, bizType, duration) {
+  const form = new FormData()
+  // 后端用 @RequestPart("file") 接收，字段名必须是 file；Content-Type 交给浏览器生成 boundary
+  form.append('file', file)
+  return http.post('/file/upload', form, {
+    params: { bizType, duration },
+    timeout: 300000
+  })
 }
 
 /* ==================== 直播管理（三期） ==================== */
@@ -784,4 +889,155 @@ export function applySchemaVersion(version) {
 /** 一键回滚某版本（执行 U 脚本；服务端只认最近一次已应用版本，LIFO） */
 export function rollbackSchemaVersion(version) {
   return http.post('/admin/schema/rollback', null, { params: { version } })
+}
+
+/* ==================== 交友管理（V1.0.7，权限点 132 system:dating:manage） ==================
+ *
+ * 后端三个屏是三个 Controller、三个权限点（Sa-Token 的类级与方法级注解是「都要过」而不是
+ * 后者覆盖前者，并到一个类里只有交友权限的管理员就连字典页也进不去）。
+ * reason / flag 都是 @RequestParam，与 disableUser 的 reason 同一口径。
+ * 跑完 V1.0.7 必须清一次 im:auth:perm:* 与 im:auth:role:*，否则已登录的 admin 三屏全是 1003。
+ */
+
+/** 学历 / 收入 / 婚恋 / 交友目的的码表：<b>直接读用户侧那一份</b>，不为后台再开一个同形端点 */
+export function fetchDatingDict() {
+  return http.get('/dating/dict')
+}
+
+/** 交友资料翻页：含隐身与已降权的人；入参 keyword / userId / city / discoverable / qualityFlag / minScore / current / size */
+export function fetchDatingProfilePage(params) {
+  return http.get('/admin/dating/profile/page', { params })
+}
+
+/** 强制隐身：不再进推荐流与附近的人，已配对与好友关系不受影响；<b>本人也能自己再打开</b>，硬封走账号封禁 */
+export function hideDatingProfile(userId, reason) {
+  return http.post(`/admin/dating/profile/${userId}/hide`, null, { params: { reason } })
+}
+
+/** 恢复可被发现，幂等 */
+export function revealDatingProfile(userId) {
+  return http.post(`/admin/dating/profile/${userId}/reveal`)
+}
+
+/** 推荐质量标记：0 正常 1 低质降权 2 已升权（真人认证，只有这里能写 2） */
+export function setDatingQuality(userId, flag, reason) {
+  return http.post(`/admin/dating/profile/${userId}/quality`, null, { params: { flag, reason } })
+}
+
+/** 照片墙翻页：默认停在 auditStatus=0 那个待审队列；上传时间正序（先传来的先审） */
+export function fetchDatingPhotoPage(params) {
+  return http.get('/admin/dating/photo/page', { params })
+}
+
+/** 照片通过：只有这一档对外可见，后端顺带重算作者的完资料度 */
+export function approveDatingPhoto(id) {
+  return http.post(`/admin/dating/photo/${id}/approve`)
+}
+
+/** 照片驳回：<b>保留行与原因</b>而不删——那是用户自己的图，他得知道哪张被拦 */
+export function rejectDatingPhoto(id, reason) {
+  return http.post(`/admin/dating/photo/${id}/reject`, null, { params: { reason } })
+}
+
+/** 删除照片：逻辑删，用于重复上传与明显垃圾；不可自助恢复 */
+export function deleteDatingPhoto(id) {
+  return http.delete(`/admin/dating/photo/${id}`)
+}
+
+/* ==================== 交友字典（权限点 134 system:tag:manage） ==================
+ * 标签与破冰文案共用一个权限点与一个页面：前台本来就是同一屏（选标签 -> 出开场白），
+ * 拆两个点只会多出一个「给了标签忘了给破冰」的错误授权组合。
+ * 写动作全是 @RequestParam，params 传。
+ */
+
+/** 标签全量（不分页，前端要它当下拉数据源）：category 可选 */
+export function fetchAdminTagList(category) {
+  return http.get('/admin/dating/dict/tag/list', { params: { category } })
+}
+
+/** 新增标签：同名校验在库里，重名直接报错 */
+export function createAdminTag({ name, category, icon, sort } = {}) {
+  return http.post('/admin/dating/dict/tag', null, { params: { name, category, icon, sort } })
+}
+
+/** 改标签：只改传进来的字段，status=0 是停用而<b>不删用户已有的绑定</b> */
+export function updateAdminTag(id, { name, category, icon, sort, status } = {}) {
+  return http.put(`/admin/dating/dict/tag/${id}`, null, { params: { name, category, icon, sort, status } })
+}
+
+/** 删标签：会连带删掉绑在这个标签上的开场白文案 */
+export function deleteAdminTag(id) {
+  return http.delete(`/admin/dating/dict/tag/${id}`)
+}
+
+/** 破冰文案翻页：入参 type / tagId / keyword / current / size */
+export function fetchAdminIcebreakerPage(params) {
+  return http.get('/admin/dating/dict/icebreaker/page', { params })
+}
+
+/** 新增破冰文案：type=3（标签开场白）必须给出已存在的 tagId */
+export function createAdminIcebreaker({ type, tagId, content, sort } = {}) {
+  return http.post('/admin/dating/dict/icebreaker', null, { params: { type, tagId, content, sort } })
+}
+
+/** 改破冰文案：把 type 改成 1/3 时不会顺手清掉旧 tagId（对那两类是无害冗余） */
+export function updateAdminIcebreaker(id, { type, tagId, content, sort, status } = {}) {
+  return http.put(`/admin/dating/dict/icebreaker/${id}`, null, { params: { type, tagId, content, sort, status } })
+}
+
+/** 删破冰文案：用户端取文案是随机抽样，删一条只是候选少一条 */
+export function deleteAdminIcebreaker(id) {
+  return http.delete(`/admin/dating/dict/icebreaker/${id}`)
+}
+
+/* ==================== 动态管理（V1.0.7，权限点 133 system:moment:manage） ==================
+ *
+ * 「下架」与「删除」是两个端点而不是一个带 boolean 的：删除会连带清掉媒体 / 评论 /
+ * 点赞 / 可见范围白名单四张附属表且不可恢复，误删成本远高于下架。
+ * mediaUrls 与用户端一样是受控地址，必须过 fetchMedia 才能变成 <img src>。
+ */
+
+/** 动态翻页：含已下架的；入参 keyword / userId / status / visibility / current / size */
+export function fetchMomentPage(params) {
+  return http.get('/admin/moment/page', { params })
+}
+
+/** 动态详情：完整正文与全部媒体，已下架的也能查（处理申诉时正是要看被藏起来的那条） */
+export function fetchMomentDetail(id) {
+  return http.get(`/admin/moment/${id}`)
+}
+
+/** 下架动态：作者本人仍能在自己主页看到并删掉它，别人全看不到；幂等 */
+export function offlineMoment(id, reason) {
+  return http.post(`/admin/moment/${id}/offline`, null, { params: { reason } })
+}
+
+/** 恢复动态，幂等 */
+export function onlineMoment(id) {
+  return http.post(`/admin/moment/${id}/online`)
+}
+
+/** 删除动态：连带四张附属表，不可自助恢复——前端必须二次确认 */
+export function deleteMoment(id) {
+  return http.delete(`/admin/moment/${id}`)
+}
+
+/** 评论翻页：不传 momentId 就是全站待处理队列，含已下架动态下的评论 */
+export function fetchMomentCommentPage(params) {
+  return http.get('/admin/moment/comment/page', { params })
+}
+
+/** 下架评论：<b>连带藏掉它当前的回复</b>并同步回写动态的评论数，否则计数与实条数永久对不上 */
+export function offlineMomentComment(id, reason) {
+  return http.post(`/admin/moment/comment/${id}/offline`, null, { params: { reason } })
+}
+
+/** 恢复评论：只恢复被点的这一条，不连带子树（子行被藏往往是它自己被单独处置过） */
+export function onlineMomentComment(id) {
+  return http.post(`/admin/moment/comment/${id}/online`)
+}
+
+/** 删除评论：连带删它下面的全部回复，评论数按本次真正删掉的行数回退 */
+export function deleteMomentComment(id) {
+  return http.delete(`/admin/moment/comment/${id}`)
 }

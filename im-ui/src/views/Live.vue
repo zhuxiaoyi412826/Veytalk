@@ -71,6 +71,7 @@ import { useSettingsStore } from '@/stores/settings'
 import UserAvatar from '@/components/UserAvatar.vue'
 import AnchorStatsDialog from '@/components/AnchorStatsDialog.vue'
 import ArticlePanel from '@/components/ArticlePanel.vue'
+import WorkFeed from '@/components/WorkFeed.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -134,8 +135,11 @@ function openReplayRoom(item) {
   router.push({ name: 'live-room', params: { roomId: String(item.id) }, query: { replay: '1' } })
 }
 
-/* ==================== 顶层双板块：视频 / 直播 ==================== */
-/** 顶层板块：live 直播间（默认），video 短视频信息流 */
+/* ==================== 顶层板块：直播 / 视频 / 文章 / 图片 / 音乐 / 小说 ==================== */
+/**
+ * 顶层板块：live 直播间（默认），video 短视频信息流，article 文章，
+ * image / music / novel 三个作品板块（共用 WorkFeed，只在卡片与弹层上按 type 分支）。
+ */
 const activeTab = ref('live')
 
 /* ---------- 视频板块：抖音式信息流（左一级频道 + 顶二级分类 + 搜索 + 自适应网格） ---------- */
@@ -2593,12 +2597,15 @@ watch(() => route.params.roomId, () => syncRoute())
 
     <!-- ==================== 大厅形态 ==================== -->
     <div v-else class="live-lobby">
-      <!-- 顶层双板块切换：视频 / 直播 -->
+      <!-- 顶层板块切换：直播 / 视频 / 文章 / 图片 / 音乐 / 小说 -->
       <div class="live-lobby__tabs">
         <el-radio-group v-model="activeTab" size="large">
           <el-radio-button value="live">直播</el-radio-button>
           <el-radio-button value="video">视频</el-radio-button>
           <el-radio-button value="article">文章</el-radio-button>
+          <el-radio-button value="image">图片</el-radio-button>
+          <el-radio-button value="music">音乐</el-radio-button>
+          <el-radio-button value="novel">小说</el-radio-button>
         </el-radio-group>
       </div>
 
@@ -2817,6 +2824,12 @@ watch(() => route.params.roomId, () => syncRoute())
       <template v-else-if="activeTab === 'article'">
         <ArticlePanel />
       </template>
+
+      <!-- ===== 图片 / 音乐 / 小说：同一个 WorkFeed，靠 type 决定接口前缀与卡片形态 ===== -->
+      <!-- 组件只在切到本 tab 时才创建，挂载即拉分类与列表，不必再补 watch(activeTab) -->
+      <WorkFeed v-else-if="activeTab === 'image'" type="image" />
+      <WorkFeed v-else-if="activeTab === 'music'" type="music" />
+      <WorkFeed v-else-if="activeTab === 'novel'" type="novel" />
     </div>
 
     <!-- ==================== 主播数据面板 ==================== -->

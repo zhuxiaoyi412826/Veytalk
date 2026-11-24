@@ -109,6 +109,13 @@ const routes = [
         meta: { title: '直播间' }
       },
       {
+        // 交友（滑动匹配）：tab 用 query 传，配对通知可以直接 ?tab=pairs 落到对应页签
+        path: 'discover',
+        name: 'discover',
+        component: () => import('@/views/Discover.vue'),
+        meta: { title: '交友' }
+      },
+      {
         path: 'user/:id',
         name: 'user-profile',
         component: () => import('@/views/UserProfile.vue'),

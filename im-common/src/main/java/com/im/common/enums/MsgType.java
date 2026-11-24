@@ -72,7 +72,20 @@ public enum MsgType {
      * 接龙的条目是「每人自带正文的一行」，行数与内容都不固定，直接存进 {@code extra} 的 JSON 列，
      * 靠服务端 read-modify-write + Redis 短锁串行化追加，<b>零新表</b>。
      */
-    CHAIN(14, "接龙");
+    CHAIN(14, "接龙"),
+    /**
+     * 动态分享（交友动态转聊天）：把一条 {@code im_moment} 转成会话里的一张卡片。
+     *
+     * <p>{@code extra} 带 {@code momentId} 与三个发送时定格的快照（作者昵称 / 正文摘要 / 附件条数），
+     * <b>不带任何图片地址</b>——动态附图的 {@code fileId} 按约定只能从动态接口下发
+     * （见 {@code FileBizType#MOMENT_IMAGE} 的注释），而消息会被转发、会被合并转发、
+     * 会躺在漫游记录里，比一次动态详情请求活得久得多。
+     *
+     * <p>快照由 {@code MomentContentHandler} 经 {@code MomentQuerySpi} 向 im-friend 反查后覆写，
+     * 客户端上报的这三个字段一律不算数：否则任何人都能造一张「某某说了某句话」的卡片。
+     * 点开卡片时可见性按<b>点开的人</b>重算，不在受众里就是「这条动态不在了」。
+     */
+    MOMENT(15, "动态");
 
     @JsonValue
     private final int code;

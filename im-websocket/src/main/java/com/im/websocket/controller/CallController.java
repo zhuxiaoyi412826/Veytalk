@@ -6,8 +6,10 @@ import com.im.common.config.ImProperties;
 import com.im.common.util.SecurityUtil;
 import com.im.websocket.dto.WsGroupCallPayload;
 import com.im.websocket.dto.vo.CallConfigVO;
+import com.im.websocket.dto.vo.TrtcUserSigVO;
 import com.im.websocket.service.CallSignalingService;
 import com.im.websocket.service.GroupCallSignalingService;
+import com.im.websocket.util.TLSSigAPIv2;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -77,5 +79,34 @@ public class CallController {
     @GetMapping("/group/active")
     public Result<WsGroupCallPayload> groupActive(@RequestParam Long groupId) {
         return Result.ok(groupCallSignalingService.activeCallOf(groupId, SecurityUtil.getUserId()));
+    }
+
+    /**
+     * 为微信小程序音视频通话现签一个腾讯云 TRTC UserSig。
+     *
+     * <p>唯一新增的后端 REST 接口：签完即返回，不落库、不审计。刻意不放进 {@code /config}——
+     * Web/桌面端根本用不到，没必要每次多取一份签名。未配置（{@code sdkAppId<=0} 或密钥为空）时
+     * 返回 {@code sdkAppId=0} + 空签名（这是降级不是错误），小程序据此禁用通话入口。
+     */
+    @Operation(summary = "签发小程序 TRTC UserSig",
+            description = "需登录。仅微信小程序音视频通话用：返回 sdkAppId/userId/userSig；"
+                    + "未配置 TRTC（sdkAppId=0）时正常返回空签名而非报错，SecretKey 只在服务端参与签名、绝不下发")
+    @GetMapping("/trtc-user-sig")
+    public Result<TrtcUserSigVO> trtcUserSig() {
+        ImProperties.Call.Trtc trtc = imProperties.getCall().getTrtc();
+        TrtcUserSigVO vo = new TrtcUserSigVO();
+        String userId = String.valueOf(SecurityUtil.getUserId());
+        vo.setUserId(userId);
+        boolean configured = trtc.getSdkAppId() > 0
+                && trtc.getSecretKey() != null && !trtc.getSecretKey().isBlank();
+        if (!configured) {
+            vo.setSdkAppId(0);
+            vo.setUserSig("");
+            return Result.ok(vo);
+        }
+        vo.setSdkAppId(trtc.getSdkAppId());
+        vo.setUserSig(new TLSSigAPIv2(trtc.getSdkAppId(), trtc.getSecretKey())
+                .genUserSig(userId, trtc.getUserSigExpireSeconds()));
+        return Result.ok(vo);
     }
 }

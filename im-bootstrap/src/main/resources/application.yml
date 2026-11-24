@@ -514,6 +514,14 @@ im:
       secret: ${IM_TURN_SECRET:}
       # 临时凭据有效期（秒），默认 24 小时
       ttl-seconds: 86400
+    # 腾讯云 TRTC：仅微信小程序音视频通话用（Web/桌面/安卓走自建 WebRTC，与本项无关）。
+    # 后端 GET /api/call/trtc-user-sig 用下面两项现签 userSig；secret-key 只在服务端、绝不下发前端。
+    # sdk-app-id=0 视为未配置：接口照常返回空签名、小程序禁用通话入口，不报错。生产经环境变量注入。
+    trtc:
+      sdk-app-id: ${IM_TRTC_SDK_APP_ID:0}
+      secret-key: ${IM_TRTC_SECRET_KEY:}
+      # UserSig 有效期（秒），默认 7 天
+      user-sig-expire-seconds: 604800
     # 振铃超时（秒）：被叫在这个时长内未接听，服务端下发 timeout 收起主叫浮层
     ring-timeout-seconds: 45
     # 单通话最大时长（秒），防御性上限，超时由服务端下发 hangup 兜底；群通话也共用这一个上限

@@ -61,6 +61,21 @@ public interface FriendMapper extends BaseMapper<Friend> {
     }
 
     /**
+     * 我拉黑的人的 ID（只取 {@code friend_id} 一列）。
+     *
+     * <p>交友卡池要把它整份当排除名单：拉黑是「我不要再看到这个人」的最强表达，
+     * 优先级高于对方的 {@code discoverable}，而它只存在 {@code im_friend} 这一侧，
+     * im-user 读不到，所以上传 ID 是唯一不越模块边界的做法。
+     */
+    default List<Long> selectBlockedFriendIds(Long userId) {
+        List<Friend> rows = selectList(Wrappers.<Friend>lambdaQuery()
+                .select(Friend::getFriendId)
+                .eq(Friend::getUserId, userId)
+                .eq(Friend::getStatus, FriendStatus.BLOCKED.getCode()));
+        return rows.stream().map(Friend::getFriendId).toList();
+    }
+
+    /**
      * 一次查出 {@code (A->B)} 与 {@code (B->A)} 两个方向的关系行。
      *
      * <p>好友判定需要同时看两边的拉黑状态，用本方法可把两次往返压成一次。

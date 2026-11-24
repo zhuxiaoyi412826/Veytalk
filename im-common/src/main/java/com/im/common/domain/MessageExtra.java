@@ -26,6 +26,7 @@ import java.util.List;
  *   <li>转账：transferAmount / transferToUserId / transferToNickname / transferMemo</li>
  *   <li>红包：packetId / packetAmount / packetCount / packetGreeting（领取状态不落这里）</li>
  *   <li>通话记录：callMediaType / duration / callScreenRecorded / fileId，群通话另带 callParticipantCount</li>
+ *   <li>动态分享：momentId / momentAuthor / momentSummary / momentMediaCount（不带图片地址，见字段注释）</li>
  * </ul>
  */
 @Data
@@ -123,6 +124,29 @@ public class MessageExtra implements Serializable {
 
     @Schema(description = "名片消息：被分享用户头像快照")
     private String cardAvatar;
+
+    /**
+     * 动态分享：被转成聊天消息的那条动态 ID。
+     *
+     * <p>气泡上<b>只放摘要不放图</b>：动态附图的 {@code fileId} 按约定只能从动态接口下发
+     * （口径同 {@code FileBizType#MOMENT_IMAGE} 的注释），把地址抄进消息就等于绕开了
+     * 那条边界，而消息会被转发、会被合并转发、会躺在漫游记录里，比一次动态详情请求活得久得多。
+     * 点开卡片走详情接口，可见性按<b>点开的人</b>重算一次，无权就报「这条动态不在了」。
+     *
+     * <p>下面三个快照字段是「原动态被删掉之后气泡还能读」的依据：删动态是作者的权力，
+     * 而聊天记录是双方的，让一方的删除把另一方的气泡变成空白是不对的。
+     */
+    @Schema(description = "动态分享：动态 ID（点开时按查看者重算可见性）")
+    private Long momentId;
+
+    @Schema(description = "动态分享：作者昵称快照（发送时定格）")
+    private String momentAuthor;
+
+    @Schema(description = "动态分享：正文摘要快照（服务端截断，纯图动态为 null）")
+    private String momentSummary;
+
+    @Schema(description = "动态分享：附件条数快照，卡片据此显示「N 图」或「视频」")
+    private Integer momentMediaCount;
 
     @Schema(description = "位置消息：地址 / 地点文字描述")
     private String locationName;

@@ -35,6 +35,9 @@
         <el-option value="chat_image" label="聊天图片" />
         <el-option value="avatar" label="头像" />
         <el-option value="video_cover" label="直播封面" />
+        <el-option value="image_work" label="图集作品" />
+        <el-option value="music_cover" label="音乐封面" />
+        <el-option value="novel_cover" label="小说封面" />
       </el-select>
       <el-select v-model="query.hitClass" class="pick" clearable filterable placeholder="全部类别" @change="reload">
         <el-option v-for="c in HIT_CLASSES" :key="c" :value="c" :label="c" />
@@ -203,7 +206,10 @@ const HIT_CLASSES = ['Porn', 'Hentai', 'Sexy', 'Violent', 'Drawing', 'Neutral']
 const SCENE_TEXT = {
   chat_image: '聊天图片',
   avatar: '头像',
-  video_cover: '直播封面'
+  video_cover: '直播封面',
+  image_work: '图集作品',
+  music_cover: '音乐封面',
+  novel_cover: '小说封面'
 }
 
 const rows = ref([])

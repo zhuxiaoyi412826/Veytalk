@@ -3,7 +3,11 @@
 > 适用端：**仅微信小程序**。
 > 信令复用现有 IM WebSocket，媒体走腾讯云 TRTC；Web / 桌面 / Android 仍走自建 WebRTC，两条链路并存、互不替代。
 >
-> **当前仓库状态**：小程序端通话页已实现；后端签名接口与 TRTC 配置项**已按要求回滚，不在仓库内**。本文第三节是「后端要如何实现」的口径与参考实现，落地时按此单独实现并部署。
+> **当前仓库状态**（2026-11-22 核对）：全链路**已落地**。小程序通话页、后端签名接口
+> （`im-websocket` 的 `CallController#trtcUserSig` → `GET /api/call/trtc-user-sig`）、自研签名工具
+> （`im-websocket/util/TLSSigAPIv2.java`，★ 无腾讯云 SDK 依赖，pom 里没有）、配置项
+> （`ImProperties.Call.Trtc` + `application.yml` 的 `${IM_TRTC_*}`）均在仓内；
+> 生产开关位置见 `md/部署/真实服务器部署手册.md` §12 ⑤。**未填值不算故障**：`sdk-app-id=0` 即降级。
 
 ---
 
@@ -56,9 +60,13 @@ im:
       user-sig-expire-seconds: 604800
 ```
 
-- 生产环境写 `Docker/app/extra/application-prod-extra.yml`，键层级为 `im.call.trtc`，**值不要用反引号包裹**。
-- 环境变量：`IM_TRTC_SDK_APP_ID`、`IM_TRTC_SECRET_KEY`。
-- **改完必须 `docker compose restart im-server`**（Java 仅在启动时读取该文件，`up -d` 未改镜像不会重读）。
+- **两种填法只选一种**（选前者时后者留默认值）：
+  - ① **推荐**：`Docker/conf/im.env` 的 `IM_TRTC_SDK_APP_ID` / `IM_TRTC_SECRET_KEY`（密钥不进仓库；模板 `conf/im.env.example` 已带这两行，默认 `0` / 空）。
+  - ② 字面值写 `Docker/app/extra/application-prod-extra.yml`，键层级 `im.call.trtc`，**值不要用反引号包裹**。
+- ★ **生效方式两边不一样，这里是高频错点**：
+  - 走 ①（`env_file`）→ 必须 `docker compose up -d --force-recreate im-server`。环境变量只在**创建容器**时读入，`restart` 不重读 `env_file`（只 `restart` 的表现是：文件里明明填了真值，接口仍回 `sdkAppId=0`）。
+  - 走 ②（外挂 yml 是挂载文件）→ `docker compose restart im-server` 就够（JVM 仅在启动时读该文件，`up -d` 未换镜像不会重建容器）。
+- 复核它真的读到了：`docker compose exec -T im-server env | grep TRTC`（只能证明进程里有这个变量，不证明值对）。
 
 ### 3.2 UserSig 签发
 
@@ -173,7 +181,10 @@ sed -i 's|^IM_SERVER_TAG=.*|IM_SERVER_TAG=local/im-server:1.0.1|' .env
 docker compose build im-server && docker compose up -d im-server
 docker compose ps
 
-# 4) 填 TRTC 配置到 app/extra/application-prod-extra.yml 后
+# 4) 填 TRTC 配置。两条路只选一条，★ 生效命令不一样
+#    ① 推荐：写 conf/im.env 的 IM_TRTC_SDK_APP_ID / IM_TRTC_SECRET_KEY（env_file 只在建容器时读入）
+docker compose up -d --force-recreate im-server
+#    ② 或者把字面值写进 app/extra/application-prod-extra.yml 的 im.call.trtc（挂载文件）
 docker compose restart im-server
 ```
 

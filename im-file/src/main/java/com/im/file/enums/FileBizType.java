@@ -89,6 +89,37 @@ public enum FileBizType {
     ARTICLE_IMG("article_img", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif")),
 
     /**
+     * 直播页图片板块的图集（1~9 张，首图兼封面）。与 {@link #ARTICLE_IMG} 分开：那是文章正文的
+     * 附属图片、生命周期跟着文章走，这是独立成一条作品的图片，按业务归档与清理的口径不同；
+     * 也与 {@link #VIDEO_COVER} 无关——那是装饰性的封面，这是内容本体。
+     *
+     * <p>扩展名沿用 {@link #CHAT_IMAGE} 的口径（含 avif / jfif）：截图工具与「另存为图片」
+     * 产出的就是这几类，少放一个只会让用户先把图转格式才能发。
+     */
+    IMAGE_WORK("image_work", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif", "jfif")),
+
+    /**
+     * 直播页音乐板块的音频本体。与 {@link #CHAT_VOICE} 分开：那是会话内私有语音，这是面向
+     * 所有登录用户的信息流内容，靠 {@link #isPublic()} 免会话校验放行下载。
+     *
+     * <p>不放行 webm：音乐板块收的是「一首曲子」，用户从各处存来的基本都是前八种容器；
+     * 网页 MediaRecorder 录的 webm 属于 {@link #CALL_RECORD} 那类通话产物，不该混进作品库。
+     */
+    MUSIC("music", Set.of("mp3", "wav", "flac", "aac", "m4a", "ogg", "opus", "amr")),
+
+    /**
+     * 音乐板块封面图（可选，无封面时前端按标题占位）。扩展名与 {@link #VIDEO_COVER} 一致：
+     * 封面是用户在上传表单里现挑的一张图，不必为他多开 avif 这条渲染路径。
+     */
+    MUSIC_COVER("music_cover", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp")),
+
+    /**
+     * 小说板块封面图（可选）。与 {@link #MUSIC_COVER} 分开而不是合成一种「作品封面」：
+     * {@code im_file} 里按 bizType 归档，合并后就没法只清某一板块的封面。
+     */
+    NOVEL_COVER("novel_cover", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp")),
+
+    /**
      * 音视频通话录制产物（桌面端录屏 / 录音）。与 {@link #CHAT_VOICE} 分开：那是语音留言，
      * 这是一次实时通话的录制，且多为带画面的容器。
      *
@@ -112,6 +143,47 @@ public enum FileBizType {
      * 没必要为一种浏览器支持面还窄的格式多开一条渲染路径。
      */
     MODERATION_QUARANTINE("moderation_quarantine", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "jfif")),
+
+    /**
+     * 交友照片墙（最多 9 张，一行一张）。
+     *
+     * <p>与 {@link #AVATAR} 分开：头像是「全站辐射的一张脸」，照片墙是「资料卡里的内容」，
+     * 两者的可见范围、上限与清理口径都不一样（头像只一个、照片墙可九张）。
+     *
+     * <p>扩展名沿用 {@link #CHAT_IMAGE}（含 avif / jfif）：用户传的是手机相册与微信存图，
+     * 少放一个格式就是让用户先转格式才能传。
+     *
+     * <p>★ 可见性与 {@link #IMAGE_WORK} 同构：<b>开</b> {@link #isPublic()} 是因为陌生人的资料卡
+     * 要渲染别人的图，逐条校验关系既做不到也没意义；而「哪一张能被他看到」由
+     * {@code im_user_photo.audit_status} 在 im-user 服务层决定（只有通过的行才把地址发出去）。
+     * 因此这一类的 {@code fileId} <b>只能从交友接口里下发</b>：被驳回与待审那张的 ID 不该出现在
+     * 任何对外响应里，否则公开下载会替用户把它放出去（边界记在下述 README 口径）。不进
+     * {@link #isImage()}：前端用带登录头的请求取成 blob 再交给 {@code <img>}，inline 与否不影响播放。
+     */
+    DATING_PHOTO("dating_photo", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif", "jfif")),
+
+    /**
+     * 交友动态的附图（一条最多 9 张）。
+     *
+     * <p>与 {@link #DATING_PHOTO} 分开而不是合用一种「交友图片」：两者在 {@code im_file} 里
+     * 的归档与清理口径不同（照片墙跟着资料走、动态跟着一条可删的内容走），
+     * 合并后就没法只清某一侧的字节。
+     *
+     * <p>★ 开 {@link #isPublic()} 的理由与 {@link #DATING_PHOTO} 完全同构：动态流要在
+     * {@code <img>} 里渲染<b>别人</b>的图，逐张校验关系既做不到也没意义；
+     * 「谁能看到这一条」由 {@code im_moment.visibility} 与白名单在 im-friend 服务层判定，
+     * 判定不通过时那一行的地址根本不下发。因此这一类的 {@code fileId} <b>只能从动态接口里下发</b>。
+     */
+    MOMENT_IMAGE("moment_image", Set.of("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif", "jfif")),
+
+    /**
+     * 交友动态的附视频（一条最多 1 个，与图片互斥）。
+     *
+     * <p>与 {@link #VIDEO} 分开：那是直播页视频板块的作品，面向全部登录用户的信息流；
+     * 这是动态里的一段随手拍，受众恒为作者的好友与配对对象。
+     * 开 {@link #isPublic()} 的理由同 {@link #MOMENT_IMAGE}：渲染方是别人，鉴权在业务侧。
+     */
+    MOMENT_VIDEO("moment_video", Set.of("mp4", "avi", "mov", "mkv", "webm", "flv", "wmv")),
 
     /**
      * 客户端安装包（后台「客户端版本管理」上传的安装包）。官网下载页递给匿名访客的就是
@@ -165,6 +237,11 @@ public enum FileBizType {
     /**
      * 是否为图片类：决定下载时默认用 {@code inline} 还是 {@code attachment}，
      * 图片必须能在浏览器里直接渲染，否则聊天窗口里全是下载按钮。
+     *
+     * <p>三板块的四类都<b>不进这里</b>（与 {@link #VIDEO_COVER}、{@link #ARTICLE_COVER} 同口径）：
+     * 它们的字节是从 {@code /api/file/download} 出去的，而前端统一用带认证头的请求取 blob
+     * 再交给 {@code <img>} / {@code <audio>} 渲染，Content-Disposition 是 attachment 也不影响播放；
+     * 反过来一旦归进 isImage，就等于允许任何人拿直链在同源窗口里直接渲染。
      */
     public boolean isImage() {
         return this == AVATAR || this == CHAT_IMAGE;
@@ -173,9 +250,16 @@ public enum FileBizType {
     /**
      * 是否为公开资源：头像、视频板块的视频与封面都属于「非上传者、非同一会话也应当能看」的内容。
      * {@code FileServiceImpl#canAccess} 据此放行，不再走会话可见性判定。
+     *
+     * <p>三板块的四类都算公开：图片、音频、封面都是信息流卡片要替<b>别人</b>的作品渲染的字节，
+     * 逐条校验作者关系既做不到也没意义（与 {@link #VIDEO} 同一理由）。
      */
     public boolean isPublic() {
         return this == AVATAR || this == VIDEO || this == VIDEO_COVER
-                || this == ARTICLE_COVER || this == ARTICLE_IMG;
+                || this == ARTICLE_COVER || this == ARTICLE_IMG
+                || this == IMAGE_WORK || this == MUSIC
+                || this == MUSIC_COVER || this == NOVEL_COVER
+                || this == DATING_PHOTO
+                || this == MOMENT_IMAGE || this == MOMENT_VIDEO;
     }
 }

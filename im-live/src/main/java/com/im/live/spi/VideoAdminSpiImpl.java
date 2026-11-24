@@ -8,6 +8,7 @@ import com.im.common.domain.AdminVideoCategoryDTO;
 import com.im.common.domain.AdminVideoDTO;
 import com.im.common.domain.AdminVideoQueryDTO;
 import com.im.common.domain.UserBriefDTO;
+import com.im.common.enums.WorkBoardType;
 import com.im.common.exception.BusinessException;
 import com.im.common.spi.AdminVideoSpi;
 import com.im.common.spi.UserQuerySpi;
@@ -129,9 +130,14 @@ public class VideoAdminSpiImpl implements AdminVideoSpi {
 
     /* ==================== 二级分类字典 ==================== */
 
+    /**
+     * 分类 CRUD 全部固定传 {@code video}：{@code im_live_video_category} 现已一张表吃四个板块，
+     * 本 SPI 是「视频那一屏」的入口，必须只看见也只改得动 {@code type=video} 的行。
+     * 跨板块的通用入口在 {@code WorkCategoryAdminSpiImpl}。
+     */
     @Override
     public List<AdminVideoCategoryDTO> listCategories() {
-        List<LiveVideoCategory> rows = categoryService.listAll();
+        List<LiveVideoCategory> rows = categoryService.listAll(WorkBoardType.VIDEO.getCode());
         List<AdminVideoCategoryDTO> dtos = new ArrayList<>(rows.size());
         for (LiveVideoCategory row : rows) {
             dtos.add(toCategoryDTO(row));
@@ -141,17 +147,17 @@ public class VideoAdminSpiImpl implements AdminVideoSpi {
 
     @Override
     public AdminVideoCategoryDTO createCategory(String name, Integer sort, Long operatorId) {
-        return toCategoryDTO(categoryService.create(name, sort, operatorId));
+        return toCategoryDTO(categoryService.create(WorkBoardType.VIDEO.getCode(), name, sort, operatorId));
     }
 
     @Override
     public AdminVideoCategoryDTO updateCategory(Long id, String name, Integer sort, Integer status, Long operatorId) {
-        return toCategoryDTO(categoryService.update(id, name, sort, status, operatorId));
+        return toCategoryDTO(categoryService.update(WorkBoardType.VIDEO.getCode(), id, name, sort, status, operatorId));
     }
 
     @Override
     public void deleteCategory(Long id, Long operatorId) {
-        categoryService.delete(id, operatorId);
+        categoryService.delete(WorkBoardType.VIDEO.getCode(), id, operatorId);
     }
 
     private AdminVideoCategoryDTO toCategoryDTO(LiveVideoCategory category) {

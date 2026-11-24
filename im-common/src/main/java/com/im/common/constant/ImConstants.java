@@ -292,6 +292,44 @@ public final class ImConstants {
     public static final String PERM_SYSTEM_SCHEMA_MANAGE = "system:schema:manage";
 
     /**
+     * 后台权限点（台账 1.0.6）：直播页「图片 / 音乐 / 小说」三个内容板块各一点。
+     *
+     * <p>为什么不并进 {@code system:video:manage}：后台是三个独立菜单页（图集 / 音频 / 长篇正文），
+     * 与视频同一口径——一屏一点，能管图集的人不必然能管小说连载。接口层是一套按 type 分发
+     * 的通用 Controller（{@code /api/admin/work/{type}/**}），但每个请求首行仍按 type 映射到
+     * 这三个串之一做精确校验，所以「一套代码」没有换来「一个权限点管三屏」。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定；种子在 {@code sql/versions/V1.0.6__live_image_music_novel.sql}
+     * （全新库走 {@code sql/im_data.sql}），绑定 admin 角色的 6029~6031，跑完必须清
+     * {@code im:auth:perm:*} 与 {@code im:auth:role:*}（只 DEL、禁 FLUSHDB），否则三个新页对 admin 也是 1003。
+     */
+    public static final String PERM_SYSTEM_IMAGE_MANAGE = "system:image:manage";
+    public static final String PERM_SYSTEM_MUSIC_MANAGE = "system:music:manage";
+    public static final String PERM_SYSTEM_NOVEL_MANAGE = "system:novel:manage";
+
+    /**
+     * 后台权限点（台账 1.0.7）：交友这批功能的三个维护屏各一点。
+     *
+     * <p>为什么是三点而不是并入已有的 {@code system:user:manage} / {@code system:moment:manage}
+     * 之类：后台是三个独立菜单页——交友资料与照片审核、动态与评论、标签与破冰字典。
+     * 照片驳回与资料降权是「看得到一个人」，动态删除是不可逆的高危动作，标签字典只影响文案，
+     * 三者的风险等级与值班人完全不同，并成一点就等于让内容审核员也能删用户的动态。
+     *
+     * <p>标签点（{@code system:tag:manage}）同时盖住 {@code im_tag} 与 {@code im_icebreaker} 两张表：
+     * 它们在前台本来就是同一屏（破冰文案里有一档要绑标签），拆成两个权限点只会让运营申请两次。
+     *
+     * <p>同一规矩：伞权限 {@code system:manage} 不参与判定（Sa-Token 是字符串精确匹配，
+     * {@code system:manage} 通配不到 {@code system:dating:manage}）；种子在
+     * {@code sql/versions/V1.0.7__dating_core.sql} 第 15 段（全新库走 {@code sql/im_data.sql}），
+     * 权限 ID 132~134、绑定 admin 角色的 6032~6034。<b>跑完必须清 {@code im:auth:perm:*}
+     * 与 {@code im:auth:role:*}</b>（只 DEL、禁 FLUSHDB），否则三个新页对 admin 也是 1003，
+     * 而 1003 的页面表现与「脚本没跑」一模一样，极易误判。
+     */
+    public static final String PERM_SYSTEM_DATING_MANAGE = "system:dating:manage";
+    public static final String PERM_SYSTEM_MOMENT_MANAGE = "system:moment:manage";
+    public static final String PERM_SYSTEM_TAG_MANAGE = "system:tag:manage";
+
+    /**
      * 三级缓存 key 前缀：拼业务主键，如 {@code user:brief:123}。
      *
      * <p>读方（UserQuerySpiImpl / GroupSpiImpl）与失效方（UserServiceImpl /

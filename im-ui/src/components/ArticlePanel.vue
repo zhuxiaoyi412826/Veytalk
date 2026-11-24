@@ -125,7 +125,8 @@ async function openEdit(item) {
   }
 }
 
-/** 封面上传：走 article_cover，成功后落 coverFileId 并即时预览受控地址 */
+/** 封面上传：走 article_cover，成功后落 coverFileId 并即时预览受控地址。
+ * ★ FileVO 的文件主键叫 fileId，不是 id（取 vo.id 会得到 undefined，封面静默丢失） */
 const coverInput = ref(null)
 function pickCover() {
   coverInput.value && coverInput.value.click()
@@ -139,9 +140,9 @@ async function onCoverChange(e) {
   coverUploading.value = true
   try {
     const vo = await uploadFileSmart(file, 'article_cover')
-    if (vo && vo.id) {
-      form.coverFileId = vo.id
-      form.coverRaw = `/api/file/download/${vo.id}`
+    if (vo && vo.fileId) {
+      form.coverFileId = vo.fileId
+      form.coverRaw = `/api/file/download/${vo.fileId}`
     }
   } catch {
     ElMessage.error('封面上传失败')
@@ -150,7 +151,7 @@ async function onCoverChange(e) {
   }
 }
 
-/** 正文插图：走 article_img，拿到 fileId 后把受控地址按 Markdown 图片语法插进光标处 */
+/** 正文插图：走 article_img，拿到 fileId 后把受控地址按 Markdown 图片语法插进光标处（主键同样是 fileId） */
 const imgInput = ref(null)
 const contentArea = ref(null)
 function pickImage() {
@@ -165,8 +166,8 @@ async function onImageChange(e) {
   imgUploading.value = true
   try {
     const vo = await uploadFileSmart(file, 'article_img')
-    if (vo && vo.id) {
-      insertAtCursor(`![图片](/api/file/download/${vo.id})`)
+    if (vo && vo.fileId) {
+      insertAtCursor(`![图片](/api/file/download/${vo.fileId})`)
     }
   } catch {
     ElMessage.error('图片上传失败')

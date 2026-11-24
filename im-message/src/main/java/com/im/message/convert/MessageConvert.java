@@ -234,6 +234,12 @@ public final class MessageConvert {
             // 红包：不露金额——谁先看到摘要就知道多少钱，会直接影响领不领
             case RED_PACKET -> "[红包] " + (entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getPacketGreeting())
                     ? "恭喜发财" : entity.getExtra().getPacketGreeting());
+            // 动态分享：content 存的是附言（可空），有附言优先出附言——那是发送者真正想说的话；
+            // 没附言就出作者昵称，与名片同一口径。正文摘要不进摘要行：会话列表那一行很窄，
+            // 「谁分享的」比「分享了什么」更能让人认出来是哪一条
+            case MOMENT -> "[动态] " + (TextUtil.isNotBlank(entity.getContent()) ? entity.getContent()
+                    : entity.getExtra() == null || TextUtil.isBlank(entity.getExtra().getMomentAuthor())
+                    ? "好友的动态" : entity.getExtra().getMomentAuthor());
         };
     }
 

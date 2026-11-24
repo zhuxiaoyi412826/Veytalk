@@ -61,11 +61,52 @@ const routes = [
         component: () => import('@/views/ArticlesView.vue'),
         meta: { title: '文章管理', perm: 'system:article:manage' }
       },
+      // 直播页新增的三个内容板块：一屏一个权限点（129/130/131，种子在 sql/versions/V1.0.6），
+      // 三页共用 WorkManage，所以这里也只是三条同形路由，别再往各自页面里塞逻辑。
+      {
+        path: 'images',
+        name: 'images',
+        component: () => import('@/views/ImagesView.vue'),
+        meta: { title: '图片管理', perm: 'system:image:manage' }
+      },
+      {
+        path: 'musics',
+        name: 'musics',
+        component: () => import('@/views/MusicsView.vue'),
+        meta: { title: '音乐管理', perm: 'system:music:manage' }
+      },
+      {
+        path: 'novels',
+        name: 'novels',
+        component: () => import('@/views/NovelsView.vue'),
+        meta: { title: '小说管理', perm: 'system:novel:manage' }
+      },
       {
         path: 'lives',
         name: 'lives',
         component: () => import('@/views/LivesView.vue'),
         meta: { title: '直播管理', perm: 'system:live:manage' }
+      },
+      // 交友三屏（V1.0.7）：三个权限点 132~134，各自一个菜单页。
+      // 不并成一个「交友」页再做页内权限判定：后端本来就是按三个权限点拆的三个 Controller，
+      // 菜单跟着一屏一条，才能做到「只给动态权限、不给照片审核」。
+      {
+        path: 'dating',
+        name: 'dating',
+        component: () => import('@/views/DatingView.vue'),
+        meta: { title: '交友管理', perm: 'system:dating:manage' }
+      },
+      {
+        path: 'moments',
+        name: 'moments',
+        component: () => import('@/views/MomentsView.vue'),
+        meta: { title: '动态管理', perm: 'system:moment:manage' }
+      },
+      {
+        path: 'dating-dict',
+        name: 'dating-dict',
+        component: () => import('@/views/DatingDictView.vue'),
+        meta: { title: '交友字典', perm: 'system:tag:manage' }
       },
       {
         path: 'groups',
@@ -216,7 +257,13 @@ router.beforeEach(async (to) => {
       'roles',
       'videos',
       'articles',
+      'images',
+      'musics',
+      'novels',
       'lives',
+      'dating',
+      'moments',
+      'dating-dict',
       'groups',
       'messages',
       'wallet',

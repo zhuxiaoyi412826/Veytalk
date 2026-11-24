@@ -24,11 +24,13 @@ import com.im.user.dto.req.UserSearchQuery;
 import com.im.user.dto.vo.UserCardVO;
 import com.im.user.dto.vo.UserVO;
 import com.im.user.entity.User;
+import com.im.user.entity.UserProfile;
 import com.im.user.entity.UserRole;
 import com.im.user.mapper.RoleMapper;
 import com.im.user.mapper.UserMapper;
 import com.im.user.mapper.UserRoleMapper;
 import com.im.user.service.CaptchaService;
+import com.im.user.service.DatingProfileService;
 import com.im.user.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -73,6 +75,8 @@ public class UserServiceImpl implements UserService {
     private final ObjectProvider<UserDataEraseSpi> userDataEraseSpiProvider;
     /** 新用户注册后装配客服/文件传输助手两个保留联系人；im-friend 未装配时该步骤自动跳过 */
     private final ObjectProvider<SystemContactSpi> systemContactSpiProvider;
+    /** 资料卡的在线状态要按对方的 {@code show_online} 收口；这里只用它的只读方法，不构成循环依赖 */
+    private final DatingProfileService datingProfileService;
 
     @Override
     public User requireById(Long userId) {
@@ -395,8 +399,13 @@ public class UserServiceImpl implements UserService {
         Set<Long> onlineIds = records.isEmpty()
                 ? Collections.emptySet()
                 : new HashSet<>(onlineStatusSpi.filterOnline(records.stream().map(User::getId).toList()));
+        // 一次批量取回整页的交友资料：逐行读会在每页上多加 size 次查询，而收口在线状态每行都要用
+        Map<Long, UserProfile> profileMap = records.isEmpty()
+                ? Collections.emptyMap()
+                : datingProfileService.findMap(records.stream().map(User::getId).toList());
         List<UserCardVO> cards = records.stream()
-                .map(user -> buildCard(user, onlineIds.contains(user.getId()), currentUserId))
+                .map(user -> buildCard(user, onlineIds.contains(user.getId()), currentUserId,
+                        profileMap.get(user.getId())))
                 .toList();
         return PageResult.of(cards, page.getTotal(), page.getCurrent(), page.getSize());
     }
@@ -404,24 +413,37 @@ public class UserServiceImpl implements UserService {
     @Override
     public UserCardVO getCard(Long targetUserId, Long currentUserId) {
         User target = requireById(targetUserId);
-        return buildCard(target, isOnline(targetUserId), currentUserId);
+        return buildCard(target, isOnline(targetUserId), currentUserId, datingProfileService.find(targetUserId));
     }
 
     /**
-     * 组装资料卡片并补齐好友关系。
+     * 组装资料卡片、补齐好友关系，并按对方的隐私开关收口在线状态。
+     *
+     * <p>收口放在这里而不是各条查询里：{@code online} 在本系统只有这一个出口，所有列表与卡片都经过
+     * 这个方法，在这里判一次就全覆盖；交给前端判断等于每个页面各写一份隐私规则，漏一个就是一个泄露点。
+     *
+     * <p>好友不受 {@code show_online} 约束：这个开关的语义是「别让陌生人看到我在线」，
+     * 对已经是好友的人隐藏在线，只会让熟人以为账号弃用了。
      */
-    private UserCardVO buildCard(User user, boolean online, Long currentUserId) {
+    private UserCardVO buildCard(User user, boolean online, Long currentUserId, UserProfile profile) {
         UserCardVO card = UserConvert.toCard(user);
-        card.setOnline(online);
         FriendRelationSpi friendSpi = friendRelationSpiProvider.getIfAvailable();
-        if (friendSpi == null || currentUserId == null || currentUserId.equals(user.getId())) {
-            return card;
+        boolean self = currentUserId == null || currentUserId.equals(user.getId());
+        boolean friend = false;
+        if (!self && friendSpi != null) {
+            friend = friendSpi.isFriend(currentUserId, user.getId());
+            card.setFriend(friend);
+            card.setRemark(friendSpi.getRemark(currentUserId, user.getId()));
+            card.setBlocked(friendSpi.isBlockedBy(currentUserId, user.getId()));
+            card.setBlockedByOther(friendSpi.isBlockedBy(user.getId(), currentUserId));
         }
-        card.setFriend(friendSpi.isFriend(currentUserId, user.getId()));
-        card.setRemark(friendSpi.getRemark(currentUserId, user.getId()));
-        card.setBlocked(friendSpi.isBlockedBy(currentUserId, user.getId()));
-        card.setBlockedByOther(friendSpi.isBlockedBy(user.getId(), currentUserId));
+        card.setOnline(online && (self || friend || shownToStranger(profile)));
         return card;
+    }
+
+    /** 没有资料行 = 从没进过交友页，按建表默认值（显示）处理，不该因为缺行就被判成隐身。 */
+    private static boolean shownToStranger(UserProfile profile) {
+        return profile == null || profile.onlineVisibleToStranger();
     }
 
     @Override

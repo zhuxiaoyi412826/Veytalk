@@ -15,6 +15,10 @@
 --    1 正常结束（无违规）/ 2 违规达阈值强制结束 / 3 未完成（关页面后被补记）/ 0 进行中
 --  详见第 7~9 节。计数与流水是照着服务端判定规则造的，两边能对账。
 --
+--  第 12 节另种一批交友演示数据（资料卡与坐标、兴趣标签、互相喜欢成对、动态与访客）：
+--  时间列一律用 NOW()/CURDATE() 的相对值，否则新装环境打开交友页就是「无动态、火花已断」，
+--  看上去像功能坏了而不是数据旧。
+--
 --  本脚本只规整自己的种子 ID 段（1~9999 与 2300~9399 区间），不会碰运行期写入的
 --  雪花 ID 数据，因此对已有真实数据的库也能安全执行（见第 0 节）。
 --
@@ -72,6 +76,21 @@ DELETE FROM `im_user_wallet`         WHERE `user_id` < 10000;
 -- im_user_agreement 一行不种也不删：它是证据流水，演示账号不需要假证据（见第 11 节末尾）。
 DELETE FROM `im_agreement`           WHERE `id` BETWEEN 1300 AND 1399;
 
+-- 交友域种子段（8100~8999，资料卡按 user_id<10000）。
+-- ★ im_tag / im_icebreaker 两张字典一行不删也不重插：它们的种子跟着 im_schema.sql 建表走
+--   （与 im_live_video_category 的分类栏同一处理），且后台会自己加标签、改文案，
+--   重跑本文件不该把运营的东西抹掉（与 im_agreement 的 v2/v3 同一口径）。
+--   im_user_photo 一行不种也不删：照片必须有 im_file 里的真实媒体，种假 file_id 只会画出破图。
+DELETE FROM `im_user_tag`            WHERE `id` BETWEEN 8100 AND 8199;
+DELETE FROM `im_moment`              WHERE `id` BETWEEN 8300 AND 8399;
+DELETE FROM `im_moment_comment`      WHERE `id` BETWEEN 8400 AND 8499;
+DELETE FROM `im_moment_like`         WHERE `id` BETWEEN 8500 AND 8599;
+DELETE FROM `im_match_like`          WHERE `id` BETWEEN 8600 AND 8699;
+DELETE FROM `im_match_pair`          WHERE `id` BETWEEN 8700 AND 8799;
+DELETE FROM `im_profile_visit`       WHERE `id` BETWEEN 8800 AND 8899;
+DELETE FROM `im_intimacy`            WHERE `id` BETWEEN 8900 AND 8999;
+DELETE FROM `im_user_profile`        WHERE `user_id` < 10000;
+
 -- -------------------------------------------------------------------------------------
 -- 1. 角色
 --
@@ -127,6 +146,14 @@ VALUES (1, 'admin', '超级管理员', '拥有系统全部权限点', 1),
 -- 126 是客户端版本管理批。不并进 116（system:config）：这一屏动的是「往公网递一个可执行文件」——
 -- 启用的那一行会成为官网的匿名下载口，与「调一个可以当场改回来的内部旋钮」不是一个风险量级，
 -- 应当可以授权给不同的人。同批新增一张表（im_client_release，见 im_schema.sql 第十六节）。
+-- 129~131 是直播页「图片 / 音乐 / 小说」三板块批，一次加三个点而不并进 112（system:video:manage）：
+-- 本项目的约定是「一屏一个权限点」，后台是三个独立菜单页，能管图集的人不必能管小说连载。
+-- 同批新增三张表（im_live_image / im_live_music / im_live_novel）并给 im_live_video_category
+-- 加 type 列（四个板块共用一套分类字典），存量库跑 sql/versions/V1.0.6__*.sql 即可。
+-- ★ 跑完必须清一次 im:auth:perm:* 与 im:auth:role:*（只 DEL、禁 FLUSHDB），否则三个新菜单页
+-- 对 admin 也返回 1003——权限缓存 TTL 30 分钟且登录不刷新，不清就看不到变化。
+-- 132~134 是交友域批（V1.0.7）：同样是「一屏一个权限点」——能管资料与配对处置的人
+-- 不必能删动态，能改标签库与打招呼模板的人不必能管配对。存量库跑 sql/versions/V1.0.7__*.sql。
 -- -------------------------------------------------------------------------------------
 INSERT INTO `im_permission` (`id`, `perm_code`, `perm_name`, `module`, `description`, `status`)
 VALUES (101, 'user:profile:update', '修改个人资料', 'user', '修改昵称、头像、签名、性别、密码', 1),
@@ -156,7 +183,13 @@ VALUES (101, 'user:profile:update', '修改个人资料', 'user', '修改昵称�
               (125, 'system:agreement:manage', '后台协议管理', 'system', '隐私政策/用户协议/服务条款的版本发布与同意留痕查询', 1),
               (126, 'system:release', '后台版本管理', 'system', '客户端安装包的上传/启用/停用/删除（启用即官网匿名可下载）', 1),
               (127, 'system:feedback', '后台意见反馈', 'system', '用户反馈的检索/查看/回复/删除', 1),
-              (128, 'system:schema:manage', 'SQL版本管理', 'system', '查看库版本台账与变更流水，应用/一键回滚 sql/versions 脚本（最高危）', 1);
+              (128, 'system:schema:manage', 'SQL版本管理', 'system', '查看库版本台账与变更流水，应用/一键回滚 sql/versions 脚本（最高危）', 1),
+       (129, 'system:image:manage', '后台图片管理', 'system', '图片图集的检索/新建/编辑/上下架/删除，以及图片板块分类栏维护', 1),
+       (130, 'system:music:manage', '后台音乐管理', 'system', '音频的检索/新建/编辑/上下架/删除，以及音乐板块分类栏维护', 1),
+       (131, 'system:novel:manage', '后台小说管理', 'system', '小说的检索/新建/编辑/上下架/删除，以及小说板块分类栏维护', 1),
+       (132, 'system:dating:manage', '后台交友管理', 'system', '交友资料/照片墙/配对/滑动记录/访客的检索与处置（含照片驳回与资料降权）', 1),
+       (133, 'system:moment:manage', '后台动态管理', 'system', '动态与评论的检索、下架、删除与举报处置（不可逆删除含媒体引用）', 1),
+       (134, 'system:tag:manage', '后台标签与破冰管理', 'system', '兴趣标签库与打招呼模板/话题卡的增删改与启停', 1);
 
 -- admin 拥有全部权限点（二期必须补齐 108~111、三期必须补齐 112~115、四期补 116~122，
 -- 否则细化后的控制器会拦住原有全权管理员）
@@ -188,7 +221,13 @@ VALUES (6001, 1, 101),
        (6025, 1, 125),
        (6026, 1, 126),
        (6027, 1, 127),
-       (6028, 1, 128);
+       (6028, 1, 128),
+       (6029, 1, 129),
+       (6030, 1, 130),
+       (6031, 1, 131),
+       (6032, 1, 132),
+       (6033, 1, 133),
+       (6034, 1, 134);
 
 -- user 拥有除「撤回任意消息」「系统管理」之外的权限点
 INSERT INTO `im_role_permission` (`id`, `role_id`, `permission_id`)
@@ -754,4 +793,100 @@ VALUES (1303, 'service', 1, 'Veytalk 服务条款',
 增值服务相关的问题（余额异常、误送、封禁申诉、处置复核）请通过【客服邮箱】联系，邮件中请附您的账号、发生时刻与现象描述，以便我们对照流水与审计记录。
 ',
         0, 1, '2026-11-01 00:00:00', '2026-11-01 00:00:00', 1, '首个对外公示版本；required=0，用户可拒后仅关增值服务入口');
+
+-- -------------------------------------------------------------------------------------
+-- 12. 交友域演示数据（im-user 的资料卡与标签 / im-friend 的配对、动态与访客）
+--
+--   时间列全用相对值（NOW() / CURDATE() 偏移）：三天可见、火花连续天数、活跃度排序
+--   都是「按今天回看」的口径，写成死日期在新装环境里永远不命中，看起来像功能坏了。
+--
+--   1 / 2 / 1000（客服、文件传输助手、系统管理员）discoverable=0：它们是消息端点不是人，
+--   留在推荐流里等于给每个新用户推一个不会回消息的账号。
+--
+--   alice 与 bob 的配对直接复用第 5 节的会话 2001（biz_key s:1001:1002 本就是同一对用户）：
+--   配对的语义是「多一条入口与一份亲密度账」，不是「再开一个会话」。
+--
+--   几张计数列与流水行刻意对账（与面试种子同一做法）：
+--     im_moment.like_count / comment_count  ←→  im_moment_like / im_moment_comment 的行数
+--     im_intimacy.interact_count = 4         ←→  8501/8502 两条互赞 + 8401/8402 两条互评
+--     im_match_pair.msg_count = 3 / im_intimacy.msg_count = 3 ←→ 会话 2001 的 3001~3003 三条消息
+--   所以配对与亲密度这两行的时间写的是第 5 节那三个 2024-01-02 死日期（它们必须跟消息同源于
+--   同一事件）；后果是新装环境里「火花」显示为已断—2024 到今年当然超过一天。这不是数据错，
+--   而是唯一能同时跟会话对账又不编造近期聊天的写法：今天发一句，服务层按「隔了一天则归零重起」
+--   会把 streak_days 算成 1，正好把两条判定分支都演示一遍。
+-- -------------------------------------------------------------------------------------
+
+-- 资料卡：保留账号只给一行默认值（不回填就是「未填」），alice / bob 给到能跑通筛选与附近的人的程度
+INSERT INTO `im_user_profile` (`user_id`, `discoverable`, `profile_score`)
+VALUES (1, 0, 0),
+       (2, 0, 0),
+       (1000, 0, 0);
+
+-- 坐标与 geohash 必须同源（6 位约 ±0.6 km）：两者对不上时「附近的人」会先用 geohash 前缀圈池再算
+-- 精确距离，编一个错值就会让本人永远圈不进去。下列三个点的 geohash 由坐标真算得到。
+INSERT INTO `im_user_profile` (`user_id`, `birthday`, `height_cm`, `education`, `occupation`, `income`, `marriage`,
+                               `dating_goal`, `province`, `city`, `district`, `lng`, `lat`, `geohash`,
+                               `location_time`, `moment_visible_days`, `show_age`, `show_distance`, `show_online`,
+                               `discoverable`, `profile_score`, `last_active_time`, `quality_flag`)
+VALUES (1001, '1995-06-12', 163, 4, '视觉设计师', 4, 1, 1, '上海市', '上海市', '黄浦区',
+        121.473700, 31.230400, 'wtw3sj', DATE_SUB(NOW(), INTERVAL 3 HOUR),
+        0, 1, 1, 1, 1, 82, DATE_SUB(NOW(), INTERVAL 20 MINUTE), 0),
+       (1002, '1993-03-08', 178, 5, '后端开发工程师', 5, 1, 2, '浙江省', '杭州市', '西湖区',
+        120.155100, 30.274100, 'wtmknp', DATE_SUB(NOW(), INTERVAL 26 HOUR),
+        0, 1, 1, 1, 1, 76, DATE_SUB(NOW(), INTERVAL 2 HOUR), 0);
+
+-- 兴趣标签：两人各 4 个，不交叉——交叉的标签同时是「同好的人」与「标签开场白」的测试入口，
+-- 想演示那两条路径就手工把 8101 的 tag_id 改成一个 bob 也有的值
+INSERT INTO `im_user_tag` (`id`, `user_id`, `tag_id`, `sort`)
+VALUES (8101, 1001, 17, 1), (8102, 1001, 33, 2), (8103, 1001, 12, 3), (8104, 1001, 25, 4),
+       (8105, 1002, 28, 1), (8106, 1002, 42, 2), (8107, 1002, 11, 3), (8108, 1002, 2, 4);
+
+-- use_count 是冗余计数（服务层在绑定/解绑时增减）。这里手工把用上的 8 个标签各对齐成 1，
+-- 免得后台标签库看上去「一个人都没用过」；跑一次交友页的重算即与 im_user_tag 实表一致。
+UPDATE `im_tag` SET `use_count` = 1 WHERE `id` IN (2, 11, 12, 17, 25, 28, 33, 42);
+
+-- 双向都「喜欢」即成对（两行 action=1）；跳过不落这里就不演示了，在交友页划一下就是一个新行
+INSERT INTO `im_match_like` (`id`, `from_user_id`, `to_user_id`, `action`, `source`)
+VALUES (8601, 1001, 1002, 1, 1),
+       (8602, 1002, 1001, 1, 1);
+
+-- user_a_id < user_b_id 是服务层写入前排序的结果，种子也必须守这个约定，否则后台按 a=当前用户查会查不到
+INSERT INTO `im_match_pair` (`id`, `user_a_id`, `user_b_id`, `conversation_id`, `status`, `like_source`, `msg_count`,
+                             `last_msg_time`)
+VALUES (8701, 1001, 1002, 2001, 1, 1, 3, '2024-01-02 09:02:00');
+
+INSERT INTO `im_intimacy` (`id`, `user_a_id`, `user_b_id`, `score`, `streak_days`, `max_streak`, `last_chat_date`,
+                           `msg_count`, `interact_count`)
+VALUES (8901, 1001, 1002, 96, 2, 5, '2024-01-02', 3, 4);
+
+-- 三条动态覆盖三种可见范围：8301/8302 公开、8303 仅自己（bob 的 Feed 里绝不能出现它）。
+-- media_count 全为 0：纯文本动态，不依赖 im_file 里有东西；带图动态要客户端发。
+INSERT INTO `im_moment` (`id`, `user_id`, `content`, `visibility`, `media_count`, `like_count`, `comment_count`,
+                         `status`, `create_time`)
+VALUES (8301, 1001, '周末的人民广场等了十分钟才等到空位，拍照这件事从来不是按快门。', 1, 0, 1, 2, 1,
+        DATE_SUB(NOW(), INTERVAL 20 HOUR)),
+       (8302, 1002, '面试题库跑到第三轮，最难的题还是自己出的那道。煮个面奖励一下。', 1, 0, 1, 0, 1,
+        DATE_SUB(NOW(), INTERVAL 6 HOUR)),
+       (8303, 1001, '这条只有自己看得见，用来验证可见范围过滤没有漏。', 4, 0, 0, 0, 1,
+        DATE_SUB(NOW(), INTERVAL 2 HOUR));
+
+INSERT INTO `im_moment_like` (`id`, `moment_id`, `user_id`)
+VALUES (8501, 8301, 1002),
+       (8502, 8302, 1001);
+
+-- 8402 是 8401 下的回复（parent_id 非 0 且带 reply_user_id）：两层封顶的版式与「回复 xxx」文案靠这一对行演示
+INSERT INTO `im_moment_comment` (`id`, `moment_id`, `user_id`, `parent_id`, `reply_user_id`, `content`, `like_count`,
+                                 `status`, `create_time`)
+VALUES (8401, 8301, 1002, 0, NULL, '空位是让出来的，不是等出来的。', 0, 1, DATE_SUB(NOW(), INTERVAL 18 HOUR)),
+       (8402, 8301, 1001, 8401, 1002, '那你下次早到半小时试试。', 0, 1, DATE_SUB(NOW(), INTERVAL 17 HOUR));
+
+-- 访客：bob 今天看了三次 alice 的资料卡（一人一天一行，times 累加而不是插三行），
+-- 昨天翻了她的照片墙；alice 前天看过 bob。两边打开「谁看过我」都不是空列表。
+INSERT INTO `im_profile_visit` (`id`, `visitor_id`, `visited_id`, `visit_date`, `view_type`, `times`, `first_time`,
+                                `last_time`)
+VALUES (8801, 1002, 1001, CURDATE(), 1, 3, DATE_SUB(NOW(), INTERVAL 5 HOUR), DATE_SUB(NOW(), INTERVAL 40 MINUTE)),
+       (8802, 1002, 1001, DATE_SUB(CURDATE(), INTERVAL 1 DAY), 2, 1, DATE_SUB(NOW(), INTERVAL 28 HOUR),
+        DATE_SUB(NOW(), INTERVAL 28 HOUR)),
+       (8803, 1001, 1002, DATE_SUB(CURDATE(), INTERVAL 2 DAY), 1, 1, DATE_SUB(NOW(), INTERVAL 50 HOUR),
+        DATE_SUB(NOW(), INTERVAL 50 HOUR));
 

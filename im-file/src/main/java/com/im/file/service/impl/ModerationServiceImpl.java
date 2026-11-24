@@ -258,12 +258,22 @@ public class ModerationServiceImpl implements ModerationService {
     /**
      * 场景校验：只接受图片类业务类型。
      *
-     * <p>直播封面（video_cover）不在 {@link FileBizType#isImage()} 里，但它是公开面向所有用户
-     * 渲染的图片，恰恰是最该拦的位置之一，所以单独算进来。
+     * <p>{@link FileBizType#isImage()} 只管「下载时 inline 还是 attachment」，而审核场景要的是
+     * 「这张图会不会当着所有用户的面渲染出来」，两者的集合并不重合：直播封面（video_cover）
+     * 与三板块的图集、两种封面都不在 isImage 里，但恰恰是最该拦的位置，所以单列进来。
+     * 交友照片墙同理：它只比那些位置多一层「递到陌生人的资料卡上」。
+     *
+     * <p>只有前端 {@code guardImage(file, { scene })} 真会用到的场景才放进来：收得比用得多宽，
+     * 审计记录里就会出现从未发生过的业务类型，事后排查时反而不敢信这张表。
      */
     private FileBizType requireImageScene(String code) {
         FileBizType type = FileBizType.of(code);
-        boolean imageScene = type != null && (type.isImage() || type == FileBizType.VIDEO_COVER);
+        boolean imageScene = type != null
+                && (type.isImage() || type == FileBizType.VIDEO_COVER
+                || type == FileBizType.IMAGE_WORK
+                || type == FileBizType.MUSIC_COVER
+                || type == FileBizType.NOVEL_COVER
+                || type == FileBizType.DATING_PHOTO);
         BusinessException.throwIf(!imageScene, ResultCode.BAD_REQUEST, "业务场景不是图片类型");
         return type;
     }

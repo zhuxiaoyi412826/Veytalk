@@ -52,4 +52,17 @@ public interface GroupSpi {
      * 群是否存在且未解散。
      */
     boolean exists(Long groupId);
+
+    /**
+     * 某人当前在群里的全部群 ID（成员状态正常）。
+     *
+     * <p>交友侧算「你们有多少个共同群」用：拿两边的 ID 集合求交，
+     * 比逐群问一次 {@link #isMember} 少几百次查询。
+     *
+     * <p>已退的与已解散的群不在结果里（解散时成员行会被整批置为退群）：
+     * 它们已经不是一段还能发生来往的关系，算进共同群只会让数字虚高。
+     *
+     * @return 没加过任何群时返回空列表，不返回 {@code null}
+     */
+    List<Long> listJoinedGroupIds(Long userId);
 }

@@ -404,6 +404,14 @@ public class ImProperties {
          * 避免一场超长通话的录像把渲染进程整块读进内存。
          */
         private DataSize recordMaxSize = DataSize.ofMegabytes(200);
+        /**
+         * 腾讯云 TRTC（实时音视频）配置，<b>仅微信小程序通话链路使用</b>。
+         *
+         * <p>Web / 桌面 / Android 仍走自建 WebRTC，与本项无关，两条链路并存、互不替代。
+         * 服务端只用它给用户现签 {@code userSig}（见 {@code im-websocket} 的 {@code TLSSigAPIv2}），
+         * 媒体流不经过本服务。
+         */
+        private Trtc trtc = new Trtc();
 
         @Data
         public static class Turn {
@@ -418,6 +426,20 @@ public class ImProperties {
             private String secret = "";
             /** 临时凭据有效期（秒），默认 24 小时 */
             private long ttlSeconds = 86400;
+        }
+
+        /**
+         * TRTC 签名参数。缺省即「未配置」（{@code sdkAppId=0}）：{@code /api/call/trtc-user-sig}
+         * 照常返回空签名、小程序禁用通话入口，不抛异常。
+         */
+        @Data
+        public static class Trtc {
+            /** 腾讯云 TRTC 的 SDKAppID；0 表示未配置 */
+            private long sdkAppId = 0;
+            /** 密钥，只在服务端参与签名，绝不下发前端；生产经环境变量 IM_TRTC_SECRET_KEY 注入 */
+            private String secretKey = "";
+            /** UserSig 有效期（秒），默认 7 天，覆盖一次通话绰绰有余；不要为省一次请求而拉满 */
+            private long userSigExpireSeconds = 604800;
         }
     }
 

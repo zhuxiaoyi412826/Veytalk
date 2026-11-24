@@ -116,8 +116,11 @@ public class Knife4jConfig {
     @Bean
     public GroupedOpenApi adminContentApi() {
         return build("13-后台-内容运营", "/api/admin/article/**", "/api/admin/announcement/**",
-                "/api/admin/video/**", "/api/admin/live/**", "/api/admin/report/**",
-                "/api/admin/sensitive-word/**", "/api/admin/agreement/**");
+                "/api/admin/video/**", "/api/admin/work/**", "/api/admin/live/**", "/api/admin/report/**",
+                "/api/admin/sensitive-word/**", "/api/admin/agreement/**",
+                // 交友三屏（V1.0.7）：资料与照片审核、标签/破冰字典、动态与评论。
+                // dating/dict 被 /api/admin/dating/** 一并吃下，不再单独登记一条前缀
+                "/api/admin/dating/**", "/api/admin/moment/**");
     }
 
     @Bean
@@ -160,14 +163,25 @@ public class Knife4jConfig {
     }
 
     /**
+     * 交友域（资料卡扩展 / 照片墙 / 标签 / 滑动匹配 / 附近的人 / 访客 / 破冰 / 亲密度）的用户侧。
+     *
+     * <p>与「02-好友关系」分开成组：两者虽然同在 im-friend 与 im-user 里，但配对（like/pass）与
+     * 好友是两套语义完全不同的接口（配对不写 {@code im_friend}），揉在一组会让人以为
+     * 「滑动匹配成会话」也会自动加好友。
+     */
+    @Bean
+    public GroupedOpenApi datingApi() {
+        return build("20-交友", "/api/dating/**");
+    }
+
+    /**
      * 按路径前缀分组，而不是按包名。
      *
      * <p>按包名分组的版本实测过：当时七个分组各自都返回了全部 60 个接口，过滤根本没生效，
      * 而 {@code application.yml} 里还同时设着全局 {@code springdoc.packages-to-scan=com.im}。
      * 改成 {@code pathsToMatch} 之后每组的接口数恢复正确，所以保留路径方案。
      *
-     * <p>目前是十九个分组，覆盖实测的 245 条路径（分组号与控制器 {@code @Tag} 的编号
-     * 是两个独立序列，不必强求一致）。
+     * <p>目前是二十个分组（最后一组是 V1.0.7 交友域），路径条数会随功能增长，别拿旧数字做量级断言。
      *
      * <p><strong>新增控制器时必须同步在这里补前缀。</strong>只写了 {@code @Tag}/{@code @Operation}
      * 而未登记分组前缀的接口，会完完整整地存在于全量 {@code /v3/api-docs} 里，却在

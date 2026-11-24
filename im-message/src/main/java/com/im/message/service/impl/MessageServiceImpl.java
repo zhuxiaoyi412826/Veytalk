@@ -31,6 +31,7 @@ import com.im.common.spi.ConversationSpi;
 import com.im.common.spi.FileStorageSpi;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.GroupSpi;
+import com.im.common.spi.IntimacySpi;
 import com.im.common.spi.PushSpi;
 import com.im.common.spi.SpeechToTextSpi;
 import com.im.common.spi.TranslationSpi;
@@ -178,6 +179,8 @@ public class MessageServiceImpl implements MessageService {
     /** 语音转文字 / 翻译：依赖外部厂商，未接入时无 bean，getIfAvailable() 回 null 即降级 */
     private final ObjectProvider<SpeechToTextSpi> speechToTextSpiProvider;
     private final ObjectProvider<TranslationSpi> translationSpiProvider;
+    /** 交友侧的亲密度计数：im-friend 未装配时单聊照发，只是不再累计火花 */
+    private final ObjectProvider<IntimacySpi> intimacySpiProvider;
 
     /** 消息类型到内容处理器的路由表，启动时一次性摊平 */
     private final Map<MsgType, MessageContentHandler> handlerRegistry = new EnumMap<>(MsgType.class);
@@ -262,6 +265,14 @@ public class MessageServiceImpl implements MessageService {
             // 会话摘要与未读数必须和消息同生共死，放在事务内；
             // ConversationSpiImpl 的事务传播是 REQUIRED，会直接加入当前事务
             conversationSpi.onNewMessage(buildEvent(message, conversationType, extra, cmd));
+
+            // 亲密度挂在事务提交之后：它写的是一张独立的计数表，既不该参与消息回滚，
+            // 也不能在回滚了的消息上留下「你们今天聊过」的痕迹
+            if (ConvType.SINGLE.getCode() == conversationType && countsAsIntimacy(type)) {
+                Long peerId = conversationSpi.getTargetId(conversationId, cmd.getFromUserId());
+                Long fromUserId = cmd.getFromUserId();
+                afterCommit(() -> accumulateIntimacy(fromUserId, peerId));
+            }
 
             MessageDTO dto = MessageConvert.toDTO(message, senderOf(message), conversationType, MessageStatus.SENT,
                     loadQuotePreview(message.getQuoteMsgId()));
@@ -2112,6 +2123,31 @@ public class MessageServiceImpl implements MessageService {
             return;
         }
         runQuietly(action);
+    }
+
+    /**
+     * 这一类消息算不算「你们说过话」。
+     *
+     * <p>只看类型，<b>不看 {@code internal}</b>：转账与红包也是 internal（金额只能由服务端产生），
+     * 但它们确实是这两个人之间发生的一次来往；真正该排除的是系统通知与机器人消息——
+     * 那两样的发送方根本不是这段关系里的人，把它们算进去等于让每条平台公告都给火花续一天。
+     */
+    private static boolean countsAsIntimacy(MsgType type) {
+        return type != MsgType.SYSTEM && type != MsgType.ROBOT;
+    }
+
+    /**
+     * 递一次单聊事实给 im-friend 累计亲密度。
+     *
+     * <p>加多少分、火花怎么算全在那一侧，本方法只负责「不该算的情形不算」：
+     * 模块未装配、对端取不到、自己发给自己（文件传输助手一类的单人会话）都直接跳过。
+     */
+    private void accumulateIntimacy(Long fromUserId, Long toUserId) {
+        IntimacySpi intimacySpi = intimacySpiProvider.getIfAvailable();
+        if (intimacySpi == null || fromUserId == null || toUserId == null || fromUserId.equals(toUserId)) {
+            return;
+        }
+        intimacySpi.onChatMessage(fromUserId, toUserId);
     }
 
     private void runQuietly(Runnable action) {

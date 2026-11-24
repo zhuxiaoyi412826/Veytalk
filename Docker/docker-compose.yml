@@ -132,6 +132,7 @@ services:
       - ./app/extra:/app/extra:ro        # CORS 白名单这类「yml 字面列表、环境变量改不动」的外挂配置
       # 开直播时把 ./data/live 也挂给后端（回放清理与录制元数据要用）；不开直播就别挂，少一个可写目录
       # - ./data/live:/app/live
+      - ./sql/versions:/app/sql/versions:ro
     expose:
       - "8080"                           # 只给 nginx 容器反代，不发布到宿主机
     # 远控 UDP 打洞（IM_DIRECT_ENABLED=true 才需要）。★ 不写 /udp 默认是 TCP，而 TCP 打洞不通且中继照样能用，

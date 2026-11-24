@@ -33,6 +33,8 @@ im-admin-ui/dist/
 im-website/dist/
 im-website/public/downloads/*.zip
 im-website/public/downloads/*.apk
+# scripts/deploy.ps1 打前端时落临时 zip 的目录（*.zip 已被全局规则兜住，整目录忽略更直观）
+dist-zip/
 .npm/
 .pnpm-store/
 *.local

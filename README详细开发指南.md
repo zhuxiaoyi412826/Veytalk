@@ -262,33 +262,38 @@ mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql
 mysql -u $env:MYSQL_USER -p --default-character-set=utf8mb4 im_db -e "source sql/im_data.sql"
 ```
 
-### 43 张表分属 10 个模块
+### 67 张表分属 12 个模块
 
 | 模块 | 表 |
 |---|---|
 | 用户权限、钱包与法定文本（im-user） | `im_user` `im_role` `im_permission` `im_user_role` `im_role_permission` `im_user_wallet` `im_gift` `im_wallet_transaction` **`im_agreement` `im_user_agreement`** |
+| 交友资料（im-user，第一批） | `im_user_profile` `im_user_photo` `im_tag` `im_user_tag` |
 | 好友（im-friend） | `im_friend` `im_friend_request` |
+| 交友匹配与动态（im-friend） | `im_match_like` `im_match_pair` `im_match_preference` `im_match_exposure` `im_profile_visit` `im_intimacy` `im_moment` `im_moment_media` `im_moment_visible` `im_moment_like` `im_moment_comment` `im_icebreaker` |
 | 会话（im-conversation） | `im_conversation` `im_conversation_member` |
 | 消息（im-message） | `im_message` `im_message_read` `im_message_delete` `im_message_reaction` `im_message_vote` `im_message_essence` `im_message_favorite` |
 | 群组（im-group） | `im_group` `im_group_member` `im_group_join_request` `im_group_robot` |
 | 文件（im-file） | `im_file` `im_moderation_log` |
 | 远程控制（im-remote） | `im_remote_device` `im_remote_session` `im_remote_audit_log` |
 | AI 面试与护栏（im-ai） | `im_interview_session` `im_interview_message` `im_interview_event` `im_ai_usage` `im_ai_guard` |
-| 直播与内容板块（im-live） | `im_live_room` `im_live_video` `im_gift_record` `im_article` |
-| 管理后台（im-admin） | `im_report` `im_config` `im_sensitive_word` `im_announcement` |
+| 直播与内容板块（im-live） | `im_live_room` `im_live_video` `im_gift_record` `im_article` `im_live_image` `im_live_music` `im_live_novel` `im_live_video_category` |
+| 管理后台（im-admin） | `im_report` `im_config` `im_sensitive_word` `im_announcement` `im_client_release` `im_feedback` `im_schema_migration` `im_schema_migration_log` |
 
 > 消息模块那四张 `im_message_*` 附属表都是「标记 / 互动」的载体，**唯一键按可见维度选**：Reaction / 投票 / 收藏挂人（一人一行、各人可见范围不同），精华挂消息（一群一行、全群共享）。逐表字段与选型理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §7.4 ~ §7.7。
 
 ### `im_data.sql` 灌了哪些演示数据
 
 - **3 个账号**（密码统一 `123456`）：`admin`（超管，持全部权限点；`user_id=1000`、绑 `admin` 角色）/ `alice`（userId 1001）/ `bob`（userId 1002）
-- **4 个角色 + 25 个权限点（101~125）+ 35 条角色权限绑定**（admin 全量 25 点，6001~6025；user 除「撤回任意消息」「系统管理」与后台各点外 5 点，6101~6105；moderator 2 点；operator 3 点）；另有 5 条用户角色绑定（admin、alice、bob 及两个后台示范角色挂载）
+- **4 个角色 + 34 个权限点（101~134）+ 44 条角色权限绑定**（admin 全量 34 点，6001~6034；user 除「撤回任意消息」「系统管理」与后台各点外 5 点，6101~6105；moderator 2 点；operator 3 点）；另有 5 条用户角色绑定（admin、alice、bob 及两个后台示范角色挂载）
 - **三份法定文本的 v1 正文**（`im_agreement` id 1301~1303，均为已发布态）：用户协议与隐私政策必签、服务条款可拒。**同意留痕表一行不种**——伪造的演示证据比没有证据更糟（逐列与理由见 [`md/数据库表解析.md`](md/数据库表解析.md) §十六）
 - **alice ↔ bob 一对好友**（双向 2 行）+ 1 条已同意的历史申请
+- **alice ↔ bob 一组交友演示数据**（ID 段 8000~8999）：两份 `im_user_profile`（含结构化资料、隐私开关与坐标，杭州 / 上海各一）、各 4 个不交叉的兴趣标签、一对双向喜欢（`im_match_like` 两行 + `im_match_pair` 一行挂着会话 2001）、一行亲密度（streak 2 / 历史最高 5）、三条动态（两种可见范围）与访客记录若干
 - **1 个单聊会话**：3 条消息（seq 1~3）+ 送达/已读回执（bob 留 1 条未读，用于演示未读角标）
 - **4 场 AI 面试演示会话**（id 2301~2304）：覆盖 status 四种取值（进行中 / 正常结束 / 违规达阈值强制结束 / 未完成），含逐轮问答与违规事件流水，计数列与事件流水严格对账
 
-> 其余 **26 张表**（消息附属五表、群组四表、文件与审核命中两表、远程三表、AI 护栏两表、直播与文章四表（房间 / 短视频 / 送礼流水 / 文章）、后台工单与配置四表、钱包账本 `im_wallet_transaction`、**同意留痕 `im_user_agreement`**）**建好即空**，运行期由业务写入，脚本不预置任何数据。
+> 其余 **36 张表**（消息附属五表、群组四表、文件与审核命中两表、远程三表、AI 护栏两表、直播与文章七表（房间 / 短视频 / 送礼流水 / 文章 / 图片 / 音乐 / 小说）、后台工单与配置六表（含客户端版本 `im_client_release`、意见反馈 `im_feedback`）、钱包账本 `im_wallet_transaction`、**同意留痕 `im_user_agreement`**、交友域五表（照片墙 `im_user_photo`、偏好 `im_match_preference`、曝光池 `im_match_exposure`、动态附件与可见范围 `im_moment_media` / `im_moment_visible`））**建好即空**，运行期由业务写入，脚本不预置任何数据。
+>
+> 另有 **5 张表的数据跟着 `im_schema.sql` 的建表段走**而不进 `im_data.sql`：`im_tag`（标签库）、`im_icebreaker`（破冰文案）、`im_live_video_category`（板块分类字典）、`im_schema_migration` + `im_schema_migration_log`（版本台账基线）。理由是它们是「字典 + 台账」而不是演示数据，重跑 `im_data.sql` 不该把运营改过的文案抹掉。
 
 > ⚠️ **PowerShell 5.1 不要用 `<` 重定向导入 SQL**：它不识别 `<`（报
 > *Missing file specification after redirection operator*），而换成 `Get-Content -Raw xx.sql | mysql`
@@ -311,9 +316,21 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 > 也可以直接 `source sql/im_schema.sql`，脚本头部已带 `CREATE DATABASE IF NOT EXISTS` 与 `USE`。
 
+### 版本化的增量升级（1.0.4 起，首选这条路）
+
+**自 1.0.4 起新的 DDL 一律不再写 `sql/migration_*.sql`**，而是成对放进 `sql/versions/`：`V<版本>__<名>.sql`（应用）与 `U<版本>__<名>.sql`（回滚），
+由后台「**SQL 版本管理**」屏（`im-admin-ui`，权限点 `system:schema:manage` 128）按版本号**升序**点「应用」，并支持对最近一个已应用版本一键回滚。
+
+- **执行人不碰命令行**：页面上的「应用」是逐条语句借还连接执行，并把执行人昵称、语句数、耗时逐条落进 `im_schema_migration_log` 流水；台账表 `im_schema_migration` 一行 = 一个版本的当前态，`checksum` 不一致时页面标红（脚本被改过）。
+- **唯一还需要手工 `source` 的引导脚本**是 `sql/migration_schema_version.sql`（建这两张台账表本身），页面在台账不存在时会直接提示先跑它。
+- **手工 `source` 过 `V*.sql` 的库不会自动登记台账**：要在页面里回滚它，就先在页面再点一次「应用」——脚本全幂等，第二次只会走「已存在，跳过」分支。
+- ★ **跑完有新权限点的版本必须清一次缓存**（`redis-cli DEL im:auth:perm:{userId} im:auth:role:{userId}`，**只 DEL、禁 FLUSHDB**）：`PermissionProviderImpl` 按用户缓存 30 分钟且登录动作不刷新，不清就是「菜单里少一项、直接进地址栏 1003」。
+
+当前库（开发机 `im_db`）的台账已到 **1.0.7**：`V1.0.7__dating_core.sql` 已应用（一次性建齐交友域 16 张表 + 权限点 132~134（`system:dating:manage` / `system:moment:manage` / `system:tag:manage`）+ 标签与破冰字典 + alice↔bob 演示数据，并回填存量账号的 `im_user_profile` 行）。交友这批功能（下文 §十九）**在该脚本应用之前一项都不可用**，且建表后需重启后端。逐项手验步骤见 `md/交友功能手动验证清单.md`。
+
 ### 已有库的增量升级
 
-本项目没有引入 Flyway / Liquibase，增量靠手工跑 `sql/migration_*.sql`。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 与本批的 `migration_agreement.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
+本项目没有引入 Flyway / Liquibase，1.0.4 之前的增量靠手工跑 `sql/migration_*.sql`（上面那节是现行做法，本节仅供存量库对账）。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 与本批的 `migration_agreement.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
 
 | 脚本 | 引入的变更 | 不跑会怎样 |
 |---|---|---|
@@ -650,6 +667,46 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | GET | `/{id}/card` | 他人资料卡片（不含手机 / 邮箱，附好友 / 拉黑关系） |
 | GET | `/search` | 搜索用户（账号 / 昵称模糊，手机号 `exact=true` 全等，排除自己） |
 | GET | `/online` | 批量查询在线状态（单次 ≤ 200） |
+
+### 交友 `/api/dating` —— 需登录（资料侧写接口另需 `user:profile:update`，匹配侧写接口另需 `friend:apply`）
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| GET | `/profile` | 本人交友资料（含隐私开关、完资料度与待补提示；缺行自动补建） |
+| PUT | `/profile` | 保存本人交友资料（只更新非 null 字段；清空走 `clears`；定位由服务端重算 geohash） |
+| PUT | `/profile/privacy` | 保存交友隐私开关（年龄 / 距离 / 在线 / 是否可被发现 + 动态可见范围） |
+| GET | `/profile/{userId}` | 看对方资料（按对方开关收口：隐年龄时 `age=null`，距离只给模糊文案，**永不返回经纬度**） |
+| GET | `/dict` | 交友字典（学历 / 收入区间 / 婚恋状况 / 交友目的四组下拉项，外加 `sorts` 卡池排序口径） |
+| GET | `/photos?userId=` | 照片墙列表（不传或传自己 = 全部含审核状态；看别人 = **只回 `audit_status=1` 那几行的地址**） |
+| POST | `/photos` | 新增一张（只提交 `fileId` + `machineChecked` + 宽高，地址服务端现拼；最多 9 张） |
+| DELETE | `/photos/{id}` | 删除一张（只逻辑删照片行，**不销毁 `im_file` 记录**） |
+| PUT | `/photos/{id}/main` | 设为主封面（挪到首位，其余顺序相对不变） |
+| PUT | `/photos/sort` | 重排（按期望顺序提交**当前全部**照片 id，第一个即封面） |
+| GET | `/tags/library` | 兴趣标签库（只含启用中的，按分类分组；选择器的唯一出处） |
+| GET | `/tags?userId=` | 某人已达成的兴趣标签（按其自选顺序；后台已下架的仍给，已删除的不给） |
+| PUT | `/tags` | 保存本人兴趣标签（**整组替换**：数组即结果与顺序，`[]` 即清空；最多 10 个） |
+| GET | `/match/deck?size=&sort=` | 取待滑动的卡池（**推荐流**：排除已划过 / 配对中 / 我拉黑的与低质号；喜欢过我的人置顶、七天内推过的人垫后；`sort` 只作用于本次；少于 size 即刷到底） |
+| POST | `/match/action` | 滑动（`action` 1 喜欢 / 2 跳过；**一个方向只记一行**，重复滑是改动作；双向喜欢即成对并建私聊会话，**不自动加好友**） |
+| GET | `/match/likes` | 谁喜欢我（分页，按对方最近一次喜欢的时间倒序；带 `likedBack` / `paired`） |
+| GET | `/match/pairs` | 我的配对（分页，`conversationId` 可直接跳聊天） |
+| DELETE | `/match/pairs/{pairId}` | 解除配对（只置 `status=2`：**会话与聊天记录都不动**，重新喜欢复用同一行） |
+| GET | `/nearby?radius=&size=` | 附近的人（按距你由近到远；`radius` 500~20000 默认 3000，`size` 1~50 默认 20；**只给模糊距离文案不给坐标**；本人无可用定位回 2042） |
+| GET | `/preference` | 我的筛选偏好（无行时回一份出厂默认值并标 `saved=false`，那份默认值**不参与筛选**） |
+| PUT | `/preference` | 保存筛选偏好（**整组替换**：12 个字段全量提交，0 / 空串即「不限」；越界与区间反了报错不夹紧） |
+| GET | `/visits` | 谁看过我（近 30 天点开过我资料卡的人，**按人聚合的一屏短列表、上限 50 位不分页**；同一天反复打开只算一天但累加 `visitTimes`；开隐身的人不留痕） |
+| GET | `/icebreakers?userId=` | 破冰文案（三类：打招呼模板 / 话题卡 / 标签开场白；`{nickname}/{city}/{tag}` 由服务端替换，**填不出来的整条不下发**；传 `userId` = 看对方资料，共同标签的开场白排前） |
+| POST | `/icebreakers/{id}/use` | 点用一条文案（只自增 `use_count`；已被后台下架的回 2032，让前端换一条） |
+| GET | `/intimacy?userId=` | 与某人的亲密度（火花天数 / 历史最高 / 互动值 / 档位与进度条百分比 / 共同好友与共同群数；**从没来往过回全 0 而不是 null**） |
+| POST | `/moments` | 发布动态（正文与附件**至少有一样**；附件只传 `fileId`，最多 9 图或 1 视频且不混排；`visibility` 1 公开 / 2 仅好友 / 3 部分人可见 / 4 仅自己） |
+| GET | `/moments/feed?cursorId=&size=` | 我的动态流（受众 = 好友 ∪ 配对过的人 ∪ 自己 − 我拉黑的；**游标翻页**，「公开」也不是全站公开） |
+| GET | `/moments/user/{userId}?cursorId=&size=` | 某人主页上的动态（看自己**含已下架**并下发状态标；看别人按对方「几天可见」设时间下界；陌生人恒为空列表） |
+| GET | `/moments/{momentId}` | 动态详情（带两层评论；可见性按点开的人重算，看不到回 2050「这条动态不在了」） |
+| DELETE | `/moments/{momentId}` | 删除自己的动态（连带附件 / 评论 / 点赞 / 白名单，**一行 `im_file` 都不动**） |
+| POST | `/moments/{momentId}/like` | 点赞（重复点幂等，返回权威总数；另需 `friend:apply`） |
+| DELETE | `/moments/{momentId}/like` | 取消点赞（本来没赞过也返回当前总数，不报错） |
+| POST | `/moments/{momentId}/comments` | 评论或回复（回复一条回复时 `parentId` 仍传一级评论，**两层封顶**；另需 `friend:apply`） |
+| DELETE | `/moments/comments/{commentId}` | 删除评论（评论作者**或**动态作者都能删；连带整棵子树并从 `commentCount` 里减掉行数） |
+| POST | `/moments/{momentId}/share` | 动态转聊天（往会话发一张 `msgType=15` 卡片，另需 `message:send`；★ **转发不改变可见范围**） |
 
 ### 好友 `/api/friend` —— 需登录
 
@@ -2063,4 +2120,248 @@ spring-boot-duomokuia/
 - **共用了登录态**：后台与聊天端是同一套 Sa-Token，后台 `logout` 会把聊天端也踢下线（一期接受，两个页面开在同一浏览器时得注意）。
 - **本批只做了编译与构建验证**：`mvn -q -o compile` 与两个前端工程的三次构建（`im-ui` 的 `build` 与 `build:electron`、`im-admin-ui` 的 `build`）均 EXIT=0；
   **未做浏览器实机串测**（举报提交、看板轮询、处置二次确认这三条路径需人工跑「十七、验证清单」第 13 / 14 项）。
+
+---
+
+## 十九、交友域（`md/待开发功能.txt` 69~81 的 13 项，逐项交付）
+
+**代码位置**：不新建 Maven 模块——资料侧（资料卡 / 照片墙 / 标签 / 完资料度）进 `im-user`，关系侧（滑动匹配 / 附近的人 / 访客 / 亲密度 / 动态 / 破冰）进 `im-friend`，跨模块读写走 `im-common` 的 SPI。
+16 张表由 `sql/versions/V1.0.7__dating_core.sql` **一次建齐**，这 13 项功能期间**不再加表、不再 ALTER**（字段预留够了比反复补列便宜）。
+
+| # | 功能 | 状态 | 主要落点 |
+|---|---|---|---|
+| 1 | 资料卡扩展（结构化 + 隐私 + 完资料度） | ✅ 已交付 | `im-user` `DatingController` / `DatingProfileServiceImpl`、`im-ui` `Profile.vue` / `UserProfile.vue` |
+| 2 | 照片墙（多张 + 排序 + 单张审核 + 主封面） | ✅ 已交付 | `im-user` `DatingPhotoServiceImpl` / `UserPhotoMapper`、`im-file` `FileBizType.DATING_PHOTO`、`im-ui` `Profile.vue` / `UserProfile.vue` |
+| 3 | 兴趣标签体系 + 完资料度评分 | ✅ 已交付 | `im-user` `DatingTagServiceImpl` / `InterestTagMapper` / `UserTagMapper`、`im-ui` `Profile.vue` / `UserProfile.vue` |
+| 4 | 滑动匹配（like / pass / 双向喜欢成会话） | ✅ 已交付 | `im-friend` `MatchController` / `MatchServiceImpl` / `MatchLikeMapper` / `MatchPairMapper`、`im-user` `DatingQuerySpiImpl`、`im-ui` `Discover.vue` / `UserProfile.vue` |
+| 5 | 附近的人 / LBS + 距离模糊化 | ✅ 已交付 | `im-friend` `NearbyController` / `NearbyServiceImpl`、`im-user` `DatingQuerySpiImpl.nearbyIds()` / `UserProfileMapper.nearbyPool()`、`GeoUtil`、`im-ui` `Discover.vue` |
+| 6 | 筛选与偏好（年龄 / 距离 / 性别 / 城市 / 身高 / 学历 / 婚恋 + 在线优先 / 活跃度优先） | ✅ 已交付 | `im-friend` `PreferenceController` / `MatchPreferenceServiceImpl` / `MatchPreference`、`im-user` `UserProfileMapper.applyFilters()` / `DatingQuerySpiImpl`、`im-ui` `DatingFilterDialog.vue` |
+| 7 | 推荐流与排序（互惠置顶 / 曝光垫后 / 热门与最新 / 低质号降权 / 冷启动保护） | ✅ 已交付 | `im-friend` `MatchController` / `MatchServiceImpl` / `MatchExposure` / `MatchExposureMapper`、`im-user` `DatingQuerySpiImpl.candidateIds()` / `DatingProfileServiceImpl.qualityOf()`、`im-common` `DatingSort`、`im-ui` `Discover.vue` |
+| 8 | 访客记录「谁看过我」 | ✅ 已交付 | `im-friend` `VisitController` / `ProfileVisitService(Impl)` / `ProfileVisit` / `ProfileVisitMapper` / `ProfileVisitSpiImpl`、`im-common` `ProfileVisitSpi` / `ProfileVisitType`、`im-user` `DatingProfileServiceImpl.view()` / `UserProfile.stealth()`、`im-ui` `Discover.vue` |
+| 9 | 破冰辅助（模板 / 标签开场白 / 话题卡） | ✅ 已交付 | `im-user` `DatingController` 的两个 `/icebreakers*` 端点 / `IcebreakerService(Impl)` / `Icebreaker` / `IcebreakerMapper`、`im-common` `IcebreakerType`、`im-ui` `UserProfile.vue` |
+| 10 | 亲密度 / 火花（streak） | ✅ 已交付 | `im-friend` `IntimacyController` / `IntimacyService(Impl)` / `Intimacy` / `IntimacyMapper` / `IntimacySpiImpl`、`im-common` `IntimacyLevel` / `IntimacySpi`、`im-message` `MessageServiceImpl` 挂钩、`im-ui` `UserProfile.vue` |
+| 11 | 动态 Feed（发布 / 游标流 / 点赞 / 两层评论） | ✅ 已交付 | `im-friend` `MomentController` / `MomentService(Impl)` / `Moment{,Media,Like,Comment,Visible}` 五表与五个 Mapper / `MomentQuerySpiImpl`、`im-ui` `MomentFeed.vue` / `MomentDetailDialog.vue` / `UserProfile.vue` |
+| 12 | 动态转聊天与可见范围 | ✅ 已交付 | `im-friend` `MomentServiceImpl.share()` / `filterVisible()`、`im-common` `MomentVisibility` / `MomentVisibleDays` / `MomentCardDTO`、`im-message` `MomentContentHandler`（`MsgType.MOMENT`=15）、`im-ui` `MessageBubble.vue` 气泡分支 |
+| 13 | 后台管理屏（交友 / 动态 / 标签破冰） | ✅ 已交付 | `im-common` 三个 `Admin*Dating*` SPI 与十个 DTO、`im-user` / `im-friend` 三个 `*AdminSpiImpl`、`im-admin` `Admin{Dating,Dict,Moment}Controller`(+Service)、`im-admin-ui` `DatingView.vue` / `MomentsView.vue` / `DatingDictView.vue` |
+
+### 1. 资料卡扩展（第一批）的口径
+
+- **结构化字段**：出生日期（**年龄不落库**，`GeoUtil.age()` 按当天现算——存下来的年龄会在生日那天集体过期而没人修）、身高 cm、学历、职业、收入区间、婚恋状况、交友目的、省 / 市 / 区。四组枚举 `DatingEducation` / `DatingIncome` / `DatingMarriage` / `DatingGoal` 定在 `im-common`，**`GET /api/dating/dict` 是前端选择器的唯一出处**（写死在 vue 里就等于开了第二份口径，改一档要改两个工程）。
+- **局部更新与「清空」的表达**：`PUT /api/dating/profile` 只更新非 null 字段，因此「清空出生日期」无法用 null 表达——显式把字段名写进 `clears` 数组。`clears` 有**白名单**，未知字段名直接 400（拼错一个字段名就静默不清空，是最难查的「改了没生效」）。文本列传空串等同清空；枚举列传 `0` 是「清为未填」，**传一个不在枚举里的值则报错而不是落 0**（否则非法输入会被静静变成「用户选了未填」）。更新走 `LambdaUpdateWrapper` 逐列 `set` 而非 `updateById(patch)`，因为后者会跳过 null。
+- **定位与距离**：前端只上报经纬度，**geohash 由服务端重算**（两边各算一次迟早对不上，而对不上的表现是本人刷不到附近的人）；精度 6 位（约 ±0.6 km，再长就把人圈到某栋楼）；`(0,0)` 视为非法；`location_time` 超 **7 天**不再采信（旧坐标会把人说成在别处）。对外**只给模糊文案四档**（500 m 内 / 1 km 内 / 取整公里 / 100 km 以上），`lng/lat` 永不下发；距离只在**双方都在采信期内有定位**时才算——只有一方定位时算出来的距离是编的。`geohash` 实现用三个公开参照点校过（北京 `wx4g0b` / 上海 `wtw3sj` / 杭州 `wtmknp`），改动必须重对。
+- **隐私位**：`showAge` / `showDistance` / `showOnline` / `discoverable` 四个开关 + `moment_visible_days`（只认 0/3/7/30）。在线状态的收口点全站唯一：`UserServiceImpl.buildCard()`——**好友与本人豁免**，陌生人只看 `show_online`；没有资料行（从没进过交友页）按建表默认值「显示」处理，不该因为缺行就被判成隐身。`search()` 用 `findMap()` 批量取资料而不是逐行查，避免搜索页 N+1。
+- **完资料度（`profile_score`，0~100）**：照片 30（满 3 张）> 标签 15（满 5 个）> 生日 10 > 其余九项各 5（身高 / 学历 / 职业 / 收入 / 婚恋 / 交友目的 / 城市，再加头像与签名），合计正好 100。照片占最大头是产品判断，不是技术选择。分数与「待补提示」**同一次计算返回**（`ScorePlan` record），否则两边口径会漂；分数落库是为了推荐排序能走索引，不是为了存历史。
+- **前端两个页**：`Profile.vue` 的「交友资料」块（进度 + 待补标签墙 + 表单 + 四个开关），写回时按 `datingOriginal` 快照算**差量**，没改过的字段不发；开关是逐项保存的，失败就拨回上一个成功值（整表保存会让一次失败回滚掉五项无关开关）。`UserProfile.vue` 展示同一张卡的他人口径（坐标本身不可回填，所以 VO 只给 `hasLocation` 布尔位，前端区分「已定位 / 超 7 天 / 未采集」）。
+- **已知边界**：年龄是读时现算的，所以**不存在过期问题**（代价是它不能进 SQL 筛选——按年龄筛要在 f6 里转成「出生日期区间」）；`profile_score` 是写侧重算的冗余列，**直接改库不会让它跟着变**（只有走 `PUT /profile`、`recalcScore()` 与后面的标签 / 照片变更路径才刷）；本批不做「资料修改审核」（`quality_flag` 列留好了，给后面的低质号降权用）；浏览器定位要 https 或 localhost 才拿得到授权（开发机 `localhost:5173` 满足，局域网 IP 访问就不满足，页面上的「重新定位」会失败并提示而不是静默无反应）。
+
+### 2. 照片墙（第二批）的口径
+
+表 `im_user_photo` 一行一张、一人最多 **9 张**（`UserPhoto.MAX_COUNT`，前端 `PHOTO_MAX` 与之一致），零新表零 ALTER（V1.0.7 已建齐）。
+
+- **两个服务层不变量**（DDL 表达不了，MySQL 没有部分唯一索引）：同一用户最多一行 `is_main=1`；**`is_main=1` 的那行恒为 `sort=0`**。每次写入后由 `applyOrder()` 按数组下标重排收敛，已是目标态的行跳过（拖拽会连续触发，九行全写是白给的写放大）。
+- **可见性靠「不下发这一行」，不靠文件权限**：`FileBizType.DATING_PHOTO` **开了 `isPublic()`**（陌生人的资料卡要渲染别人上传的图，与 `IMAGE_WORK` 同构），所以「哪一张能被看到」只能在服务层按 `audit_status` 决定——**未通过那行的 `fileId` / `url` / `rejectReason` 一律不出现在对外响应里**（漏一个字段就是替用户把违规图发出去了）。`UserPhotoVO` 里那五个字段只在本视角填（`toVO(photo, self)`）。
+- **单张审核状态怎么落**：前端 `guardImage(file, { scene: 'dating_photo' })` 真跑过且未命中 → 提交 `machineChecked=true` → 落 **1 已通过**；模型降级（`result.skipped`）→ 传 false → 落 **0 待审**，不能把没检查过的图当已检查的放出去。**2 驳回**只由后台人工写（属 f13，现在还没有入口）。`ModerationServiceImpl.requireImageScene()` 已放行该场景，否则上报会被拒。
+- **封面取哪一张**：不是直接取 `is_main=1`，而是 `DatingPhotoService.cover(userId)` 的「主封面且已过审 → 否则第一张已过审 → 否则 null」——用户完全可能把待审那张拖到首位，那时对外得自动退回，而他自己的页面上仍写着「封面」。**这张封面是给 f4 匹配卡片与 f7 推荐流复用的唯一入口**，本批暂无调用方。
+- **提交什么、不信任什么**：入参只有 `fileId` + `machineChecked` + 宽高。服务端三重闸门：文件存在、**上传者是自己**、`bizType=dating_photo`（漏后两条就能拿别人的图或聊天图冒充）；`url` 由 `FileStorageSpi.accessUrl()` 现拼、`size` 取文件元数据，**前端传的 URL 与字节数一律不算数**。宽高是客户端上报的版式元数据（服务端不解码像素，否则要给 im-user 再引一份解码依赖）。
+- **排序接口要「完整新顺序」而不是「谁插到第 N 位」**：`PUT /photos/sort` 一次提交全部 id，天然幂等（拖拽中间态反复提交不会越排越乱）；提交的集合必须与当前不多不少正好相等，否则报错——少传等于偷偷删，掺别人的 id 就是越权改他人排序。
+- **只逻辑删照片行，不销毁 `im_file`**：秒传时同一 `objectKey` 可能还挂着别人的头像或聊天图，删记录会连带把他们的下载打死。新增 / 删除后必调 `recalcScore()`（照片占完资料度 30 分），前端顺手重拉一次 `/dating/profile` 把分数与待补提示刷回来。
+- **依赖方向是单向的**：`DatingPhotoServiceImpl` 注入 `DatingProfileService`（为了重算分数），而 `DatingProfileServiceImpl` 只注入 `UserPhotoMapper` 取张数——**双向注 service 就是构造器循环依赖，应用会在启动那一步直接失败**（与 `UserMapper` 而不是 `UserService` 那个已有约束同因）。同理 `DatingStatMapper.countApprovedPhotos()` 已随本批删除，不留第二套读 `im_user_photo` 的路径（剩下的 `countUserTags()` 已随第三批迁入 `UserTagMapper`，`DatingStatMapper` 整类因此删除）。
+- **五个端点仍不开新权限点**：复用 `user:profile:update`，但限流比资料保存紧得多（add 10/60s、其余 20/60s，key 显式写 `dating.photo.*`）——每张图都要进一次审核而保存资料不会。`/api/dating/**` 已在 `Knife4jConfig` 的「20-交友」分组里，本批无需改 knife4j 配置。
+- **前端两个页**：`Profile.vue` 的九宫格（新增 / 设为封面 / 前移后移 / 删除，鼠标悬停才出手势区）；`UserProfile.vue` 用 `el-image` 的 `preview-src-list` 直接大图预览，**不在前端再按状态过滤一遍**（那等于默认相信接口会漏）。两处渲染都走 `mediaUrl(item.url)`（受控地址要带登录头取 blob）。
+- **★ 运行时验证待做**：本批零新 SQL，但仍要先把 `V1.0.7` 应用一次（库里现在还没有 `im_user_photo`），否则五个端点全部报 1007。
+
+### 3. 兴趣标签体系（第三批）的口径
+
+- **字典 + 关联表而不是一个逗号串**：`im_tag`（后台可维护）+ `im_user_tag`（一行一个绑定）。理由是可反查与可改名：「同好的人」（f4/f7）与按标签的开场白（f9）都要走 `idx_tag`，而逗号串只能全表 `LIKE`；改名在字典里是一行 UPDATE，在串里是刷穿全表。本表**物理删除**（无 `deleted` 列），所以 `UserTag` 继承 `AuditEntity` 而不是 `BaseEntity`：`uk_user_tag` 只有真删行才会释放，取消后重新选中同一个标签才能成功。
+- **上限 10 个、满分 5 个是两个不同的数**：`UserTag.MAX_SELECT` 同时是 DTO 的 `@Size`、服务层的校验与报错文案里的数（只留一处口径）；`UserTag.SCORE_FULL` 则是完资料度里拿满 15 分所需的个数。上限比满分高，是为了「选得下」但不再加分——卡片上只能摆下几个。前端 `Profile.vue` 的 `TAG_MAX = 10` 是已知的一处重复（拿不到服务端常量，超上限最终仍由服务端拒），改动要两边一起看。
+- **保存是整组替换而不是 `add`/`remove` 两个增量接口**：选择器的交互是「点若干下 → 一次保存」，全量比对天然幂等（同一个数组提交两次，第二次是零写入），而拆两个接口就得让前端自己保证两次请求之间没人改过；照片墙要跨多次上传逐步累积，才需要另一套按 id 操作。`ids` 先去 null 去重（保留首次出现的位置），空数组是「清空全部」的有效表达，所以校验只能要求非 null 不能要求非空。并发两个页面同时保存时 `uk_user_tag` 兜住：命中唯一键就当「已经绑上了」，**但不再往 `use_count` 加这一次人头**。
+- **`use_count` 是冗余计数，只用于展示与热度**：增减走一条 `UPDATE ... SET use_count = GREATEST(use_count + #{delta}, 0)`（不是读-改-写，否则两人同时选同一个标签会丢一次计数；`GREATEST` 是防止已经漂移的计数被继续拖成负数，负数反而排到「热门」最前）。完资料度与匹配打分一律按 `im_user_tag` 的实际行数算，不按它。
+- **下架一个标签不该删掉别人的资料卡内容**：`status=0` 只从选择器里消失，**已绑定的行保留**；保存时「已停用的标签」允许原样提交回来，但不给新增——否则后台一下架，用户只是改个身高就会在这栏上失败。被逻辑删除的标签读不出名字，**读路径只跳过不报错也不顺手清理**（那几行脏绑定会在用户下次保存时自然消失）。
+- **分类分组在服务端做**：全表按 `sort` 升序取出后用 `LinkedHashMap` 按分类归组，分类顺序就自然等于「该分类最小的 `sort`」（也就是种子排的那个顺序）；`TagVO` **刻意不给 `sort` 字段**，顺序只看数组下标——排序来源本来有两个（库内 `im_tag.sort` 与用户自拖的 `im_user_tag.sort`），多一个字段就是让前端猜这次是哪个。
+- **完资料度里标签那一档现在按真实张数**：`DatingProfileServiceImpl.plan()` 改读 `UserTagMapper.countByUserId()`，`DatingStatMapper` 因此整类删除（读 `im_user_tag` 只留一套路径）。依赖方向仍是单向：`DatingTagServiceImpl` 注 `DatingProfileService` 重算分数，而它反向只注 Mapper。
+- **三个端点不开新权限点**：两个读只需登录，`PUT /tags` 复用 `user:profile:update`（限流 30/60s，key `dating.tag.save`）；`/api/dating/**` 已在「20-交友」分组，knife4j 配置无需改。标签库的**后台维护屏属 f13**（权限点 134 `system:tag:manage`），本批只读不改。
+- **前端两个页**：`Profile.vue` 的「兴趣标签」块——已选区可前移 / 后移 / 取消（带 `已下架` 标记），下面按分类列全部启用项，点一下即切换选中（选满 10 个拦住第 11 下），**有修改才亮保存按钮**（`tagDirty` 只比 id 序列，库内改标签名不该把草稿判成已改动）。`UserProfile.vue` 只渲染名字 chip，不给看 `disabled` 标记（对访客而言那是一句多余的系统文案）。
+- **★ 运行时验证待做**：仍是零新 SQL，但 `V1.0.7` 未应用前三个端点全报 1007（`im_tag` / `im_user_tag` 都不存在）；应用后 `im_tag` 应有 **48** 行种子（分 8 类），`SELECT COUNT(*) FROM im_tag` 不是 48 就是脚本只跑了一半。
+
+### 4. 滑动匹配（第四批）的口径
+
+表 `im_match_like` + `im_match_pair`（V1.0.7 已建，零新 SQL），代码全在 `im-friend`，卡片数据从 `im-user` 的 `DatingQuerySpi` 拿。
+
+- **一个方向只记一行**：`uk_from_to(from_user_id, to_user_id)`，重复滑动是 `UPDATE action` 而不是插第二行。**撤销喜欢也改行不删行**——删行会让推荐流（f7）失去「这个人已被划走」的信号，退化成反复推同一张卡。`idx_to_action_time(to_user_id, action, update_time)` 专供「谁喜欢我」按时间倒序。
+- **配对行的两个约定**：`(user_a_id, user_b_id)` 恒定 **a < b**（否则 (A,B) 与 (B,A) 会各成一行，`uk_pair` 也就拦不住重复配对）；解除只置 `status=2` 不删行，再配回来 `reactivate()` 复用同一行改回 1，配对历史因此是一条不断裂的线。两张表都**无 `deleted` 列**，所以实体继承 `AuditEntity` 而不是 `BaseEntity`。
+- **候选池的归属冲突怎么解**：过滤条件（`discoverable` / 年龄 / geohash / 完资料度）在 `im_user_profile`（im-user），排除名单（已划过 / 配对中 / 拉黑）在 `im_match_*` 与 `im_friend`（im-friend），星型架构下两边都读不到对方的表。定成「**im-friend 组装排除名单 → 传给 im-user 的 `candidatePool()` → 回一串 ID**」，入参是 `DatingCandidateQueryDTO`（f5 加距离、f6 加偏好、f7 加排序都只往这个 DTO 上添字段，不改 SPI 签名）。排除名单上限 `SLID_EXCLUDE_MAX = 1000`：不封顶会把一条 `NOT IN (…)` 拖成全表扫，而划过一千人还没刷到底的账号本来就不该继续走这条路。
+- **`DatingQuerySpiImpl` 是隐私收口的唯一一处**：`cards()` 一次批量出卡（七次批量读：users / profiles / covers / photoCounts / tagNames / onlineIds / friendIds + viewer 那一行资料，代替逐人 N+1），年龄、距离文案、在线位全在这里按对方开关裁。**把这段逻辑复制进 im-friend 的某个 VO 里，就是第二条会漏的收口**。在线位口径比资料侧宽一档：**好友与已配对不受 `show_online` 影响**，陌生人只对「没主动关过」的人可见。封号过滤看 `im_user.status`（profile 行不会因为封号被删，只筛资料列会把封禁用户继续往外推），`status IS NULL` 按不正常处理。
+- **空更新必须不发 UPDATE**：`update_time` 是「谁喜欢我」的排序列，`updateAction()` 在 action 与 source 都没变时直接返回——否则用户刷新页面重刷同一张卡，会把三天前的喜欢顶到最前。
+- **成对这一路的事务与推送**：`ConversationSpi.getOrCreateSingle(a, b)` **刻意不 catch**，同事务——会话建不成就让整个喜欢回滚，不能留下「已成对但没有会话」的行。系统通知与 `match-success` WS 推送挂 `afterCommit`（事务没提交就把消息推给对方，对方点进来会拿到一个查不到的会话 ID）；推送**同时给两个人**，`celebrate()` 里发两次 `pushMatched`。`conversationId` 每次都靠 `getOrCreateSingle` 重新幂等取，不信配对行里存的旧值——用户可能早已把那个会话删掉。
+- **已知并发窗口（写在这里而不是假装解决）**：两人同一毫秒互点喜欢，会双双读不到对方的行而都不成对。**不加 `FOR UPDATE`**：换来的是一对外键方向相反的更新互相等待、其中一方整笔回滚（用户看到的是「点了喜欢报错」）。后果可自愈——双方「喜欢我的」列表里都有对方，再点一次立即成对。
+- **解除配对后对方不会自动回到卡池**：「划过」是个不会撤销的事实（否则解除就成了反复刷同一个人的开关）；要再成对，得从「喜欢我的」那一页点回去。
+- **注销与封号的行怎么留**：`likesReceived()` / `pairs()` 里 `card == null` 的行直接 `continue`，**`total` 因此会偏大**（分页条显示 12 条而列表只有 10 行）。这是明知代价后的选择：为了一个计数去反查 `im_user` 会把每条记录都变成一次额外查询，而多翻一页就能看到「已经没有人了」。
+- **权限与限流不开新码**：写侧三个动作（action / unmatch，含前端的「喜欢 TA」）复用 `friend:apply`——滑动喜欢的语义就是「向陌生人发起接触」，与好友申请是同一种能力，V1.0.7 也没为用户侧预留新权限位；读侧三个端点只要登录。限流按交互频率定：action 120/60s（手滑到底的速度上限）、deck / likes / pairs 60/60s、unmatch 20/60s。`/api/dating/match/**` 靠路径前缀天然落进「20-交友」分组（分组按 `pathsToMatch` 切，不按包名也不按 `@Tag`），**knife4j 配置无需改**。
+- **前端四改动一处新增**：新增 `Discover.vue`（滑动匹配 / 喜欢我的 / 我的配对 三个 tab，卡池刷到剩余 ≤ 3 张自动补一批）；`router/index.js` 加 `discover`；`MainLayout.vue` 导航插「交友」（`Compass`——实测 Element Plus 没有 Heart 图标），同时把窄屏底栏的 `.main-layout__item` 由 58px 定宽改为等分（六项 + 直播已在 375px 上顶出屏）；`ws/dispatch.js` 加 `match-success` 分支；`UserProfile.vue` 的动作区加「喜欢 TA」。
+- **一次喜欢只弹一层**：发起方走 HTTP 返回的「去聊天 / 继续刷」弹框，`match-success` 的 WS 分支只负责通知与系统消息入库（两边都发）。**本地再补一个 `ElNotification` 就是点一下出三个东西**；因为发起方的弹框来自 HTTP 响应而推送来自 WS，两者先后不定，所以去重靠「各只发一种形态」而不是靠一个共享的 pairId 集合。
+- **★ 运行时验证待做**：仍是零新 SQL，但 `V1.0.7` 未应用前五个端点全报 1007（`im_match_like` / `im_match_pair` 都不存在）。应用后的最小链路：A 取到卡池 → A 喜欢 → B 在「喜欢我的」看到 A → B 回喜欢 → 双方各收一帧 `match-success` 且会话列表多出一条 → `im_match_pair` 一行且 `a < b` → 解除后 `status=2` 而会话仍在。
+
+### 5. 附近的人（第五批）的口径
+
+零新表零 ALTER：`lng` / `lat` / `geohash` / `location_time` 四列随第一批就在 `im_user_profile` 上，定位写入也只有 `PUT /api/dating/profile` 一条路。
+
+- **半径决定 geohash 前缀取几位**：`radius ≤ 1000` 用 5 位（格子约 4.9 × 4.9 km），否则用 4 位（约 39 × 19.6 km）——**前缀格子必须比半径宽一档**，否则跨在格子边界上的人会被 `likeRight` 直接漏掉。明确**不做 8 邻居扩展**（三条理由，写在 `nearbyIds()` 注释里）：邻居要先有 geohash 解码能力（`GeoUtil` 只有编码），误差已被「取粗一档」吸收到大半，而用户看到的又只是一句「3 km 内」。
+- **扫描窗口与预排序**：`UserProfileMapper.NEARBY_SCAN_MAX = 500` + `ORDER BY location_time DESC`。精确距离要回内存用 `GeoUtil.distanceMeters()` 逐行算，SQL 排不了它，那这个预排就必须挑「仍然可信」的序而不是「分高」的序：一个 90 分但三个月前定位的人不会在附近，让他占满 500 行窗口就等于附近没人。
+- **先算距离再查账号状态**：`NEARBY_STATUS_PROBE = 3` —— 排完序只取前 `limit × 3` 去校 `im_user.status`。为一发 `IN (500 个 id)` 的查询买单是白花销，而完全不补余量又会让「20 个里有 2 个被封」把列表直接砍成 18 个。
+- **排序精度与展示精度分离**（距离模糊化的全部要点）：排序用内存里的精确米数，对外只有 `card.distanceText` 那一句四档文案。`NearbyPeerVO` **刻意没有距离字段**——列表次序会泄露「谁更近」，但泄露不出可以用来跟踪的坐标。
+- **「你还没定位」与「附近没人」是两句话**：前者用 `DatingQuerySpi.locationReady()` 判（坐标存在 + 合法 + `location_time` 未超 `UserProfile.LOCATION_VALID_DAYS`），后者是空集合。所以 `candidateIds()` 在查看者定位失效时**只回空池而不报错**：im-user 不该决定 im-friend 的文案，错误码 2042 `DATING_LOCATION_REQUIRED` 由 `NearbyServiceImpl` 自己抛。
+- **排除名单与卡池不同，且是有意为之**：附近的人只排「我拉黑的人」，**不排已划过、也不排已配对**——这是一个 browse 视图，划走不代表 TA 不在你身边，而配对之后更要反复用这一屏找 TA（所以 `paired` / `conversationId` 是这一栏的主字段而非异常分支）。两个入口共用同一个候选池读法，只是 `DatingCandidateQueryDTO.nearbyRadiusMeters` 给不给的区别。
+- **不开第二条写路径**：`NearbyController` 只有一个 `GET`，喜欢仍走 `POST /api/dating/match/action` 传 `source=2`（`MatchSource.NEARBY`），会话里那句系统通知因此会写成「你们在「附近的人」里互相喜欢」而不是照抄「推荐流」。
+- **权限与限流**：只要登录，不要新权限码（返回的都是按查看者视角收口过的公开卡片，且看不到坐标）；60 次 / 60s（key `dating.nearby.list`）比滑动的 120 次紧，因为这一屏每一次请求都要重扫 500 行并重算一遍距离序，也防拿它当坐标探测仪高频刷。路径前缀 `/api/dating/**` 天然落进「20-交友」分组，**knife4j 配置无需改**。
+- **前端是 `Discover.vue` 的第四个 tab**（不是新路由）：半径六档 500 m / 1 / 3 / 5 / 10 / 20 km 与后端 `[500, 20000]` 一致，空态「放大范围」直接跳下一档；2042 用 `{ silent: true }` 请求 + 原地「去定位」引导（不弹全局红条，因为那不是失败而是一个待修状态）；喜欢成功后**就地改这一行**而不重拉整列——重拉会按距离重新排序，刚配对的那个人可能直接跳到底下。
+- **已知边界**：前缀匹配看不见格子边界外的人（要覆盖就得扩邻居，本批明确不做）；`location_time` 一过期，「附近的人」与「距离文案」同时失效是同一件事的两个表现；对方关了 `showDistance` 时那一行距离为空但排序仍按远近；半径上限 20 km 是「附近」的语义边界，更大的范围属 f6 的同城筛选（按 `city` **包含匹配**而不是等值，不走 geohash）。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_user_profile.geohash` 不存在，`/api/dating/nearby` 直接 1007。应用后的最小链路：A 在 `Profile.vue` 采集定位（`geohash` 落库且为 6 位）→ A 看得到自己「已定位」→ B 同法定位 → B 的附近的人里出现 A 且带一句模糊距离 → B 喜欢 A（`source=2`）→ A 回喜欢 → 会话里那句通知写的是「附近的人」而不是「推荐流」；另需验一次未定位账号看到的是 2042 引导而不是空列表。
+
+### 6. 筛选与偏好（第六批）的口径
+
+零新表零 ALTER：`im_match_preference` 已在 `V1.0.7` 建齐（`uk_user` 一人一行），本批只是把这张表**读出来摊进已有的两条候选池查询**。
+
+- **保存是整组替换，与第一批的「null 不改」刻意相反**：筛选条件是一个整体——「不设上限」本身就是有效选择，部分更新会让「把年龄上限改回不限」永远做不到（发 null 等于没发）。代价是 `PUT /api/dating/preference` 必须收全量表单，前端弹层因此始终提交 12 个字段而不是差量。区间反了与越界一律**报错而不是夹紧**：静默夹紧会让用户以为自己设的是 25~35 而实际存的是 25~45，这类「设置没生效」是查不下去的。（建表注释里那句「服务端夹取」是早期措辞，实现按报错走——结果仍然是「小于 18 的一律进不了交友池」。）
+- **`saved=false` 时出厂默认值不生效**：`GET /preference` 在无行时回一份 `defaultRow()` / 前端 `DEFAULT_FORM` 同源的默认值（年龄 18~45，其余全部为「不限」），那只是**表单预先填好的样子**，后端不拿它筛人——真正生效只有 PUT 过一次（没行时 `find()` 直接回 null，两条读路径都不加任何条件）。这一条在接口 javadoc 与弹层 alert 两处都写了，因为「默认值到底有没有在筛」是这一批最容易被误解的点。
+- **跨模块只有一条通道**：`im-friend` 不直读 `im_user_profile`，全部条件摊进 `DatingCandidateQueryDTO` 的 10 个字段，由 `MatchPreferenceService.applyTo(preference, query)` 一次填入。`applyTo()` **只填调用方没显式给的字段**——卡池的 `limit`、附近的请求半径都不该被偏好覆盖，顺序反过来就成了偏好能改分页大小。
+- **年龄换算成出生日期区间**：`ageMin → birthday <= today.minusYears(ageMin)`，`ageMax → birthday > today.minusYears(ageMax + 1)`。上界用开区间是为了不把「刚满 35 岁零一天」的人算成 36 岁而筛掉；年龄列不存在（第一批定的「读时现算」），所以这一步换算必须留在 im-user 的 Mapper 里，im-friend 只说年龄。
+- **性别走 `im_user` 子查询而不是内存过滤**：`gender` 那一列不在资料表，`applyFilters()` 用 `inSql(... "SELECT id FROM im_user WHERE deleted = 0 AND gender = " + gender)`——同模块同库自己发起，不破坏星型架构；拼进 SQL 的是已判过 `1/2` 的 int，没有注入面（与 `LIMIT` 内联同理）。改成拿回内存再筛会让 `limit` 语义失真：取 20 行筛完剩 3 个，卡池就会莫名刷不出人。
+- **「填了区间就排除没填的人」是严格口径**：身高 / 学历 / 婚恋 / 城市同理，未知不等于已知。这条在 `applyFilters()` javadoc、弹层红字提示、CHANGELOG 三处都写明——用户看到「筛不到人」时需要知道原因，而不是以为产品坏了。学历按 `DatingEducation` 的升序码 `>=` 实现「及以上」，婚恋是 `eq`（「未婚」与「离异」之间没有高低）。
+- **排序与在线优先只能分别处理**：`sortBy=active` 换整条 ORDER BY（`last_active_time` → `profile_score` → `user_id` 兜底保证分页稳定），`DatingSort` 用 String code 是因为列本身是 `VARCHAR(16)`；`onlineFirst` 则**进不了 SQL**（在线态在 Redis），只能多取 5 倍再内存稳定分区（在线块保持原序 + 离线块保持原序，而不是重新打分），且 `ids.size() <= limit` 时直接跳过那次 Redis 批量查。
+- **两条读路径对偏好的采信范围不同**：卡池 `candidatePool()` 全量条件 + 排序；附近的人 `nearbyPool()` 只认筛选条件，**刻意忽略 `sortBy` / `onlineFirst`**——距离序与在线序互相拆台，一屏里同时排必有一边是假的。半径兜底是三级：请求参数 > 偏好 `distance_km × 1000` > 3000 m，而前端下拉框会把偏好那一档预选进去（`syncNearbyRadius()` + `nearbyRadiusTouched` 标记），保持所见即所得而不是「有个隐藏值在起作用」。
+- **「已划过的人」是否重现由 `exclude_passed` 决定**：`selectSlidTargets()` 加了第三个参数 `MatchAction action`——开着「排除已跳过」（默认）时传 `null`（like + pass 全排除），关掉时只传 `LIKE`；**已配对的始终排除**，那一档管的是「划走的还能不能再刷到」而不是「喜欢过的要不要再来一遍」。
+- **权限与限流不开新码**：`GET` 只要登录（这是个人视角的一份读配置），`PUT` 复用 `PERM_USER_UPDATE` + 20/60s（比资料保存紧、比照片宽松：一次保存要扫全池）。`/api/dating/preference` 靠路径前缀落进「20-交友」分组，**knife4j 配置无需改**。
+- **前端一个新组件 + 三处接线**：新增 `DatingFilterDialog.vue`（`DEFAULT_FORM` 与后端常量一一对应，字典项现拉 `fetchDatingDict()` 并模块级缓存一次）；`Discover.vue` 卡池顶部平铺 chips 而不是只留一个按钮——「刷不到人」的第一句追问永远是「我是不是设了什么条件」，所以年龄必然进 chip。chip 文案直接用后端下发的 `targetEducationDesc` / `targetMarriageDesc`（字典唯一出处，前端不抄第二份映射），保存后 `loadDeck(true)` 并重拉附近的。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_match_preference` 不存在，两个新端点与两条读路径都报 1007。应用后的最小链路：从没保存过偏好（`saved=false`）时 chips 为空且能看到没填生日的人 → 保存一次后年龄 chip 必然出现（它是唯一一个没有「不限」态的条件） → 设 `ageMin=25` 后没填生日的人消失 → 性别选「女」后 `im_user.gender=1` 的人不再出现 → `sortBy=active` 与 `onlineFirst` 在卡池生效但在附近的人不生效 → 关掉「排除已跳过」后划走过的人能重现 → 换一个账号登录不受影响（`uk_user` 一人一行）。
+
+### 7. 推荐流与排序（第七批）的口径
+
+零新表零 ALTER：`im_match_exposure` 已在 `V1.0.7` 建齐（`uk_user_candidate` + `idx_user_last`），`quality_flag` / `profile_score` / `last_active_time` 三列随第一批就在 `im_user_profile` 上。本批把「刷到谁」从一句 ORDER BY 变成一个可解释的推荐流。
+
+- **只分区、不打分**：四个因子的单位不一样（活跃天数 / 收到多少喜欢 / 在线布尔 / 完资料度），乘系数加起来得到的是一个无法向用户解释的数字，而且每个因子都得在 im-user 拿得到数据才能参与——喜欢流水与曝光记录都住在 im-friend。所以 `DatingQuerySpiImpl.candidateIds()` 是一句 ORDER BY 打底 + 四层**稳定分区**（后叠的把先叠的往上顶）：**已曝光垫后 → 近 3 天活跃置顶（`hot`）→ 在线置顶 → 互惠置顶**。稳定是指每一拨内部仍保持底座序，不推翻 f6 的 ORDER BY 口径。互惠压在最上：一个不回应的在线陌生人不如一个已经喜欢过我的人值得先看；曝光降权在最底因为它最弱（同一个人被推第三遍仍可能成对）。
+- **互惠必须单开一次候选池读**：置顶的人按底座序很可能排在 `LIMIT` 之外，混在一个池子里就永远搬不动——那会让「喜欢过我的人优先」退化成一个只在人少时生效的开关。所以多走一次 `candidatePool(query, boostCap, query.getBoostIds())`（`boostCap = limit / 2`，即置顶最多占半屏）。★ 这一次的 **WHERE 与 ORDER BY 与正常池子完全一致**（同一个 `baseWrapper` + `applyFilters` + `applySort`）：「喜欢我」不等于「可以绕过我的筛选」，筛选是用户明确表达过的边界。im-friend 侧取喜欢名单时多取一倍（`BOOST_FETCH = 60`）再在内存里筛掉已表过态的、截到 `BOOST_MAX = 30`，免得一个热门账号把置顶名额全占在已配对的人身上。
+- **曝光池是「垫后」不是「排除」**：`REEXPOSE_DAYS = 7` 天内推过的人排到底部，小池子里这两者的差别就是「还剩不还剩第二次机会」。名单一次最多取 200（`DEPRIORITIZE_MAX`，候选池本身只取 50 行，再大的名单就是白传），且按 `last_expose_time` **倒序**取——需要垫后的是「刚见过」的那批，被上限截掉的正是最老的那些。记账只在卡池这一条读路径做（`附近的人` / `喜欢我的` 不记：一次「看了一眼」就把对方的曝光时间推后，会让推荐流自己把自己饿死）；记的是**本次真的下发的那几条**而不是候选池取回的全部；用一条 `INSERT ... ON DUPLICATE KEY UPDATE expose_count = expose_count + 1, last_expose_time = NOW()`（同 `MessageReadMapper#upsertBatch`），时间取库的 `NOW()` 而不是 Java 侧时钟，`update_time` 交给 DDL 的 `ON UPDATE CURRENT_TIMESTAMP`。★ 主键要调用方自己 `IdWorker.getId()`（自定义 SQL 拿不到自动填充），空列表必须先 `return`（空的 `foreach` 会拼出一句没有 VALUES 的 INSERT）；写入失败只 `log.warn`——曝光是优化项，为它让一次刷卡报错是最亏的取舍。
+- **低质号自动降权只有一个写入点**：`DatingProfileServiceImpl.qualityOf()` 判据是「完资料度 < 35 **或** 一张已过审照片都没有」——35 分的含义是具体的（照片一项就占 30 分），而后者单独就能判低质：只填文字不上传的人分数看着不低，但在卡池里几乎无人会滑。三条边界：① 只落 `0` / `1` 两个值，`2`（升权）只由后台人工认证写（第十三批），按分数往上顶就会出现「资料填全了自己变成加权号」；② 已升权的不自动降回去（认证是人工判断，不该被用户改个头像冲掉）；③ 注册 7 天内的新号豁免（`NEW_USER_SHIELD_DAYS`）——降权的目的不是惩罚而是别把有限的新面孔位置浪费在填不满的人身上，而新号还没被浪费过，这一段保护期与「冷启动曝光池」是同一件事。分数与质量标记**同一条 UPDATE 写**（拆开就会出现「分数已经掉下来但还在推荐流里」的中间态），照片数由 `ScorePlan` 顺带透出而不是再查一次。排除只开在推荐流（`excludeLowQuality=TRUE` 仅 `deck()` 传）：低质号仍能从「喜欢我的」与「附近的人」里被看到，那是别人主动表达过的喜欢与真实地理位置，不该被一个自评分数抹掉。
+- **`sort` 是本轮参数而不是偏好写入**：`GET /match/deck?sort=` 只作用于这一次请求，null 与认不出的脏值一律**退回偏好里存的那个**（而不是退回出厂 `recommend`——用户临时切一次不该把自己存好的默认口径洗掉）；实现上是在 `applyTo()` 之前 `query.setSortBy(requested)`，靠「`applyTo` 只填没显式给的字段」这条既有约定生效。五档的落地位置各不相同：`recommend` / `active` / `new` 是一句 ORDER BY，`hot` 是内存分区（它的主因子「收到多少喜欢」本模块读不到，底座退回 `recommend`），`distance` 不进卡池字典。`new` 排的是**本表**的 `create_time` 而不是 `im_user.create_time`（后者要多 join 一张表才能进 ORDER BY，而存量账号在这列上是同一个值，并列自然落到第二序的活跃时间上）。
+- **理由是一句话而不是两个布尔位**：`DatingCardDTO.matchReason` 只由 `MatchServiceImpl#deck` 写（「TA 喜欢了你」/「最近见过 TA」，两者都命中时只说前者），摊成布尔位就等于把推荐流的分区口径复制一份到浏览器里拼。新鲜度不进理由：那是 `sortBy=new` 的排序依据而不是需要向用户解释的事。
+- **排序口径改字典驱动**：`GET /dating/dict` 新增 `sorts`（由 `DatingSort` 生成，**排除 `distance`**），前端两处消费：卡池那一栏的切换器（`Discover.vue`，即时换一口径而不是改偏好）与弹层里的「默认排序口径」（`DatingFilterDialog.vue`）。★ 排序**不再进 chips**：切换器的选中项就是当前生效的口径，旁边再挂一句「排序：热门」就是同一个事实说两遍，而这两句在用户临时切换后必然不一致。`SortOption.code` 是 String 而不是复用 `Option`（`sort_by` 列本身就是 `VARCHAR(16)`）。
+- **零新权限零新错误码零新限流档**：`deck` 沿用 60/60s，字典与偏好不动。`/api/dating/match/deck` 的路径前缀已在「20-交友」分组里，knife4j 无需改。
+- **已知边界：`quality_flag` 是惰性的**，只有 `recalcScore()` 被调到时才重判（保存资料 / 增删照片 / 保存标签三类写入口），所以上线当天存量行不会批量被打标，要等他们下一次动资料。★ 本批刻意**不为此跑一次全量重算或一条 UPDATE SQL**：`profile_score` 为 0 的行在 `recommend` 底座序下本就排在最底，降权能挡的那点额外曝光它们本来就拿不到，而一个全表重算脚本是这个产品里最容易把库跑坏的东西。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_match_exposure` 不存在，卡池直接 1007（`deck` 是唯一读它的入口，其它 tab 不受影响）。应用后的最小链路：A 喜欢 B 不回应 → B 的卡池首屏出现 A 且卡片写着「TA 喜欢了你」 → 同一个人连刷三次卡池会从前部滑到底部（垫后）而不是消失，且 `im_match_exposure` 只有一行、`expose_count=3` → 隔 7 天（或手工把 `last_expose_time` 改老）后他重新回到正常位置 → 一张照片都没过审且**已触发过重算**的账号不出现在卡池但出现在「喜欢我的」与「附近的人」里 → 上传并过审一张后 `quality_flag` 回到 0（同一次 `recalcScore`）且重新进池 → 卡池 URL 加 `&sort=new` 与不加时顺序不同，而 `im_match_preference.sort_by` 没变 → 字典接口的 `sorts` 里没有 `distance`。
+
+### 8. 访客记录「谁看过我」（第八批）的口径
+
+零新表零 ALTER：`im_profile_visit` 随 `V1.0.7` 建齐（`uk_visitor_visited_date(visitor_id, visited_id, visit_date)` + `idx_visited_last(visited_id, last_time)`），本批只是把这张表接上读写两端。
+
+- **一人一天一行，不是一次访问一行**：访客列表要回答的是「谁来过」，一天刷二十次就出二十条同名记录既没用又撑爆表；`times` 把热度保留下来。写侧因此是一条 `INSERT ... ON DUPLICATE KEY UPDATE`（`times = times + 1`、`last_time = NOW()`）而不是「先查再决定插还是改」——每一次看资料都要落一笔，先查后写在这里就是白多一次往返（同 `MessageReadMapper#upsertBatch`、`MatchExposureMapper#upsertBatch` 的约定）。主键由 Service 用 `IdWorker.getId()` 发号：这一列不是自增，而 MP 的自动填充只对它自己的 `insert` 生效。
+- **权威时钟只有一个**：`visit_date` 取服务端的 `LocalDate.now()`、`last_time` 写库的 `NOW()`，`first_time` / `update_time` 全部交给建表默认值。「一天一行」的这个「一天」如果信客户端时间，就会出现「凌晨把昨天的访问记到今天」而 `times` 白加一次。
+- **表在 im-friend、触发点在 im-user，靠 `ProfileVisitSpi` 连过去**：这张表记的是关系侧的一件事（谁来看过我），而<em>引发</em>它的读入口在资料侧（`GET /api/dating/profile/{userId}`）。让 im-friend 去监听资料卡读取要么把表搬到 im-user，要么让 im-user 暴露一个回调，两种都比现在这条线贵。方向与 `DatingQuerySpiImpl` 注 `FriendRelationSpi` 一致，im-user 侧用 `ObjectProvider<ProfileVisitSpi>` 弱依赖取，否则「im-user → im-friend → `DatingQuerySpi` → im-user」在构造期就把应用卡死。
+- **★ 隐身的人来看不留痕**，且这是本批唯一真正需要论证的一条：若隐身（`discoverable=0`）仍会留在对方的访客列表里，那么任何人只要开着一页资料卡等我来看，就能在 TA 自己的访客列表里发现我——隐身就退化成一句只约束推荐流的话。判据收进 `UserProfile.stealth()`（`discoverable` 在内存里的唯一读法，`DatingQuerySpiImpl.discoverable()` 也改用它），候选池那句 WHERE 用的是同一个 `SHOW` 常量（`LambdaQueryWrapper` 里没法调实例方法）；「该不该记」放在调用方而不是 SPI 里，因为实现方读不到 `im_user_profile`。
+- **一次 `find(currentUserId)` 共用**：`view()` 原本只为算距离查查看者那一行，现在把它提成 `viewer` 局部变量，判隐身与取 `visitorId` 都用同一个对象——同一页里读两次会得到两个结论，而这两处结论必须同时成立才不留痕。
+- **足迹是一次附属写入，不该拦下资料卡**：`recordVisit()` 里 `try/catch` + `log.warn`，SPI 缺席（模块被裁）时只 `log.debug` 直接跳过。但**不在 SPI 实现类里吞异常**——那会让下一个调用方（第十二批的动态列表项）也没机会知道自己的写入失败了。
+- **只记 `view_type=1`**，其余三档先占着口径不写：照片墙与资料卡是同一个页面上先后加载的两次请求，一次浏览写两行（同一唯一键上重复 upsert）只会让 `view_type` 恒为「照片墙」；匹配卡片是系统推送 ≠ 用户主动看了 TA，那件事已由 `im_match_exposure` 精确记着；动态等第十二批真有了独立入口再记。
+- **回看 30 天只作用于读**：`ProfileVisit.LIST_WINDOW_DAYS = 30`，历史行一条不删——「解锁完整访客列表」是这张表注定的后续会员权益，要的就是这份历史。窗口边界是 `today.minusDays(29)`：查询里的 `ge` 是闭区间，含今天算满 30 个自然日。
+- **不分页，按人在内存里聚合**：`selectRecentVisits()` 取窗口内最多 `WINDOW_SCAN_MAX = 200` **行**（纯索引读，排序列与 `visited_id` 一起正好覆盖 `idx_visited_last`，不产生文件排序）→ `LinkedHashMap` 按 visitor 聚合（行序即 `last_time` 倒序，所以截到 `VISITOR_MAX = 50` 位时砍掉的是最久没来的人而不是随机一批）。★ 不在 SQL 里 `GROUP BY` 再分页：那样 `total` 是行数不是人数，要再写一个子查询计数——为一个最多 50 项的短列表不值。已知边界：若某个人的历史行正好跨在 200 行截断点上，TA 的 `visitDays` / `visitTimes` 会偏小（列表顺序仍然正确，因为排序键是每行的 `last_time`）。
+- **注销/封禁的人直接从列表消失**：卡片现取 `datingQuerySpi.cards()`，拿不到卡就不输出这一行——访客行的可执行动作全挂在卡片上（资料、喜欢、聊天），留一个空位子不如不留。这与「喜欢我的」那栏保留 `该用户已注销` 一行不同：那一条的语义是一个**已经发生的表态**，抹掉它等于改写历史。本表也**没有 `deleted` 列**（继承 `AuditEntity`）：「不想被看见来过」靠写入前拦掉，而不是事后删行——删过一次就等于允许伪造历史。
+- **零新权限零新错误码**：`GET /api/dating/visits` 只要登录 + 60/60s 限流（key `dating.visits`），永远只回「谁看了<em>我</em>」，没有越权面；路径前缀已在「20-交友」分组，knife4j 无需改。
+- **前端一个 tab + 一个已有枚举值**：`Discover.vue` 第五个 tab「谁看过我」（`TAB_NAMES` 加 `visits`，懒加载分支同其它三栏）；喜欢时 `source` 传 4（`MatchSource.VISITOR` 随 f4 就已在字典里，本批不新增取值）。`visitDays` 与 `visitTimes` 都要渲：「来过 1 天 · 看了 8 次」与「来过 5 天 · 共 8 次」是两种不同的兴趣强度（一晚上刷了八遍 vs 连着追了五天），只留一个数就分不出这个区别；`viewDesc` 暂不渲（只有一种入口时每行重复同一句是噪音）。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_profile_visit` 不存在 → `GET /dating/visits` 报 1007，而**看资料卡照常打开**（只在服务端日志里留一条 warn）——这是设计好的容忍方向。应用后的最小链路：A 开着「出现在推荐与附近」看 B 的资料 → B 的「谁看过我」出现 A 且 `im_profile_visit` 一行 `times=1` → A 同一天再看两次 → 仍是一行但 `times=3`，B 看到「来过 1 天 · 看了 3 次」 → A 关掉这个开关（即隐身）后再来看 → 不再新增行、`times` 停在 3 → A 打开自己的资料页 → 一行都不落 → B 把 A 封禁或 A 注销 → B 的列表里那一行消失而库里行仍在（读时过滤，不做删除）。
+
+### 9. 破冰辅助（第九批）的口径
+
+零新表零 ALTER：`im_icebreaker` 随 `V1.0.7` 建齐，**55 行种子也在脚本里**（id 1~20 打招呼模板、21~40 话题卡、41~55 标签定制开场白，`type` 依次为 1 / 2 / 3，`tag_id=0` 表示通用）。
+
+- **不接 LLM**：需求原文写的是「开场白建议」而不是「AI 开场白」，字典驱动既可控又能被后台维护（第十三屏就是它的维护入口），而接一个大模型要连带处理提示词、超时、降级、成本与内容护栏，本批的验收点只是「点一下就能发出去的那句话」。
+- **占位符在服务端替**（`Icebreaker#render` 处理 `{nickname}` / `{city}` / `{tag}`）：模板里出现哪些占位符属于**内容**而不是协议，写死在前端就等于让加一个占位符要跟着发一次版。★ **填不出来的整条不下发**（含残留未知占位符的防御），绝不把 `{city}` 原样发出去——一句带着花括号的开场白比不给建议更难看。
+- **截断排在渲染之后**：每一档取前 N 条的判断放在 `render` 返回非 null 之后。先截后渲染会让「对方没填城市」把打招呼那一整档掏空，而库里排在后面、不含 `{city}` 的句子本来是能给的。
+- **共同标签现算不加缓存**：`im_user_tag` 两侧一次批量取后 `retainAll`，且只收录字典里还存在的标签。★ 缓存会把过期标签写进开场白——「你也练健身？」发给一个刚取消健身标签的人，比不给建议更糟。求交在 `IcebreakerServiceImpl` 里自己做（而不是调 `DatingTagService` 多开一个方法）：标签服务给的是「某个人的标签名列表」，这里要的是「两个人都有的那几个 ID」，拆到两个模块各算一半会让「谁负责求交」没有答案。
+- **排序按「我自己」的兴趣顺序**：共同标签的顺序取我拖的那个顺序（最重要的兴趣在前），而不是标签库的 `sort`——开场白是替我说话的。
+- **三档分桶返回而不是一个混排列表**：`greetings` / `topics` / `tagOpeners` 三个数组。它们在页面上住的位置不同（招呼语在资料卡顶部、话题卡是接不下去时抛的问题、标签开场白紧跟昵称），混排就要前端再判一次 type 分桶，那就是第二份分类口径。
+- **库里出现枚举认不出的 `type` 就跳过**，而不是当通用文案下发：否则「后台先加了一档、前端还没做」会变成用户看到一句莫名其妙的话。
+- **`use_count` 是一条 `UPDATE … AND status = 1` 的自增**：受影响 0 行就是「这条已被后台停用或删除」，回 2032 让前端换一条——用户手里的列表是几十秒前拉的，中间被下架是正常事件而不是错误。★ 计数是纯增益统计，**失败不拦复制动作**。
+- **给自己看不给建议**：`targetUserId` 为空或等于自己时归一成 `null`，只给通用文案——模板里的 `{nickname}` 渲染成自己的昵称读起来像自言自语。
+- **零新权限两个端点**：`GET /api/dating/icebreakers?userId=` 与 `POST /api/dating/icebreakers/{id}/use` 都只要登录 + 60/60s（key `dating.icebreaker.use`）；文案是全站字典，不存在越权面。新错误码只有一个 2032。
+- **前端一张卡片**：`UserProfile.vue` 的「不知道聊什么？」，点一条即写入剪贴板 + 静默计数，标签开场白排最前（它是唯一一条「只有我和 TA 之间才成立」的话）。
+- **★ 码表四处对齐**：`IcebreakerType`、建表注释与种子、用户端分桶、后台字典屏的标签映射必须一致。本轮写第十三屏时一度把 2/3 写成「标签开场白/话题卡」（已订正 `DatingDictView.vue` 的 `TYPE_TEXT`、`TAG_OPENER` 与 `AdminDictController` 的 `@Parameter` 文案），而 `DictAdminSpiImpl` 一直用的是枚举常量所以校验没错——**能引用枚举就不要手抄码值**。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_icebreaker` 不存在 → 两个端点报 1007（资料卡其余部分照常）。应用后的最小链路：看一个有共同标签的人 → 标签开场白出现在最前且 `{tag}` 已被替成真标签名 → 对方没填城市 → 含 `{city}` 的那几条直接消失而不是原样下发 → 点一条 → 剪贴板有内容且 `use_count` +1 → 后台停用该条 → 再点回 2032 并提示换一条。
+
+### 10. 亲密度与火花（第十批）的口径
+
+零新表：`im_intimacy` 随 `V1.0.7` 建齐（**`uk_pair(user_a_id, user_b_id)` 一行一对人**，约定 `user_a_id < user_b_id`）。
+
+- **写入只有两条 `INSERT … ON DUPLICATE KEY UPDATE`**（消息一条、互动一条），而不是「先查再决定插还是改」：每一次聊天都要落一笔，先查后写在这里就是白多一次往返（同 `ProfileVisitMapper` / `MatchExposureMapper` 的约定）。
+- **火花三档判定全在 SQL 的 `CASE` 里**：今天已聊 → 不动；昨天聊过 → `+1`；否则归 1。★ `max_streak = GREATEST(max_streak, streak_days)` **必须排在 `streak_days` 那一句赋值之后**——MySQL 的 `UPDATE` 是从左到右求值的，写反了就会拿旧的最高值去比一个新归 1 的 `streak_days`，历史最高永远不涨。
+- **自然日只有一个权威时钟**：`LocalDate.now()` 取服务端，不采信客户端时间（否则改手机日期就能把火花刷满）。
+- **跨模块只经新增的 `IntimacySpi`**：im-message 在 `conversationSpi.onNewMessage` 之后按「单聊 + 非系统/机器人账号」挂 `afterCommit` 调用，用 `ObjectProvider` 弱依赖。★ **SPI 实现方一律吞异常只 `warn`**：计数表不该把一条已落库的消息打回失败，而 `afterCommit` 之后的异常也没人接得住了。
+- **哪些动作算来往**：文字/图片/语音等普通消息算，转账与红包**也算**（只看 `msgType` 不看 `internal`）——发了钱就是真在联系。动态点赞与评论走 `onMomentLike` / `onMomentComment`（第十二批接上），★ **加分但不推进火花**：否则每天点一个赞就能养出一串永不熄灭的 30 天，火花就不再是「真的在聊」的证据。
+- **档位表只存下界**：新增 `IntimacyLevel`（5 档，`minScore` 只记下界，`intimacy_score >= minScore` 即命中），★ 不存上界是因为最高一档要无限大，存两个数就会有一处对不上；进度条百分比由**服务端算好下发**，前端不存档位表（与 `/dating/dict` 同一个理由）。
+- **共同好友与共同群读时现算不落列**：前者用 `FriendMapper` 两侧求交，后者用新增的 `GroupSpi.listJoinedGroupIds` 两侧求交。存下来就要在加好友、删好友、退群、踢人、解散群、重新配对六七处各补一次维护，漏一处就是一张错的脸。
+- **从没来往过返回全 0 而不是 `null`**：前端的「火花 0 天」与「 TA 还没开通交友资料」是两个不同的空态，混成一个会把正常关系说成异常。
+- **零新权限**：`GET /api/dating/intimacy?userId=` 只要登录 + 120/60s（这个接口会被资料卡、聊天顶栏、动态详情页三处调，限流比其它交友写接口松），而且永远只算「我与 TA」，没有越权面。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时 `im_intimacy` 不存在 → 本接口报 1007（聊天与资料卡都不受影响，只在日志里 warn）。应用后的最小链路：A/B 单聊发一条 → 行出现且 `streak_days=1`、`max_streak=1` → 同一天再发十条 → `intimacy_score` 涨而 `streak_days` 仍是 1 → 改库把 `last_chat_date` 拨到昨天再发 → `streak_days=2`、`max_streak=2` → 拨到前天再发 → `streak_days` 归 1 而 `max_streak` 仍为 2（★ 这一步就是那个列顺序的回归测试）→ A 给 B 的动态点赞 → 分涨而 `streak_days` 不动。
+
+### 11. 动态 Feed（第十一批）的口径
+
+零新表：`im_moment` 与四张附属表（`im_moment_media` / `im_moment_like` / `im_moment_comment` / `im_moment_visible`）全部随 `V1.0.7` 建齐，本批只是把这五张表接上读写。
+
+- **权限按「动的是谁的内容」分三档**（`MomentController` 的类注释里写着理由）：发布 / 删除 / 删评论只要登录（动的是自己的内容，服务层已按作者身份判过一道，再挂权限点只是多一个会被忘掉的开关，与 im-live 四屏的 UGC 口径一致）；点赞与评论要 `friend:apply`（**对别人的内容做出一个会被对方看到的动作**，语义上就是一次接触，同 `MatchController`）；转聊天要 `message:send`。★ **刻意不为动态新开权限点**：那要再补一条 `im_permission`，让已经发出去的账号包多一次迁移，而 `V1.0.7` 也没为用户侧预留新权限位。
+- **受众只有一个定义**：好友 ∪ 配对中的人 ∪ 自己 − 我拉黑的人（`audienceOf()`）。它同时是 Feed 的 `IN` 列表与可见性判定的输入，所以「我能看到谁」在全局只有一处答案。配对关系取的是 `im_match_pair` 的**活跃行**（`selectActiveByUser`），解除配对后对方的动态就从 Feed 消失——这不是 bug，是「受众」这个词应有的意思。
+- **`AUDIENCE_MAX = 1000` 挤掉的是 ID 小的一半**（雪花 ID 单调，大的是新建立的关系），而 Feed 上「新认识的人」比「三年前的老友」更该出现；★ 被挤掉的人的动态**仍然能在他的主页上看到**（`userMoments` 按单个作者查，不走这个 `IN`），所以这不是内容丢失。真到需要放开这一天时该改的是取数方式（按时间分片），不是这个常量。
+- **游标而不是页码**：动态是逐条读的流，`cursorId` = 上一页最后一条 ID。★ 游标要推进到「**扫过的**最后一条」而不是「挑中的最后一条」：否则下一页会漏掉夹在中间那些本轮被可见性滤掉的行后面的可见动态（宁可重扫一遍被滤掉的行）。`FILL_ROUNDS = 3` 是补捞轮数：一轮取的候选可能整批都是别人「仅自己」的动态，这时候回 0 条并不代表刷到底了；三轮仍被滤空就说明这个人的受众里本来就没多少可看的。
+- **★ Feed 不下发评论**，只给 `commentCount`：MySQL 里「每条动态各取前 N 条」要么用窗口函数（版本风险 + 难读），要么逐条查（N 次往返），要么 `LIMIT n*N` 让一条被刷屏的动态挤掉别人的名额——那是**错误内容**而不只是少内容。评论进详情页一次查全。
+- **两个计数列是幂等维护的冗余**：`like_count` / `comment_count` 走 `UPDATE … SET x = x + ?` 原子调整，而写侧的幂等靠**唯一键 + 受影响行数**：点赞捕获 `DuplicateKeyException` 当幂等（前端连点两下不该让计数涨两次也不该报错），取消点赞用 `deleteBy` 的返回 0 行来判断「本来就没赞过」（否则会把计数拖到负数）。两个接口都**返回当前权威总数**而不是回 `true`，前端不需要自己加 1。
+- **`comment_count` 恒等于可见行数**：`insert` 一条 +1，`deleteWithChildren` 返回多少行就减多少。★ 删一级评论减的是**整棵子树**的行数（回复也计在 `comment_count` 里），只减 1 会让这个数字永远虚高。评论两层封顶（`parentId` 恒为一级评论，`isRoot()` 不满足就回 2056），三层以上在数据模型上就不可表达，而不是「存得下但前端不渲」。
+- **`replyUserId` 要服务端复核**（`resolveReplyUser()`）：只有当这个 ID 出现在父评论作者或同一棵子树里已说过话的人当中才采信，否则退回父评论作者。不这么做的话，「A 回复 B」里的 B 可以是一个从没在这条动态下出现过的人，而前端会照着这个快照把 B 的头像与昵称渲进评论区——那就是把一个人的身份挂到一段他没参与的对话上。
+- **附件的三重闸门一个都不能省**（`insertMedia()`）：文件存在 + **是本人上传的** + `bizType` 与声明的类型对得上。漏掉后两条就能拿别人的照片墙图片或聊天图冒充自己的动态附图——而动态是好友与配对对象都会看到的位置。★ 地址由 `FileStorageSpi.accessUrl()` 服务端现拼，前端传的 URL 一律不算数；VO 也**不下发 `fileId`**（文件下载的鉴权依据是「文件所在会话的成员」，而动态附件不在任何会话里，拿到 ID 也只会得到一个 403）。
+- **9 图或 1 视频，不混排**（`checkMediaShape()`）：不是界面问题——九宫格按等比缩略图画，一个视频格子进去要单独占一整行，而「既有图又有视频」要前端同时备两套播放器与两套占位，换来的是一个几乎没人用的组合。字节数取文件元数据而不信客户端上报。
+- **删除是级联物理删四张附属表，但 `im_file` 一行都不动**：秒传时那份字节可能正被别处引用。`like` / `visible` 两张表没有 `deleted` 列，是物理删——留着只会成为指向空气的记录。
+- **★ 同一个码 2050 兜住三种情况**（不存在 / 不是我的 / 无权看）：动态 ID 是可以被逐个试的，分开报就是替外部确认存在性。拉黑的人的主页与看不到的动态都回空列表而不是报错，同一个理由。
+- **状态与可见范围只对作者本人下发**（`render()` 里那段 `if (mine)`）：别人看到「仅好友」这个标，等于从侧面知道了「我是这个人的好友」，而这一信息对渲染没有任何用处。作者自己在主页上**能看到已下架的行**（他需要看到「我这条被下架了」），对外则是 2050。
+- **敏感词是 `mask` 而不是拒发**，且 `sanitize` 后才判空：一段只由标签组成的正文清洗完就是空的，那等于没写字。可见范围脏值**报错而不退到「公开」**——这是隐私位，认不出来就不能替用户选一个最宽的档位。
+- **前端三个入口共用两个组件**：`MomentFeed.vue`（发布器 + 游标列表 + 九宫格）挂在 `Discover.vue` 新增的 tab 与 `UserProfile.vue` 的主页区块；`MomentDetailDialog.vue` 抽成独立组件而不是留在 Feed 里，因为从聊天卡片点开一条动态时也要同一屏，共用一份才不会让「可见范围文案」「2050 的提示」「两层评论的回复口径」在三处各长一套。与宿主只有一个 `changed` 事件（带权威计数与 `removed` / `gone` 标记）：宿主就地按 id 打补丁，而不是重拉整页把用户正在看的位置冲掉。
+- **★ 运行时验证待做**：零新 SQL，但 `V1.0.7` 未应用时五张表都不存在 → 九个端点全报 1007。应用后的最小链路见第十二批末尾（两批共用一条验收链）。
+
+### 12. 动态转聊天与可见范围（第十二批）的口径
+
+零新表零新列：`im_moment_visible` 随 `V1.0.7` 建齐，`moment_visible_days` 那一列随第一批就在 `im_user_profile` 上（只认 0/3/7/30）。
+
+- **★ 可见范围在内存里逐条判，而不是写进 SQL**：三档判据不同源——`PUBLIC` 与 `FRIENDS_ONLY` 看关系表，`PARTIAL` 看白名单表，而「几天可见」看的是**另一个模块**的一张资料表。合成一句 SQL 要跳模块 join，星型架构下做不到；写成 `CASE` 则是一句没人敢改的东西。所以口径是：**SQL 只按受众与游标取候选，可见范围由服务层一次批量查完再逐条判**，代价是候选多取几倍（上面的 `FILL_ROUNDS`），换来的是判据只有一处。
+- **一次请求内只读一次关系快照**（`Viewer` record：friends / matched / blocked）：Feed 补捞三轮时这三张表只该读一次，否则同一屏里「好友」这个概念会有三个不同的取值。
+- **四档都不是「全站公开」**：`PUBLIC(1)` 的受众也是好友 ∪ 配对过的人（因为候选池本身就是按受众取的）。“公开”只是「不再额外要求好友关系」的意思，陌生人在 Feed 与主页上都看不到。把这一条写进接口的 `@Operation` 与后台屏的 `el-alert`，否则运营会以为勾了「公开」就能被推荐。
+- **`PARTIAL(3)` 的白名单要归一**（`normalizeWhitelist()`）：去重、去掉自己（作者恒可见，写进去只会多一行没人读的记录）、去掉我拉黑的人（「我不想再看到这个人」是最强的表达，不该被一次点名覆盖），再按上限夹一刀。选了 3 而白名单为空返 2053，而不是默默当「仅自己」。
+- **★ `MomentVisibleDays.of(null)` 退到最严的「最近三天」而不是「全部」**：这是隐私位，宁可少给。库里这一列是 `NOT NULL DEFAULT 0`，正常读不到脏值，真读到了说明有人手改过，那时候把三年前的动态全放出去是不可逆的泄露。看自己的主页**不设时间下界**（作者永远能翻到自己的全部历史），只有看别人才按对方的偏好算 `cutoff(now)`。
+- **转聊天发的是 `msgType=15` 的卡片，而且只带摘要不带图**（`MomentContentHandler`）：作者昵称、正文摘要、附件条数三样由服务端经新增的 `MomentQuerySpi.loadCard()` 反查后**定格覆写**。★ 这一步不是「省一次前端查询」，而是唯一能防住伪造的地方：这三个字段直接决定气泡显示「谁说了什么」，采信客户端上报就等于允许任何人造一张挂在别人名下的卡片，而卡片会被转发、会躺在漫游记录里，比一条普通文本更难追回。
+- **★ 不把动态附图的 `fileId` 抄进 `extra`**：`moment_image` / `moment_video` 两类文件的 `fileId` 按约定只能从动态接口下发（见 `FileBizType` 的注释），抄进消息就是绕开那条边界。气泡只画文字卡片，点开走详情接口**按查看者重算一次可见性**——所以「转发不改变可见范围」：一条「仅自己」的动态被本人转发到群里（卡片能发出去是因为他自己看得到），收件人点开仍是 2050。
+- **能发出去的卡片一定点得开**：`share()` 与 `loadCard()` 用的是同一个 `filterVisible` 口径，两处都判而不冲突。★ `share()` 里先 `requireVisible` 一次不是为了拦人（消息侧会再拦一次），而是为了让错误码出自交友侧的 2050「这条动态不在了」而不是消息侧的「内容不合法」。
+- **目标定位 `conversationId` 优先于 `toUserId`**：两个都传而指向不同的人时，以会话为准才不会发错地方；都没传报 400，`toUserId` 等于自己也报 400（分享给自己在语义上不是一个动作）。`clientMsgId` 缺省时服务端返 `mom` + 雪花 ID，幂等窗口照旧由消息模块管。
+- **im-friend 缺席时直接拒发而不降级放行**：没有权威数据源就没有快照可写，写一条 `extra` 全空的卡片出去，接收端只会看到一张点不开也读不懂的空壳（同第十批 SPI 缺席的口径，但方向相反：计数可以吞，写进会话的内容不能缺）。
+- **前端气泡 15 分支与推送**：`MessageBubble.vue` 新增一张可点卡片（作者 + 摘要 + 「N 张」角标），点一下就弹 `MomentDetailDialog`；`ws/dispatch.js` 不需要新分支（动态卡片走普通消息通道，不新增 `type`），而第十一批发出去的 `moment_like` / `moment_comment` 通知则复用已有的通知，没为新事件开常量。
+- **★ 两批共用一条运行时验证**（第十一 + 第十二）：`V1.0.7` 未应用时动态相关接口全报 1007。应用后：A（与 B 是好友、与 C 配对过）发一条「仅好友」带 3 图的动态 → B 的 Feed 有、C 的 Feed 也有（受众含配对者）、陌生人 D 在主页上看到空列表 → A 改发一条「部分人可见」只选 C → B 看不到而 C 看得到 → C 点赞并评论 → A 的 `likeCount` / `commentCount` 各 +1 且 `im_intimacy` 分涨而 `streak_days` 不动 → C 把这条动态转给好友 E → E 看到卡片（E 不在受众里）→ E 点开 → 「这条动态不在了」 → A 删掉一条一级评论 → 它下面两条回复一起消失且 `comment_count` 减 3 而不是减 1。
+
+### 13. 后台管理屏（第十三批）的口径
+
+零新 SQL：三个权限点（**132 `system:dating:manage` / 133 `system:moment:manage` / 134 `system:tag:manage`**，角色绑定 6032~6034）已在 `V1.0.7` 第 15 段种好，本批代码只引用。
+
+**四件套的形状**（与已有的协议/版本/反馈/直播四屏同构）：`im-common` 定契约（`AdminDatingSpi` / `AdminMomentSpi` / `AdminDictSpi` 加十个 DTO）→ 业务模块给实现（`im-user` 的 `DatingAdminSpiImpl` / `DictAdminSpiImpl`，`im-friend` 的 `MomentAdminSpiImpl`）→ `im-admin` 的 `AdminXxxService` 薄封装（`requireSpi()` + 每个写动作一条 `log.info` 审计）→ `AdminXxxController`。
+
+- **★ 为什么拆三个 Controller 而不是一个类挂方法级注解**：Sa-Token 的类级与方法级 `@SaCheckPermission` 是「**都要过**」而不是后者覆盖前者——把字典端点塞进 `AdminDatingController` 再挂 `tag:manage`，只有交友权限的管理员就会连字典页也进不去。字典那个类挂的是 `/api/admin/dating/dict` 子路径（靠路径不重叠与 `/api/admin/dating` 共存）而不是新开一个顶层前缀，Knife4j 也因此无需再登记。
+- **一屏一个权限点的价值**：照片驳回、删动态、改字典是三个风险量级不同的动作，拆开后才能做到「只给动态权限、不给照片审核」。菜单与路由跟着三屏走（`perm` 分别是三个权限码），而不是合成一个「交友」页再做页内判定。
+- **★ 实现方直接对 mapper 说话，不复用用户端 Service**：用户侧每个读都带受众视角（可见范围、白名单、三天可见、是否本人），而后台要的恰恰是「无视角的全状态行」——已下架的、仅自己可见的那些在用户端服务里根本查不出来。复用过来就等于在实现类里开一条「跳过校验」的分支，而这条分支迟早被下一个功能当成用户端入口。**唯一例外是 `DatingProfileService.recalcScore()` 这种无视角的纯计算**（照片过审与删除都要刷完资料度）。
+- **强制隐身复用 `discoverable`，不新增后台专用标记位**：代价是本人自己也能重新打开（后台拦不住一个头铁的用户），但这是故意的——硬封走的是账号封禁那一屏，交友这一屏只负责「不对外出现」。好处是读路径零改动（推荐流/附近的人/动态候选都已经在查这一列），新增一列就要在六处各加一个 `AND`。
+- **`quality_flag=2`（已升权 / 真人认证）的唯一写入点是后台**：服务端的完资料度重算永远不自动顶到 2，也不会把 2 降回 0（否则一次改头像就能洗掉认证）。`1` 则由第七批的自动降权与后台共管。
+- **照片驳回保留行与原因而不删**：那是用户自己的图，他要知道哪张被拦才知道换一张，而不是反复重传同一张；原因只回给本人。通过后重算作者完资料度，而**驳回与待审之间来回不改「已过审张数」这个数，所以不重算**（白写一行）。
+- **删照片不修 `is_main`**：封面规则是「主封面且已过审 → 否则第一张已过审的」，被逻辑删的行根本进不了候选，下一次读封面自动退到下一张。`im_file` 本体一期不级联清理（同照片墙第二批的秒传约定）。
+- **照片队列固定按上传时间升序**（先传来的先审，否则新图永远插队），而前端默认停在 `auditStatus=0` 那一档——那才是需要人看的队列。
+- **★ 动态下架与恢复是不对称的**：下架一条动态置 `status=2`，**不再出现在任何人的 Feed 与详情里（含作者本人）**，但行与附属表全留、随时可恢复；下架一级评论会连带藏掉它**当前状态正常**的回复（本来就被单独下架过的子行不该被这次操作改回正常态，那是抹掉上一次处置的痕迹），而恢复只恢复单行。`comment_count` 的含义是「可见的评论行数」，所以**减的是本次真正改动的行数**而不是拍一个 1。四个接口全幂等（重复下架返回当前态而不是报错）。
+- **后台删动态是级联物理删四张附属表**，与 `MomentServiceImpl#delete` 严格对齐（只在「清哪几张表」这一处对齐，不共享方法）；一期没有回收站，所以前端要手敲确认。
+- **列表只带 3 个附件地址（`MEDIA_PREVIEW = 3`），详情给全量**：列表只为认图不为看完，一屏 20 条各带 9 张图就是 180 个图片请求，后台翻页体验会直接崩掉；评论队列里那条动态的摘要是截断的，所以详情弹框必须重新取一次全量。
+- **关键词长度上限 50**：防止一条超长 `like` 拖死 `im_moment` 的全表扫。
+- **评论队列用 `selectBatchIds` 而不是 `selectNormalByIds` 取所属动态**：后台要能看到「已下架那条动态下的评论」，否则处置一条骚扰评论时看不到上下文。
+- **★ 码表复用用户侧 `/api/dating/dict`**：学历 / 收入 / 婚恋 / 交友目的四组下拉不在后台另写一份常量（那必然漂成第三份），而 `DatingController` 类级只 `@SaCheckLogin`、`/dict` 无额外权限，后台登录后就能读（nginx `location /api` 整片代理、admin-ui `baseURL='/api'`、vite proxy 同，生产可用）——先例是 `/api/report/config`（后台侧同样能读，不为后台另开一份）。
+- **写操作一律 `@RequestParam` 而非 `@RequestBody`**（后台表单类接口的既有口径）：前端就是 `http.put(url, null, { params })`，DTO 只用在分页查询上。
+- **前端三屏都是页内 tab 而不是三个菜单项**：交友资料 + 照片审核、动态 + 评论队列、标签 + 破冰文案各自同屏（运营改文案时必然对着同一个标签想效果，拆两个菜单就是把一次编辑拆成两次跳转）；菜单按权限点一屏一条。
+- **受控地址必须走 `fetchMedia`**：动态附件与照片都是 `/api/file/download/...` 这类要登录头的地址，`<img src>` 带不了，必须转 blob；头像用已有的 `AvatarCell.vue` 封装，雪花 ID 不做 `Number()` 转换。
+- **★ 运行时验证已转为清单**：逐项点验的步骤与预期均落在 `md/交友功能手动验证清单.md`（含两个历史坑：① `V1.0.7` 未应用时三屏的每一次查库都会因表不存在而报错（不是「XX模块未装配」——那个业务错误只在模块真没装时出现）；② 应用了 SQL 但**没清 `im:auth:perm:*` / `im:auth:role:*`** 时，连 admin 点进去也是 1003，且交友整块接口 1007（权限缓存在 Redis 里 30 分钟，新写的三个点不在旧快照里））。其中一条必验的最小链路：给一个角色只勾选 133 → 该账号能看到「动态管理」但看不到另外两屏 → 下架一条带评论的动态 → 作者自己的主页也看不到而后台仍查到 `status=2` → 恢复 → Feed 里回来；再给 134 → 新增一个标签并绑一条标签开场白（type=3）→ 不绑标签就报错 → 删标签 → 绑它的开场白一并消失。
+
+
 

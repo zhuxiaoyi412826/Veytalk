@@ -254,6 +254,26 @@
             </div>
           </div>
 
+          <!-- 动态分享（15）：只画发送时定格的快照（作者 + 摘要 + 附件数），不带图。
+               动态附图的 fileId 按约定只从动态接口下发，而消息会被转发、会躺在漫游记录里，
+               活得比一次动态详情请求久得多。点开时可见范围按「点开的人」重算，不在受众里就是「这条动态不在了」 -->
+          <div
+            v-else-if="msgType === 15"
+            class="bubble__moment"
+            :class="{ 'is-disabled': !momentId }"
+            @click="onMomentClick"
+          >
+            <div class="bubble__moment-head">
+              <el-icon :size="14"><ChatDotSquare /></el-icon>
+              <span class="bubble__moment-tag">动态</span>
+              <span class="bubble__moment-author im-ellipsis">{{ momentAuthor }}</span>
+            </div>
+            <div class="bubble__moment-summary">{{ momentSummary || '（无正文）' }}</div>
+            <div class="bubble__moment-hint">
+              {{ momentMediaCount > 0 ? `${momentMediaCount} 个附件 · ` : '' }}点击查看
+            </div>
+          </div>
+
           <!-- 转账（12）：金额与附言。即时到账，所以没有「点一下领取」这一步，只把结论写清楚 -->
           <div v-else-if="msgType === 12" class="bubble__money">
             <el-icon class="bubble__money-icon" :size="26"><Coin /></el-icon>
@@ -347,7 +367,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, Coin, Present, Plus } from '@element-plus/icons-vue'
+import { Delete, Document, Loading, Picture, View, VideoPause, VideoPlay, VideoCameraFilled, WarningFilled, PhoneFilled, Select, ChatLineSquare, ChatDotSquare, Coin, Present, Plus } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import EmojiPicker from './EmojiPicker.vue'
 import WatermarkOverlay from './WatermarkOverlay.vue'
@@ -379,7 +399,7 @@ const props = defineProps({
   selected: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote', 'chain', 'close-chain', 'open-packet'])
+const emit = defineEmits(['menu', 'resend', 'discard', 'view-file', 'view-image', 'view-flash', 'jump-quote', 'react', 'view-card', 'open-location', 'view-merged', 'toggle-select', 'vote', 'close-vote', 'chain', 'close-chain', 'open-packet', 'view-moment'])
 
 const auth = useAuthStore()
 const settings = useSettingsStore()
@@ -419,6 +439,19 @@ const mergedTitle = computed(() => extra.value.mergedTitle || '聊天记录')
 const mergedCount = computed(() => (Array.isArray(extra.value.mergedMessages) ? extra.value.mergedMessages.length : 0))
 function onMergedClick() {
   emit('view-merged', { title: mergedTitle.value, messages: extra.value.mergedMessages || [] })
+}
+
+/* ------------------------------ 动态分享 ------------------------------ */
+// 三个快照字段一律是服务端在发送时反查动态后覆写的，客户端上报的不算数；
+// 这里只负责把它们画出来，不去拼任何图片地址（extra 里本来也没有）
+const momentId = computed(() => extra.value.momentId || '')
+const momentAuthor = computed(() => extra.value.momentAuthor || '好友')
+const momentSummary = computed(() => extra.value.momentSummary || '')
+const momentMediaCount = computed(() => Number(extra.value.momentMediaCount || 0))
+function onMomentClick() {
+  if (momentId.value) {
+    emit('view-moment', momentId.value)
+  }
 }
 
 /* -------------------------------- 转账 / 红包 -------------------------------- */
@@ -656,7 +689,7 @@ const textContent = computed(() => {
 const boxClass = computed(() => ({
   'bubble__box--self': props.message.self,
   // 附件类气泡自带白底卡片，再套一层气泡底色会出现双重边框
-  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4 || msgType.value === 6 || msgType.value === 7 || msgType.value === 8 || msgType.value === 9 || msgType.value === 10
+  'bubble__box--bare': msgType.value === 2 || msgType.value === 3 || msgType.value === 4 || msgType.value === 6 || msgType.value === 7 || msgType.value === 8 || msgType.value === 9 || msgType.value === 10 || msgType.value === 15
 }))
 
 /**
@@ -674,6 +707,8 @@ const quoteContent = computed(() => {
   if (type === 3) return '[文件]'
   if (type === 4) return '[语音]'
   if (type === 6) return '[通话]'
+  // 动态卡片的 content 存的是附言（可空），而引用条要的是「引的是什么」而不是「附言写了什么」
+  if (type === 15) return '[动态]'
   return q.content || ''
 })
 
@@ -1181,6 +1216,64 @@ onBeforeUnmount(() => {
 
 .bubble__box--bare::before {
   display: none;
+}
+
+/* 动态分享卡片：与名片同一口径的白底横块，整块可点 */
+.bubble__moment {
+  min-width: 200px;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--im-panel);
+  border: 1px solid var(--im-border, rgba(0, 0, 0, 0.06));
+  cursor: pointer;
+}
+
+.bubble__moment.is-disabled {
+  cursor: default;
+}
+
+.bubble__moment-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.bubble__moment-tag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  color: var(--el-color-primary);
+}
+
+.bubble__moment-author {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--im-text);
+}
+
+.bubble__moment-summary {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--im-text);
+  word-break: break-word;
+  /* 摘要只给两行：会话里那一块很窄，把整段正文摊开会把上下几条消息推到很远 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bubble__moment-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
 }
 
 /* 名片：头像 + 昵称的横排卡片，整块可点 */

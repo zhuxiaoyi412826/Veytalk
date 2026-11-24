@@ -5,8 +5,6 @@
 > 并明确标注这次变更「清除 / 增加 / 修改」了哪些对象。** 没登记 = 没做完。
 > 闸门写在 [`CONTRIBUTING.md`](../CONTRIBUTING.md) 的硬性门槛里，所有人（含 AI）适用。
 
----
-
 ## 目录
 
 - [一、为什么要有这份文档](#一为什么要有这份文档)
@@ -23,6 +21,8 @@
   - [1.0.3 im_live_video 新增 category 列（视频板块抖音式分类，2026-11-19）](#103-im_live_video-新增-category-列视频板块抖音式分类2026-11-19)
   - [1.0.4 新增 im_live_video_category 字典表（视频分类栏后台可增删改，2026-11-19）](#104-新增-im_live_video_category-字典表视频分类栏后台可增删改2026-11-19)
   - [1.0.5 新增 SQL 版本管理两张表与权限点 128（自研 C 方案，2026-11-20）](#105-新增-sql-版本管理两张表与权限点-128自研-c-方案2026-11-20)
+  - [1.0.6 直播三板块：三张作品表 + 分类字典加 type + 权限点 129~131（2026-11-22，补登记）](#106-直播三板块三张作品表--分类字典加-type--权限点-1291312026-11-22补登记)
+  - [1.0.7 交友域一次建齐 16 张表 + 权限点 132~134（2026-11-22）](#107-交友域一次建齐-16-张表--权限点-1321342026-11-22)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -284,6 +284,54 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 - **需清的 Redis 键**：`im:auth:perm:*` / `im:auth:role:*`（新增权限点 128，不清则「SQL 版本」菜单对 admin 也不显示；禁 FLUSHDB，只 DEL 这两个键）
 - **回滚方式**：`DELETE FROM im_role_permission WHERE id=6028; DELETE FROM im_permission WHERE id=128; DROP TABLE IF EXISTS im_schema_migration_log; DROP TABLE IF EXISTS im_schema_migration;`（删两张台账表只退回页面功能，不动任何业务表结构）
 - **验证 SQL**：`SELECT COUNT(*) FROM im_permission WHERE perm_code='system:schema:manage';` 期望 1；`SELECT version,status,operator_name FROM im_schema_migration;` 期望仅 1.0.0/APPLIED/SYSTEM 一行；`SHOW TABLES LIKE 'im_schema_migration%';` 期望 2 行
+
+---
+
+### 1.0.6 直播三板块：三张作品表 + 分类字典加 type + 权限点 129~131（2026-11-22，补登记）
+
+> 本条是**补登记**：1.0.5 说了「1.0.6 起不再手写本台账条目」，但那条只对「已通过页面应用、
+> 流水自动进 `im_schema_migration_log`」的版本成立。1.0.6 当时脚本写完却没在页面点过「应用」，
+> 台账里没有它的行，光翻流水就查不到这一批变更——所以结构类变更仍必须在此登记一条。
+
+- **背景**：直播页在视频之外新增「图片 / 音乐 / 小说」三个内容板块，四板块共用一套分类字典。
+- **脚本文件**：`sql/versions/V1.0.6__live_image_music_novel.sql` + `U1.0.6__live_image_music_novel.sql`（页面应用/回滚）
+- **★ 清除**：无（V 脚本不删任何东西；只有 U 脚本才清，见「回滚方式」）
+- **★ 增加**：表 `im_live_image` / `im_live_music` / `im_live_novel`（各两条索引）；`im_live_video_category` 加列 `type VARCHAR(16) NOT NULL DEFAULT 'video'`；分类种子 +30 行（图片 101~110、音乐 121~130、小说 141~150）；`im_permission` id 129~131（system:image/music/novel:manage）与 `im_role_permission` id 6029~6031
+- **★ 修改**：`im_live_video_category` 索引 `idx_status_sort(status,sort)` → `idx_type_status_sort(type,status,sort)`（分类栏主查询多了 type 这一列，最左前缀要跟着换）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十节「直播（im-live）」内（im_live_image / im_live_music / im_live_novel 三表建表 + 30 行分类种子，含 `im_live_video_category` 的 type 列与新索引）；`im_data.sql` ☑ 权限 129~131 与绑定 6029~6031
+- **需清的 Redis 键**：`im:auth:perm:*` / `im:auth:role:*`（新增三个权限点，不清则三个新菜单页对 admin 也返回 1003；禁 FLUSHDB）
+- **回滚方式**：页面点 U1.0.6（第一步落 4 张 `*_bak_20261122` 前像备份表，再 `DROP TABLE im_live_novel/im_live_music/im_live_image`、`DELETE FROM im_live_video_category WHERE type IN ('image','music','novel')`、索引退回 `idx_status_sort`、`DROP COLUMN type`、`DELETE FROM im_role_permission WHERE id IN (6029,6030,6031)` 与 `DELETE FROM im_permission WHERE id IN (129,130,131)`）
+- **验证 SQL**：`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='im_db' AND TABLE_NAME IN ('im_live_image','im_live_music','im_live_novel');` 期望 3 行；`SELECT type, COUNT(*) FROM im_live_video_category GROUP BY type;` 期望 video 17 / image 10 / music 10 / novel 10
+
+---
+
+### 1.0.7 交友域一次建齐 16 张表 + 权限点 132~134（2026-11-22）
+
+- **背景**：落地 `md/待开发功能.txt` 第 69–81 行的 13 项交友功能（资料卡扩展 / 照片墙 / 兴趣标签 / 滑动匹配 / 附近的人 /
+  筛选偏好 / 曝光池 / 访客 / 亲密度火花 / 动态 Feed / 可见范围 / 破冰文案 / 后台三屏）。硬约束是「SQL 只导一次」，
+  所以本版**一次性把 13 项要用的表全部建齐**，后续逐项写代码时不再加表、不再 ALTER。
+- **脚本文件**：`sql/versions/V1.0.7__dating_core.sql`（566 行）+ `U1.0.7__dating_core.sql`（265 行）
+- **★ 清除**：无
+- **★ 增加**：16 张表——im-user 侧 `im_user_profile`（主键即 `user_id`，1:1）/ `im_user_photo` / `im_tag`（`uk_name`）/ `im_user_tag`（`uk_user_tag`，**无 deleted**）；
+  im-friend 侧 `im_match_like`（`uk_from_to`）/ `im_match_pair`（`uk_pair`，a<b 约定）/ `im_match_preference`（`uk_user`）/ `im_match_exposure`（`uk_user_candidate`）/
+  `im_profile_visit`（`uk_visitor_visited_date`）/ `im_intimacy`（`uk_pair`）/ `im_moment` / `im_moment_media` / `im_moment_visible` /
+  `im_moment_like`（`uk_moment_user`）/ `im_moment_comment` / `im_icebreaker`；
+  种子：`im_tag` 48 行（id 1~48，8 个分类）、`im_icebreaker` 55 行（id 1~55：打招呼 20 / 话题卡 20 / 标签开场白 15）、
+  `im_user_profile` 按 `INSERT IGNORE ... SELECT id FROM im_user` **为存量账号回填基础行**（漏回填等于老用户在推荐流集体隐身）、
+  演示数据 id 段 8100~8999（资料卡 5 行、标签绑定 8 行、配对 1 行、动态 3 行、评论 2 行、点赞 2 行、访客 3 行、亲密度 1 行）；
+  `im_permission` id 132~134（system:dating/moment/tag:manage）与 `im_role_permission` id 6032~6034
+- **★ 修改**：无（不动任何既有表的列与索引；因此本版**不需要 V1.0.6 那套 information_schema 会话变量守卫**——全篇 `CREATE TABLE IF NOT EXISTS` + `INSERT IGNORE`，天然幂等）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十九节（第 1358 行起至文件末：16 张建表 + 两份字典种子）+ DROP 块第 34~49 行补 16 行（**加表必须同步补 DROP，否则重跑撞「表已存在」中断、库变半新半旧**）；`im_data.sql` ☑ 第 79~95 行（种子段清理）、第 190 行（权限 132~134）、第 228 行（绑定 6032~6034）、第 798 行起（第 12 节交友演示数据）
+- **需清的 Redis 键**：`im:auth:perm:*` / `im:auth:role:*`（新增三个权限点；伞权限 `system:manage`(107) 不通配细粒度点，必须显式绑给 role 1，且不清缓存则三个新后台页对 admin 也 1003；禁 FLUSHDB）
+- **回滚方式**：页面点 U1.0.7（第一步落 16 张 `im_*_bak_20261122` 前像备份表，再 `DELETE FROM im_role_permission WHERE id IN (6032,6033,6034)` 与 `DELETE FROM im_permission WHERE id IN (132,133,134)`，最后倒序 `DROP TABLE` 16 张）。
+  两点口径：配对产生的私聊会话**不跟着删**（会话归 `im_conversation`，与「删好友不清会话」同一口径）；`im_file` 里 bizType=dating_photo / moment_image / moment_video 的媒体本体**不级联清理**，成孤儿仍占磁盘
+- **验证 SQL**：`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='im_db' AND TABLE_NAME IN ('im_user_profile','im_user_photo','im_tag','im_user_tag','im_match_like','im_match_pair','im_match_preference','im_match_exposure','im_profile_visit','im_intimacy','im_moment','im_moment_media','im_moment_visible','im_moment_like','im_moment_comment','im_icebreaker');` 期望 16；
+  `SELECT (SELECT COUNT(*) FROM im_user WHERE deleted=0) AS users, (SELECT COUNT(*) FROM im_user_profile WHERE deleted=0) AS profiles;` 两个数应相等；
+  `SELECT COUNT(*) FROM im_permission WHERE id IN (132,133,134) AND deleted=0;` 与 `SELECT COUNT(*) FROM im_role_permission WHERE id IN (6032,6033,6034) AND role_id=1;` 均为 3
+
+> **★ 生产应用顺序**：台账只应用「最小的待应用版本」，而 1.0.4 / 1.0.6 都没在页面点过「应用」，
+> 所以顺序必须是 1.0.4 → 1.0.6 → 1.0.7（前两个脚本幂等，对已手工 source 过的库只登记台账）。
+> 跑完 1.0.7 再清一次权限缓存。
 
 ---
 

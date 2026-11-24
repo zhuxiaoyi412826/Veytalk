@@ -143,6 +143,7 @@
               @chain="onChain"
               @close-chain="onCloseChain"
               @open-packet="onOpenPacket"
+              @view-moment="onViewMoment"
             />
           </div>
         </template>
@@ -595,6 +596,9 @@
       :messages="mergedViewer.messages"
     />
 
+    <!-- 动态卡片（msgType=15）点开的那一屏：与交友页复用同一个组件，2050 的提示与评论口径只长一处 -->
+    <MomentDetailDialog v-model:visible="momentViewer.visible" :moment-id="momentViewer.momentId" />
+
     <!-- 名片选择器：搜好友、选中即把他资料卡发到当前会话 -->
     <el-dialog v-model="cardPicker.visible" title="发送名片" width="420px" append-to-body>
       <el-input
@@ -836,6 +840,7 @@ import GroupSettings from '@/components/GroupSettings.vue'
 import GroupCallInviteDialog from '@/components/GroupCallInviteDialog.vue'
 import ForwardDialog from '@/components/ForwardDialog.vue'
 import MergedRecordDialog from '@/components/MergedRecordDialog.vue'
+import MomentDetailDialog from '@/components/MomentDetailDialog.vue'
 import ImageMosaicDialog from '@/components/ImageMosaicDialog.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useChatStore, newClientMsgId } from '@/stores/chat'
@@ -1039,6 +1044,21 @@ function onViewCard(userId) {
   }
 }
 
+/* ------------------------------ 动态分享卡片 ------------------------------ */
+
+const momentViewer = reactive({ visible: false, momentId: null })
+
+/**
+ * 点开气泡里的动态卡片。
+ *
+ * 不在本地拿 extra 的快照填屏：快照是发送者当时的可见范围算出来的，而这条动态可能已被删、
+ * 已被作者收紧，所以只把 momentId 交给详情弹层，由它按查看者重算一次（报 2050 就原地空态）。
+ */
+function onViewMoment(momentId) {
+  momentViewer.momentId = asId(momentId)
+  momentViewer.visible = true
+}
+
 /* ------------------------------ 位置 ------------------------------ */
 
 const TYPE_LOCATION = 8
@@ -1170,6 +1190,9 @@ function mergedSummaryOf(m) {
     case 7: return `[名片] ${ex.cardNickname || ''}`.trim()
     case 8: return `[位置] ${ex.locationName || ''}`.trim()
     case 9: return `[聊天记录] ${ex.mergedTitle || ''}`.trim()
+    // 动态卡片本身不带正文全文，只有定格摘要；附言（content）在这里排不上用场，
+    // 合并查看器那一栏要认的是「这是一张什么卡片」
+    case 15: return `[动态] ${ex.momentAuthor || ''}`.trim()
     default: return m.content || ''
   }
 }
@@ -3228,6 +3251,8 @@ function quoteSummaryText(msg) {
   if (type === 3) return '[文件]'
   if (type === 4) return '[语音]'
   if (type === 6) return '[通话]'
+  // 动态卡片的 content 存的是附言（可空），直接露出来会让人以为引用的是对方写的一句话而不是那张卡
+  if (type === 15) return '[动态]'
   return msg.content || ''
 }
 

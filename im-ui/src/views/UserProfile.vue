@@ -63,6 +63,110 @@
           </div>
         </section>
 
+        <!-- ==================== 交友资料 ==================== -->
+        <section v-if="datingFacts.length || otherTags.length || photoWall.length" class="user-profile__card">
+          <div class="user-profile__card-title user-profile__card-title--row">
+            <span>交友资料</span>
+            <span v-if="dating && dating.distanceText" class="user-profile__distance">
+              <el-icon><Location /></el-icon>{{ dating.distanceText }}
+            </span>
+          </div>
+          <el-descriptions :column="2" border size="small">
+            <el-descriptions-item v-for="item in datingFacts" :key="item.label" :label="item.label">
+              {{ item.value }}
+            </el-descriptions-item>
+          </el-descriptions>
+          <!-- 兴趣标签按对方自己拖的顺序给，最重要的兴趣在前；后端已经按这个序排好了，这里不再排 -->
+          <div v-if="otherTags.length" class="user-profile__tags">
+            <span v-for="item in otherTags" :key="item.tagId" class="user-profile__tag">{{ item.name }}</span>
+          </div>
+          <!--
+            照片墙：后端只会把审核通过的几张发过来，因此这里拿到的就是「能被看的」，
+            不需要也不应该在前端再按状态过滤一遍（那等于默认相信接口会漏）。
+          -->
+          <div v-if="photoWall.length" class="user-profile__wall">
+            <el-image
+              v-for="(item, index) in photoWall"
+              :key="item.id"
+              class="user-profile__wall-img"
+              :src="mediaUrl(item.url)"
+              :preview-src-list="photoWallSrcs"
+              :initial-index="index"
+              preview-teleported
+              fit="cover"
+            />
+          </div>
+        </section>
+
+        <!-- ==================== TA 的动态 ==================== -->
+        <!--
+          v-show 而不是 v-if：组件得先挂载才能拉一次并报出条数，而陌生人恒为空列表
+          （可见范围逐条过滤后什么都不剩）—— 为「什么都看不到」留一张空卡只是噪音。
+          :key 绑 targetId：同一路由下换 :id 时组件会被复用，不重建就会把上一个人的列表留在屏上。
+        -->
+        <section v-show="momentsVisible" class="user-profile__card">
+          <div class="user-profile__card-title">{{ isSelf ? '我的动态' : 'TA 的动态' }}</div>
+          <MomentFeed :key="targetId" :user-id="targetId" compact @loaded="onMomentsLoaded" />
+        </section>
+
+        <!-- ==================== 亲密度与火花 ==================== -->
+        <!--
+          后端从没来往过时也回一组 0，所以这里只需要判「有没有拿到」，不需要判「是不是 0」。
+          进度条绑的是 progress（当前档位内的百分比），档位边界只有后端知道，
+          前端不去用 level 反推分值——那边插一档就会出现两边进度条不一样长。
+        -->
+        <section v-if="intimacy" class="user-profile__card">
+          <div class="user-profile__card-title user-profile__card-title--row">
+            <span>你们的火花</span>
+            <span class="user-profile__tip">{{ intimacy.levelDesc }} · {{ intimacy.score }} 分</span>
+          </div>
+          <div class="user-profile__spark" :class="{ 'user-profile__spark--off': !intimacy.sparkAlive }">
+            <strong>{{ intimacy.streakDays }}</strong>
+            <span>天连续聊天</span>
+          </div>
+          <div class="user-profile__tip">{{ sparkHint }}</div>
+          <el-progress
+            class="user-profile__spark-bar"
+            :percentage="intimacy.progress"
+            :stroke-width="8"
+            :show-text="false"
+          />
+          <div class="user-profile__tip">{{ nextLevelHint }}</div>
+          <div class="user-profile__spark-stats">
+            <span>消息 {{ intimacy.msgCount }} 条</span>
+            <span>互动 {{ intimacy.interactCount }} 次</span>
+            <span>共同好友 {{ intimacy.commonFriendCount }}</span>
+            <span>共同群 {{ intimacy.commonGroupCount }}</span>
+          </div>
+        </section>
+
+        <!-- ==================== 破冰建议 ==================== -->
+        <!--
+          三档分开展示而不是混成一列：标签开场白带「你们都喜欢 X」这个前提，
+          混在打招呼模板里就看不出它为什么比别的句子更值得发。
+          后端返回的 content 已经是成品（占位符替过），这里不再做任何模板处理。
+        -->
+        <section v-if="icebreakerGroups.length" class="user-profile__card">
+          <div class="user-profile__card-title user-profile__card-title--row">
+            <span>不知道聊什么？</span>
+            <span class="user-profile__tip">点一条即复制，去聊天框粘贴发出</span>
+          </div>
+          <div v-for="group in icebreakerGroups" :key="group.key" class="user-profile__ice-group">
+            <div class="user-profile__ice-label">{{ group.label }}</div>
+            <div class="user-profile__ice-list">
+              <button
+                v-for="item in group.items"
+                :key="item.id"
+                type="button"
+                class="user-profile__ice-item"
+                @click="pickIcebreaker(item)"
+              >
+                {{ item.content }}
+              </button>
+            </div>
+          </div>
+        </section>
+
         <!-- ==================== 操作 ==================== -->
         <section class="user-profile__card">
           <div class="user-profile__card-title">{{ isSelf ? '我的资料' : '操作' }}</div>
@@ -110,6 +214,21 @@
 
             <el-button v-else type="success" :icon="Plus" :disabled="!canApply" @click="openApply">
               添加好友
+            </el-button>
+
+            <!--
+              从资料卡直接喜欢：看到合眼缘的人不必退回交友页翻卡池。只在对方填过交友资料时出现
+              （一个连一行资料都没有的人进不了卡池，在这里喜欢 TA 等于把一个隐身号拉进配对）。
+            -->
+            <el-button
+              v-if="canLike"
+              type="danger"
+              plain
+              :icon="Star"
+              :loading="acting === 'like'"
+              @click="likePeer"
+            >
+              喜欢 TA
             </el-button>
 
             <!--
@@ -184,13 +303,17 @@ import {
   CircleClose,
   Delete,
   EditPen,
+  Location,
   Plus,
   RefreshLeft,
   Setting,
+  Star,
   Warning
 } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import MomentFeed from '@/components/MomentFeed.vue'
 import { fetchUserCard } from '@/api/user'
+import { actMatch, fetchDatingCard, fetchIcebreakers, fetchIntimacy, fetchPhotos, fetchTags, useIcebreaker } from '@/api/dating'
 import { fetchFriendCard } from '@/api/friend'
 import { useAuthStore } from '@/stores/auth'
 import { useFriendStore } from '@/stores/friend'
@@ -198,6 +321,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { useReportStore } from '@/stores/report'
 import { asId, sameId } from '@/utils/id'
 import { formatDateTime, genderText } from '@/utils/format'
+import { mediaUrl } from '@/utils/media'
 
 defineOptions({ name: 'UserProfile' })
 
@@ -217,6 +341,18 @@ const card = ref(null)
 const relation = ref(null)
 /** 当前正在执行的操作，用于给对应按钮上 loading */
 const acting = ref('')
+/** 交友资料（/api/dating/profile/{id}）；对方一行资料都没填时为 null */
+const dating = ref(null)
+/** 对方的照片墙：接口只回审核通过的那几张，这里不再按状态过滤一遍 */
+const photoWall = ref([])
+/** 大图预览用的地址列表：在 computed 里调 mediaUrl，取回 blob 后预览器才会跟着重渲染 */
+const photoWallSrcs = computed(() => photoWall.value.map((item) => mediaUrl(item.url)))
+/** 对方的兴趣标签（已下架的那些仍会给，名字本身还是对方说过的话） */
+const otherTags = ref([])
+/** 破冰建议（/api/dating/icebreakers）；看自己时不拉，保持 null */
+const ice = ref(null)
+/** 亲密度与火花（/api/dating/intimacy）；同样只在看别人时拉 */
+const intimacy = ref(null)
 
 const isSelf = computed(() => sameId(card.value && card.value.userId, auth.userId))
 const isFriend = computed(() => !!(card.value && card.value.friend))
@@ -225,6 +361,8 @@ const blockedByOther = computed(() => !!(card.value && card.value.blockedByOther
 /** 单向阻断：只拦「对方拉黑我」；我拉黑对方后仍可主动发，发送成功会顺带自动解除拉黑 */
 const canChat = computed(() => isFriend.value && !blockedByOther.value)
 const canApply = computed(() => !isSelf.value && auth.hasPermission('friend:apply'))
+/** 喜欢 TA：与滑动匹配同一个权限，对方得先有一张能出现在卡池里的交友资料 */
+const canLike = computed(() => !isSelf.value && !isFriend.value && !!dating.value && canApply.value)
 const displayName = computed(() => {
   const target = card.value
   if (!target) {
@@ -263,6 +401,140 @@ const relatedRequest = computed(() => {
   )
 })
 
+/* ------------------------------ 交友资料展示 ------------------------------ */
+
+/**
+ * 只拼有值的行。
+ *
+ * <p>年龄为空代表两种情况：对方没填，或对方藏了年龄（showAge=0）——后端两种情况都返回 null，
+ * 前端也不去区分，因为对看资料的人来说结果一样：这一行不该存在。
+ * 把它渲染成「0 岁」或「未填」都是替对方多交代了一层信息。
+ */
+const datingFacts = computed(() => {
+  const d = dating.value
+  if (!d) {
+    return []
+  }
+  const facts = [
+    { label: '年龄', value: d.age != null ? `${d.age} 岁` : '' },
+    { label: '身高', value: d.heightCm ? `${d.heightCm} cm` : '' },
+    { label: '学历', value: d.educationDesc || '' },
+    { label: '职业', value: d.occupation || '' },
+    { label: '收入区间', value: d.incomeDesc || '' },
+    { label: '婚恋状况', value: d.marriageDesc || '' },
+    { label: '交友目的', value: d.datingGoalDesc || '' },
+    { label: '所在地', value: d.locationText || '' }
+  ]
+  return facts.filter((item) => item.value)
+})
+
+/* ------------------------------ 亲密度与火花 ------------------------------ */
+
+/**
+ * 火花旁边那句说明。
+ *
+ * 熄灭时写清楚「说一句话就能重新点燃」而不是只写「已熄灭」：
+ * 天数归零是个不可逆的事实，但接下来该做什么得说出来，否则这一块看起来像一条惩罚。
+ * 历史最高只在它比当前高时提：两者相等时「最长连续过 3 天」和上面那个 3 是同一个数，重复了。
+ */
+const sparkHint = computed(() => {
+  const data = intimacy.value
+  if (!data) {
+    return ''
+  }
+  const parts = [data.sparkAlive ? '今天或昨天聊过，火花还亮着' : '火花已经熄灭，说一句话就能重新点燃']
+  if (data.maxStreak > data.streakDays) {
+    parts.push(`最长连续过 ${data.maxStreak} 天`)
+  }
+  return parts.join(' · ')
+})
+
+/**
+ * 进度条下面那句「还差多少」。
+ *
+ * 分值差在前端算（两个已经下发的数相减），但**下一档叫什么名字不在前端算**：
+ * 后端只给了 nextLevelScore，没给下一档的文案，自己拿 level+1 去映射一份名字
+ * 就等于在前端存了一份档位表，后端插一档两边就会对不上。
+ */
+const nextLevelHint = computed(() => {
+  const data = intimacy.value
+  if (!data) {
+    return ''
+  }
+  if (!data.nextLevelScore) {
+    return '已经是最高档了'
+  }
+  // 差值理论上恒为正（下一档的下界一定大于当前分），夹一下只为防库里的分被手改过
+  return `再累积 ${Math.max(0, data.nextLevelScore - data.score)} 分升到下一档`
+})
+
+/* ------------------------------ 破冰建议 ------------------------------ */
+
+/**
+ * 三档分组；标签开场白排在最前。
+ *
+ * 它有「你们都喜欢 X」这个前提，是三档里最不容易被当成客套话的一句；
+ * 打招呼模板与话题卡则谁都能拿到，排后面。
+ * 三档全空时整块不渲染（后端把字典清空了才会这样）。
+ */
+const icebreakerGroups = computed(() => {
+  const data = ice.value
+  if (!data) {
+    return []
+  }
+  const groups = []
+  const openers = data.tagOpeners || []
+  if (openers.length) {
+    const names = (data.commonTags || []).join('、')
+    groups.push({
+      key: 'tag',
+      label: names ? `你们都喜欢：${names}` : '按共同兴趣挑的开场白',
+      items: openers
+    })
+  }
+  const greetings = data.greetings || []
+  if (greetings.length) {
+    groups.push({ key: 'greeting', label: '打招呼模板', items: greetings })
+  }
+  const topics = data.topics || []
+  if (topics.length) {
+    groups.push({ key: 'topic', label: '聊不下去时，抛个问题', items: topics })
+  }
+  return groups
+})
+
+/**
+ * 点一条：先复制到剪贴板，再静默记一次使用。
+ *
+ * 计数失败不影响复制结果，所以它不 await、也不弹错：用户已经把句子拿到手了，
+ * 为了一个运营用的计数告诉他「操作失败」只会让人以为没复制上。
+ */
+async function pickIcebreaker(item) {
+  await copyText(item.content)
+  useIcebreaker(item.id, { silent: true }).catch(() => {})
+}
+
+/** 非 HTTPS 且非 localhost 时 navigator.clipboard 不可用，退回 execCommand（与其它页面同一个写法）。 */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      document.body.removeChild(area)
+    }
+    ElMessage.success('已复制，去聊天框粘贴即可')
+  } catch {
+    ElMessage.warning('浏览器不允许访问剪贴板，请长按或选中文字手动复制')
+  }
+}
+
 /* -------------------------------- 加载 -------------------------------- */
 
 /**
@@ -280,12 +552,60 @@ async function load() {
   loading.value = true
   card.value = null
   relation.value = null
+  dating.value = null
+  photoWall.value = []
+  otherTags.value = []
+  ice.value = null
+  intimacy.value = null
   try {
     const vo = await fetchUserCard(id)
     if (token !== loadToken) {
       return
     }
     card.value = vo
+    // 交友块与好友详情互不依赖，单独一发：对方一行交友资料都没填也得得到一张空卡，
+    // 但不能因为它报错就把整个资料卡打回空状态
+    fetchDatingCard(id, { silent: true })
+      .then((dto) => {
+        if (token === loadToken) {
+          dating.value = dto
+        }
+      })
+      .catch(() => {})
+    // 照片、标签与结构化资料是三个接口：一张没传的人仍然可以有一堆填齐的条件
+    fetchPhotos(id, { silent: true })
+      .then((list) => {
+        if (token === loadToken) {
+          photoWall.value = list || []
+        }
+      })
+      .catch(() => {})
+    fetchTags(id, { silent: true })
+      .then((list) => {
+        if (token === loadToken) {
+          otherTags.value = list || []
+        }
+      })
+      .catch(() => {})
+    // 破冰建议与亲密度只在「看别人」时拉：自己资料页上摆一排开场白没有对象可发，
+    // 而后端拿到自己当目标也只会退回通用两档与一组 0，不如不发这两个请求
+    if (!sameId(id, auth.userId)) {
+      fetchIcebreakers(id, { silent: true })
+        .then((dto) => {
+          if (token === loadToken) {
+            ice.value = dto
+          }
+        })
+        .catch(() => {})
+      // 亲密度拉失败就整块不渲染：一块写着「0 天 0 分」的卡片比没有卡片更误导人
+      fetchIntimacy(id, { silent: true })
+        .then((dto) => {
+          if (token === loadToken) {
+            intimacy.value = dto
+          }
+        })
+        .catch(() => {})
+    }
     if (vo && vo.friend) {
       try {
         relation.value = await fetchFriendCard(id, { silent: true })
@@ -310,10 +630,67 @@ async function load() {
 // 同一个路由下换 :id 时组件会被复用，必须靠 watcher 而不是 onMounted
 watch(targetId, load, { immediate: true })
 
+/* ------------------------------ TA 的动态 ------------------------------ */
+
+/** 首页报上来的条数，只用来决定整张卡要不要显示 */
+const momentsCount = ref(0)
+
+/**
+ * 这一张卡要不要显示。
+ *
+ * 看自己时恒显示：主页上要能看到自己被下架的那几条，而那一档只有 /user/{id} 才给。
+ * isSelf 依赖 card，而 card 可能比动态晚到，所以这里用 computed 而不是在回调里一次算完 ——
+ * 否则「自己的主页上一条动态都没发过」会因为 card 还没回来而被永久藏掉。
+ */
+const momentsVisible = computed(
+  () => momentsCount.value > 0 || isSelf.value || sameId(targetId.value, auth.userId)
+)
+
+function onMomentsLoaded(count) {
+  momentsCount.value = count
+}
+
+// 换 :id 时先把上一个人的条数清掉：不清就会先按旧条数显示一下再消失
+watch(targetId, () => {
+  momentsCount.value = 0
+})
+
 /* -------------------------------- 操作 -------------------------------- */
 
 function goProfile() {
   router.push({ name: 'profile' })
+}
+
+/**
+ * 在资料卡上直接喜欢 TA。
+ *
+ * 成对时会话已由后端建好，这里先刷会话列表再问要不要过去；与交友页不同，
+ * 本页不需要处理「继续刷」，用户留下自然还在资料上。
+ */
+async function likePeer() {
+  acting.value = 'like'
+  try {
+    const result = await actMatch({ targetUserId: targetId.value, action: 1, source: 1 })
+    if (result && result.matched) {
+      conversation.fetchList()
+      try {
+        await ElMessageBox.confirm(`已和「${displayName.value}」配对成功，现在发消息？`, '配对成功', {
+          confirmButtonText: '去聊天',
+          cancelButtonText: '稍后',
+          type: 'success'
+        })
+        router.push({ name: 'chat', params: { conversationId: asId(result.conversationId) } })
+      } catch {
+        // 选了「稍后」，留在资料页
+      }
+    } else if (result && result.message) {
+      ElMessage.success(result.message)
+    }
+  } catch {
+    // 提示已弹出
+  } finally {
+    acting.value = ''
+  }
 }
 
 async function startChat() {
@@ -494,6 +871,125 @@ function goBack() {
   margin-bottom: 16px;
   font-size: 15px;
   font-weight: 600;
+}
+
+/* 交友块要把模糊距离顶到行尾，其余标题保持原本的整行文本 */
+.user-profile__card-title--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.user-profile__distance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--im-text-secondary);
+}
+
+/* 固定格宽而不是按张数均分：九张和两张都要占同样的位置，否则别人的资料卡会一刷新就改版式 */
+.user-profile__wall {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.user-profile__wall-img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  cursor: zoom-in;
+  background: var(--im-bg);
+}
+
+.user-profile__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* 破冰：一档一个小标题 + 一排可点的句子 */
+.user-profile__ice-group + .user-profile__ice-group {
+  margin-top: 14px;
+}
+
+.user-profile__ice-label {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--im-text-secondary);
+}
+
+.user-profile__ice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 用 button 而不是 div：这一条是可点的，得能被键盘选中、在移动端有按下去的反馈 */
+.user-profile__ice-item {
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--im-text);
+  background: var(--im-bg);
+  border: 1px solid var(--im-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.user-profile__ice-item:hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+
+.user-profile__spark {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--el-color-primary);
+}
+
+.user-profile__spark strong {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.user-profile__spark span {
+  font-size: 13px;
+}
+
+/* 火花熄灭时只把它压成次要色，不隐藏整块：天数归零本身是事实，
+   把这一块藏起来会让人以为接口没返数据 */
+.user-profile__spark--off {
+  color: var(--im-text-secondary);
+}
+
+.user-profile__spark-bar {
+  margin: 12px 0 6px;
+}
+
+.user-profile__spark-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--im-text-secondary);
+}
+
+.user-profile__tag {
+  padding: 3px 10px;
+  border: 1px solid var(--im-border);
+  border-radius: 12px;
+  color: var(--im-text-secondary);
+  font-size: 12px;
 }
 
 .user-profile__head {

@@ -113,7 +113,7 @@
 <script setup>
 import { computed, onBeforeMount, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChatDotRound, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
+import { ChatDotRound, Compass, Microphone, Monitor, Setting, User, VideoCamera } from '@element-plus/icons-vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import CallOverlay from '@/components/CallOverlay.vue'
 import CallFloatWindow from '@/components/CallFloatWindow.vue'
@@ -155,6 +155,8 @@ const agreement = useAgreementStore()
 const navItems = computed(() => [
   { name: 'chat', label: '消息', icon: ChatDotRound, badge: conversation.totalUnread, match: 'chat' },
   { name: 'friends', label: '好友', icon: User, badge: 0, match: 'friends' },
+  // 交友（滑动匹配）：Element Plus 没有 Heart 图标，罗盘对「发现新朋友」的语义也贴
+  { name: 'discover', label: '交友', icon: Compass, badge: 0, match: 'discover' },
   // 后端 Java 全栈面试：基于知识库 RAG 的模拟面试，无未读概念，badge 恒为 0
   { name: 'interview', label: '面试', icon: Microphone, badge: 0, match: 'interview' },
   // 远程控制：被控设备清单与远程会话入口，同样无未读概念
@@ -420,8 +422,14 @@ function blockRawFileDrop(event) {
     gap: 0;
   }
 
+  /*
+   * 横排后不再按 58px 定宽：导航项加到六个（消息/好友/交友/面试/设置）再加底栏的直播，
+   * 定宽在 375px 的手机上会把最后一格顶出屏幕，改成等分才能不管几项都铺得下。
+   */
   .main-layout__item {
-    width: 58px;
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
   }
 
   .main-layout__footer {

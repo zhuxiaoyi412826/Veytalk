@@ -168,6 +168,23 @@ public class GroupSpiImpl implements GroupSpi {
         return groupId != null && groupMapper.selectNormalById(groupId) != null;
     }
 
+    /**
+     * 直接走 {@code selectActiveByUser}：它已经只取 {@code STATUS_IN_GROUP} 的行，
+     * 而解散一个群时 {@code dismissAllMembers} 会把成员行整批置为退群，所以这里不需要再查一次群状态。
+     */
+    @Override
+    public List<Long> listJoinedGroupIds(Long userId) {
+        if (userId == null) {
+            return List.of();
+        }
+        List<GroupMember> rows = groupMemberMapper.selectActiveByUser(userId);
+        List<Long> ids = new ArrayList<>(rows.size());
+        for (GroupMember row : rows) {
+            ids.add(row.getGroupId());
+        }
+        return ids;
+    }
+
     private static String cacheKey(Long groupId) {
         return ImConstants.CACHE_GROUP_BRIEF_PREFIX + groupId;
     }

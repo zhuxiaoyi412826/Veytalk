@@ -22,17 +22,28 @@
           <el-icon><Lock /></el-icon>
           <span>角色管理</span>
         </el-menu-item>
-        <el-menu-item v-if="auth.can('system:video:manage')" index="videos" :route="{ name: 'videos' }">
-          <el-icon><VideoCamera /></el-icon>
-          <span>视频管理</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.can('system:article:manage')" index="articles" :route="{ name: 'articles' }">
-          <el-icon><Document /></el-icon>
-          <span>文章管理</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.can('system:live:manage')" index="lives" :route="{ name: 'lives' }">
+        <!-- 六个内容板块在侧栏只占一条「直播」，具体切哪个板块走顶栏那一排分类入口。
+             这里只是导航容器：路由、meta.perm、守卫、后端鉴权全没动，所以旧地址仍然能收藏，
+             「只给了图片权限的人进不去小说」也照旧成立。目标路取第一个有权限的板块，
+             于是只持单一板块权限的人点这条菜单也能直接落到他能看的那一屏。 -->
+        <el-menu-item v-if="visibleBoards.length" :index="boardTarget" :route="{ name: boardTarget }">
           <el-icon><VideoPlay /></el-icon>
-          <span>直播管理</span>
+          <span>直播</span>
+        </el-menu-item>
+        <!-- 交友三屏（V1.0.7，权限点 132~134）：三条而不是合在一条「交友」菜单里——
+             照片驳回、删动态、改字典是三个风险量级不同的动作，种子按三个点分别授，
+             菜单得能把「谁能看到哪一屏」一眼读出来 -->
+        <el-menu-item v-if="auth.can('system:dating:manage')" index="dating" :route="{ name: 'dating' }">
+          <el-icon><Postcard /></el-icon>
+          <span>交友管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:moment:manage')" index="moments" :route="{ name: 'moments' }">
+          <el-icon><ChatLineSquare /></el-icon>
+          <span>动态管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.can('system:tag:manage')" index="dating-dict" :route="{ name: 'dating-dict' }">
+          <el-icon><PriceTag /></el-icon>
+          <span>交友字典</span>
         </el-menu-item>
         <el-menu-item v-if="auth.can('system:group:manage')" index="groups" :route="{ name: 'groups' }">
           <el-icon><UserFilled /></el-icon>
@@ -108,6 +119,11 @@
 
     <el-container>
       <el-header class="header">
+        <!-- 六个内容板块的分类入口只在自己的那一屏里出现（isBoardPage）：它是「六块之间横向切换」的控件，
+             在用户管理、数据看板那些页面上摆一排「视频 / 音乐 / 小说」既不对应当前内容，
+             又让人以为顶栏随时可以切走。不在板块页时整排隐藏，而不是置灰。
+             它属于「去哪个屏」的导航，不是业务操作，所以不违反下面那条「顶栏不放业务操作」的约定。 -->
+        <el-segmented v-if="isBoardPage && visibleBoards.length > 1" v-model="boardTab" :options="boardOptions" class="board-tabs" />
         <span class="narrow-hint muted">界面按宽屏设计，窄屏下表格会被挤压，建议在电脑上使用</span>
         <span class="grow" />
         <span class="muted">{{ auth.username }}</span>
@@ -133,12 +149,18 @@ import { useAuthStore } from '@/stores/auth'
  *
  * 顶栏<b>不放任何业务操作</b>（没有搜索框、没有快捷按钮）：后台的四个页面各自有筛选条件，
  * 把它们提到全局就会出现「在用户页顶部输关键词却搜了工单」这类归属不清的交互。
+ * 唯一的例外是六个内容板块的分类入口（el-segmented）：它只回答「去哪个屏」，不碰任何数据，而且只在
+ * 那六个板块页自己出现（见模板里的 isBoardPage）。
  *
  * 身份与权限已由路由守卫确认过（拿到 /auth/me 且至少持有一个后台权限点），
  * 这里直接读 store 就行，不再兜一层「没登录怎么办」——真走到那一步早就被守卫弹回登录页了。
  *
  * 菜单用 <code>auth.can(...)</code> 逐条判权限。所有权限点一个都没有的人进不了后台（守卫拦下），
  * 所以这里不存在「整条菜单都是空的」那种中间态；真出现了就只能说明种子数据里角色被改坏了。
+ *
+ * 六个内容板块在侧栏只占一条「直播」，剩下五块移到顶栏的分段控件上（与 admin / 退出 同一行）：
+ * 它们本来就是同一个页面的六个标签，在菜单里摆六条既挤长了列表，又让人误以为是六个不相干的系统。
+ * 合并的只是导航形状，路由与权限点一个没动。
  *
  * 「系统配置」与「全服公告」是两条而不是合在一条：前者改的是可以立刻改回来的旋钮，
  * 后者一发就对着全部在线连接喊话、弹出去的通知收不回来。服务端把它们分成两个权限点，
@@ -154,7 +176,40 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const activeName = computed(() => route.name)
+/**
+ * 直播页的六个内容板块：侧栏合成一条、顶栏横排切换。
+ *
+ * 顺序就是用户从直播页看到的顺序（直播 / 视频 / 文章 / 图片 / 音乐 / 小说），与侧栏
+ * 原本从上到下摆的顺序故意不一致：那一列原来按「风险量级」排，而这里按「用户心智」排。
+ * perm 与 router/index.js 里各路由的 meta.perm 逐项对应，新增板块时两边一起加。
+ */
+const BOARDS = [
+  { name: 'lives', label: '直播', perm: 'system:live:manage' },
+  { name: 'videos', label: '视频', perm: 'system:video:manage' },
+  { name: 'articles', label: '文章', perm: 'system:article:manage' },
+  { name: 'images', label: '图片', perm: 'system:image:manage' },
+  { name: 'musics', label: '音乐', perm: 'system:music:manage' },
+  { name: 'novels', label: '小说', perm: 'system:novel:manage' }
+]
+
+// 只列持有权的板块：给了图片权限的人不该在顶部看到一个点了就 1003 的小说标签
+const visibleBoards = computed(() => BOARDS.filter((b) => auth.can(b.perm)))
+const boardTarget = computed(() => visibleBoards.value[0]?.name || 'dashboard')
+const boardOptions = computed(() => visibleBoards.value.map((b) => ({ label: b.label, value: b.name })))
+const isBoardPage = computed(() => visibleBoards.value.some((b) => b.name === route.name))
+const boardTab = computed({
+  get: () => route.name,
+  set: (name) => {
+    if (name && name !== route.name) {
+      router.push({ name })
+    }
+  }
+})
+
+// 板块页统一回落到合并项的 index，其余页面用路由名：如果这里直接返回 route.name，
+// 那么在 /users 这类页面时 activeName 是 users，而合并项的 index 也跟着变成 users，
+// 会出现「用户管理」和「直播」两条同时高亮
+const activeName = computed(() => (isBoardPage.value ? boardTarget.value : route.name))
 
 async function onLogout() {
   try {
@@ -229,6 +284,13 @@ async function onLogout() {
 
 .main {
   padding: 20px;
+}
+
+/* 顶栏板块切换：不参与伸缩，窄屏下自己横向滚，不把右侧的退出按钮顶出屏幕 */
+.board-tabs {
+  flex: none;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* 窄屏提示只在 < 900px 出现，宽屏下一个像素都不占；用 CSS 而不是 JS 量宽度，

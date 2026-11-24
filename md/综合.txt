@@ -9,6 +9,11 @@ Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
     Write-Host "Vite局域网地址：http://$($_.IPAddress):5173"
 }
 
+docker compose build im-server && docker compose up -d im-server
+docker compose restart im-server   
+docker compose restart nginx
+
+
 electron 打包桌面端 安装版和非安装版
 cd d:\daima\Lianshi\spring-boot-duomokuia\im-ui
 npm run build:electron
@@ -51,7 +56,9 @@ chcp 65001
 
 
 编译打包
-$env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"   打jar包   前端打包 npm run build
+$env:JAVA_TOOL_OPTIONS = "-Dfile.encoding=UTF-8"  
+打jar包  mvn clean package -DskipTests
+前端打包 npm run build
 mvn spring-boot:run
 
 生成环境下启动直播 进入到electron目录

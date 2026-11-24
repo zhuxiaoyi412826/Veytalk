@@ -59,3 +59,16 @@ im:
       - http://*.*.*.*:4173
       - https://*.*.*.*:5173
       - https://*.*.*.*:4173
+  # ---------------------------------------------------------------------------
+  # 腾讯云 TRTC：仅微信小程序音视频通话用（Web/桌面/安卓走自建 WebRTC，与本项无关）。
+  # application.yml 已用 ${IM_TRTC_SDK_APP_ID}/${IM_TRTC_SECRET_KEY} 兜底，生产二选一：
+  #   ① 在 conf/im.env 配 IM_TRTC_SDK_APP_ID / IM_TRTC_SECRET_KEY（推荐，密钥不进仓库）；
+  #   ② 直接在本文件写死字面值（★ 值不要用反引号包裹）。
+  # sdk-app-id 留 0 = 未配置，小程序禁用通话入口、不报错。填完必须 docker compose restart im-server
+  # （Java 仅启动时读这份文件，up -d 未换镜像不会重读）。
+  # ---------------------------------------------------------------------------
+  call:
+    trtc:
+      sdk-app-id: ${IM_TRTC_SDK_APP_ID:0}
+      secret-key: ${IM_TRTC_SECRET_KEY:}
+      user-sig-expire-seconds: 604800
