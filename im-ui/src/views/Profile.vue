@@ -128,27 +128,44 @@
             </el-select>
           </el-form-item>
           <el-form-item label="所在地区">
+            <!--
+              三个自由输入框换成一份离线行政区划字典的三级联动：手填会出现「深圳 / 深圳市 / 广东省深圳市」
+              三种写法，而同城筛选是按 city 做包含匹配（LIKE '%深圳市%'），它只能一个方向兼容：存「深圳市」能
+              被「深圳」筛到，存「深圳」却筛不到。写法统一了两个方向才不会莫名其妙少人。存进库的仍是三个名字（见 regionTree.js 头注释）。
+            -->
             <div class="profile__region">
-              <el-input v-model.trim="datingForm.province" maxlength="32" placeholder="省" />
-              <el-input v-model.trim="datingForm.city" maxlength="32" placeholder="市（同城筛选按它）" />
-              <el-input v-model.trim="datingForm.district" maxlength="32" placeholder="区" />
+              <el-cascader
+                v-model="regionValue"
+                class="profile__region-picker"
+                :options="regionOpts"
+                :props="regionProps"
+                :placeholder="regionPlaceholder"
+                filterable
+                clearable
+                @change="onRegionChange"
+              />
+              <div v-if="regionHint" class="profile__hint">{{ regionHint }}</div>
             </div>
           </el-form-item>
           <!--
             坐标只由这里采集、geohash 一律服务端重算：前端如果也算一份，两边迟早对不上，
             对不上的表现是“本人永远刷不到自己附近的人”。
+            ★ 定位一成功就单独落库，不等「保存交友资料」：附近的人与资料卡距离读的是库里那一行，
+              要用户记得再点一次保存才生效，就是「明明定位了却还是不行」那个 bug 本身。
           -->
           <el-form-item label="我的定位">
             <div class="profile__loc-row">
               <el-button :loading="locating" @click="locateMe">重新定位</el-button>
-              <el-button v-if="dating.hasLocation && !clearLocation" link type="danger" @click="clearLocation = true">
-                清除定位
-              </el-button>
+              <el-button v-if="dating.hasLocation" link type="danger" @click="clearMyLocation">清除定位</el-button>
               <span class="profile__readonly">{{ locationSummary }}</span>
             </div>
             <div v-if="locatingError" class="profile__hint profile__hint--warn">{{ locatingError }}</div>
-            <div v-else-if="locationForm.lng !== null" class="profile__hint">
-              本次将上报新坐标：{{ locationForm.lng }}, {{ locationForm.lat }}
+            <div v-else-if="locating" class="profile__hint">正在取位置；浏览器弹窗里点「允许」后会自动继续</div>
+            <div v-else-if="!dating.hasLocation" class="profile__hint">
+              定位一次即可：坐标当场入库，附近的人与资料卡距离立刻生效，不用再点「保存交友资料」
+            </div>
+            <div v-else-if="privacy.showDistance !== 1" class="profile__hint profile__hint--warn">
+              「显示距离」这个开关是关的，别人的资料卡上看不到公里数；打开后仍需双方在 {{ LOCATION_VALID_DAYS }} 天内都定位过
             </div>
           </el-form-item>
           <el-form-item>
@@ -363,6 +380,10 @@ import {
 } from '@/api/dating'
 import { guardImage } from '@/utils/nsfw'
 import { mediaUrl, readImageSize } from '@/utils/media'
+import { regionOptions, regionCodes, regionNames } from '@/data/regionTree'
+import { resolveRegionByCoords } from '@/utils/regionLookup'
+import { requestLocation } from '@/utils/location'
+import { getCache, setCache } from '@/utils/localCache'
 import { sendSmsCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { signOut } from '@/stores'
@@ -462,11 +483,50 @@ const datingForm = reactive({
   marriage: null, datingGoal: null, province: '', city: '', district: ''
 })
 
-/** 本次要上报的新坐标：null 表示没动定位，与「库里已有的定位」是两件事（VO 不回传经纬度，拿不到旧值） */
+/** 本次要上报的新坐标：正常情况下它只在「自动落库失败」时留一会儿（定位一成功就单独存一次） */
 const locationForm = reactive({ lng: null, lat: null })
-const clearLocation = ref(false)
 const locating = ref(false)
 const locatingError = ref('')
+
+/* ---------------- 所在地区：省市县三级联动 ---------------- */
+
+/** 与后端 UserProfile.LOCATION_VALID_DAYS 同一口径，只用来把提示写清楚 */
+const LOCATION_VALID_DAYS = 7
+
+const regionOpts = regionOptions()
+// checkStrictly：东莞、儋州这类下面没有区县的市，以及不想填到区的用户，都要能只选到市那一档
+const regionProps = { checkStrictly: true, expandTrigger: 'hover' }
+/** 级联框的值是编码数组，而库里存的是三个名字（为什么这么切分见 data/regionTree.js 头注释） */
+const regionValue = ref([])
+const regionHint = ref('')
+const regionLegacy = ref('')
+
+const regionPlaceholder = computed(() =>
+  regionLegacy.value ? `原填「${regionLegacy.value}」，重新选可对齐字典` : '选择省 / 市 / 区县'
+)
+
+/**
+ * 把库里已有的手填文本换算成级联框的选中值。
+ *
+ * <p>查不到这套名字时<b>保留原文并解释一句</b>，不清空：历史数据里大量是「深圳」这种少个「市」
+ * 字的写法，替用户把它抹掉等于把一个他填过的地址弄丢，而同城筛选本来就还能按包含匹配到它。
+ */
+function syncRegionValue() {
+  const raw = [datingForm.province, datingForm.city, datingForm.district].filter(Boolean).join(' ')
+  const codes = regionCodes(datingForm.province, datingForm.city, datingForm.district)
+  regionValue.value = codes || []
+  regionLegacy.value = codes || !raw ? '' : raw
+  regionHint.value = ''
+}
+
+function onRegionChange(value) {
+  const names = regionNames(Array.isArray(value) ? value : [])
+  datingForm.province = names[0] || ''
+  datingForm.city = names[1] || ''
+  datingForm.district = names[2] || ''
+  regionLegacy.value = ''
+  regionHint.value = ''
+}
 
 const privacy = reactive({ showAge: 1, showDistance: 1, showOnline: 1, discoverable: 1, momentVisibleDays: 0 })
 /** 已落库的开关值，仅用于写失败时把开关拨回去 */
@@ -488,15 +548,11 @@ const momentVisibleOptions = [
 
 const datingDirty = computed(() =>
   JSON.stringify(datingForm) !== JSON.stringify(datingOriginal)
-  || clearLocation.value
   || locationForm.lng !== null
   || locationForm.lat !== null
 )
 
 const locationSummary = computed(() => {
-  if (clearLocation.value) {
-    return '保存后将清除定位'
-  }
   if (!dating.hasLocation) {
     return '还没采集过定位，不影响城市筛选'
   }
@@ -532,9 +588,9 @@ function fillDating(vo) {
   datingForm.city = vo.city || ''
   datingForm.district = vo.district || ''
   Object.assign(datingOriginal, datingForm)
+  syncRegionValue()
   locationForm.lng = null
   locationForm.lat = null
-  clearLocation.value = false
   locatingError.value = ''
   privacy.showAge = Number(vo.showAge ?? 1)
   privacy.showDistance = Number(vo.showDistance ?? 1)
@@ -548,32 +604,85 @@ function resetDatingForm() {
   Object.assign(datingForm, datingOriginal)
   locationForm.lng = null
   locationForm.lat = null
-  clearLocation.value = false
+  syncRegionValue()
   locatingError.value = ''
 }
 
-/** 定位失败只在原地提示、不弹全局错误：不授权定位也能只用城市列做同城筛选 */
-function locateMe() {
-  locatingError.value = ''
-  if (!navigator.geolocation) {
-    locatingError.value = '当前浏览器不支持定位，可先只填城市'
+/**
+ * 坐标落库后只刷定位相关的几个字段。
+ *
+ * <p>不能直接走 {@code fillDating(vo)}：那会把用户正在改、还没保存的生日/城市一起按库里的旧值
+ * 覆盖回去，界面凭空吞掉几次输入。
+ */
+function applyLocationFields(vo) {
+  if (!vo) {
     return
   }
+  dating.hasLocation = vo.hasLocation === true
+  dating.locationFresh = vo.locationFresh !== false
+  dating.locationText = vo.locationText || ''
+  dating.profileScore = Number(vo.profileScore ?? 0)
+  dating.missingTips = vo.missingTips || []
+}
+
+/** 坐标单独落库：成功了就清掉待上报值，剩下的交友字段仍等用户自己点保存 */
+async function persistLocation() {
+  if (locationForm.lng === null || locationForm.lat === null) {
+    return
+  }
+  try {
+    applyLocationFields(await saveDatingProfile({ lng: locationForm.lng, lat: locationForm.lat }))
+    locationForm.lng = null
+    locationForm.lat = null
+    ElMessage.success('定位已保存，附近的人与资料卡距离即刻生效')
+  } catch {
+    // 提示已由 request.js 弹出；坐标留着，点「保存交友资料」时还会再带一次
+  }
+}
+
+async function clearMyLocation() {
+  try {
+    applyLocationFields(await saveDatingProfile({ clears: ['location'] }))
+    locationForm.lng = null
+    locationForm.lat = null
+    ElMessage.success('定位已清除，附近的人将不再按距离找你')
+  } catch {
+    // 提示已由 request.js 弹出
+  }
+}
+
+/**
+ * 坐标 → 三级并回填。
+ *
+ * <p>这一步可能要连公网取边界文件（内网与打包成 EXE/APK 时大概率取不到，那时只回填到省），
+ * 所以它不参与 locating 那把锁：坐标已经落库，行政区划只是顺手预填，再慢也不能把按钮占着。
+ */
+async function fillRegionByCoords(lng, lat) {
+  regionHint.value = '正在按坐标判断所在地区…'
+  const got = await resolveRegionByCoords(lng, lat)
+  if (!got.codes.length) {
+    regionHint.value = got.note || '这个坐标对不上行政区划字典，请手动选择所在地区'
+    return
+  }
+  onRegionChange(got.codes)
+  regionHint.value = got.note
+}
+
+/** 定位失败只在原地提示、不弹全局错误：不授权定位也能只用城市列做同城筛选 */
+async function locateMe() {
+  locatingError.value = ''
   locating.value = true
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      locationForm.lng = Number(pos.coords.longitude.toFixed(6))
-      locationForm.lat = Number(pos.coords.latitude.toFixed(6))
-      locating.value = false
-    },
-    (err) => {
-      locating.value = false
-      locatingError.value = err && err.code === 1
-        ? '定位权限被拒，可在浏览器地址栏里重新允许'
-        : '定位失败，请稍后重试或直接填写城市'
-    },
-    { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
-  )
+  const got = await requestLocation()
+  if (!got.ok) {
+    locating.value = false
+    locatingError.value = got.message
+    return
+  }
+  locationForm.lng = got.lng
+  locationForm.lat = got.lat
+  await persistLocation()
+  locating.value = false
+  fillRegionByCoords(got.lng, got.lat)
 }
 
 /**
@@ -615,9 +724,7 @@ function buildDatingPayload() {
       payload[key] = text(datingForm[key])
     }
   }
-  if (clearLocation.value) {
-    clears.push('location')
-  } else if (locationForm.lng !== null || locationForm.lat !== null) {
+  if (locationForm.lng !== null || locationForm.lat !== null) {
     if (locationForm.lng === null || locationForm.lat === null) {
       locatingError.value = '经纬度必须成对上报，请点「重新定位」重新采集'
       return null
@@ -698,6 +805,49 @@ const photoInputRef = ref(null)
 const photos = ref([])
 const photoUploading = ref(false)
 
+/**
+ * 原地拦重复上传。
+ *
+ * <p>后端的判重依据是 fileId（同一张图上传会秒传命中同一行 im_file），报 2026 是一条全局错误
+ * 弹框；而“同一张图再传一次”根本不需要往返一趟服务端才能发现。两道拦法：
+ * 一是本地记住“文件指纹 → fileId”，命中已在墙上的那张时连上传都不发；
+ * 二是上传完先拿 fileId 对一遍照片列表，命中就不再去调 addPhoto。
+ */
+const PHOTO_FP_TTL = 90 * 24 * 60 * 60 * 1000
+
+/** 指纹用 name+size+lastModified：三者全同几乎只会是同一个文件，比再算一遍 MD5 便宜得多 */
+function fingerprintOf(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`
+}
+
+/** 按用户隔离：同一台机器换一个账号，不能拿上一个号的相册指纹来判重 */
+function photoFpKey() {
+  return `photo.fp.${auth.userInfo?.id || 0}`
+}
+
+function photoFpMap() {
+  const map = getCache(photoFpKey())
+  return map && typeof map === 'object' ? map : {}
+}
+
+/** 长整型 ID 一律按字符串比：序列化配置一变就是一扇漏判的门 */
+function sameId(left, right) {
+  return left != null && right != null && String(left) === String(right)
+}
+
+function wallHasFile(fileId) {
+  return photos.value.some((item) => sameId(item.fileId, fileId))
+}
+
+function rememberPhotoFile(file, fileId) {
+  if (!fileId) {
+    return
+  }
+  const map = photoFpMap()
+  map[fingerprintOf(file)] = String(fileId)
+  setCache(photoFpKey(), map, PHOTO_FP_TTL)
+}
+
 function pickPhoto() {
   if (photoUploading.value || photos.value.length >= PHOTO_MAX) {
     return
@@ -717,6 +867,11 @@ async function onPhotoPicked(event) {
     ElMessage.error('请选择图片文件')
     return
   }
+  const knownFileId = photoFpMap()[fingerprintOf(file)]
+  if (knownFileId && wallHasFile(knownFileId)) {
+    ElMessage.warning('这张照片已经在照片墙里了，先删掉那张再传')
+    return
+  }
   photoUploading.value = true
   try {
     const guard = await guardImage(file, { scene: 'dating_photo' })
@@ -727,6 +882,12 @@ async function onPhotoPicked(event) {
     // 宽高只能在本地读（文件服务不解析图片内容），失败不拦上传，只是别人看到时会抖动一下
     const size = await readImageSize(file)
     const vo = await uploadFileSmart(file, 'dating_photo')
+    // ★ 同一张图秒传回来的是同一个 fileId，在这里就地拦下，不必让后端回 2026 再弹一个全局错误
+    if (wallHasFile(vo.fileId)) {
+      rememberPhotoFile(file, vo.fileId)
+      ElMessage.warning('这张照片已经在照片墙里了，先删掉那张再传')
+      return
+    }
     // machineChecked 用 skipped 取反：模型没真跑过时不能谎报「机器已审」，否则这张会直接对外可见
     photos.value = await addPhoto({
       fileId: vo.fileId,
@@ -734,6 +895,7 @@ async function onPhotoPicked(event) {
       width: size ? size.width : 0,
       height: size ? size.height : 0
     })
+    rememberPhotoFile(file, vo.fileId)
     ElMessage.success('照片已提交')
     refreshDatingScore()
   } catch {
@@ -1338,7 +1500,12 @@ onMounted(async () => {
 
 .profile__region {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.profile__region-picker {
   width: 100%;
 }
 

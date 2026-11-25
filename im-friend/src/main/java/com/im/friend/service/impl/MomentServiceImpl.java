@@ -1,6 +1,9 @@
 package com.im.friend.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.im.common.api.PageResult;
 import com.im.common.api.ResultCode;
 import com.im.common.domain.FileDTO;
 import com.im.common.domain.MessageDTO;
@@ -21,6 +24,7 @@ import com.im.common.spi.UserQuerySpi;
 import com.im.common.util.TextUtil;
 import com.im.friend.dto.req.MomentCommentRequest;
 import com.im.friend.dto.req.MomentMediaItem;
+import com.im.friend.dto.req.MomentMineQuery;
 import com.im.friend.dto.req.MomentPublishRequest;
 import com.im.friend.dto.req.MomentShareRequest;
 import com.im.friend.dto.vo.MomentCommentVO;
@@ -343,6 +347,77 @@ public class MomentServiceImpl implements MomentService {
         return render(picked, viewerId);
     }
 
+    /**
+     * 我的动态分页。
+     *
+     * <p>条件全部缺省时等价于「按发布时间倒序翻自己的历史」，而页码与 Feed 的游标不同，
+     * 所以下一行取的是 {@link Page}：MyBatis-Plus 把记录与总数都填回同一个对象。
+     *
+     * <p>不认识的条件值一律<b>当没传</b>而不是报错：这一屏是辅助查看，前端控件递来一个脏值
+     * （典型场景是版本没对齐、多了一个旧控件）时，空列表与 500 都不如「按无筛选返回」。
+     * 但 {@code sortBy} 不认识时只回默认列，<b>不拼列名</b>：那一串字符串一旦能直达 SQL
+     * 就是一个 ORDER BY 注入口。
+     */
+    @Override
+    public PageResult<MomentVO> minePage(Long userId, MomentMineQuery query) {
+        MomentMineQuery safe = query == null ? new MomentMineQuery() : query;
+        String keyword = safe.getKeyword() == null || safe.getKeyword().isBlank()
+                ? null : safe.getKeyword().trim();
+        Page<Moment> page = safe.toPage();
+        momentMapper.selectMinePage(page, userId, new MomentMapper.MineFilter(
+                knownKind(safe.getContentType()),
+                knownStatus(safe.getStatus()),
+                safe.getStartDate() == null ? null : safe.getStartDate().atStartOfDay(),
+                safe.getEndDate() == null ? null : safe.getEndDate().plusDays(1).atStartOfDay(),
+                keyword,
+                nonNegative(safe.getMinCommentCount()),
+                nonNegative(safe.getMinViewCount()),
+                nonNegative(safe.getMinLikeCount()),
+                orderColumnOf(safe.getSortBy()),
+                "asc".equalsIgnoreCase(safe.getSortOrder())));
+        List<Moment> rows = page.getRecords();
+        if (rows.isEmpty()) {
+            return PageResult.empty(page.getCurrent(), page.getSize());
+        }
+        return PageResult.of(render(rows, userId), page.getTotal(), page.getCurrent(), page.getSize());
+    }
+
+    /** 内容形态只认 1/2/3，其余（包括手改出来的脏值）当没筛。 */
+    private static Integer knownKind(Integer kind) {
+        return kind != null
+                && (kind == MomentMapper.KIND_IMAGE || kind == MomentMapper.KIND_VIDEO || kind == MomentMapper.KIND_TEXT)
+                ? kind : null;
+    }
+
+    /** 状态只认 1/2；不传就是不限，包括已下架的那几条。 */
+    private static Integer knownStatus(Integer status) {
+        return status != null && (status == Moment.STATUS_NORMAL || status == Moment.STATUS_OFFLINE) ? status : null;
+    }
+
+    /** 下限为负数等同于 0：一个负的阈值筛不出任何东西，不如归成「不筛」。 */
+    private static Integer nonNegative(Integer value) {
+        return value == null ? null : Math.max(value, 0);
+    }
+
+    /**
+     * 排序字典：<b>字典在服务层，列名在方法引用里</b>。
+     *
+     * <p>按评论数 / 浏览量 / 点赞数排时给的是这些列，它们包不到索引（一个用户的动态最多几百条，
+     * {@code idx_user_status_time} 先把自己那批行圈出来，剩下的 filesort 很便宜），
+     * 所以不值得为它们多建三个索引。
+     */
+    private static SFunction<Moment, ?> orderColumnOf(String sortBy) {
+        if (sortBy == null) {
+            return Moment::getCreateTime;
+        }
+        return switch (sortBy.trim().toLowerCase()) {
+            case "comment" -> Moment::getCommentCount;
+            case "view" -> Moment::getViewCount;
+            case "like" -> Moment::getLikeCount;
+            default -> Moment::getCreateTime;
+        };
+    }
+
     @Override
     public MomentVO detail(Long viewerId, Long momentId) {
         Moment moment = momentMapper.selectById(momentId);
@@ -357,6 +432,12 @@ public class MomentServiceImpl implements MomentService {
         }
         MomentVO vo = render(List.of(moment), viewerId).get(0);
         vo.setComments(buildComments(momentCommentMapper.selectByMomentId(momentId), viewerId));
+        if (!mine) {
+            // 浏览量只数「别人点开」：作者自己反复看自己那一条不算热度，否则刚发的动态
+            // 会在自己的「按浏览量」排序里永远排在最前。不判重复访客（口径同 im_article），
+            // 也不参与任何业务判定，所以失败就失败，不为它多开一个事务。
+            momentMapper.increaseViewCount(momentId);
+        }
         return vo;
     }
 
@@ -652,11 +733,12 @@ public class MomentServiceImpl implements MomentService {
             if (mine) {
                 // 可见范围与状态只对作者本人下发：别人看到「仅好友」这一标，
                 // 等于从侧面知道了「我是这个人的好友」（他能看到的可能是公开也可能是仅好友），
-                // 而这一信息对渲染没有任何用处
+                // 而这一信息对渲染没有任何用处。浏览量同一个口径：它是作者自己的运营数据。
                 vo.setVisibility(moment.getVisibility());
                 vo.setVisibilityDesc(MomentVisibility.descOf(moment.getVisibility()));
                 vo.setStatus(moment.getStatus());
                 vo.setStatusDesc(statusDesc(moment.getStatus()));
+                vo.setViewCount(moment.getViewCount() == null ? 0 : moment.getViewCount());
             }
             result.add(vo);
         }

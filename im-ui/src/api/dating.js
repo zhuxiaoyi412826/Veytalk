@@ -329,6 +329,47 @@ export function fetchUserMoments(userId, params = {}, options) {
 }
 
 /**
+ * 我的动态分页（作者视角），页码翻页而不是游标。
+ *
+ * 与 feed / user 两条读口的区别，都是为「我自己翻自己的历史」这个场景让的路：
+ * - **不过可见范围**、**不按「几天可见」设时间下界**，否则会以为自己发丢了；
+ * - **含已下架的行**（status=2），下架不等于删掉，作者有权看见它还在；
+ * - 每条带 `viewCount`（浏览量，详情页每打开一次 +1，非去重）。
+ *
+ * query 全部可省，空值不要拼进去（后端把空白串当条件处理）：
+ * - contentType 1 图文 / 2 视频 / 3 纯文字（按附件实际形态判定，不认提交时填的类型）；
+ * - status 1 正常 / 2 已下架；startDate / endDate 传 `YYYY-MM-DD`，闭区间，只给一端也行；
+ * - sortBy `time` / `comment` / `view` / `like`，sortOrder `asc` / `desc`（默认 time desc）；
+ * - minCommentCount / minViewCount / minLikeCount 是「不少于」的下限；keyword 匹配正文。
+ *
+ * 返回标准的 PageResult：{ records, total, current, size }。
+ */
+export function fetchMyMoments(params = {}) {
+  const query = {}
+  const keys = [
+    'current',
+    'size',
+    'contentType',
+    'status',
+    'startDate',
+    'endDate',
+    'sortBy',
+    'sortOrder',
+    'minCommentCount',
+    'minViewCount',
+    'minLikeCount',
+    'keyword'
+  ]
+  keys.forEach((key) => {
+    const value = params[key]
+    if (value !== null && value !== undefined && value !== '') {
+      query[key] = value
+    }
+  })
+  return http.get('/dating/moments/mine/page', { params: query })
+}
+
+/**
  * 动态详情，带全部评论（两层：一级在外，回复挂在 replies 里）。
  *
  * 从聊天卡片点进来也走这一条：可见性按**点开的人**重算，不在受众里或已超出作者的

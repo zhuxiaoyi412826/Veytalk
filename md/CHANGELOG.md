@@ -22,6 +22,12 @@
 
 ### 新增 Added
 
+- **★ 动态新增「我的动态」分页查询（时间 / 评论数 / 浏览量等条件）**。新增 `GET /api/dating/moments/mine/page`（`MomentMineQuery`：内容形态 1 图文 / 2 视频 / 3 纯文字、状态、发布日期间隔、评论数 / 浏览量 / 点赞数下限、正文关键字、`sortBy=time|comment|view|like` 加升降序）：作者视角刻意**不过可见范围、不设「几天可见」下界、含已下架的行**（否则人会以为自己发的动态丢了），形态判定用 `im_moment_media` 的 EXISTS 相关子查询，排序字段在服务层 switch 成 `SFunction` 方法引用（绝不让列名字符串直达 SQL）。`im_moment` 新增 `view_count`（详情页每打开一次 +1、非去重、作者自己看不计）。★ **存量库先应用 `sql/versions/V1.0.8__moment_view_count.sql`** 并换 jar + `npm run build`，否则浏览量恒为 0。涉及：`sql/{versions/V,U}1.0.8__moment_view_count.sql`、`sql/im_schema.sql`、`im-friend`（`MomentController` / `MomentService(+Impl)` / `MomentMapper.selectMinePage` / `MomentMineQuery` / `Moment` / `MomentVO`）、`im-ui`（`api/dating.js`、`components/MomentFeed.vue`、`components/MomentDetailDialog.vue`）。
+
+- **★ 交友地区改为省市县三级联动选择，定位坐标可自动回填三级**。`release/省市县三级联动数组.json` 经新增的 `scripts/gen-region-tree.mjs` 生成离线字典 `im-ui/src/data/{regionTree,regionRows,provinceCenters}.js`（35 省 / 393 市 / 3178 区县，**选择这件事不接地图服务也不走外网**，断内网也能选完）；`Profile.vue` 的城市输入换成 `el-cascader`（`checkStrictly` 允许只选到省或市、`filterable` 可输关键字筛），存进库的仍是三个名字而不是编号。新增 `utils/regionLookup.js` 做坐标→三级回填：先查随包的省外包框定省（零请求），再按需拉阿里云 DataV 边界用射线法判点在多边形内（结果缓存 30 天，base 可用 `VITE_REGION_BOUNDARY_BASE` 换自建镜像）——★ 取不到就只回填到能确定的那一档并说明原因，**绝不丢掉已拿到的坐标**，境外坐标也不硬猜一个国内地址。零 SQL 零后端（但 `regionRows` 体积不小，随 `im-ui` 重新构建才生效）。涉及：`scripts/gen-region-tree.mjs`、`im-ui/src/{data/regionTree.js,data/regionRows.js,data/provinceCenters.js,utils/regionLookup.js,views/Profile.vue}`。
+
+- **★ 后台新增「移动端」入口（手机客户端相关管理都收在这一条）**。侧栏多一条「移动端」（路由 `/mobile`，守卫新增 `meta.perms` 任一命中即放行）；三个页签 **Android 版本 / 视频分类 / 意见反馈** 画在顶栏与 admin·退出 同一行（`el-segmented`，与板块切换条同一策略：只在自己那一屏出现、`flex:none` 跟着文字自适应宽度、窄屏内部横滚），当前页签走 `?tab=` 所以能收藏能刷新。三个面板全是复用：`ReleasesView` 加 `lockPlatform`/`title` 两个 prop（只钉住筛选与下拉，启用互斥/上传/确认行为一字不改），`VideoCategoryPanel.vue` 从 `VideosView` 抽出两处共用（副带效果：分类列表改为点开页签才拉，不再在进页时就请求），`FeedbackView` 原样嵌入；页签表只留一份在 `utils/mobileTabs.js`，顶栏与内容区各算一次保证高亮与内容一致。★ **零新 SQL、零新权限点、后端一行未动**（页签各认既有的 `system:release` / `system:video:manage` / `system:feedback`），旧三屏菜单全部保留；手机客户端视频页标签栏的数据源就是 `system:video:manage` 那一份字典（与 Web 视频板块同一批行，`type=video`）。涉及：`im-admin-ui/src/{utils/mobileTabs.js,views/MobileView.vue,components/VideoCategoryPanel.vue,views/VideosView.vue,views/ReleasesView.vue,router/index.js,layout/AdminLayout.vue}`。
+
 - **后台顶栏那排板块分类只在板块页出现**（`AdminLayout.vue` 的 `el-segmented` 条件里加上文件里已有的 `isBoardPage`）。改前：只要管理员持有≥两个板块权，这一排就在全后台每个页面常驻，在用户管理 / 数据看板上摆一排「视频 / 音乐 / 小说」既不对应当前内容又让人以为随时可切走。改后：非板块页整排隐藏（不是置灰），侧栏那条合并入口、六个路由与 `meta.perm`、后端鉴权全未动。`npm run build` 通过，运行时表现待你在浏览器确认。涉及：`im-admin-ui/src/layout/AdminLayout.vue`。
 
 - **★ 交友域 13 项功能的手动验证清单**。新建 `md/交友功能手动验证清单.md`：按 f1~f13 逐项给出入口（`Profile.vue` 四块卡片、`Discover.vue` 六个 tab、`UserProfile.vue` 火花与破冰三档、后台三条菜单）、预期现象与上限数值（照片 9 / 标签 10 / 动态 9 图或 1 视频 / 破冰 8·6·5 / 火花档位 0-50-200-500-1000），附限流快测表、只读落库核对 SELECT、症状→原因速查表与结果登记栏。★ 提醒：双向用例（配对/访客/可见范围）需 alice + bob 两个窗口，改完角色权限必须清 `im:auth:perm:*` / `im:auth:role:*`。顺手修正 `数据库表解析.md` §17.11 把三个权限码写成 `dating:manage` / `dating:tag:manage` / `moment:manage` 的错（实际为 `system:dating:manage` / `system:moment:manage` / `system:tag:manage`，133 = 动态、134 = 标签）；`README详细开发指南.md` 台账状态由「待应用 1.0.7」改到已应用。涉及：`md/交友功能手动验证清单.md`、`md/数据库表解析.md`、`md/项目知识点总结.md`、`README详细开发指南.md`。
@@ -89,6 +95,16 @@
 
 
 ### 修复 Fixed
+
+- **修复首次定位「显示失败但其实已成功、必须再点一次」，并把坐标改为定位到即落库**。新增 `im-ui/src/utils/location.js` 统一三个入口（`Profile.vue` / `ChatWindow.vue` / `Discover.vue`）：★ 根因是 `navigator.geolocation` 的 `timeout` 从调用那一刻就开始计时，把「用户在授权弹窗上思考的那几十秒」也算进去了，原来的 8 秒几乎必然先超时——改成先用 Permissions API 查权限态，`granted` 才用 15s，还在 `prompt` 给 75s；非安全上下文（http 且非 localhost）直接给可直接照做的文案而不是笼统的「定位失败」（定位本身不发网络请求，看不到请求是正常的）。同时「资料卡不显示距离」与「附近的人用不了」也不是显示层的毛病：坐标以前只在表单里、不点「保存交友资料」就从不入库，后端拿不到你的位置就算不出距离——现在定位成功即 `saveDatingProfile({lng,lat})` 单独落库并回刷定位字段（不走整表回填，避免吞掉用户正在输入的生日与城市），而 `showDistance` 关着时在原地出警示。
+
+- **修复照片墙同一张图再传一次只在提交后吃一条后端错误**。`Profile.vue` 改为两道原地拦截：选文件时按 `utils/fileHash.js` 的指纹比对已有照片（命中就不上传，省一次带宽），上传完成后再按 `fileId` 比一次（秒传回来的仍是同一行）；命中直接原地提示「这张照片已经在照片墙里了」并从草稿里摘掉，不再逼人关掉弹框重选。
+
+- **修复动态里的视频播放窗口太小**。根因不是 `max-height: 420px` 一个数：`MomentFeed.vue` 与 `MomentDetailDialog.vue` 的 `gridClass` 只数图片，而一条动态的视频永远只有一张，于是落到「0 张图」分支拿到 `--triple`，一个附件在 480px 宽的三列网格里只分到三分之一。改后视频先判并拿到新的 `--video`（单列铺满，卡片 720px / 详情弹层撑宽到 880px），卡片右上角多一个「放大」按钮开满屏播放弹层（`destroy-on-close`，否则关掉还在背后跑声音）。
+
+- **★ 修复后台「动态管理」看不了视频**。`AdminMomentDTO` 新增 `mediaTypes`（与 `mediaUrls` **同序一一对应**，由同一批 `im_moment_media` 行按同一顺序拆出，绝不拆两次查询），`MomentAdminSpiImpl` 内部从「只收 url」改为收整行 `MomentMedia`；`MomentsView.vue` 列表、详情与「从评论跳到动态」三条路径都按类型分流渲染 `<video>`（以前无条件画 `<img>`，视频地址画进 img 就是一个碎图标），并统一 `fetchMedia(url, { timeout: 0 })`——几十 MB 的视频会被 axios 默认的 20s 掐断。
+
+- **修复后台 `ADMIN_PERMS` 名单过期，只持新权限点的账号被挡在后台外**。`stores/auth.js` 不再手抄名单，改判 `router/index.js` 新导出的 `ADMIN_SCREEN_PERMS`（从路由表 `meta.perm` / `meta.perms` 现取）。改前：那份名单停在 15 个点，只被授 `system:release` / `feedback` / `article:manage` / `schema:manage` / `agreement:manage` / `image|music|novel:manage` / `dating|moment|tag:manage` / `ai:guard` 其中任何一个的账号，登录时即被判「没有管理后台权限」，而路由守卫与 Controller 本来都放行。改后：进门判定 = 「至少有一屏你看得动」，新增一屏自动计入，第二处登记不存在了。★ 纯前端、零 SQL 零后端，覆盖 `im-admin-ui/dist` 即生效。涉及：`im-admin-ui/src/stores/auth.js`、`im-admin-ui/src/router/index.js`。
 
 - **修复文章板块上传封面 / 正文插图后图片静默不显示**：`ArticlePanel.vue` 的 `onCoverChange` / `onImageChange` 取的是 `vo.id`，而 `FileVO` 的主键字段叫 `fileId`，导致 `coverFileId` 恒为 undefined、插图 Markdown 拼出 `/api/file/download/undefined`（上传接口成功、图却丢了，不报任何错）。同仓其余调用点（`Live.vue` / `WorkFeed.vue`）一直用的是 `fileId`。★ 需重新构建 `im-ui` 并覆盖静态站才生效。涉及：`im-ui/src/components/ArticlePanel.vue`。
 

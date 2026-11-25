@@ -181,8 +181,11 @@
             :image-size="72"
             description="你还不能按距离找人"
           >
-            <div class="discover__empty-tip">先去交友资料里采集一次定位（超过 7 天会自动失效）。</div>
-            <el-button type="primary" @click="router.push({ name: 'profile' })">去定位</el-button>
+            <div class="discover__empty-tip">
+              定位一次就能用（超过 7 天会自动失效）。下面这一下会把坐标直接存进交友资料，不用再跑去资料页点保存。
+            </div>
+            <el-button type="primary" :loading="nearbyLocating" @click="locateForNearby">立即定位</el-button>
+            <el-button @click="router.push({ name: 'profile' })">去资料页</el-button>
           </el-empty>
           <el-empty v-else-if="!nearbyLoading && nearby.length === 0" :image-size="72" description="这个范围里暂时没人">
             <el-button :disabled="!canExpandRadius" @click="expandRadius">放大范围</el-button>
@@ -376,6 +379,7 @@ import {
   fetchNearby,
   fetchPreference,
   fetchProfileVisits,
+  saveDatingProfile,
   unmatchPair
 } from '@/api/dating'
 import { useConversationStore } from '@/stores/conversation'
@@ -383,6 +387,7 @@ import { useAuthStore } from '@/stores/auth'
 import { formatConvTime, genderText } from '@/utils/format'
 import { mediaUrl } from '@/utils/media'
 import { asId } from '@/utils/id'
+import { requestLocation } from '@/utils/location'
 
 /**
  * 交友页：滑动匹配 + 动态 + 附近的人 + 谁喜欢我 + 谁看过我 + 我的配对。
@@ -691,8 +696,10 @@ async function celebrate(result) {
 const nearby = ref([])
 const nearbyLoading = ref(false)
 const nearbyLoaded = ref(false)
-/** 区分「附近没人」与「你自己没定位」两种空态，后者的出路是去资料页而不是换半径 */
+/** 区分「附近没人」与「你自己没定位」两种空态，后者的出路是在这一格直接采一次定位 */
 const nearbyNoLocation = ref(false)
+/** 空态里那个「立即定位」的占用位：与拉列表的 loading 分开，两者同时转会把文案遮掉 */
+const nearbyLocating = ref(false)
 const nearbyRadius = ref(3000)
 /** 用户手动改过范围下拉框就不再拿偏好里的距离去抢他的选择 */
 const nearbyRadiusTouched = ref(false)
@@ -758,6 +765,34 @@ function expandRadius() {
   }
   nearbyRadius.value = next.value
   loadNearby()
+}
+
+/**
+ * 就在这一格补一次定位：坐标直接写进交友资料，写完重拉列表。
+ *
+ * <p>以前这里只有一个「去定位」把人赶去资料页，而那边点完「重新定位」还要再点一次
+ * 「保存交友资料」才落库 —— 回来自然还是空的，这就是「明明已经定位了却还不行」的来路。
+ */
+async function locateForNearby() {
+  if (nearbyLocating.value) {
+    return
+  }
+  nearbyLocating.value = true
+  const got = await requestLocation()
+  if (!got.ok) {
+    nearbyLocating.value = false
+    ElMessage.warning(got.message)
+    return
+  }
+  try {
+    await saveDatingProfile({ lng: got.lng, lat: got.lat })
+    await loadNearby()
+    ElMessage.success(nearby.value.length ? '定位已更新' : '定位已更新，但这个范围里还没人')
+  } catch {
+    // 提示已由 request.js 弹出
+  } finally {
+    nearbyLocating.value = false
+  }
 }
 
 async function likeNearby(item) {

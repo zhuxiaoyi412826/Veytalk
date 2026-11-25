@@ -105,6 +105,13 @@
           <el-icon><ChatDotSquare /></el-icon>
           <span>意见反馈</span>
         </el-menu-item>
+        <!-- 移动端：凡只服务手机客户端的管理动作都收在这一条，进去后顶部页签切换。
+             三个页签各自判权限（见 MobileView），所以菜单只问「一个有没有」；
+             一个都没有时整条隐藏，而不是让他点进去看一个空壳 -->
+        <el-menu-item v-if="hasMobileAny" index="mobile" :route="{ name: 'mobile' }">
+          <el-icon><Iphone /></el-icon>
+          <span>移动端</span>
+        </el-menu-item>
         <!-- SQL 版本管理：全后台唯一按钮直接改库结构的一页，永远放菜单最后一项 -->
         <el-menu-item v-if="auth.can('system:schema:manage')" index="schema" :route="{ name: 'schema' }">
           <el-icon><Tickets /></el-icon>
@@ -124,6 +131,16 @@
              又让人以为顶栏随时可以切走。不在板块页时整排隐藏，而不是置灰。
              它属于「去哪个屏」的导航，不是业务操作，所以不违反下面那条「顶栏不放业务操作」的约定。 -->
         <el-segmented v-if="isBoardPage && visibleBoards.length > 1" v-model="boardTab" :options="boardOptions" class="board-tabs" />
+        <!-- 移动端的三个页签同样放顶栏（与 admin / 退出 同一行），也只在 /mobile 那一屏出现：
+             与板块切换条同一条规矩——它是「看哪个屏」的导航，不是业务操作。
+             当前页签走地址栏的 ?tab= 而不是局部状态，这样收藏 /mobile?tab=feedback 能直接落到那一页，
+             刷新也不会因为组件重建而跳回第一个页签 -->
+        <el-segmented
+          v-if="isMobilePage && mobileOptions.length > 1"
+          v-model="mobileTab"
+          :options="mobileOptions"
+          class="mobile-tabs"
+        />
         <span class="narrow-hint muted">界面按宽屏设计，窄屏下表格会被挤压，建议在电脑上使用</span>
         <span class="grow" />
         <span class="muted">{{ auth.username }}</span>
@@ -143,6 +160,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AvatarCell from '@/components/AvatarCell.vue'
 import { useAuthStore } from '@/stores/auth'
+import { resolveMobileTab, visibleMobileTabs } from '@/utils/mobileTabs'
 
 /**
  * 后台外框：一条侧边菜单 + 一个顶栏 + 内容区。
@@ -191,6 +209,23 @@ const BOARDS = [
   { name: 'musics', label: '音乐', perm: 'system:music:manage' },
   { name: 'novels', label: '小说', perm: 'system:novel:manage' }
 ]
+
+// 移动端入口的显隐与顶栏页签：表只有一份（utils/mobileTabs），内容区 MobileView 吃的是同一份，
+// 于是不会出现「菜单里有、顶栏上没得、点进去渲染第三个」这种对不上号的状态
+const mobileTabs = computed(() => visibleMobileTabs((code) => auth.can(code)))
+const hasMobileAny = computed(() => mobileTabs.value.length > 0)
+const isMobilePage = computed(() => route.name === 'mobile')
+const mobileOptions = computed(() =>
+  mobileTabs.value.map((tab) => ({ label: tab.label, value: tab.value }))
+)
+const mobileTab = computed({
+  get: () => resolveMobileTab(mobileTabs.value, route.query.tab),
+  set: (value) => {
+    if (value && value !== mobileTab.value) {
+      router.push({ name: 'mobile', query: { ...route.query, tab: value } })
+    }
+  }
+})
 
 // 只列持有权的板块：给了图片权限的人不该在顶部看到一个点了就 1003 的小说标签
 const visibleBoards = computed(() => BOARDS.filter((b) => auth.can(b.perm)))
@@ -288,6 +323,14 @@ async function onLogout() {
 
 /* 顶栏板块切换：不参与伸缩，窄屏下自己横向滚，不把右侧的退出按钮顶出屏幕 */
 .board-tabs {
+  flex: none;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* 移动端页签与板块切换条同一条策略：宽度跟着选项文字走（el-segmented 默认就是内容宽），
+   靠 flex:none 不去抢中间那段空白，窄屏下自己横滚，不把右侧的 admin / 退出 顶出屏幕 */
+.mobile-tabs {
   flex: none;
   max-width: 100%;
   overflow-x: auto;

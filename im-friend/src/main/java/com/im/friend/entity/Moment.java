@@ -21,9 +21,10 @@ import java.io.Serial;
  * 有可见范围、只在熟人之间流转。合成一张表就得让「可见范围」这个只在动态上有意义的列
  * 挂在所有文章行上，而 {@code idx_status_time} 也会因为两种排序口径而失去意义。
  *
- * <p>{@link #likeCount} / {@link #commentCount} 是<b>冗余计数</b>，写时增减：Feed 一屏十几条，
+ * <p>{@link #likeCount} / {@link #commentCount} / {@link #viewCount} 是<b>冗余计数</b>，写时增减：Feed 一屏十几条，
  * 每条都 {@code COUNT(*)} 一次点赞与评论是两次全表扫。代价是它可能与附属表行数漂移，
  * 所以减法一律走 {@code GREATEST(x - 1, 0)}，漂移的后果只是「显示的数字少一」而不是负数。
+ * 浏览量没有附属表，它只是一个「详情页打开次数」的累加器，口径与 {@code im_article.view_count} 一致。
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -68,6 +69,9 @@ public class Moment extends BaseEntity {
 
     /** 含一级评论与其下的回复 */
     private Integer commentCount;
+
+    /** 详情页每次打开 +1，非去重（口径同 {@code im_article.view_count}）；作者本人打开不计数 */
+    private Integer viewCount;
 
     /** 状态：1 正常 2 已下架 */
     private Integer status;

@@ -19,6 +19,12 @@ import java.util.List;
  *
  * <p>{@link #mediaUrls} 只为缩略图预览服务，最多给前几张（常量在实现方）：九宫格全量
  * 与视频地址在详情里另取，列表页拉满会把一页 20 条变成几百个图片请求。
+ *
+ * <p>{@link #mediaTypes} 与 {@link #mediaUrls} <b>同序一一对应</b>，取值同
+ * {@code im_moment_media.type}（1 图片 2 视频）。它存在的唯一理由是：后台拿到一个
+ * {@code /api/file/download/xxx} 时无法从地址本身判出那是图还是视频，而没有这一列就只能
+ * 把视频地址当图片画——画出来是一个碎图标，「后台看不了动态视频」就是这么来的。
+ * 两个列表只能由同一批行按同一顺序生成，拆不成两次查询，否则一重排序就会把对应关系弄反。
  */
 @Data
 @Builder(toBuilder = true)
@@ -48,6 +54,9 @@ public class AdminMomentDTO implements Serializable {
 
     /** 预览用的前几个附件地址，见类注释 */
     private List<String> mediaUrls;
+
+    /** 附件类型，与 {@link #mediaUrls} 同序一一对应：1 图片 2 视频 */
+    private List<Integer> mediaTypes;
 
     private Integer likeCount;
 

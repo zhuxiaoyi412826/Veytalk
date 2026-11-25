@@ -1,44 +1,27 @@
 import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
+import { ADMIN_SCREEN_PERMS } from '@/router'
 import { getToken, setToken, clearToken } from '@/utils/token'
 import { resetRedirectFlag } from '@/api/request'
 
 /**
- * 与后端 ImConstants 里的后台权限点一一对应。
+ * 后台「能不能进门」这件事的判定依据。
  *
  * <b>system:manage</b> 是二期之前的伞权限，仍保留作向后兼容：持有它的人（admin）能进所有屏。
  * 二期把四个控制器拆到细粒度点后，一个审核员可能只持有 system:dashboard + system:report:handle
- * 而<b>没有</b>伞权限——所以「能不能进后台」不能再只认 system:manage，得认下面这一组。
- * 三期又加了四个点（视频/直播/监控/日志）：只持有新点的人也该让他进后台，
- * 而不是登录时就报「没有管理后台权限」。
- * 四期再加 system:config（系统配置）：同理，一个只被配了配置页权限的账号
- * 也应该能进后台，只是进去后只看到那一屏。
- * 四期第二批再加 system:remote（远程控制审计）：同一处理方式，不再重复解释。
- * 四期第四批再加 system:announcement（全服公告）：同理，但它是本批<b>唯一</b>的新权限点
- * （在线敏感词不另设点，仍走 system:config），所以跑完 SQL 必须清一次 im:auth:* 缓存。
- * 四期第五批再加四个点（钱包与礼物 / AI 面试记录 / 群组管理 / 消息管理）：这批一次加了四个，
- * 而不是前几批的一个——四屏各认一个点，谁被给了哪屏就只进得去那一屏，同样不能顺带。
- * 这些串是<b>唯一</b>一份：im-admin 那些 Controller 类上的 {@code @SaCheckPermission(...)} 才是真正的门，
- * 前端拿它只做「要不要显示某个菜单 / 要不要放行某个路由」这件事，藏掉按钮从来不是安全边界。
+ * 而<b>没有</b>伞权限——所以「能不能进后台」不能再只认 system:manage，得认一组细粒度点。
+ *
+ * ★ 这一组<b>不再在这里手抄</b>，改成从路由表派生（{@code ADMIN_SCREEN_PERMS}）。
+ * 以前每上一批新屏就要顺手往这份名单里加一次，而它从 system:release 上线起就再没被动过，
+ * 结果只持有发版 / 反馈 / 图片音乐小说 / 交友与动态 / 字典 / 法定文本 / SQL 版本这些点的账号
+ * 在登录这一步就被判「没有管理后台权限」——可他每一屏都点得动，纯粹是名单过期挡的路。
+ * 现在新增一屏就自动算进门理由，第二处登记不存在了，也就没有「忘了同步」这件事。
+ *
+ * 判定口径没变，仍是「至少有一屏你看得动」，而不是放宽成「登录了就放进来」：
+ * 这些串只是前端拿来决定「要不要显示某条菜单 / 要不要放行某个路由」，
+ * 真正的门一直是 im-admin 那些 Controller 类上的 {@code @SaCheckPermission(...)}，藏掉按钮从来不是安全边界。
  */
 const PERM_SYSTEM_MANAGE = 'system:manage'
-const ADMIN_PERMS = [
-  'system:dashboard',
-  'system:user:manage',
-  'system:report:handle',
-  'system:role:manage',
-  'system:video:manage',
-  'system:live:manage',
-  'system:monitor',
-  'system:log',
-  'system:config',
-  'system:remote',
-  'system:announcement',
-  'system:wallet',
-  'system:interview',
-  'system:group:manage',
-  'system:message:manage'
-]
 
 function permissionList(userInfo) {
   return userInfo?.permissions || []
@@ -51,8 +34,9 @@ function hasAdminPermission(userInfo) {
   if (permissions.includes('*') || permissions.includes(PERM_SYSTEM_MANAGE)) {
     return true
   }
-  // 只持有一个细粒度点（如只有看板的审核员）也该让他进后台，而不是挡在登录页外
-  return ADMIN_PERMS.some((perm) => permissions.includes(perm))
+  // 只持有一个细粒度点（如只有看板的审核员）也该让他进后台，而不是挡在登录页外。
+  // 这一组点从路由表取，不在这里维护名单（理由见文件顶部）
+  return ADMIN_SCREEN_PERMS.some((perm) => permissions.includes(perm))
 }
 
 /**
@@ -68,7 +52,8 @@ let loadPromise = null
  * 后台的登录态。
  *
  * 它和 im-ui 那份 stores/auth 最大的区别是<b>多了一道权限闸门</b>：
- * 聊天端只要登录成功就能进，后台还要求这个账号持有 system:manage。
+ * 聊天端只要登录成功就能进，后台还要求这个账号至少能进得去一屏
+ * （持有伞权限 system:manage、或任意一个细粒度权限点）。
  * 这道检查放在这里而不是只放在路由守卫里，是因为守卫只看得见 localStorage，
  * 而「有没有权限」这个事实只有 /auth/login 与 /auth/me 的响应里才有。
  *

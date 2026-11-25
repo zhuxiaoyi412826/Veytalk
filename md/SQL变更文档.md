@@ -23,6 +23,7 @@
   - [1.0.5 新增 SQL 版本管理两张表与权限点 128（自研 C 方案，2026-11-20）](#105-新增-sql-版本管理两张表与权限点-128自研-c-方案2026-11-20)
   - [1.0.6 直播三板块：三张作品表 + 分类字典加 type + 权限点 129~131（2026-11-22，补登记）](#106-直播三板块三张作品表--分类字典加-type--权限点-1291312026-11-22补登记)
   - [1.0.7 交友域一次建齐 16 张表 + 权限点 132~134（2026-11-22）](#107-交友域一次建齐-16-张表--权限点-1321342026-11-22)
+  - [1.0.8 im_moment 新增 view_count 列（我的动态按浏览量筛选，2026-11-25）](#108-im_moment-新增-view_count-列我的动态按浏览量筛选2026-11-25)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -332,6 +333,34 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 > **★ 生产应用顺序**：台账只应用「最小的待应用版本」，而 1.0.4 / 1.0.6 都没在页面点过「应用」，
 > 所以顺序必须是 1.0.4 → 1.0.6 → 1.0.7（前两个脚本幂等，对已手工 source 过的库只登记台账）。
 > 跑完 1.0.7 再清一次权限缓存。
+
+---
+
+### 1.0.8 im_moment 新增 view_count 列（我的动态按浏览量筛选，2026-11-25）
+
+- **背景**：`md/待开发功能.txt` 第 4 行要求「动态页面增加我的动态……查询条件时间、评论数量、浏览量等」。
+  库里只有 `like_count` / `comment_count` 两个冗余计数，**没有浏览量**（只有 `im_article.view_count` 有），
+  所以上不了筛选。本版只补这一列，口径沿用 `im_article.view_count`：**详情页每打开一次 +1、非去重**；
+  作者自己点开不计（否则自用账号能把自己的热度刷上去）。
+- **脚本文件**：`sql/versions/V1.0.8__moment_view_count.sql`（62 行）+ `U1.0.8__moment_view_count.sql`（67 行）
+- **★ 清除**：无（V 脚本只加一列，不删任何东西也不动种子）
+- **★ 增加**：`im_moment.view_count INT NOT NULL DEFAULT 0`（排在 `comment_count` 之后）；存量行由
+  `NOT NULL DEFAULT 0` 直接读到 0，**不需要回填 UPDATE**（浏览量从本版起才开始数，回填反而造假数据）
+- **★ 修改**：无（不动索引、不改任何既有列的类型与注释；浏览量要进 ORDER BY 与 `>` 筛选，但
+  这一列上只可能是「先看自己发的那几百条再筛再排」，已有的 `idx_user_status_time(user_id,status,create_time)`
+  足以把行数收到一个用户量级，**不为此单开索引**（`view_count` 选择性差，加了也选不中）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第十九节 `im_moment` 建表内第 **1656** 行（`comment_count` 与 `status` 之间）；
+  `im_data.sql` ☐ 不动——动态的演示数据 INSERT 用的是显式列清单，新列有默认值，不需要同步补字段
+- **需清的 Redis 键**：**无**（不涉及 `im_permission` / `im_role_permission` / `im_config`，动态列表本来就不缓存）
+- **回滚方式**：页面点 U1.0.8（第一步落 `im_moment_view_count_bak_20261125` 前像备份表（**只存 `id` 与 `view_count` 两列**），
+  再 `ALTER TABLE im_moment DROP COLUMN view_count`）。★ 回滚后「我的动态」按浏览量筛选会直接报错（列不存在），
+  必须同时退回旧 jar；备份表不受回滚影响，要恢回数值可 `UPDATE im_moment m JOIN im_moment_view_count_bak_20261125 b ON m.id=b.id SET m.view_count=b.view_count`（先手工重加列）
+- **验证 SQL**：`SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='im_db' AND TABLE_NAME='im_moment' AND COLUMN_NAME='view_count';` 期望 1 行（`int` / `NO` / `0`）；
+  `SELECT COUNT(*) FROM im_moment WHERE view_count IS NULL;` 期望 0；
+  打开一条别人的动态两次后 `SELECT id, view_count FROM im_moment WHERE id={那条};` 应看到 +2
+
+> **★ 不重跑旧版本**：本版**不回头改 `V1.0.7`**（那会改变已发布脚本的内容与 checksum，页面会拒绝应用）。
+> 全新库靠 `im_schema.sql` 直接带上新列，存量库靠本版增量，两边结构最终一致。
 
 ---
 

@@ -79,9 +79,11 @@ POST /api/auth/logout
    `captchaKey / captchaCode`（那两个字段只用于「发短信、发邮件之前的闸门」）。
    照抄聊天端那块验证码图只会多一个没人校验的输入框。
 3. **登录成功还要再验一道权限**：`userInfo.permissions` 里必须有 `*`、伞权限 `system:manage`，
-   或八个细粒度点（二期四点 + 三期四点 `system:video:manage` / `system:live:manage` /
-   `system:monitor` / `system:log`）里的**任意一个**（二期改的：低权限角色也该能进门，只是菜单少几项；
-   三期把这四个新点也加进了 `ADMIN_PERMS`，否则只持新点的账号会被挡在登录页外），
+   或**任意一个**细粒度点。★ 这一组点不再手抄名单，而是从路由表派生：`router/index.js` 导出的
+   `ADMIN_SCREEN_PERMS` 就是各屏 `meta.perm` / `meta.perms` 的合集，所以「能不能进门」等价于
+   「至少有一屏你看得动」（低权限角色也该能进门，只是菜单少几项）。以前这里是一份手抄的
+   `ADMIN_PERMS`，它从 `system:release` 上线起就再没被动过，导致只持有发版 / 反馈 / 文章 /
+   图片音乐小说 / 交友与动态 / 法定文本 / SQL 版本这些点的账号被误挡在登录页外。
    都没有就**不写 token**，直接停在登录页并提示「该账号没有管理后台权限」。
    如果先存 token 再清，中间那次跳转会让拦截器带着一个「有身份但没权限」的 token 去打管理接口，
    登录页上会闪出一串 `1003` 红条。

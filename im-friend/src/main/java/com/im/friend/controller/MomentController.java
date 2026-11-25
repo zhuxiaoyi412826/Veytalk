@@ -2,11 +2,13 @@ package com.im.friend.controller;
 
 import cn.dev33.satoken.annotation.SaCheckLogin;
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.security.ratelimit.RateLimit;
 import com.im.common.util.SecurityUtil;
 import com.im.friend.dto.req.MomentCommentRequest;
+import com.im.friend.dto.req.MomentMineQuery;
 import com.im.friend.dto.req.MomentPublishRequest;
 import com.im.friend.dto.req.MomentShareRequest;
 import com.im.friend.dto.vo.MomentCommentVO;
@@ -49,7 +51,8 @@ import java.util.List;
  * 让已经发出去的账号包多一次迁移，而 V1.0.7 也没为用户侧预留新权限位。
  *
  * <p>{@code GET /feed} 与 {@code GET /{momentId}} 不歧义：Spring 匹配时字面量路径优先于模板，
- * 不会被当成一个 momentId 为 "feed" 的详情请求。
+ * 不会被当成一个 momentId 为 "feed" 的详情请求。{@code GET /mine/page} 同一个道理
+ *（而且它多了一层路径，就算匹配优先级变了也撞不上）。
  *
  * <p>限流按动作频率定：发布 10 次/分钟（每次都落一行 + 最多九行附件），
  * 点赞与评论 60 次/分钟（人手连点的上限），读侧 60 次/分钟。
@@ -103,6 +106,18 @@ public class MomentController {
             @RequestParam(required = false) @Min(value = 1, message = "size 最小为 1")
             @Max(value = 30, message = "size 最大为 30") Integer size) {
         return Result.ok(momentService.userMoments(SecurityUtil.getUserId(), userId, cursorId, size));
+    }
+
+    @Operation(summary = "我的动态分页",
+            description = "作者视角翻自己发的动态，页码分页（与 /feed 的游标翻页不同口径）：可按内容形态"
+                    + "（1 图文 2 视频 3 纯文字）、状态（1 正常 2 已下架，不传含已下架）、发布日期间隔、"
+                    + "评论数 / 浏览量 / 点赞数下限与正文关键字筛选，排序字段 time / comment / view / like 加升降序；"
+                    + "★ 不过可见范围过滤，也不按「几天可见」设时间下界——作者永远能看到自己的全部，"
+                    + "包括「仅自己」与被后台下架的那几条；size 上限走统一分页上限 100")
+    @RateLimit(count = 60, seconds = 60, dimension = RateLimit.Dimension.USER, key = "dating.moment.mine")
+    @GetMapping("/mine/page")
+    public Result<PageResult<MomentVO>> minePage(MomentMineQuery query) {
+        return Result.ok(momentService.minePage(SecurityUtil.getUserId(), query));
     }
 
     @Operation(summary = "动态详情",

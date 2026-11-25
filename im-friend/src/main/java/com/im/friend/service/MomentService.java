@@ -1,7 +1,9 @@
 package com.im.friend.service;
 
+import com.im.common.api.PageResult;
 import com.im.common.domain.MomentCardDTO;
 import com.im.friend.dto.req.MomentCommentRequest;
+import com.im.friend.dto.req.MomentMineQuery;
 import com.im.friend.dto.req.MomentPublishRequest;
 import com.im.friend.dto.req.MomentShareRequest;
 import com.im.friend.dto.vo.MomentCommentVO;
@@ -19,6 +21,9 @@ import java.util.List;
  *
  * <p>列表一律用<b>游标</b>而不用页码：动态是随时在插入的流，第 2 页在第 1 页看完之后
  * 才去取，中间新发的那几条会把旧内容往下挤，页码分页的表现是「同一条动态看到两次」。
+ *
+ * <p>唯一的例外是 {@link #minePage}：那一屏要的是「作者翻自己的历史」，而且必须能按时间区间、
+ * 内容形态与热度筛选排序——筛选与游标拧在一起只会得到一个「下一页的第 3 条其实是上一页滤剩的」。
  */
 public interface MomentService {
 
@@ -52,6 +57,15 @@ public interface MomentService {
      * 我拉黑的人返回空列表而不是报错——主页空空如也就是拉黑该有的样子。
      */
     List<MomentVO> userMoments(Long viewerId, Long targetUserId, Long cursorId, Integer size);
+
+    /**
+     * 我的动态分页，带形态 / 状态 / 时间区间 / 评论数与浏览量下限 / 排序六类条件。
+     *
+     * <p>只查自己的行，因此<b>不跑可见范围那三道闸</b>：作者看自己的「仅自己」动态本来就该看得见，
+     * 而已下架的行也得留着（不然他会以为发出去就没了）。{@code viewCount} 与
+     * {@code visibility} / {@code status} 同一口径，只对作者本人下发。
+     */
+    PageResult<MomentVO> minePage(Long userId, MomentMineQuery query);
 
     /**
      * 一条动态的详情，带全部评论（两层）。

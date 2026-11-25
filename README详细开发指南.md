@@ -328,6 +328,8 @@ CREATE DATABASE im_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 当前库（开发机 `im_db`）的台账已到 **1.0.7**：`V1.0.7__dating_core.sql` 已应用（一次性建齐交友域 16 张表 + 权限点 132~134（`system:dating:manage` / `system:moment:manage` / `system:tag:manage`）+ 标签与破冰字典 + alice↔bob 演示数据，并回填存量账号的 `im_user_profile` 行）。交友这批功能（下文 §十九）**在该脚本应用之前一项都不可用**，且建表后需重启后端。逐项手验步骤见 `md/交友功能手动验证清单.md`。
 
+★ **本批新增 `V1.0.8__moment_view_count.sql`（给 `im_moment` 补 `view_count` 列）需在页面点一次「应用」并重启后端**：不点不会错，但「我的动态」按浏览量筛选与排序恒为 0（列不存在时 SQL 直接 1054，所以上层代码是跟着这个版本写的）。不涉及权限点，**不需要清 Redis 缓存**。台账条目见 `md/SQL变更文档.md` 的 1.0.8。
+
 ### 已有库的增量升级
 
 本项目没有引入 Flyway / Liquibase，1.0.4 之前的增量靠手工跑 `sql/migration_*.sql`（上面那节是现行做法，本节仅供存量库对账）。⚠️ **“幂等”要拆两句话说**：新建表的那几个里，只有 `migration_missing_tables.sql` 与本批的 `migration_agreement.sql` 用的是 `CREATE TABLE IF NOT EXISTS`（可重跑）；`migration_message_favorite.sql` 与 `migration_report.sql` 开头带 `DROP TABLE IF EXISTS`，**表里有数据后再跑一次等于清空**（当时那么写是因为表还不存在，为的是重跑不报错）。已部署的库升到当前代码：
@@ -700,7 +702,8 @@ token 通过请求头 `satoken: <JWT>` 传递（`is-read-header=true`，Cookie �
 | POST | `/moments` | 发布动态（正文与附件**至少有一样**；附件只传 `fileId`，最多 9 图或 1 视频且不混排；`visibility` 1 公开 / 2 仅好友 / 3 部分人可见 / 4 仅自己） |
 | GET | `/moments/feed?cursorId=&size=` | 我的动态流（受众 = 好友 ∪ 配对过的人 ∪ 自己 − 我拉黑的；**游标翻页**，「公开」也不是全站公开） |
 | GET | `/moments/user/{userId}?cursorId=&size=` | 某人主页上的动态（看自己**含已下架**并下发状态标；看别人按对方「几天可见」设时间下界；陌生人恒为空列表） |
-| GET | `/moments/{momentId}` | 动态详情（带两层评论；可见性按点开的人重算，看不到回 2050「这条动态不在了」） |
+| GET | `/moments/mine/page` | **我的动态分页（页码而不是游标）**：可按形态 `contentType` 1 图文 / 2 视频 / 3 纯文字、`status`、`startDate`/`endDate`、`minCommentCount`/`minViewCount`/`minLikeCount`、`keyword` 筛，`sortBy=time|comment|view|like` + `sortOrder`；★ 作者视角**不过可见范围、不设可见天数下界、含已下架行**，每条带 `viewCount` |
+| GET | `/moments/{momentId}` | 动态详情（带两层评论；可见性按点开的人重算，看不到回 2050「这条动态不在了」；**别人打开一次 `view_count` +1，作者自己看不计**） |
 | DELETE | `/moments/{momentId}` | 删除自己的动态（连带附件 / 评论 / 点赞 / 白名单，**一行 `im_file` 都不动**） |
 | POST | `/moments/{momentId}/like` | 点赞（重复点幂等，返回权威总数；另需 `friend:apply`） |
 | DELETE | `/moments/{momentId}/like` | 取消点赞（本来没赞过也返回当前总数，不报错） |
@@ -2362,6 +2365,26 @@ spring-boot-duomokuia/
 - **前端三屏都是页内 tab 而不是三个菜单项**：交友资料 + 照片审核、动态 + 评论队列、标签 + 破冰文案各自同屏（运营改文案时必然对着同一个标签想效果，拆两个菜单就是把一次编辑拆成两次跳转）；菜单按权限点一屏一条。
 - **受控地址必须走 `fetchMedia`**：动态附件与照片都是 `/api/file/download/...` 这类要登录头的地址，`<img src>` 带不了，必须转 blob；头像用已有的 `AvatarCell.vue` 封装，雪花 ID 不做 `Number()` 转换。
 - **★ 运行时验证已转为清单**：逐项点验的步骤与预期均落在 `md/交友功能手动验证清单.md`（含两个历史坑：① `V1.0.7` 未应用时三屏的每一次查库都会因表不存在而报错（不是「XX模块未装配」——那个业务错误只在模块真没装时出现）；② 应用了 SQL 但**没清 `im:auth:perm:*` / `im:auth:role:*`** 时，连 admin 点进去也是 1003，且交友整块接口 1007（权限缓存在 Redis 里 30 分钟，新写的三个点不在旧快照里））。其中一条必验的最小链路：给一个角色只勾选 133 → 该账号能看到「动态管理」但看不到另外两屏 → 下架一条带评论的动态 → 作者自己的主页也看不到而后台仍查到 `status=2` → 恢复 → Feed 里回来；再给 134 → 新增一个标签并绑一条标签开场白（type=3）→ 不绑标签就报错 → 删标签 → 绑它的开场白一并消失。
+
+### 14. 2026-11-25 修补批（`待开发功能.txt` L1~L5 六项）的口径
+
+★ **上线必做的三步**：后台「SQL 版本」页对 `V1.0.8` 点一次「应用」→ 重启后端（新接口 `/api/dating/moments/mine/page` 与响应里新加的 `mediaTypes` 字段不重启就没有）→ 用新构建覆盖 `im-ui/dist` 与 `im-admin-ui/dist`（前端覆盖即生效，但浏览器要 Ctrl+F5）。本批**不开新权限点，因此不需要清 Redis**。
+
+**① 地区三级联动用随包字典而不是接地图 API**：`release/省市县三级联动数组.json` 经 `scripts/gen-region-tree.mjs` 生成 `im-ui/src/data/{regionRows,regionTree,provinceCenters}.js`（扁平表 3624 行、建树只在内存做一次）。选这条路是因为内网与打包成 EXE/APK 时地图 key 与配额都不可靠，而行政区划一年也改不了一次。★ **存进库的仍是三个名字**（`province/city/district` 三列不改），编码只活在前端用来把输入框住成合法值，顺带兼容历史手填数据。`el-cascader` 开 `checkStrictly`（东莞、儋州、海南各县、兵团各市本就没有第三级）与 `filterable`（3178 个叶子逐个点是点不完的）。
+
+**①b 坐标回填分三步而不把全国边界打进包**：随包的省外包框先定省（零请求）→ 按需拉阿里云 DataV 省级边界判市 → 再拉市级边界判区县（射线法点在多边形，只取每个面的外环）。全国边界有几 MB，为「给一个输入框预填」撑大首屏不值得；base 可用 `VITE_REGION_BOUNDARY_BASE` 换自建镜像，结果按约 1km 网格缓存 30 天。★ 三条铁律：**每次失败只降级成「少填一档」，绝不丢掉已拿到的坐标**；判不准时退到最近中心点并打 `approximate` 让界面说明「这是推断的」（宁可标注也不假装精确）；境外坐标直说「不在国内范围内」而不硬猜一个国内地址（给境外用户回填一个国内地址比让他手选更坑）。
+
+**② 首次定位假失败的根因是超时口径而不是定位本身**：`navigator.geolocation` 的 `timeout` 从**调用那一刻**开始计，把用户在授权弹窗上思考的几十秒也算进去，原来那个 8 秒几乎必然先超时——于是界面报失败，而用户随后点了允许、位置其实到手了，再点一次因为权限已授出立刻成功。修法是先用 Permissions API 看权限态：**已授权给 15 秒，仍在询问中给 75 秒**（查不到权限态一律按「还在问」处理，宁可多等不要误报）。另外补了非安全上下文检测（`http://` 且非 localhost 时浏览器直接回 `PERMISSION_DENIED`，再重试也没用，得说明），以及★ **坐标当场单独落库**（不等「保存交友资料」）——这正是「附近的人已经定位了还是不行」的另一半。顺带一句：**「看不到网络请求」是预期**，定位走的是操作系统位置服务，网页只接一个回调。
+
+**③ 距离不显示 = 上面那半 + 开关关着却不解释**：要同时满足「双方都在 7 天内定位过」与「查看对象的 `show_distance=1`」。以前条件不满足时界面什么也不说，用户只能反复重定位；现在 `Profile.vue` 定位行下方直接出黄色提示指出是哪一个没达标（**要用户自己猜的原因等于没有原因**）。别人侧仍只给模糊档位，经纬度绝不下发给陌生人。照片墙判重**前移到前端**：同一张图第二次点就地提示、不发上传请求（省一次带宽也省一条待审记录），服务端那道 2026 照旧保留（跨设备与清缓存还得靠它兜）。
+
+**④ 视频窗口小不是 `max-height` 给小了**：★ 真正的原因是 `gridClass(media)` 只统计图片条数——一条动态的视频恒为 1 而图片为 0，于是落进 `--triple` 的三列网格，在 `max-width: 480px` 下视频只拿到约 158px。修法是「含视频」先判并返回专用的单列 `--video` 类，且 `MomentFeed.vue` 与 `MomentDetailDialog.vue` **两处同改（漏一处等于没修）**。再加卡片右上角的放大弹层（`min(1000px, 94vw)`，★ 必须 `destroy-on-close`，否则关掉后声音还在背后跑）与详情弹层按媒体类型动态撑宽（纯图文仍用 580px，不能一律撑宽）。
+
+**④ 「我的动态」分页与 Feed 是两个读口径**：作者视角刻意**不过可见范围、不设「几天可见」下界、含 `status=2` 已下架的行**（否则人以为自己发的动态丢了而去重发），`view_count` **只对作者本人下发**（沿用上一批「状态与可见范围只对作者下发」的口径：用不上的数就不多发）。分页用页码而不是游标（要回头查几年前那一条），而分页模式下必须关掉 `onScroll` 自动续页；两套口径共用的只有 `reload` 一个入口，`viewMode` 切换时用序号让「最后一次请求说了算」并丢弃跨界响应。排序字段**只在服务层 switch 成 `SFunction` 方法引用**（绝不让列名字符串直达 SQL）；`view_count` 沿用 `im_article` 的口径（详情页每打开一次 +1、不去重、`SET view_count = view_count + 1` 不做读改写），★ 作者自己点开不计。不开新索引：已有的 `idx_user_status_time(user_id,status,create_time)` 够了，`view_count` 选择性差，单开一个索引写放大而不受益。
+
+**⑤ 后台看不了视频 = 链路上把类型丢了**：SPI 原本只传 `List<String>` 地址，前端一律拿 `<img>` 去画视频地址，于是碎图标。修法是 `AdminMomentDTO.mediaTypes` 与 `mediaUrls` **同序一一对应**（由同一批 `im_moment_media` 行按同一顺序拆出，★ 绝不拆成两次查询，那会一错位就张冠李戴），前端 `zipMedia(urls, types, blobs)` **先配对后过滤**（先 filter 会让下标错位：第 2 条拉失败，第 3 条的类型就挂到了第 2 条上）。★ 三条渲染路径（列表缩略 / 详情弹层 / 评论队列点进动态）统一走同一个 `fillDetail`，只修列表不修第三条就是老毛病复发；视频取 blob 必须 `fetchMedia(url, { timeout: 0 })`，否则被默认 20 秒掐断。
+
+逐项手验步骤、只读核对 SQL 与症状→原因速查表见 `md/交友功能手动验证清单.md` **§18**（本批六项）与 §16（全局速查）。
 
 
 

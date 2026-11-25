@@ -1653,6 +1653,7 @@ CREATE TABLE `im_moment`
     `media_count`   INT           NOT NULL DEFAULT 0 COMMENT '媒体条数（冗余，卡片决定画一格还是九宫格）',
     `like_count`    INT           NOT NULL DEFAULT 0 COMMENT '点赞数（冗余计数，写时增减，与 im_moment_like 行数最终一致）',
     `comment_count` INT           NOT NULL DEFAULT 0 COMMENT '评论数（冗余计数，含一级与子回复）',
+    `view_count`    INT           NOT NULL DEFAULT 0 COMMENT '浏览量（详情页每次打开 +1，非去重）',
     `status`        TINYINT       NOT NULL DEFAULT 1 COMMENT '状态：1 正常 2 已下架（后台或本人下架，行保留）',
     `create_time`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发布时间（Feed 排序按它，三天可见也按它算）',
     `update_time`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',

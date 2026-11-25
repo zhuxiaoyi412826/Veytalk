@@ -102,7 +102,7 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
             momentIds.add(row.getId());
         }
         Map<Long, UserBriefDTO> users = userQuerySpi.listByIds(authorIds);
-        Map<Long, List<String>> preview = mediaPreview(momentIds);
+        Map<Long, List<MomentMedia>> preview = mediaPreview(momentIds);
         List<AdminMomentDTO> dtos = new ArrayList<>(rows.size());
         for (Moment row : rows) {
             dtos.add(toMomentDTO(row, users.get(row.getUserId()),
@@ -115,7 +115,7 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
     public AdminMomentDTO detail(Long momentId) {
         Moment moment = requireMoment(momentId);
         // 详情给全量附件：后台点开的就是这一条，截断只会逼人再去调一次用户端接口（而它按受众过滤）
-        return toMomentDTO(moment, briefOf(moment.getUserId()), mediaUrls(momentId, 0));
+        return toMomentDTO(moment, briefOf(moment.getUserId()), mediaRows(momentId, 0));
     }
 
     @Override
@@ -135,7 +135,7 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
         }
         log.info("[后台动态管理] operator={} 将动态 {} 置为{}: userId={}, reason={}",
                 operatorId, momentId, online ? "上架" : "下架", moment.getUserId(), trimToNull(reason));
-        return toMomentDTO(moment, briefOf(moment.getUserId()), mediaUrls(momentId, MEDIA_PREVIEW));
+        return toMomentDTO(moment, briefOf(moment.getUserId()), mediaRows(momentId, MEDIA_PREVIEW));
     }
 
     @Override
@@ -296,33 +296,38 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
         return hidden;
     }
 
-    /** 一批动态的附件预览，按发布时的顺序每人最多 {@link #MEDIA_PREVIEW} 个。 */
-    private Map<Long, List<String>> mediaPreview(Collection<Long> momentIds) {
+    /**
+     * 一批动态的附件预览，按发布时的顺序每人最多 {@link #MEDIA_PREVIEW} 个。
+     *
+     * <p>回的是整行而不是地址串：后台需要知道每一个附件是图还是视频，而这个信息只长在
+     * {@code im_moment_media.type} 上；先抽成 {@code List<String>} 再回头补类型，就只能多查一次。
+     */
+    private Map<Long, List<MomentMedia>> mediaPreview(Collection<Long> momentIds) {
         return mediaGrouped(momentIds, MEDIA_PREVIEW);
     }
 
-    /** 单条动态的附件地址；{@code limit} 传 0 表示不限量。 */
-    private List<String> mediaUrls(Long momentId, int limit) {
-        List<String> all = new ArrayList<>();
+    /** 单条动态的附件行；{@code limit} 传 0 表示不限量。 */
+    private List<MomentMedia> mediaRows(Long momentId, int limit) {
+        List<MomentMedia> all = new ArrayList<>();
         for (MomentMedia media : momentMediaMapper.selectByMomentId(momentId)) {
             if (limit > 0 && all.size() >= limit) {
                 break;
             }
-            all.add(media.getUrl());
+            all.add(media);
         }
         return all;
     }
 
-    private Map<Long, List<String>> mediaGrouped(Collection<Long> momentIds, int limit) {
+    private Map<Long, List<MomentMedia>> mediaGrouped(Collection<Long> momentIds, int limit) {
         if (momentIds == null || momentIds.isEmpty()) {
             return Map.of();
         }
-        Map<Long, List<String>> grouped = new LinkedHashMap<>();
+        Map<Long, List<MomentMedia>> grouped = new LinkedHashMap<>();
         // 行已由 Mapper 按 (moment_id, sort, id) 排好，这里只分组截断，不再排一次
         for (MomentMedia media : momentMediaMapper.selectByMomentIds(momentIds)) {
-            List<String> bucket = grouped.computeIfAbsent(media.getMomentId(), k -> new ArrayList<>());
+            List<MomentMedia> bucket = grouped.computeIfAbsent(media.getMomentId(), k -> new ArrayList<>());
             if (bucket.size() < limit) {
-                bucket.add(media.getUrl());
+                bucket.add(media);
             }
         }
         return grouped;
@@ -349,7 +354,17 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
         return ids;
     }
 
-    private AdminMomentDTO toMomentDTO(Moment moment, UserBriefDTO author, List<String> mediaUrls) {
+    /**
+     * 拼后台用的一行动态。附件行在这里才拆成「地址 + 类型」两个同序列：
+     * 只在拼 DTO 的这一处拆，两个列表就不可能因为中途多一次排序而错位。
+     */
+    private AdminMomentDTO toMomentDTO(Moment moment, UserBriefDTO author, List<MomentMedia> media) {
+        List<String> urls = new ArrayList<>(media.size());
+        List<Integer> types = new ArrayList<>(media.size());
+        for (MomentMedia row : media) {
+            urls.add(row.getUrl());
+            types.add(row.getType());
+        }
         return AdminMomentDTO.builder()
                 .id(moment.getId())
                 .userId(moment.getUserId())
@@ -357,7 +372,8 @@ public class MomentAdminSpiImpl implements AdminMomentSpi {
                 .content(moment.getContent())
                 .visibility(moment.getVisibility())
                 .mediaCount(moment.getMediaCount())
-                .mediaUrls(mediaUrls)
+                .mediaUrls(urls)
+                .mediaTypes(types)
                 .likeCount(moment.getLikeCount())
                 .commentCount(moment.getCommentCount())
                 .status(moment.getStatus())

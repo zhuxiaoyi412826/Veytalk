@@ -48,7 +48,19 @@
                 <div class="moment-cell">
                   <span class="content">{{ row.content || '（纯图动态）' }}</span>
                   <div v-if="(row.mediaUrls || []).length" class="media-row">
-                    <img v-for="url in previewOf(row)" :key="url" class="thumb" :src="url" alt="" />
+                    <template v-for="item in previewOf(row)" :key="item.src">
+                      <!-- 列表里就得能播：以前这里无条件画 <img>，视频地址画进 img 就是一个碎图标，
+                           后台「看不了视频」就是这么来的 -->
+                      <video
+                        v-if="item.type === MEDIA_VIDEO"
+                        class="thumb thumb--video"
+                        :src="item.src"
+                        controls
+                        preload="metadata"
+                        playsinline
+                      />
+                      <img v-else class="thumb" :src="item.src" alt="" />
+                    </template>
                     <span v-if="row.mediaCount > row.mediaUrls.length" class="muted">+{{ row.mediaCount - row.mediaUrls.length }}</span>
                   </div>
                 </div>
@@ -207,8 +219,9 @@
       </el-tab-pane>
     </el-tabs>
 
-    <!-- 详情弹框：列表只给前 3 张缩略与截断正文，这里换成全文与全部媒体 -->
-    <el-dialog v-model="detail.visible" title="动态详情" width="640px">
+    <!-- 详情弹框：列表只给前 3 个缩略与截断正文，这里换成全文与全部媒体 -->
+    <!-- 带视频就把弹层撑宽：一个 16:9 的视频挤在 640px 里，字幕与人脸都看不清 -->
+    <el-dialog v-model="detail.visible" title="动态详情" :width="detailVideo ? '880px' : '640px'">
       <div v-loading="detail.loading">
         <div class="detail-head">
           <span>{{ detail.row?.userNickname || '已注销用户' }}</span>
@@ -221,7 +234,17 @@
         </div>
         <p class="detail-content">{{ detail.row?.content || '（纯图动态）' }}</p>
         <div class="detail-media">
-          <img v-for="url in detail.media" :key="url" class="detail-img" :src="url" alt="" />
+          <template v-for="item in detail.media" :key="item.src">
+            <video
+              v-if="item.type === MEDIA_VIDEO"
+              class="detail-video"
+              :src="item.src"
+              controls
+              preload="metadata"
+              playsinline
+            />
+            <img v-else class="detail-img" :src="item.src" alt="" />
+          </template>
         </div>
         <p v-if="detail.row && !detail.media.length" class="muted">这条动态没有媒体</p>
       </div>
@@ -230,7 +253,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteMoment,
@@ -257,6 +280,8 @@ import { formatDateTime, formatListTime } from '@/utils/format'
  * 这两份是库表结构的一部分，加值必然要改 DDL 与枚举，届时这一屏也躲不过一次改动。
  */
 const VISIBILITY_TEXT = { 1: '公开', 2: '仅好友', 3: '部分人可见', 4: '仅自己' }
+/** im_moment_media.type：1 图片 / 2 视频，与用户端同一套数字 */
+const MEDIA_VIDEO = 2
 
 function visibilityText(code) {
   return VISIBILITY_TEXT[code] || '未知'
@@ -302,14 +327,27 @@ function reload() {
 }
 
 /**
- * 缩略图：后端 mediaUrls 只给前 3 个受控地址，<img src> 带不了登录头，
- * 必须经 fetchMedia 换成 blob（与视频封面同一套路，缓存与合流都在 fetchMedia 里）。
- * 键用动态 ID，值是已换好的地址数组；未就绪时画不出图，回来后再填。
+ * 缩略图：后端 mediaUrls 只给前 3 个受控地址，它们与 mediaTypes 同序一一对应；
+ * <img> 与 <video> 的 src 都带不了登录头，必须经 fetchMedia 换成 blob（与视频封面同一套路），
+ * 而视频动辄几十 MB，timeout 给 0 不让默认的 20s 掐断。
+ * 键用动态 ID，值是 { src, type } 数组；未就绪时画不出东西，回来后再填。
  */
 const previews = reactive({})
 
 function previewOf(row) {
   return previews[row.id] || []
+}
+
+/**
+ * 把地址与类型成对交给模板。
+ *
+ * 不能只交地址：丢掉类型就丢掉「该用 img 还是 video」，而先过滤失败的地址再配类型
+ * 会让下标错位（第 2 条拉失败，第 3 条的类型就挂到了第 2 条上），所以先配后筛。
+ */
+function zipMedia(urls, types, blobs) {
+  return (urls || [])
+    .map((url, index) => ({ src: blobs[index], type: Number(types && types[index]) || 1 }))
+    .filter((item) => item.src)
 }
 
 function loadPreviews() {
@@ -318,13 +356,15 @@ function loadPreviews() {
       return
     }
     previews[row.id] = []
-    Promise.all(row.mediaUrls.map((url) => fetchMedia(url))).then((list) => {
-      previews[row.id] = list.filter(Boolean)
+    Promise.all(row.mediaUrls.map((url) => fetchMedia(url, { timeout: 0 }))).then((blobs) => {
+      previews[row.id] = zipMedia(row.mediaUrls, row.mediaTypes, blobs)
     })
   })
 }
 
 const detail = reactive({ visible: false, loading: false, row: null, media: [] })
+/** 有视频就把详情弹层撑宽，纯图动态不给多余宽度 */
+const detailVideo = computed(() => detail.media.some((item) => item.type === MEDIA_VIDEO))
 let detailSeq = 0
 
 async function openDetail(row) {
@@ -339,17 +379,27 @@ async function openDetail(row) {
       return
     }
     detail.row = full
-    // 全量媒体同样要过 fetchMedia：详情里的图片比列表多，一条九图动态就是九个请求，串行等会白屏
-    const list = await Promise.all((full.mediaUrls || []).map((url) => fetchMedia(url)))
-    if (seq === detailSeq) {
-      detail.media = list.filter(Boolean)
-    }
+    await fillDetail(full, seq)
   } catch {
     // 同上
   } finally {
     if (seq === detailSeq) {
       detail.loading = false
     }
+  }
+}
+
+/**
+ * 把详情里的媒体换上 blob 地址。
+ *
+ * 列表页直接点开与从评论跳过来两条路都要走这一步，抽出来是为了两边不会各自长出一套
+ * 「只收地址不收类型」的写法 —— 那样视频在一条路上能播、在另一条路上是个碎图标。
+ */
+async function fillDetail(full, seq) {
+  detail.row = full
+  const blobs = await Promise.all((full.mediaUrls || []).map((url) => fetchMedia(url, { timeout: 0 })))
+  if (seq === detailSeq) {
+    detail.media = zipMedia(full.mediaUrls, full.mediaTypes, blobs)
   }
 }
 
@@ -437,17 +487,19 @@ function reloadComments() {
  * 列表页没有「按动态 ID 筛」的输入框（后端只认 userId / keyword），
  * 所以这里不去改列表的筛选条件再切页签——那样点一下会被当作「刷新列表」而看不出发生了什么。*/
 function jumpToMoment(momentId) {
+  const seq = ++detailSeq
+  detail.visible = true
+  detail.loading = true
+  detail.row = null
+  detail.media = []
   fetchMomentDetail(momentId)
-    .then((full) => {
-      detail.row = full
-      detail.media = []
-      detail.visible = true
-      return Promise.all((full.mediaUrls || []).map((url) => fetchMedia(url)))
-    })
-    .then((list) => {
-      detail.media = list.filter(Boolean)
-    })
+    .then((full) => fillDetail(full, seq))
     .catch(() => {})
+    .finally(() => {
+      if (seq === detailSeq) {
+        detail.loading = false
+      }
+    })
 }
 
 function confirmCommentOffline(row) {
@@ -540,7 +592,9 @@ async function confirmCommentDelete(row) {
 
 .media-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
+  align-items: flex-start;
 }
 
 .thumb {
@@ -549,6 +603,14 @@ async function confirmCommentDelete(row) {
   height: 46px;
   object-fit: cover;
   width: 62px;
+}
+
+/* 视频缩略给到能看清人脸的尺寸：46px 高的播放器上连进度条都点不到 */
+.thumb--video {
+  background: #000;
+  height: 120px;
+  width: 180px;
+  object-fit: contain;
 }
 
 .user-text {
@@ -587,5 +649,14 @@ async function confirmCommentDelete(row) {
   height: 150px;
   object-fit: cover;
   width: 200px;
+}
+
+/* 详情里的视频按弹层宽度铺满，高度封顶在视口内，不出双层滚动条 */
+.detail-video {
+  background: #000;
+  border-radius: 4px;
+  display: block;
+  max-height: 62vh;
+  width: 100%;
 }
 </style>

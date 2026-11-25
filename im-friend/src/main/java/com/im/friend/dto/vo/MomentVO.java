@@ -62,6 +62,9 @@ public class MomentVO implements Serializable {
     @Schema(description = "评论数（含回复），权威总数")
     private Integer commentCount;
 
+    @Schema(description = "浏览量（详情页每打开一次 +1，非去重）；只对作者本人下发，与可见范围同一口径")
+    private Integer viewCount;
+
     @Schema(description = "我是否赞过这一条")
     private Boolean liked;
 

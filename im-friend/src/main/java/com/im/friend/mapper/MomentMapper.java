@@ -1,8 +1,12 @@
 package com.im.friend.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.im.friend.entity.Moment;
+import com.im.friend.entity.MomentMedia;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Update;
@@ -20,6 +24,10 @@ import java.util.List;
  * 用它排序等价于按发布时间排序，而游标只需要一列。用 {@code (create_time, id)} 复合游标要写
  * {@code (create_time &lt; ? OR (create_time = ? AND id &lt; ?))}，多出来的那半句在
  * {@code idx_status_time} 上用不上索引；而「同一秒发了两条」在单列游标下天然有确定顺序。
+ *
+ * <p>唯一的例外是 {@link #selectMinePage}：那是作者按「评论数 / 浏览量」排自己的动态，
+ * 排序列不是 {@code id}，所以它额外补一段 {@code ORDER BY id DESC} 做同值时的确定次序，
+ * 否则同一条赞数的两条动态在翻页之间会互换位置，出现「第一页末尾和第二页开头是同一条」。
  */
 @Mapper
 public interface MomentMapper extends BaseMapper<Moment> {
@@ -78,6 +86,85 @@ public interface MomentMapper extends BaseMapper<Moment> {
                 .last("LIMIT " + safeLimit));
     }
 
+    /**
+     * 「我的动态」分页的过滤条件（不含作者与分页本身）。
+     *
+     * <p>收成一个不可变值对象而不是十一个方法参数：这十个条件里大半可以缺省，
+     * 列在签名里读不出哪个能传 {@code null}，而调用点也无法对齐。
+     *
+     * @param contentType     内容形态：{@code null} 不限，1 图文 2 视频 3 纯文字
+     * @param status          状态过滤，{@code null} 不限（作者要能看到自己已下架的那几条）
+     * @param startTime       发布时间下界（含），{@code null} 不限
+     * @param endTime         发布时间上界（不含，由服务层把「结束日期 + 1 天」算好传进来）
+     * @param keyword         正文关键字，{@code null} / 空白不限
+     * @param minCommentCount 评论数下限（含），{@code null} 不限
+     * @param minViewCount    浏览量下限（含），{@code null} 不限
+     * @param minLikeCount    点赞数下限（含），{@code null} 不限
+     * @param orderColumn     排序列，由服务层按 sortBy 映射成方法引用（不接受列名字符串，那样能被注进来）
+     * @param asc             升序还是倒序
+     */
+    record MineFilter(Integer contentType, Integer status, LocalDateTime startTime, LocalDateTime endTime,
+                      String keyword, Integer minCommentCount, Integer minViewCount, Integer minLikeCount,
+                      SFunction<Moment, ?> orderColumn, boolean asc) {
+    }
+
+    /** 内容形态：图文（有附件且不含视频） */
+    int KIND_IMAGE = 1;
+    /** 内容形态：视频 */
+    int KIND_VIDEO = 2;
+    /** 内容形态：纯文字（无附件） */
+    int KIND_TEXT = 3;
+
+    /** 判定「这一条带不带视频行」的相关子查询，与 {@link #KIND_VIDEO} / {@link #KIND_IMAGE} 配套。 */
+    String HAS_VIDEO_EXISTS = "select 1 from im_moment_media mm where mm.moment_id = im_moment.id"
+            + " and mm.type = " + MomentMedia.TYPE_VIDEO + " and mm.deleted = 0";
+
+    /**
+     * 我发的动态分页，带形态 / 状态 / 时间区间 / 热度下限四个维度的筛选。
+     *
+     * <p>与 {@link #selectFeedCandidates} 最大的区别是<b>这里不跑可见范围过滤</b>：作者看自己的
+     * 列表不需要判断「谁能看到」，而一旦套上那套闸，「仅自己」的那几条就会从页面上消失，
+     * 作者反而以为自己发丢了。{@code status} 也不默认夹成正常：已下架的行要留在结果里，
+     * 否则这一屏就成了「我发了十条但只看得见八条」。
+     *
+     * <p>形态不用子表 join 而是 EXISTS：一条动态要么≤ 9 图要么 1 视频（服务层保证不混排），
+     * 所以「是不是视频」是一个存在性判定而不是计数。纯文字直接读冗余列 {@code media_count}，
+     * 不碰子表。
+     */
+    default IPage<Moment> selectMinePage(IPage<Moment> page, Long userId, MineFilter filter) {
+        LambdaQueryWrapper<Moment> wrapper = Wrappers.<Moment>lambdaQuery()
+                .eq(Moment::getUserId, userId)
+                .eq(filter.status() != null, Moment::getStatus, filter.status())
+                .ge(filter.startTime() != null, Moment::getCreateTime, filter.startTime())
+                .lt(filter.endTime() != null, Moment::getCreateTime, filter.endTime())
+                .gt(filter.minCommentCount() != null, Moment::getCommentCount, zeroIfNull(filter.minCommentCount()) - 1)
+                .gt(filter.minViewCount() != null, Moment::getViewCount, zeroIfNull(filter.minViewCount()) - 1)
+                .gt(filter.minLikeCount() != null, Moment::getLikeCount, zeroIfNull(filter.minLikeCount()) - 1)
+                .like(filter.keyword() != null, Moment::getContent, filter.keyword());
+        Integer kind = filter.contentType();
+        if (kind != null && kind == KIND_VIDEO) {
+            wrapper.exists(HAS_VIDEO_EXISTS);
+        } else if (kind != null && kind == KIND_IMAGE) {
+            wrapper.gt(Moment::getMediaCount, 0).notExists(HAS_VIDEO_EXISTS);
+        } else if (kind != null && kind == KIND_TEXT) {
+            wrapper.le(Moment::getMediaCount, 0);
+        }
+        if (filter.asc()) {
+            wrapper.orderByAsc(filter.orderColumn());
+        } else {
+            wrapper.orderByDesc(filter.orderColumn());
+        }
+        return selectPage(page, wrapper.orderByDesc(Moment::getId));
+    }
+
+    /**
+     * 「下限（含）」写成 {@code > min - 1}而不是 {@code >= min}：语义相同，但后者在
+     * MyBatis-Plus 的条件重载里要传三参，而三参版本跟 {@code gt}/{@code lt} 混排时极易写歪。
+     */
+    private static int zeroIfNull(Integer value) {
+        return value == null ? 0 : value;
+    }
+
     /** 一条状态正常的动态；已下架或已删除返回 {@code null}（调用方一律报「不在了」）。 */
     default Moment selectNormalById(Long id) {
         if (id == null) {
@@ -130,6 +217,22 @@ public interface MomentMapper extends BaseMapper<Moment> {
               AND deleted = 0
             """)
     int adjustCommentCount(@Param("momentId") Long momentId, @Param("delta") int delta);
+
+    /**
+     * 浏览量 +1（详情页打开时，只对「点开的人不是作者」调）。
+     *
+     * <p>不做读改写：两个受众同时点开同一条动态，读改写会丢一次增量。这一列不进任何
+     * 业务判定（只用于展示与排序），丢一两下只是排序里换个位置，所以不加锁也不建计数表。
+     *
+     * <p>★ 逻辑删除过滤在这里要手写在条件里（自定义 SQL 拿不到 MyBatis-Plus 的自动拼接）。
+     */
+    @Update("""
+            UPDATE im_moment
+            SET view_count = view_count + 1
+            WHERE id = #{momentId}
+              AND deleted = 0
+            """)
+    int increaseViewCount(@Param("momentId") Long momentId);
 
     /**
      * 带状态条件的上下架，兼作乐观锁。

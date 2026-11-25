@@ -7,8 +7,75 @@
         <span>发动态</span>
       </el-button>
       <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
+      <!-- 两个入口不是一回事：动态流是好友与配对对象的游标无限流，「我的动态」是按条件分页翻自己的历史（含已下架的那几条） -->
+      <el-radio-group v-if="isMineFeed" v-model="viewMode" size="small" @change="switchView">
+        <el-radio-button value="feed">动态流</el-radio-button>
+        <el-radio-button value="mine">我的动态</el-radio-button>
+      </el-radio-group>
       <!-- 「公开」这个词最容易被读成全站公开，所以在工具条上就把受众说清，不等用户刷不到人再来问 -->
-      <span class="peerbar__hint">只显示你的好友与配对对象的动态，「公开」不是全站公开</span>
+      <span class="peerbar__hint">{{ viewHint }}</span>
+    </div>
+
+    <!-- 筛选栏只属于「我的动态」：动态流是滚到底自动续页的，那里没有「第几页」可筛 -->
+    <div v-if="isMineView" class="minebar">
+      <el-select v-model="filters.contentType" size="small" placeholder="全部形态" clearable @change="applyMineFilter">
+        <el-option v-for="opt in KIND_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+      </el-select>
+      <el-select v-model="filters.status" size="small" placeholder="全部状态" clearable @change="applyMineFilter">
+        <el-option label="正常" :value="1" />
+        <el-option label="已下架" :value="STATUS_OFFLINE" />
+      </el-select>
+      <el-date-picker
+        v-model="filters.dates"
+        type="daterange"
+        size="small"
+        class="minebar__date"
+        value-format="YYYY-MM-DD"
+        format="YYYY-MM-DD"
+        range-separator="至"
+        start-placeholder="开始日期"
+        end-placeholder="结束日期"
+        :shortcuts="DATE_SHORTCUTS"
+        clearable
+        @change="applyMineFilter"
+      />
+      <el-input
+        v-model="filters.keyword"
+        size="small"
+        class="minebar__kw"
+        placeholder="搜正文关键字"
+        clearable
+        :prefix-icon="Search"
+        @keyup.enter="applyMineFilter"
+        @clear="applyMineFilter"
+      />
+      <el-input-number
+        v-model="filters.minCommentCount"
+        size="small"
+        class="minebar__num"
+        :min="0"
+        :max="999999"
+        :controls="false"
+        :value-on-clear="null"
+        placeholder="评论≥"
+        @change="applyMineFilter"
+      />
+      <el-input-number
+        v-model="filters.minViewCount"
+        size="small"
+        class="minebar__num"
+        :min="0"
+        :max="999999"
+        :controls="false"
+        :value-on-clear="null"
+        placeholder="浏览≥"
+        @change="applyMineFilter"
+      />
+      <el-select v-model="filters.sortBy" size="small" placeholder="排序" @change="applyMineFilter">
+        <el-option v-for="opt in SORT_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+      </el-select>
+      <el-button size="small" @click="toggleSortOrder">{{ filters.sortOrder === 'asc' ? '升序' : '降序' }}</el-button>
+      <el-button size="small" text @click="resetMineFilter">重置</el-button>
     </div>
 
     <div ref="bodyRef" v-loading="loading" class="moment-feed__body im-scroll" @scroll="onScroll">
@@ -55,13 +122,20 @@
         <!-- 九宫格：一张时给大图，多张时按格数自适应；视频恒为一条（后端不允许图视频混排） -->
         <div v-if="(item.media || []).length" class="moment__media" :class="gridClass(item.media)">
           <template v-for="m in item.media" :key="asId(m.mediaId)">
-            <video
-              v-if="m.type === MEDIA_VIDEO"
-              class="moment__video"
-              :src="mediaUrl(m.url)"
-              controls
-              preload="metadata"
-            />
+            <!-- 视频单独一层：竖屏视频挤在九宫格里根本看不清，给一个占满整行的大窗口外加放大弹层 -->
+            <div v-if="m.type === MEDIA_VIDEO" class="moment__videobox">
+              <video class="moment__video" :src="mediaUrl(m.url)" controls preload="metadata" />
+              <el-button
+                class="moment__video-zoom"
+                size="small"
+                type="primary"
+                circle
+                title="放大播放"
+                @click="openVideo(m)"
+              >
+                <el-icon><FullScreen /></el-icon>
+              </el-button>
+            </div>
             <el-image
               v-else
               class="moment__img"
@@ -98,6 +172,10 @@
             <el-icon><ChatDotRound /></el-icon>
             <span>评论 {{ item.commentCount || 0 }}</span>
           </el-button>
+          <!-- 浏览量只对作者下发（别人看到自己的动态被多少人点开过就是泄底），所以这里判的是「字段在不在」 -->
+          <span v-if="item.viewCount !== null && item.viewCount !== undefined" class="moment__count">
+            浏览 {{ item.viewCount || 0 }}
+          </span>
           <el-button v-if="canShare" link @click="openShare(item)">
             <el-icon><Promotion /></el-icon>
             <span>转发</span>
@@ -116,18 +194,30 @@
         </div>
       </article>
 
-      <el-empty
-        v-if="!loading && list.length === 0"
-        :image-size="72"
-        :description="isMineFeed ? '还没有动态' : 'TA 还没有可见的动态'"
-      >
-        <div v-if="isMineFeed" class="moment-feed__tip">
+      <el-empty v-if="!loading && list.length === 0" :image-size="72" :description="emptyText">
+        <div v-if="isMineFeed && !isMineView" class="moment-feed__tip">
           发一条动态，你的好友与配对对象就能在这里看到；也可以在资料页把「动态可见天数」调宽。
         </div>
-        <el-button v-if="isMineFeed" type="primary" plain @click="openPublish">发第一条</el-button>
+        <el-button v-if="isMineFeed && !isMineView" type="primary" plain @click="openPublish">发第一条</el-button>
+        <!-- 分页模式下的空列表有两种意思：真的一条没有，与有但都被条件筛掉了，后者得能一键退回 -->
+        <el-button v-if="isMineView && filtersDirty" size="small" @click="resetMineFilter">清空筛选条件</el-button>
       </el-empty>
 
-      <div v-if="list.length" class="moment-feed__more">
+      <!-- 分页模式靠页码而不是滚动到底：翻几年前的历史时自动续页会把人不知道带到哪一页 -->
+      <div v-if="isMineView && list.length" class="moment-feed__pager">
+        <el-pagination
+          v-model:current-page="mine.current"
+          v-model:page-size="mine.size"
+          background
+          small
+          layout="total, sizes, prev, pager, next, jumper"
+          :total="mine.total"
+          :page-sizes="[10, 20, 50]"
+          @size-change="onMineSize"
+          @current-change="fetchMine"
+        />
+      </div>
+      <div v-else-if="list.length" class="moment-feed__more">
         <el-button v-if="!exhausted" link :loading="loadingMore" @click="loadMore">加载更多</el-button>
         <span v-else class="moment-feed__end">没有更多了</span>
       </div>
@@ -219,6 +309,21 @@
          各长一套的话，改一处漏一处的永远是「多给出去」的那一边 -->
     <MomentDetailDialog v-model:visible="detail.visible" :moment-id="detail.momentId" @changed="onDetailChanged" />
 
+    <!-- ==================== 视频放大播放 ==================== -->
+    <!-- 卡片里的窗口再放宽也受版面限制：竖屏视频与长视频要点开一个几乎满屏的层才看得清，
+         destroy-on-close 是必需的：关掉后不销毁就不会停下来，音频会始终在背后面跑 -->
+    <el-dialog
+      v-model="videoPlayer.visible"
+      title="播放视频"
+      width="min(1000px, 94vw)"
+      top="4vh"
+      append-to-body
+      destroy-on-close
+      class="video-player"
+    >
+      <video class="video-player__el" :src="videoPlayer.src" controls autoplay preload="metadata" />
+    </el-dialog>
+
     <!-- ==================== 动态转聊天 ==================== -->
     <el-dialog v-model="share.visible" title="发到聊天" width="420px" append-to-body @closed="resetShare">
       <el-input
@@ -273,14 +378,14 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  ChatDotRound, CircleCloseFilled, EditPen, Loading, Picture, PictureFilled, Plus, Promotion,
+  ChatDotRound, CircleCloseFilled, EditPen, FullScreen, Loading, Picture, PictureFilled, Plus, Promotion,
   Search, Select, Star, VideoCamera
 } from '@element-plus/icons-vue'
 import UserAvatar from './UserAvatar.vue'
 import MomentDetailDialog from './MomentDetailDialog.vue'
 import {
-  deleteMoment, fetchMatchPairs, fetchMomentFeed, fetchUserMoments, likeMoment, publishMoment,
-  shareMoment, unlikeMoment
+  deleteMoment, fetchMatchPairs, fetchMomentFeed, fetchMyMoments, fetchUserMoments, likeMoment,
+  publishMoment, shareMoment, unlikeMoment
 } from '@/api/dating'
 import { uploadFileSmart } from '@/api/file'
 import { guardImage } from '@/utils/nsfw'
@@ -307,6 +412,10 @@ import { useFriendStore } from '@/stores/friend'
  *   <li><b>点赞与评论要 friend:apply、转发要 message:send</b>：没权限就把按钮藏掉，
  *       留一个点了吃 403 的按钮只会让人反复去点。</li>
  * </ul>
+ *
+ * <p>「我的动态」是同一个组件里的第二种读法（{@link #viewMode}）：游标流不适合回头查
+ * 自己几年前发的那一条，所以那里换成页码分页 + 时间/评论数/浏览量筛选，并且**不过可见范围、
+ * 含已下架的行** —— 否则作者会以为自己的动态发丢了。
  */
 defineOptions({ name: 'MomentFeed' })
 
@@ -335,6 +444,34 @@ const MEDIA_IMAGE = 1
 const MEDIA_VIDEO = 2
 const STATUS_OFFLINE = 2
 
+/** 内容形态与后端 MomentMapper.KIND_IMAGE / KIND_VIDEO / KIND_TEXT 一致，按附件实际形态而不是发布时填的类型 */
+const KIND_OPTIONS = [
+  { value: 1, label: '图文' },
+  { value: 2, label: '视频' },
+  { value: 3, label: '纯文字' }
+]
+/** 排序字段，与后端 orderColumnOf 的 switch 一一对应；这里多一个值后端只会当成时间，不会拼进 SQL */
+const SORT_OPTIONS = [
+  { value: 'time', label: '按发布时间' },
+  { value: 'view', label: '按浏览量' },
+  { value: 'comment', label: '按评论数' },
+  { value: 'like', label: '按点赞数' }
+]
+
+/** 日期快捷项给的是 Date，填进表单时由 value-format 统化成 YYYY-MM-DD */
+function recentRange(days) {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - days + 1)
+  return [start, end]
+}
+const DATE_SHORTCUTS = [
+  { text: '近 7 天', value: () => recentRange(7) },
+  { text: '近 30 天', value: () => recentRange(30) },
+  { text: '近 90 天', value: () => recentRange(90) },
+  { text: '今年', value: () => [new Date(new Date().getFullYear(), 0, 1), new Date()] }
+]
+
 const VISIBILITY_PUBLIC = 1
 const VISIBILITY_PARTIAL = 3
 const VISIBILITY_OPTIONS = [
@@ -362,6 +499,128 @@ const canShare = computed(() => auth.hasPermission('message:send'))
 /** 传了别人的 userId 就是主页视角：不出发布入口，也不把新发的动态往这一列里插 */
 const isMineFeed = computed(() => !props.userId || sameId(props.userId, auth.userId))
 
+/* --------------------- 我的动态：分页与筛选 --------------------- */
+
+const viewMode = ref('feed')
+/** 紧凑模式是嵌在资料卡里的一小块，那一屏既没有地方放筛选栏，也不该有两个入口 */
+const isMineView = computed(() => isMineFeed.value && !props.compact && viewMode.value === 'mine')
+const mine = reactive({ current: 1, size: 10, total: 0 })
+const filters = reactive({
+  contentType: null,
+  status: null,
+  dates: [],
+  keyword: '',
+  minCommentCount: null,
+  minViewCount: null,
+  sortBy: 'time',
+  sortOrder: 'desc'
+})
+
+// el-select 清空后给的是 undefined 而不是 null，所以这里统一按「不为空」判，
+// 否则清空一次筛选会仍被当成脏条件（那个「清空筛选条件」按钮就会一直在）
+const filtersDirty = computed(() =>
+  filters.contentType != null || filters.status != null || filters.keyword.trim() !== ''
+  || filters.minCommentCount != null || filters.minViewCount != null
+  || (Array.isArray(filters.dates) && filters.dates.length === 2)
+)
+
+const viewHint = computed(() => {
+  if (isMineView.value) {
+    return '自己发过的全部动态，含已下架的，不受可见范围与可见天数限制'
+  }
+  return '只显示你的好友与配对对象的动态，「公开」不是全站公开'
+})
+
+const emptyText = computed(() => {
+  if (isMineView.value) {
+    return filtersDirty.value ? '没有符合筛选条件的动态' : '还没有动态'
+  }
+  return isMineFeed.value ? '还没有动态' : 'TA 还没有可见的动态'
+})
+
+/**
+ * 拉一页「我的动态」。
+ *
+ * 不复用 exhausted：分页有 total，翻到最后一页 el-pagination 自己就禁了下一页；
+ * 也不往 list 里追加：页码翻页的语义就是「当前页只放这一页的内容」。
+ * 这里不加「已在加载就返回」的闸门而是用序号让最后一次请求说了算：切页码要能连续响应，
+ * 而一个迟到的旧页盖掉新页比多一个请求难查得多。
+ */
+let mineSeq = 0
+
+async function fetchMine() {
+  const seq = ++mineSeq
+  loading.value = true
+  try {
+    const [startDate, endDate] = Array.isArray(filters.dates) ? filters.dates : []
+    const page = (await fetchMyMoments({
+      current: mine.current,
+      size: mine.size,
+      contentType: filters.contentType,
+      status: filters.status,
+      startDate,
+      endDate,
+      sortBy: filters.sortBy,
+      sortOrder: filters.sortOrder,
+      minCommentCount: filters.minCommentCount,
+      minViewCount: filters.minViewCount,
+      keyword: (filters.keyword || '').trim()
+    })) || {}
+    if (seq !== mineSeq) {
+      // 已经有人点了更新的页或改了条件，这个迟到的响应不能再写列表
+      return
+    }
+    list.value = page.records || []
+    mine.total = Number(page.total) || 0
+    emit('loaded', list.value.length)
+  } catch {
+    // 提示由 request.js 弹过，列表留在原地；把人推到空列表比留着旧数据更难解释
+  } finally {
+    if (seq === mineSeq) {
+      loading.value = false
+    }
+  }
+}
+
+/** 改任何一个条件都回到第一页：停在第 6 页改筛选条件，多半会落到一个空页上 */
+function applyMineFilter() {
+  mine.current = 1
+  fetchMine()
+}
+
+function resetMineFilter() {
+  filters.contentType = null
+  filters.status = null
+  filters.dates = []
+  filters.keyword = ''
+  filters.minCommentCount = null
+  filters.minViewCount = null
+  filters.sortBy = 'time'
+  filters.sortOrder = 'desc'
+  applyMineFilter()
+}
+
+function toggleSortOrder() {
+  filters.sortOrder = filters.sortOrder === 'asc' ? 'desc' : 'asc'
+  applyMineFilter()
+}
+
+function onMineSize() {
+  mine.current = 1
+  fetchMine()
+}
+
+function switchView() {
+  list.value = []
+  exhausted.value = false
+  if (isMineView.value) {
+    mine.current = 1
+    fetchMine()
+    return
+  }
+  fetchPage(true)
+}
+
 /* ------------------------------ 列表 ------------------------------ */
 
 /**
@@ -371,6 +630,10 @@ const isMineFeed = computed(() => !props.userId || sameId(props.userId, auth.use
  * 前端只要把返回数组的尾巴交回去即可，不要自己按时间排序后另取一个游标。
  */
 async function fetchPage(reset) {
+  // 「我的动态」与游标流是两套取数口径，共用的只有 reload 这一个入口
+  if (isMineView.value) {
+    return fetchMine()
+  }
   const busy = reset ? loading : loadingMore
   if (busy.value) {
     return
@@ -383,6 +646,10 @@ async function fetchPage(reset) {
     const page = (props.userId
       ? await fetchUserMoments(asId(props.userId), { cursorId, size: PAGE_SIZE }, { silent: true })
       : await fetchMomentFeed({ cursorId, size: PAGE_SIZE })) || []
+    if (isMineView.value) {
+      // 请求在飞的这段时间里用户切到了「我的动态」：这一批游标流的结果不能再写回列表
+      return
+    }
     if (reset) {
       list.value = page
     } else {
@@ -415,10 +682,11 @@ function loadMore() {
   fetchPage(false)
 }
 
-/** 滚到离底 120px 以内就自动续一页：这一列是无限流，让人每屏都去找「加载更多」按钮很蠢 */
+/** 滚动到离底 120px 以内就自动续一页：这一列是无限流，让人每屏都去找「加载更多」按钮很蠢 */
 function onScroll() {
   const el = bodyRef.value
-  if (!el || exhausted.value || loading.value || loadingMore.value) {
+  // 分页模式下不自动续页：那会把页码与看到的内容对不上，翻到第 3 页却插进第 4 的数据
+  if (!el || isMineView.value || exhausted.value || loading.value || loadingMore.value) {
     return
   }
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
@@ -430,9 +698,17 @@ function authorName(item) {
   return (item.author && item.author.nickname) || '该用户已注销'
 }
 
-/** 一张图给大图，2 或 4 张给两列，其余给三列：九宫格的意义就是让格数看起来是齐的 */
+/**
+ * 一张图给大图，2 或 4 张给两列，其余给三列：九宫格的意义就是让格数看起来是齐的。
+ *
+ * 视频必须在最前面单独判：它永远只有一条，落到下面三个分支里会被归成「0 张图」而拿到
+ * triple，于是在一个 480px 宽的三列网格里只分到三分之一——这就是「播放窗口太小」的根源。
+ */
 function gridClass(media) {
   const images = (media || []).filter((m) => m.type !== MEDIA_VIDEO)
+  if (images.length !== (media || []).length) {
+    return 'moment__media--video'
+  }
   if (images.length === 1) {
     return 'moment__media--single'
   }
@@ -440,6 +716,21 @@ function gridClass(media) {
     return 'moment__media--double'
   }
   return 'moment__media--triple'
+}
+
+/* --------------------------- 视频放大播放 --------------------------- */
+
+const videoPlayer = reactive({ visible: false, src: '' })
+
+/**
+ * 开一个满屏的播放层。
+ *
+ * 地址现取 mediaUrl：卡片里那份可能还是个空串（blob 没回写完成），
+ * 而弹层里的视频一旦绑上空 src 就不会再自己重取，所以进弹层时重新调一次。
+ */
+function openVideo(media) {
+  videoPlayer.src = mediaUrl(media.url)
+  videoPlayer.visible = true
 }
 
 /** 预览列表只收图片：把视频地址塞进 el-image 的 preview-src-list 会得到一个放不出来的黑框 */
@@ -505,6 +796,10 @@ async function removeMoment(item) {
   try {
     await deleteMoment(id)
     list.value = list.value.filter((row) => !sameId(row.momentId, id))
+    // 分页模式下的总数得跟着减，否则最后一行只剩一条而页码显示「共 11 条」
+    if (isMineView.value && mine.total > 0) {
+      mine.total -= 1
+    }
     ElMessage.success('已删除')
   } catch {
     // 提示已弹出
@@ -666,7 +961,12 @@ async function submitPublish() {
     })
     ElMessage.success('已发布')
     publish.visible = false
-    if (isMineFeed.value && vo && vo.momentId) {
+    if (isMineView.value) {
+      // 分页模式回到第一页重拉：新发的那一条按时间一定在第一页，而就地插会多出一条不属于这一页的卡片
+      mine.current = 1
+      mine.total += 1
+      fetchMine()
+    } else if (isMineFeed.value && vo && vo.momentId) {
       list.value = [vo].concat(list.value.filter((row) => !sameId(row.momentId, vo.momentId)))
     }
   } catch {
@@ -849,6 +1149,9 @@ watch(
   () => {
     list.value = []
     exhausted.value = false
+    // 切到别人的主页时把分页状态带回去：这一列只在自己翻历史时才有意义，
+    // 留着 mine 会让回到自己页面时直接落在一个带旧筛选条件的分页上
+    viewMode.value = 'feed'
     fetchPage(true)
   }
 )
@@ -912,6 +1215,38 @@ defineExpose({ reload })
 .moment-feed__end {
   font-size: 12px;
   color: var(--im-text-secondary);
+}
+
+/* 「我的动态」的筛选栏：控件一律 small，挤不下一行就换行，不为它专门开一个弹层 */
+.minebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 0 8px;
+}
+
+.minebar__date {
+  width: 240px;
+}
+
+.minebar__kw {
+  width: 160px;
+}
+
+.minebar__num {
+  width: 84px;
+}
+
+/* el-input-number 的 placeholder 默认居中且不换行，收窄后要让它靠右才能与旁边的数字一眼对上 */
+.minebar__num :deep(.el-input__inner) {
+  text-align: right;
+}
+
+.moment-feed__pager {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
 }
 
 .moment {
@@ -1003,10 +1338,44 @@ defineExpose({ reload })
   max-height: 420px;
 }
 
+/* 视频占满整行而不是九宫格里的一格：一行只能有一个附件，网格收成一个列 */
+.moment__media--video {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 720px;
+}
+
+.moment__videobox {
+  position: relative;
+  min-width: 0;
+}
+
 .moment__video {
   width: 100%;
-  max-height: 420px;
+  /* 从 420px 放宽到按视口算的高度：竖屏视频在 420px 里只能看到一小块画面 */
+  max-height: min(70vh, 640px);
   border-radius: 4px;
+  background: #000;
+  display: block;
+}
+
+.moment__video-zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  opacity: 0.85;
+}
+
+.moment__video-zoom:hover {
+  opacity: 1;
+}
+
+.video-player__el {
+  display: block;
+  width: 100%;
+  max-height: 76vh;
+  margin: 0 auto;
+  border-radius: 6px;
   background: #000;
 }
 

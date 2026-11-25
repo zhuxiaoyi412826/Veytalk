@@ -1,5 +1,12 @@
 <template>
-  <el-dialog v-model="dialogVisible" title="动态详情" width="580px" append-to-body @closed="onClosed">
+  <!-- 带视频的详情把弹层撑宽：固定在 580px 里，稍大一点的竖屏视频也只能看到一小块画面 -->
+  <el-dialog
+    v-model="dialogVisible"
+    title="动态详情"
+    :width="dialogWidth"
+    append-to-body
+    @closed="onClosed"
+  >
     <div v-loading="loading" class="mdetail">
       <template v-if="data">
         <header class="mdetail__head">
@@ -61,6 +68,10 @@
           </el-button>
           <span v-else class="mdetail__count">赞 {{ data.likeCount || 0 }}</span>
           <span class="mdetail__count">评论 {{ data.commentCount || 0 }}</span>
+          <!-- 浏览量只对作者下发，判的是字段在不在而不是有没有权限 -->
+          <span v-if="data.viewCount !== null && data.viewCount !== undefined" class="mdetail__count">
+            浏览 {{ data.viewCount || 0 }}
+          </span>
           <span class="mdetail__spacer"></span>
           <el-button v-if="data.mine" link type="danger" size="small" @click="remove">删除这条动态</el-button>
         </div>
@@ -191,9 +202,18 @@ const replyTarget = ref(null)
 const canInteract = computed(() => auth.hasPermission('friend:apply'))
 const authorName = computed(() => (data.value && data.value.author && data.value.author.nickname) || '该用户已注销')
 
-/** 一张图给大图，2 或 4 张给两列，其余给三列：九宫格的意义就是让格数看起来是齐的 */
+/**
+ * 一张图给大图，2 或 4 张给两列，其余给三列：九宫格的意义就是让格数看起来是齐的。
+ *
+ * 视频先单独判：它永远只有一条，落到下面会被归成「0 张图」而拿到 triple，
+ * 于是一个附件只分到网格的三分之一，这就是「播放窗口太小」的根源。
+ */
 const gridClass = computed(() => {
-  const images = ((data.value && data.value.media) || []).filter((m) => m.type !== MEDIA_VIDEO)
+  const media = (data.value && data.value.media) || []
+  const images = media.filter((m) => m.type !== MEDIA_VIDEO)
+  if (images.length !== media.length) {
+    return 'mdetail__media--video'
+  }
   if (images.length === 1) {
     return 'mdetail__media--single'
   }
@@ -202,6 +222,11 @@ const gridClass = computed(() => {
   }
   return 'mdetail__media--triple'
 })
+
+const hasVideo = computed(() =>
+  ((data.value && data.value.media) || []).some((m) => m.type === MEDIA_VIDEO)
+)
+const dialogWidth = computed(() => (hasVideo.value ? 'min(880px, 94vw)' : '580px'))
 
 /** 预览列表只收图片：把视频地址塞进 el-image 的 preview-src-list 会得到一个放不出来的黑框 */
 const previewList = computed(() => {
@@ -486,11 +511,18 @@ watch(
   max-height: 420px;
 }
 
+/* 视频占满整行：一个附件不需要网格，宽度交给弹层自己定 */
+.mdetail__media--video {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .mdetail__video {
   width: 100%;
-  max-height: 420px;
+  /* 从 420px 放宽到按视口算的高度，弹层也会随带视频而撑宽 */
+  max-height: min(66vh, 620px);
   border-radius: 4px;
   background: #000;
+  display: block;
 }
 
 .mdetail__actions {

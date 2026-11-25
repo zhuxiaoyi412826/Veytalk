@@ -202,6 +202,17 @@ const routes = [
         meta: { title: '意见反馈', perm: 'system:feedback' }
       },
       {
+        // 移动端：一个入口吃三个页签，所以这里用 perms（任一命中即放行）而不是单个 perm。
+        // 不新设 system:mobile:manage：能发 APK 的人未必该能改分类，合并成一个点只会逼人整套打包授权。
+        // 旧那三屏（版本管理 / 意见反馈 / 视频管理·分类管理）的路由一律不动，两处入口同一批数据。
+        // 下面那个兜底名单里没有 mobile：它没有 meta.perm，而兜底只按 meta.perm 选落点；
+        // 真能落到这一屏的人，前面那些单权限屏早就命中了，加进来只会多一行读不懂的代码
+        path: 'mobile',
+        name: 'mobile',
+        component: () => import('@/views/MobileView.vue'),
+        meta: { title: '移动端', perms: ['system:release', 'system:video:manage', 'system:feedback'] }
+      },
+      {
         // SQL 版本管理（台账 1.0.5）：权限点 128，全后台唯一能直接改库结构的页面，
         // 种子只授 admin；与应用/回滚按钮的二次确认一起构成「人点按钮才动库」的闸门
         path: 'schema',
@@ -244,12 +255,17 @@ router.beforeEach(async (to) => {
   // 进了后台不代表能看每一屏：二三四期按细粒度权限点逐路由放行。
   // 缺这一屏权限时送回他能访问的第一屏（而不是弹回登录页——他确实是合法的后台用户，只是不该看到这一页）。
   // 没有 meta.perm 的路由（如根路径 redirect）不拦。
+  // meta.perms 是给「移动端」那种一个入口多个权限点的屏用的：任一命中即放行，
+  // 具体哪个页签能看由页面自己逐个判（进去后看不见的页签不渲染，而不是渲染出来点了报错）。
   //
   // 下面这个兜底顺序是有意义的：把「只看数字」的看板放最前，把能动手的屏放后面，
   // 于是只持低风险点的账号不会刚进后台就落在一个带危险按钮的页面上。
   // 四期第五批的四项插在直播之后、监控之前：群组与消息是「治理」，钱包与面试是「经营与招聘」，
   // 它们都比那四张运维表更接近业务现场，也更接近需要被单独授权的那一档。
-  if (to.meta.perm && !auth.can(to.meta.perm)) {
+  if (
+    (to.meta.perm && !auth.can(to.meta.perm)) ||
+    (to.meta.perms && !to.meta.perms.some((code) => auth.can(code)))
+  ) {
     const fallback = [
       'dashboard',
       'reports',
@@ -292,5 +308,25 @@ router.beforeEach(async (to) => {
 router.afterEach((to) => {
   document.title = to.meta.title ? `${to.meta.title} · 管理后台` : '管理后台'
 })
+
+/**
+ * 后台每一屏各自要的那个权限点，从上面路由表里现取。
+ *
+ * 存在这条导出是因为<b>登录那道门</b>需要它：以前 stores/auth 里手抄了一份名单来判
+ * 「这个账号到底能不能进后台」，那份名单从发版（system:release）上线起就没再动过，于是一连串
+ * 只持有新点的账号（发版 / 反馈 / 图片音乐小说 / 交友与动态 / 字典 / 法定文本 / SQL 版本）
+ * 登录时直接被挡在后台外——明明每一屏都点得动，却连门都进不来。
+ *
+ * 改成从路由表派生后，<b>新增一屏就自动算进门理由</b>，不必记得去第二处补登记；
+ * 语义也更准：能进后台 = 至少有一屏是你看得动的，而不是「名字恰好写在某张名单上」。
+ * meta.perms（移动端那种一个入口吃多个点的屏）同样计入。
+ *
+ * 只计子路由的 meta，/login 与拦截路由本来就没有 perm。
+ */
+export const ADMIN_SCREEN_PERMS = routes.flatMap((item) =>
+  (item.children || []).flatMap((child) =>
+    [child.meta?.perm, ...(child.meta?.perms || [])].filter(Boolean)
+  )
+)
 
 export default router

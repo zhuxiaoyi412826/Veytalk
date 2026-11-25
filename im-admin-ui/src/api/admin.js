@@ -994,7 +994,9 @@ export function deleteAdminIcebreaker(id) {
  *
  * 「下架」与「删除」是两个端点而不是一个带 boolean 的：删除会连带清掉媒体 / 评论 /
  * 点赞 / 可见范围白名单四张附属表且不可恢复，误删成本远高于下架。
- * mediaUrls 与用户端一样是受控地址，必须过 fetchMedia 才能变成 <img src>。
+ * mediaUrls 与用户端一样是受控地址，必须过 fetchMedia 才能变成 <img src> / <video src>。
+ * ★ mediaTypes 与 mediaUrls **同序一一对应**（1 图片 / 2 视频）：渲染时只拿地址就会把视频
+ * 当图画成碎图标，后台「动态管理看不了视频」就是这么来的，所以这两个数组必须成对使用。
  */
 
 /** 动态翻页：含已下架的；入参 keyword / userId / status / visibility / current / size */

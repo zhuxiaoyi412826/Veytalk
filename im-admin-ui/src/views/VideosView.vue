@@ -118,59 +118,11 @@
       </el-tab-pane>
 
       <el-tab-pane label="分类管理" name="categories">
-        <div class="toolbar">
-          <span class="muted">自定义视频板块顶部分类栏：增删改、排序（改 sort）、启停。停用/删除只影响新的展示，不动历史视频已落库的分类文本。</span>
-          <span class="grow" />
-          <el-button type="primary" @click="openCategoryCreate">
-            <el-icon><Plus /></el-icon>
-            <span>新增分类</span>
-          </el-button>
-          <el-button :loading="catLoading" @click="loadCategories">
-            <el-icon><Refresh /></el-icon>
-            <span>重新读取</span>
-          </el-button>
-        </div>
-
-        <el-card shadow="never">
-          <el-table v-loading="catLoading" :data="categories">
-            <el-table-column align="center" label="排序" prop="sort" width="90" />
-            <el-table-column label="分类名称" prop="name" min-width="160" />
-            <el-table-column label="状态" width="150">
-              <template #default="{ row }">
-                <el-switch :model-value="row.status === 1" @change="(v) => toggleCategoryStatus(row, v)" />
-                <span class="muted cat-status-text">{{ row.status === 1 ? '启用' : '停用' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column fixed="right" label="操作" width="160">
-              <template #default="{ row }">
-                <el-button text type="primary" @click="openCategoryEdit(row)">编辑</el-button>
-                <el-button text type="danger" @click="confirmDeleteCategory(row)">删除</el-button>
-              </template>
-            </el-table-column>
-            <template #empty>
-              <el-empty description="还没有分类" :image-size="80" />
-            </template>
-          </el-table>
-        </el-card>
+        <!-- 与「移动端 · 视频分类」是同一个组件、同一批行（type=video）：两个入口改的字典必须是一份，
+             否则 Web 与 App 的分类栏会各长各的 -->
+        <VideoCategoryPanel />
       </el-tab-pane>
     </el-tabs>
-
-    <!-- 分类新增/编辑弹框：sort 留空则后端排到最后 -->
-    <el-dialog v-model="catDialog.visible" :title="catDialog.id ? '编辑分类' : '新增分类'" width="420px">
-      <el-form label-width="72px">
-        <el-form-item label="名称">
-          <el-input v-model="catDialog.name" :maxlength="32" placeholder="分类名称（不超过 32 字）" />
-        </el-form-item>
-        <el-form-item label="排序">
-          <el-input-number v-model="catDialog.sort" :min="0" :max="9999" />
-          <span class="muted sort-hint">升序展示，留空排最后</span>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="catDialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="catSaving" @click="submitCategory">保存</el-button>
-      </template>
-    </el-dialog>
 
     <!-- 预览弹框：fileUrl 是服务端拼好的受控地址（非预签名短链，翻页停留再久也不 404），
          但 <video src> 带不了登录头，必须先经 fetchMedia 取成 blob 才能播 -->
@@ -187,15 +139,12 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  createVideoCategory,
   deleteVideo,
-  deleteVideoCategory,
-  fetchVideoCategories,
   fetchVideoPage,
   offlineVideo,
-  onlineVideo,
-  updateVideoCategory
+  onlineVideo
 } from '@/api/admin'
+import VideoCategoryPanel from '@/components/VideoCategoryPanel.vue'
 import { fetchMedia } from '@/api/request'
 import { EMPTY_TEXT, formatBytes, formatDuration, formatListTime, formatNumber } from '@/utils/format'
 
@@ -367,96 +316,12 @@ async function confirmDelete(row) {
   }
 }
 
-/* ==================== 分类管理（控制栏可增删改） ==================== */
+/* ==================== 分类管理 ==================== */
 
+// 分类那一 tab 的全部逻辑在 VideoCategoryPanel 里（与移动端共用），这里只留页签归属
 const activeTab = ref('videos')
-const categories = ref([])
-const catLoading = ref(false)
-const catSaving = ref(false)
-const catDialog = reactive({ visible: false, id: null, name: '', sort: undefined })
 
-async function loadCategories() {
-  catLoading.value = true
-  try {
-    categories.value = (await fetchVideoCategories()) || []
-  } catch {
-    // 提示已由 request.js 弹过；保留上一次结果
-  } finally {
-    catLoading.value = false
-  }
-}
-
-function openCategoryCreate() {
-  catDialog.id = null
-  catDialog.name = ''
-  catDialog.sort = undefined
-  catDialog.visible = true
-}
-
-function openCategoryEdit(row) {
-  catDialog.id = row.id
-  catDialog.name = row.name
-  catDialog.sort = row.sort
-  catDialog.visible = true
-}
-
-async function submitCategory() {
-  const name = catDialog.name.trim()
-  if (!name) {
-    ElMessage.warning('分类名称不能为空')
-    return
-  }
-  catSaving.value = true
-  try {
-    if (catDialog.id) {
-      await updateVideoCategory(catDialog.id, { name, sort: catDialog.sort })
-      ElMessage.success('分类已保存')
-    } else {
-      await createVideoCategory(name, catDialog.sort)
-      ElMessage.success('分类已新增')
-    }
-    catDialog.visible = false
-    loadCategories()
-  } catch {
-    // 接口层已弹提示（如同名拒绝）
-  } finally {
-    catSaving.value = false
-  }
-}
-
-async function toggleCategoryStatus(row, enabled) {
-  try {
-    const updated = await updateVideoCategory(row.id, { status: enabled ? 1 : 0 })
-    Object.assign(row, updated)
-    ElMessage.success(enabled ? '分类已启用' : '分类已停用')
-  } catch {
-    // 失败不本地改状态：:model-value 单向绑定，未更新即自动回弹
-  }
-}
-
-async function confirmDeleteCategory(row) {
-  try {
-    await ElMessageBox.confirm(
-      `删除分类「${row.name}」只让它从前端分类栏消失，已发布视频的分类文本不变。`,
-      '删除分类',
-      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch {
-    return
-  }
-  try {
-    await deleteVideoCategory(row.id)
-    ElMessage.success('分类已删除')
-    loadCategories()
-  } catch {
-    // 同上
-  }
-}
-
-onMounted(() => {
-  load()
-  loadCategories()
-})
+onMounted(load)
 </script>
 
 <style scoped>
@@ -475,14 +340,6 @@ onMounted(() => {
 
 .videos__tabs :deep(.el-tabs__header) {
   margin-bottom: 16px;
-}
-
-.cat-status-text {
-  margin-left: 8px;
-}
-
-.sort-hint {
-  margin-left: 8px;
 }
 
 .hint {

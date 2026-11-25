@@ -1,7 +1,7 @@
 <template>
   <div class="releases">
     <div class="toolbar">
-      <h2 class="page-title">客户端版本管理</h2>
+      <h2 class="page-title">{{ title }}</h2>
       <span class="grow" />
       <el-button type="primary" @click="openCreate">
         <el-icon><Plus /></el-icon>
@@ -31,7 +31,8 @@
           <el-icon><Search /></el-icon>
         </template>
       </el-input>
-      <el-select v-model="query.platform" class="platform" clearable placeholder="全部平台" @change="reload">
+      <!-- 锁定单一平台时把选择器收起：这一屏本来就只看一个平台，留一个只能选它的下拉只会让人以为能切 -->
+      <el-select v-if="!lockPlatform" v-model="query.platform" class="platform" clearable placeholder="全部平台" @change="reload">
         <el-option v-for="p in platforms" :key="p.code" :value="p.code" :label="p.name" />
       </el-select>
       <el-select v-model="query.status" class="status" clearable placeholder="全部状态" @change="reload">
@@ -126,9 +127,9 @@
       :show-close="!uploading"
     >
       <el-form label-position="top">
-        <el-form-item label="平台（必填，创建后不可改）">
+        <el-form-item :label="lockPlatform ? '平台（本页固定）' : '平台（必填，创建后不可改）'">
           <!-- 编辑时锁死：平台是启用互斥的分组键，改平台等于删旧建新，后端也忽略这个字段 -->
-          <el-select v-model="form.platform" :disabled="!!dialog.id || uploading" class="platform" placeholder="选择平台">
+          <el-select v-model="form.platform" :disabled="!!dialog.id || uploading || !!lockPlatform" class="platform" placeholder="选择平台">
             <el-option v-for="p in platforms" :key="p.code" :value="p.code" :label="p.name" />
           </el-select>
         </el-form-item>
@@ -216,13 +217,25 @@ import { EMPTY_TEXT, formatBytes, formatListTime, formatNumber } from '@/utils/f
  *
  * 启用/停用/删除都先 ElMessageBox 确认再调接口，且以服务端回来的结果重新拉列表：
  * 这一屏可能开着好几个管理员，两秒前的状态可能刚被同事改过。
+ *
+ * 两个 props 是为了让「移动端」能把 Android 那一档单独嵌成自己的一个 tab（同一批数据、
+ * 同一套接口，不抽第二份表格）：锁平台只是把筛选条件钉住、把平台下拉收起，
+ * 启用互斥、上传、确认这些行为一个都不改——否则两处各维护一套「启用」逻辑，
+ * 早晚出现「从移动端 tab 启用不冲突、从原页启用冲突」这种只有一边错的结果。
  */
+const props = defineProps({
+  /** 锁定只看某一个平台（移动端传 android）；空串就是原来那屏全平台版本管理 */
+  lockPlatform: { type: String, default: '' },
+  /** 页面标题：锁平台时由调用方给一句符合入口身份的话 */
+  title: { type: String, default: '客户端版本管理' }
+})
+
 const rows = ref([])
 const total = ref(0)
 const loading = ref(false)
 const platforms = ref([])
 
-const query = reactive({ keyword: '', platform: undefined, status: undefined, current: 1, size: 20 })
+const query = reactive({ keyword: '', platform: props.lockPlatform || undefined, status: undefined, current: 1, size: 20 })
 
 const dialog = reactive({ visible: false, saving: false, id: null, version: '', platformName: '' })
 const form = reactive({
@@ -288,7 +301,8 @@ function platformName(code) {
 }
 
 function resetForm() {
-  form.platform = ''
+  // 锁平台时新建版本不必再选（下拉也已禁用），不锁时仍为空让「未选平台」被 formReady 拦住
+  form.platform = props.lockPlatform
   form.version = ''
   form.releaseNote = ''
   form.fileId = null

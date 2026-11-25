@@ -868,6 +868,7 @@ import { isElectron } from '@/utils/env'
 import { formatFileSize, formatMsgTime, needTimeDivider } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
 import { externalMapUrl } from '@/utils/geo'
+import { requestLocation } from '@/utils/location'
 
 defineOptions({ name: 'ChatWindow' })
 
@@ -1072,24 +1073,18 @@ function openLocationPicker() {
 }
 
 /** 调浏览器定位 API 填回当前坐标（非安全上下文/拒授权时提示改手写） */
-function useMyLocation() {
-  if (!navigator.geolocation) {
-    ElMessage.warning('当前环境不支持定位，请手动填写经纬度')
+async function useMyLocation() {
+  locationDialog.locating = true
+  // 走统一的 requestLocation：它把「等你在弹窗里点允许」那段时间算在授权等待里而不是取坐标超时，
+  // 否则会重现「第一次提示失败、其实已经定位成功、还要再点一次」那个假失败
+  const got = await requestLocation({ highAccuracy: true, maxAgeMs: 0 })
+  locationDialog.locating = false
+  if (!got.ok) {
+    ElMessage.warning(got.message)
     return
   }
-  locationDialog.locating = true
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      locationDialog.latitude = pos.coords.latitude.toFixed(6)
-      locationDialog.longitude = pos.coords.longitude.toFixed(6)
-      locationDialog.locating = false
-    },
-    () => {
-      locationDialog.locating = false
-      ElMessage.error('获取位置失败，请检查定位权限或手动填写经纬度')
-    },
-    { enableHighAccuracy: true, timeout: 10000 }
-  )
+  locationDialog.latitude = String(got.lat)
+  locationDialog.longitude = String(got.lng)
 }
 
 async function sendLocation() {
