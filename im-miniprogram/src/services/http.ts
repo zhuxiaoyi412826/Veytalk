@@ -1,5 +1,5 @@
 import Taro from '@tarojs/taro'
-import { getApiBase } from '@/config/runtime'
+import { getApiBase, getDeviceName } from '@/config/runtime'
 import type { ApiEnvelope, Query } from '@/types/im'
 import { createTraceId } from '@/utils/format'
 import { getToken, getTokenName } from '@/utils/session'
@@ -62,6 +62,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     'X-Trace-Id': createTraceId()
   }
   if (options.auth !== false && token) header[getTokenName()] = token
+  // 设备友好名：后端 SecurityUtil.getDeviceName() 读它，取不到才用 User-Agent 兜底；空值不发头
+  const deviceName = getDeviceName()
+  if (deviceName) header['X-Device-Name'] = deviceName
   const query = options.query || {}
   // wx.request 会把 undefined 序列化成字符串 "undefined"，
   // 后端 @RequestParam Long 无法转换 →「参数 xxx 类型不正确」。GET 参数先过滤空值。

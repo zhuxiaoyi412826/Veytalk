@@ -48,8 +48,9 @@ public class WsTicketController {
                     + "断线重连必须重新申请，不能复用旧票据")
     @PostMapping("/ticket")
     public Result<WsTicketVO> ticket(
-            @Parameter(description = "设备标识：web / pc / android / ios / mini，未知值按 web 处理；"
-                    + "缺省时读 X-Device-Id 请求头")
+            @Parameter(description = "设备位：类型:实例（如 web:8f2c…），只传类型码（web / pc / android / ios / mini）"
+                    + "为老客户端写法、未知类型按 web 处理；缺省时读 X-Device-Id 请求头。"
+                    + "必须与登录时上送的那一份一致，否则这张票据建立的连接挂在另一个设备位上，顶号时会踢不中它")
             @RequestParam(required = false) String deviceId) {
         // 显式参数优先，其次回落到 SecurityUtil.getDevice()，让「查询参数」和「请求头」两种传法都能工作
         String device = TextUtil.isBlank(deviceId) ? SecurityUtil.getDevice() : deviceId;

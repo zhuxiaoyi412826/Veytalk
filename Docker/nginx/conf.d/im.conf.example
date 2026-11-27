@@ -199,9 +199,10 @@ server {
         expires 7d;
         add_header Cache-Control "public";
     }
-    # 下载页要拉后台启用中的版本（GET /api/release/list）与匿名下载安装包（/api/release/download/{id}），
-    # 同源反代免 CORS（官网与后端不同域名时靠这段把两者收敛到同一源）。只递 /api/release：
-    # 官网访客只该碰这两条公开端点，其余 /api/** 是带登录态的业务接口，不在官网上开洞。
+    # 下载页要拉后台启用中的版本（GET /api/release/list）、历史版本（/api/release/history）
+    # 与匿名下载安装包（/api/release/download/{id}），同源反代免 CORS（官网与后端不同域名时靠这段把两者收敛到同一源）。
+    # 只递 /api/release：官网访客只该碰这三条只读公开端点，其余 /api/** 是带登录态的业务接口，不在官网上开洞。
+    # 新增公开端点时这里不用动（location 是前缀匹配），但 SaTokenConfigure 的白名单要逐路径补一行。
     location /api/release {
         proxy_pass http://im-server:8080;
         include /etc/nginx/snippets/proxy.conf;

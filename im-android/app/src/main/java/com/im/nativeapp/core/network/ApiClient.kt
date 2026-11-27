@@ -42,6 +42,12 @@ class ApiClient @Inject constructor(
             // 头名取自后端下发的 tokenName，不写死 satoken（对齐 token.js 的教训）
             builder.header(session.currentTokenName(), token)
         }
+        // 设备友好名：后端 SecurityUtil.getDeviceName() 优先读这个头，取不到才拿 User-Agent 兜底。
+        // 空值不能发——OkHttp 对空字符串头值是允许的，但后端会把它当成「上送了一个空设备名」。
+        val name = session.deviceName
+        if (!name.isNullOrEmpty()) {
+            builder.header("X-Device-Name", name)
+        }
         chain.proceed(builder.build())
     }
 

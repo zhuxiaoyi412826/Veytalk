@@ -301,3 +301,14 @@ export interface NotifyData {
   content?: string
   [key: string]: unknown
 }
+
+/** 被顶下线的 data（后端 kickoutPacket：固定键 + 详情键） */
+export interface KickoutData {
+  userId?: Id
+  deviceId?: string
+  reason?: string
+  /** 挤掉我这台的那个设备名，客户端自报，可能为空 */
+  deviceName?: string
+  ip?: string
+  time?: string
+}

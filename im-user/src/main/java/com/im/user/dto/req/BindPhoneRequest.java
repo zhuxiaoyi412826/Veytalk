@@ -31,4 +31,14 @@ public class BindPhoneRequest implements Serializable {
     @NotBlank(message = "验证码不能为空")
     @Pattern(regexp = "^\\d{6}$", message = "验证码为 6 位数字")
     private String smsCode;
+
+    /**
+     * 换绑后要不要连当前设备一起下线。
+     *
+     * <p>默认 {@code false}：保留本机、只踢其他设备——换绑本身就在手机上做，
+     * 做完就把用户登出去等于让他重进一次，而真正的风险（别处的旧会话还在用）已经解除了。
+     * 担心手机丢了才需要改绑的场景，可以显式传 {@code true} 做一次彻底清洗。
+     */
+    @Schema(description = "换绑后是否连当前设备一起下线，默认仅下线其他设备", example = "false")
+    private Boolean logoutAll = Boolean.FALSE;
 }

@@ -55,7 +55,9 @@ public class Knife4jConfig {
 
     @Bean
     public GroupedOpenApi userApi() {
-        return build("01-用户中心", "/api/auth/**", "/api/captcha/**", "/api/user/**");
+        // /api/device 归本组而不是另开一组：它管的是「这个账号在哪些设备上登过」，
+        // 与改密码、换绑手机号是同一件事的三个面，调用方也是同一个设置页
+        return build("01-用户中心", "/api/auth/**", "/api/captcha/**", "/api/user/**", "/api/device/**");
     }
 
     @Bean
@@ -120,7 +122,10 @@ public class Knife4jConfig {
                 "/api/admin/sensitive-word/**", "/api/admin/agreement/**",
                 // 交友三屏（V1.0.7）：资料与照片审核、标签/破冰字典、动态与评论。
                 // dating/dict 被 /api/admin/dating/** 一并吃下，不再单独登记一条前缀
-                "/api/admin/dating/**", "/api/admin/moment/**");
+                "/api/admin/dating/**", "/api/admin/moment/**",
+                // 意见反馈的后台侧与「举报」同属申诉处理线，归本组而不是另开一组；
+                // 用户提交侧的 /api/feedback 在「23-意见反馈」，两边分开的理由见那个 Bean 的注释
+                "/api/admin/feedback/**");
     }
 
     @Bean
@@ -175,13 +180,49 @@ public class Knife4jConfig {
     }
 
     /**
+     * 后台的发布与运维两件：客户端安装包版本、SQL 脚本版本台账。
+     *
+     * <p>不折进「13-内容运营」或「14-业务与风控」：这两块动的都不是业务数据行，而是
+     * 「线上跑的是哪个包 / 库表结构到哪个版本」——排查生产问题时是同一拨人查的两件事，
+     * 混进内容运营那一组，找 SQL 回滚接口的人得在二十几条文章接口里翻。
+     */
+    @Bean
+    public GroupedOpenApi adminReleaseSchemaApi() {
+        return build("21-后台-发布与运维", "/api/admin/release/**", "/api/admin/schema/**");
+    }
+
+    /**
+     * 官网下载页的公开侧（匿名）：版本列表、历史版本、安装包流式下载。
+     *
+     * <p>单独一组，与「19-协议与合规」同一个理由：本组全部接口在 Authorize 之前就该调通，
+     * 官网是匿名纯静态站，访客没有 token。
+     */
+    @Bean
+    public GroupedOpenApi publicReleaseApi() {
+        return build("22-官网公开", "/api/release/**");
+    }
+
+    /**
+     * 用户侧提交意见反馈（需登录，要拿 userId 回线）。
+     *
+     * <p>后台处理侧 {@code /api/admin/feedback/**} 归「13-后台-内容运营」而不并进本组：
+     * 分组是按路径前缀切的，用户侧与后台侧的鉴权语义不同（一个要登录态、一个要权限点），
+     * 拼在一组会让人误以为官网式的匿名调用也能走后台那几条。
+     */
+    @Bean
+    public GroupedOpenApi feedbackApi() {
+        return build("23-意见反馈", "/api/feedback");
+    }
+
+    /**
      * 按路径前缀分组，而不是按包名。
      *
      * <p>按包名分组的版本实测过：当时七个分组各自都返回了全部 60 个接口，过滤根本没生效，
      * 而 {@code application.yml} 里还同时设着全局 {@code springdoc.packages-to-scan=com.im}。
      * 改成 {@code pathsToMatch} 之后每组的接口数恢复正确，所以保留路径方案。
      *
-     * <p>目前是二十个分组（最后一组是 V1.0.7 交友域），路径条数会随功能增长，别拿旧数字做量级断言。
+     * <p>路径条数随功能增长，分组数与接口数都不写死在这里（写死过三次，每次都过时），
+     * 以 {@code /v3/api-docs} 与 {@code swagger-config} 的实测为准。
      *
      * <p><strong>新增控制器时必须同步在这里补前缀。</strong>只写了 {@code @Tag}/{@code @Operation}
      * 而未登记分组前缀的接口，会完完整整地存在于全量 {@code /v3/api-docs} 里，却在

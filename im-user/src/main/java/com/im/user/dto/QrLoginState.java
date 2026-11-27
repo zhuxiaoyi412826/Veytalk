@@ -30,6 +30,15 @@ public class QrLoginState implements Serializable {
     /** 授权成功后为该用户新签的 web 设备 token */
     private String token;
 
+    /**
+     * 发起扫码那一端的设备位（{@code 类型:实例}），在 {@code create} 时由待登录的浏览器自己上送。
+     *
+     * <p>必须存在状态里而不是等 {@code authorize} 时再取：授权请求是<b>手机 APP</b> 发来的，
+     * 那一刻的上下文里根本没有浏览器的设备信息，拿它去签会话就会把手机的身份误写成新端的身份，
+     * 导致同一浏览器的多个页签共用一个裸类型码、将来想单独顶掉一台时顶不中。
+     */
+    private String deviceSlot;
+
     /** token 所在请求头名 */
     private String tokenName;
 

@@ -241,9 +241,10 @@ export function installWsDispatch() {
       friend.reset()
       // 没确认完的公告也要清：否则下一个账号登录会在自己的界面上看到上一个账号的公告栏
       announce.reset()
-      ElMessageBox.alert(data.reason || '账号已在其他设备登录', '下线通知', {
+      ElMessageBox.alert(kickoutHtml(data), '下线通知', {
         confirmButtonText: '重新登录',
-        type: 'warning'
+        type: 'warning',
+        dangerouslyUseHTMLString: true
       })
         .catch(() => {})
         .finally(() => {
@@ -551,4 +552,39 @@ function handleGroupJoinNotify(data, group) {
     })
     notifySystem('入群申请被拒绝', message, { tag: 'join-rejected' })
   }
+}
+
+/**
+ * 把 kickout 报文拼成一句能看懂的话。
+ *
+ * 后端从 1.0.9 起在 detail 里多带三样：顶掉你的那台设备名、它的 IP、发生时间
+ * （见 WsSessionManager.kickoutPacket，固定键 reason / userId 不会被盖掉）。
+ * 只给 IP 不给城市：本系统没接归属地库，凭一个 IP 编出「来自某市」是编造而不是推理。
+ *
+ * 弹窗开了 dangerouslyUseHTMLString，所以这里必须自己转义：设备名来自对方客户端上送的
+ * X-Device-Name（后端只截断不改写），不转义就是一条现成的 XSS。
+ */
+function kickoutHtml(data) {
+  const reason = escapeHtml(data.reason || '账号已在其他设备登录')
+  const parts = []
+  if (data.deviceName) {
+    parts.push(`设备：${escapeHtml(String(data.deviceName))}`)
+  }
+  if (data.ip) {
+    parts.push(`IP：${escapeHtml(String(data.ip))}`)
+  }
+  if (data.time) {
+    parts.push(`时间：${escapeHtml(String(data.time))}`)
+  }
+  return parts.length
+    ? `${reason}<br><span style="color:#909399;font-size:12px">${parts.join(' · ')}</span>`
+    : reason
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }

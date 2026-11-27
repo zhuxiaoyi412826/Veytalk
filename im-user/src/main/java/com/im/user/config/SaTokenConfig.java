@@ -23,11 +23,11 @@ import org.springframework.context.annotation.Configuration;
  *   replaced(Object loginId, String device)              ← is-concurrent=false 时登录流程会自动调用
  *   searchTokenValue(String, int, int, boolean)
  * </pre>
- * 本项目的 {@code AuthServiceImpl} 恰好全部依赖这几个能力：登录时 {@code kickSameDevice} 要
- * {@code kickout(userId, device)} 顶掉同设备旧连接，改密码后 {@code logoutEverywhere} 要
- * {@code logout(userId)} 清全部登录态，续签要 {@code logoutByTokenValue} 注销旧 token。
- * 用 Mixin 的实际后果是：首次登录能成功，但只要 Redis 里还留着同设备的旧 token，
- * 后续每一次登录都会报“this api is disabled”——因为 {@code kickout} 最终会走进被禁用的 {@code _logout}。
+ * 本项目的登录链路恰好全部依赖这几个能力：同端顶号与设备撤销要
+ * {@code kickoutByTokenValue(token)} / {@code logoutByTokenValue(token)} 精确注销单个会话，
+ * 改密码后 {@code AuthServiceImpl#logoutEverywhere} 要 {@code logout(userId)} 清全部登录态。
+ * 用 Mixin 的实际后果是：首次登录能成功，但只要 Redis 里还留着同设备位的旧 token，
+ * 后续每一次登录都会报“this api is disabled”——因为顶号最终会走进被禁用的 {@code _logout}。
  *
  * <p>Simple 模式同样交付“token 是 JWT、网关可离线验签”这个核心诉求，
  * 并且额外支持 {@code StpUtil.getExtra} 读取 JWT 载荷里的扩展参数（Mixin 反而不支持 {@code is-share}）。

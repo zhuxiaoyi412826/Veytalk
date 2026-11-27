@@ -90,6 +90,12 @@ const DEFAULTS = {
    * （序号在不同场次之间不保证一致）。本场没这一档时播放器自动回落，选项也会置灰标「本场无」。
    */
   liveQuality: 'auto',
+  /**
+   * 点位置消息卡片时用哪家地图：'' = 每次弹窗问（默认），否则直接开对应那家。
+   * 值必须是 utils/geo.js 里 MAP_PROVIDERS 的 key（amap / baidu / google）；
+   * 非法值不报错，按清单第一个处理（resolveMapProvider 已兜）。只在本机生效，不建后端表。
+   */
+  mapProvider: '',
   // ---------- 隐私与安全 ----------
   /** 聊天窗口全局水印：开启后在当前账号的聊天区叠加账号信息，防截图（仅本机生效） */
   chatWatermark: false,

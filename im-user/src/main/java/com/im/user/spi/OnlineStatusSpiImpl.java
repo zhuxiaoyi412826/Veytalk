@@ -1,7 +1,7 @@
 package com.im.user.spi;
 
-import com.im.common.enums.DeviceType;
 import com.im.common.spi.OnlineStatusSpi;
+import com.im.common.util.DeviceIds;
 import com.im.common.util.RedisUtil;
 import com.im.common.constant.RedisKeys;
 import lombok.RequiredArgsConstructor;
@@ -18,9 +18,14 @@ import java.util.Map;
 /**
  * 在线状态实现，数据全部落在 Redis。
  *
- * <p>键结构：{@code im:online:{userId}} 为 Hash，field 是设备标识、value 是最近一次心跳的毫秒时间戳，
- * 整个键带 90 秒 TTL。只要任一设备在心跳，键就持续续期；读取时再按时间戳过滤掉已经静默的设备，
- * 这样即便多端共用一个键，也不会出现「某端早已断开却仍显示在线」的脏数据。
+ * <p>键结构：{@code im:online:{userId}} 为 Hash，field 是<b>设备位</b>（{@code 类型:实例}）、
+ * value 是最近一次心跳的毫秒时间戳，整个键带 90 秒 TTL。只要任一设备在心跳，键就持续续期；
+ * 读取时再按时间戳过滤掉已经静默的设备，这样即便多端共用一个键，也不会出现
+ * 「某端早已断开却仍显示在线」的脏数据。
+ *
+ * <p>★ field 必须是设备位而不是设备类型：这里是「谁在线」的判定源，而 Sa-Token 会话、
+ * WebSocket 注册表、{@code im_user_device} 都已经是设备位粒度。若这一层还把实例 ID 洗掉，
+ * 同一类设备的两台手机就会共用一个 field——踢掉其中一台，另一台在前端看来也一起离线了。
  */
 @Slf4j
 @Service
@@ -118,7 +123,10 @@ public class OnlineStatusSpiImpl implements OnlineStatusSpi {
         }
     }
 
+    /**
+     * 清洗上送的设备位，保留实例部分；空白或非法值回落 {@code web}，与改造前同口径。
+     */
     private String normalize(String deviceId) {
-        return DeviceType.codeOf(deviceId);
+        return DeviceIds.normalize(deviceId);
     }
 }

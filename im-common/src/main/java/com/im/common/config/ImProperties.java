@@ -1,5 +1,6 @@
 package com.im.common.config;
 
+import com.im.common.enums.DeviceType;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -33,6 +34,7 @@ public class ImProperties {
     private Wallet wallet = new Wallet();
     private LinkMic linkmic = new LinkMic();
     private AiGuard aiGuard = new AiGuard();
+    private Account account = new Account();
 
     @Data
     public static class Jwt {
@@ -590,5 +592,91 @@ public class ImProperties {
         private int requestTimeoutSeconds = 60;
         /** 单次连麦最长时长（秒），超时由服务端下发 leave 兜底 */
         private int maxDurationSeconds = 3600;
+    }
+
+    /**
+     * 账号与多端登录策略。
+     *
+     * <h2>为什么顶号是「同端互斥」而不是「全账号只留一台」</h2>
+     *
+     * <p>QQ 的口径就是浏览器 / 手机 / 桌面端各占一个位互不影响，只有同一类设备超出台数才顶。本表
+     * 的键就是 {@code DeviceType} 的码，值是那一个类型同时允许几台。<b>互斥只在带实例 ID 的设备位上执行</b>，
+     * 老客户端（只传类型码）一律并存，理由见 {@code DeviceIds} 的类注释。
+     *
+     * <h2>为什么 web 默认 3 而不是 1</h2>
+     *
+     * <p>一个浏览器实例的多个标签页共用同一个设备位（刷新也是同一个），所以这里数的不是标签页而是
+     * 「几个浏览器 / 几台 PC」——同一个 Chrome 开十个页签也只算 1。给 1 会让「Edge + Chrome」这种
+     * 日常用法直接登不上，给得太大又失去了顶号的意义。
+     *
+     * <p>{@code deviceLimit} 的每个键都进了 {@code AdminConfigKey} 白名单（每次登录现取，改完即生效），
+     * 所以这里的默认值只在后台没覆盖时起作用。
+     */
+    @Data
+    public static class Account {
+        /**
+         * 同端顶号总开关。关掉就是改造前的行为：同一账号的所有设备位全部并存，永不互踢。
+         * 保留它不是因为这是个合理配置，而是因为它是一道<b>应急旋钮</b>：顶号逻辑一旦在某些
+         * 真实设备上误踢了正常用户，需要能在不重新发版的情况下一刀停掉。
+         */
+        private boolean exclusiveLogin = true;
+        /** 每类设备允许同时在线的台数，键为 {@code DeviceType} 码；不在表里的类型按 {@link #defaultDeviceLimit} */
+        private Map<String, Integer> deviceLimit = defaultLimits();
+        /** 表里没写到某类设备时的兜底台数 */
+        private int defaultDeviceLimit = 1;
+        /** 登录流水保留天数，由定时任务物理删除（0 = 永不清理） */
+        private int loginLogKeepDays = 180;
+        /** 设备列表里最多列几条已登记设备（防一个养号脚本把上千行塞进用户屏幕） */
+        private int deviceListMax = 50;
+
+        /**
+         * 取某类设备的台数上限。
+         *
+         * <p>查找时不区分大小写：配置里的键和 {@code DeviceType} 码理论上总是小写，
+         * 但这是运维手填的东西，写成 {@code ANDROID} 就静默回落到兜底值 1 是最难查的一类坑。
+         */
+        public int limitOf(String deviceType) {
+            if (deviceType == null || deviceLimit == null || deviceLimit.isEmpty()) {
+                return Math.max(1, defaultDeviceLimit);
+            }
+            Integer exact = deviceLimit.get(deviceType);
+            if (exact == null) {
+                for (Map.Entry<String, Integer> entry : deviceLimit.entrySet()) {
+                    if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(deviceType)) {
+                        exact = entry.getValue();
+                        break;
+                    }
+                }
+            }
+            // 上限 20：填 0 或负数会让「谁都无法登录」，填上千则等于关掉了顶号，都不如直接收敛
+            return exact == null ? Math.max(1, defaultDeviceLimit) : Math.min(20, Math.max(1, exact));
+        }
+
+        /**
+         * 改某一类设备的台数上限，供后台「系统配置」页在线下发用（改了立刻生效，不必重启）。
+         *
+         * <p>键统一收敛成 {@code DeviceType} 的小写码再存：写进去一个 {@code ANDROID}，
+         * {@link #limitOf} 虽然也能靠忽略大小写命中，但表里就会同时存在 {@code android} 和
+         * {@code ANDROID} 两行，改哪行全凭运气。范围同样夹在 [1, 20]，理由见 {@link #limitOf}。
+         */
+        public void setLimit(String deviceType, int value) {
+            if (deviceType == null || deviceType.isBlank()) {
+                return;
+            }
+            if (deviceLimit == null) {
+                deviceLimit = new LinkedHashMap<>(8);
+            }
+            deviceLimit.put(DeviceType.codeOf(deviceType), Math.min(20, Math.max(1, value)));
+        }
+
+        private static Map<String, Integer> defaultLimits() {
+            Map<String, Integer> map = new LinkedHashMap<>(8);
+            map.put("web", 3);
+            map.put("pc", 1);
+            map.put("android", 1);
+            map.put("ios", 1);
+            map.put("mini", 1);
+            return map;
+        }
     }
 }

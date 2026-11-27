@@ -108,6 +108,44 @@ a { color: inherit; text-decoration: none; }
 .dl-note { margin-top: 26px; color: var(--text-2); font-size: 14px; text-align: center; }
 .dl-note code { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 13px; }
 
+/* ---------- 下载卡：校验值与发布日期 ---------- */
+.dl-check { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; }
+/* user-select: all —— 点一下就把 32 位校验值整体选中，访客能直接 Ctrl+C 拿去跟本地算的结果对；
+   不写这个就得从一长串十六进制里手动拖选，反而更容易选漏一位而白对半天 */
+.dl-md5 {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px; color: var(--text-2); background: var(--bg-soft);
+  border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px;
+  max-width: 100%; word-break: break-all; user-select: all; cursor: text;
+}
+
+/* ---------- 历史版本 ---------- */
+/* 用 auto-fit 而不是像 .dl-grid 那样定死列数：这里的分组数等于后台真发过包的平台数（1~5），
+   写死 repeat(2, 1fr) 在只有一组时会留下半个空列 */
+.his-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+.his-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px;
+}
+.his-card h3 { font-size: 16px; margin-bottom: 6px; }
+.his-list { list-style: none; }
+.his-list li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.his-list li:last-child { border-bottom: none; padding-bottom: 0; }
+.his-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.his-ver { font-size: 15px; font-weight: 600; }
+.his-spec { color: var(--text-2); font-size: 13px; flex: 1; min-width: 120px; }
+.his-get {
+  font-size: 13px; color: var(--accent); border: 1px solid var(--line);
+  border-radius: 8px; padding: 3px 12px; transition: all 0.2s; white-space: nowrap;
+}
+.his-get:hover { border-color: var(--accent); }
+/* 停用行：不给下载链，就老实说「已停用」而不是留个空位——访客需要知道这个版本存在过但不能从本站拿 */
+.his-off {
+  font-size: 12px; color: var(--text-2); background: var(--bg-soft);
+  border: 1px dashed var(--line); border-radius: 8px; padding: 3px 10px; white-space: nowrap;
+}
+/* pre-line：更新说明在后台是按行写的，这里得把换行当换行看，而不是全挤成一行 */
+.his-note { margin-top: 6px; color: var(--text-2); font-size: 13px; white-space: pre-line; word-break: break-word; }
+
 /* ---------- 链接区 ---------- */
 .link-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
 .link-card {
@@ -142,4 +180,7 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 560px) {
   .grid { grid-template-columns: 1fr; }
   .hero { padding: 64px 0 48px; }
+  /* 窄屏上把「日期 · 体积」挤到版本号下面，否则三个元素加一个下载按钮会撞成一团 */
+  .his-spec { flex-basis: 100%; min-width: 0; order: 3; }
+  .his-get, .his-off { margin-left: auto; }
 }

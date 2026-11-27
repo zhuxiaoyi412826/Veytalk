@@ -4,13 +4,13 @@ import cn.dev33.satoken.stp.SaTokenInfo;
 import cn.dev33.satoken.stp.StpUtil;
 import com.im.common.api.ResultCode;
 import com.im.common.domain.WsPacket;
-import com.im.common.enums.DeviceType;
 import com.im.common.enums.WsMessageType;
 import com.im.common.exception.BusinessException;
 import com.im.common.security.PasswordEncryptor;
 import com.im.common.spi.FriendRelationSpi;
 import com.im.common.spi.OnlineStatusSpi;
 import com.im.common.spi.PushSpi;
+import com.im.common.util.DeviceIds;
 import com.im.common.util.SecurityUtil;
 import com.im.common.util.TextUtil;
 import com.im.user.dto.req.EmailLoginRequest;
@@ -24,11 +24,13 @@ import com.im.user.dto.vo.EmailSendVO;
 import com.im.user.dto.vo.LoginVO;
 import com.im.user.dto.vo.SmsSendVO;
 import com.im.user.dto.vo.UserVO;
+import com.im.user.entity.LoginLog;
 import com.im.user.entity.User;
 import com.im.user.entity.UserAgreement;
 import com.im.user.service.AgreementService;
 import com.im.user.service.AuthService;
 import com.im.user.service.CaptchaService;
+import com.im.user.service.DeviceService;
 import com.im.user.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -59,6 +61,8 @@ public class AuthServiceImpl implements AuthService {
     private final PasswordEncryptor passwordEncryptor;
     private final OnlineStatusSpi onlineStatusSpi;
     private final AgreementService agreementService;
+    /** 登录留痕与「下线其他设备」都靠它，它不反向依赖 AuthService，不成环 */
+    private final DeviceService deviceService;
     private final ObjectProvider<PushSpi> pushSpiProvider;
     private final ObjectProvider<FriendRelationSpi> friendRelationSpiProvider;
 
@@ -77,6 +81,9 @@ public class AuthServiceImpl implements AuthService {
         }
         if (!passwordEncryptor.matches(request.getPassword(), user.getPassword())) {
             log.warn("登录失败，密码错误: account={}, ip={}", account, SecurityUtil.getClientIp());
+            // 留一条失败流水：它是「有人试图撞这个号」的唯一一手证据。账号不存在的分支不记，
+            // 因为那里根本不知道 user_id，而 im_login_log.user_id 是 NOT NULL
+            deviceService.recordEvent(user.getId(), request.getDeviceId(), LoginLog.EVENT_LOGIN_FAIL, "密码错误");
             throw new BusinessException(ResultCode.USER_PASSWORD_ERROR);
         }
         checkUsable(user);
@@ -156,8 +163,10 @@ public class AuthServiceImpl implements AuthService {
 
         userService.resetPassword(user.getId(), request.getNewPassword());
         // 改完密码必须踢掉全部设备：这是找回密码的标准动作。
-        // 不踢的话，盗号者拿到验证码改完密码，原主人的会话依旧活着，两边同时在线
-        logoutEverywhere(user.getId());
+        // 不踢的话，盗号者拿到验证码改完密码，原主人的会话依旧活着，两边同时在线。
+        // 这里的 keepCurrent 永远是 false：找回密码是在未登录态下完成的，根本没有「当前设备」可留
+        logoutEverywhere(user.getId(), "密码已重置，请使用新密码登录", false,
+                "凭验证码重置密码，全部设备下线");
         log.info("用户 {} 通过{}找回密码重置成功，已注销全部登录态", user.getId(), byEmail ? "邮箱" : "手机号");
     }
 
@@ -167,19 +176,51 @@ public class AuthServiceImpl implements AuthService {
             return;
         }
         Long userId = SecurityUtil.getUserIdOrNull();
-        String device = DeviceType.codeOf(StpUtil.getLoginDeviceType());
+        // ★ 必须在 logout 之前取设备位：会话一注销就读不到自己的终端信息了
+        String slot = SecurityUtil.getLoginDevice();
         StpUtil.logout();
         // 监听器可能因取不到设备信息而清理了全部在线状态，这里按设备精确回填一次
         if (userId != null) {
-            onlineStatusSpi.setOffline(userId, device);
-            notifyOnlineState(userId, false);
+            onlineStatusSpi.setOffline(userId, slot == null ? SecurityUtil.getDevice() : slot);
+            deviceService.recordEvent(userId, slot, LoginLog.EVENT_LOGOUT, "主动退出登录");
+            // 多端共存时不能一律广播下线：手机注销不该让好友看到「这人离线了」而他电脑还开着
+            notifyOnlineState(userId, !onlineStatusSpi.getOnlineDevices(userId).isEmpty());
         }
     }
 
     @Override
     public void logoutEverywhere(Long userId) {
+        logoutEverywhere(userId, null, false, null);
+    }
+
+    /**
+     * 全端 / 除本机以外下线的唯一入口。
+     *
+     * <p>1-参调用（后台封号）传 {@code reason=null} 是故意的：{@code AdminUserSpiImpl} 自己
+     * 已经推过一句带封禁到期时间的 kickout 报文，这里再推一遍会让用户看到两句不同的话。
+     */
+    @Override
+    public void logoutEverywhere(Long userId, String reason, boolean keepCurrent, String recordDetail) {
         if (userId == null) {
             return;
+        }
+        if (keepCurrent) {
+            // 逐位推报文 + 逐位注销会话都在 DeviceService 里，它才知道哪些位不是本机
+            deviceService.logoutOthers(userId, reason == null ? "账号已在其他设备上重新登录" : reason,
+                    LoginLog.EVENT_CREDENTIAL_CHANGED);
+            if (recordDetail != null) {
+                deviceService.recordEvent(userId, SecurityUtil.getLoginDevice(),
+                        LoginLog.EVENT_CREDENTIAL_CHANGED, recordDetail);
+            }
+            return;
+        }
+        PushSpi pushSpi = pushSpiProvider.getIfAvailable();
+        if (pushSpi != null && reason != null) {
+            try {
+                pushSpi.kickOut(userId, null, reason);
+            } catch (Exception e) {
+                log.warn("全端下线时推送报文失败（继续注销会话）: userId={}, {}", userId, e.getMessage());
+            }
         }
         try {
             StpUtil.logout(userId);
@@ -188,6 +229,9 @@ public class AuthServiceImpl implements AuthService {
         }
         onlineStatusSpi.clear(userId);
         notifyOnlineState(userId, false);
+        if (recordDetail != null) {
+            deviceService.recordEvent(userId, null, LoginLog.EVENT_CREDENTIAL_CHANGED, recordDetail);
+        }
     }
 
     @Override
@@ -197,15 +241,23 @@ public class AuthServiceImpl implements AuthService {
         checkUsable(user);
 
         String oldToken = StpUtil.getTokenValue();
-        String device = DeviceType.codeOf(StpUtil.getLoginDeviceType());
-        StpUtil.login(userId, StpUtil.createSaLoginParameter().setDeviceType(device));
+        // ★ 续签必须把类型与实例一起带过去，只传类型码会让这台设备升级后“退化成老客户端”：
+        //   实例 ID 一洗掉，它就再也进不了同端顶号的计数，而且设备表里会多出一行 device_id=''
+        String slot = SecurityUtil.getLoginDevice();
+        if (slot == null) {
+            slot = DeviceIds.normalize(SecurityUtil.getDevice());
+        }
+        String type = DeviceIds.typeOf(slot);
+        StpUtil.login(userId, StpUtil.createSaLoginParameter()
+                .setDeviceType(type)
+                .setDeviceId(DeviceIds.instanceOf(slot)));
         SaTokenInfo info = StpUtil.getTokenInfo();
         if (oldToken != null && !oldToken.equals(info.getTokenValue())) {
             StpUtil.logoutByTokenValue(oldToken);
         }
         // 旧 token 注销会触发监听器清理在线状态，这里重新标记当前设备在线
-        onlineStatusSpi.setOnline(userId, device);
-        return buildLoginVO(info, device, userService.getProfile(userId), agreementService.needConsent(userId));
+        onlineStatusSpi.setOnline(userId, slot);
+        return buildLoginVO(info, type, userService.getProfile(userId), agreementService.needConsent(userId));
     }
 
     @Override
@@ -303,17 +355,25 @@ public class AuthServiceImpl implements AuthService {
     /**
      * 完成 Sa-Token 登录并组装返回体。
      *
-     * <p>不再做同设备顶号：同一浏览器的多个标签页、同一桌面端的多个窗口共用一个设备位，
-     * 顶号会把用户已经打开的其它页面挤下线（两端拿的是同一个登录 token，被顶的一方既没换账号也没断网）。
-     * 配置 is-concurrent=true + is-share=false，每次登录签发独立 token，各端互不影响。
+     * <p>客户端上送的 {@code deviceId} 从 1.0.9 起是<b>设备位</b>（{@code 类型:实例}），进 Sa-Token 前
+     * 拆回两个字段：这样同类型设备的两台机器各自占一个位，而监听器里的
+     * {@code DeviceService.onLogin} 才能按位顶号。老客户端只传类型码，拆出来实例为空，
+     * 行为与改造前一致（同端全部并存、永不互踢）。
+     *
+     * <p>配置 is-concurrent=true + is-share=false，每次登录签发独立 token；顶号不在本方法里做，
+     * 它只住在 {@code DeviceServiceImpl}：四条登录路径（密码 / 短信 / 邮箱 / 扫码）共用一份口径，
+     * 写在这里就会变成四处都要补一遍的重复代码。
      */
     private LoginVO doLogin(User user, String deviceId) {
-        String device = DeviceType.codeOf(deviceId);
+        String slot = DeviceIds.normalize(deviceId);
+        String type = DeviceIds.typeOf(slot);
 
-        StpUtil.login(user.getId(), StpUtil.createSaLoginParameter().setDeviceType(device));
+        StpUtil.login(user.getId(), StpUtil.createSaLoginParameter()
+                .setDeviceType(type)
+                .setDeviceId(DeviceIds.instanceOf(slot)));
         userService.touchLogin(user.getId(), SecurityUtil.getClientIp());
         notifyOnlineState(user.getId(), true);
-        return buildLoginVO(StpUtil.getTokenInfo(), device, userService.getProfile(user.getId()),
+        return buildLoginVO(StpUtil.getTokenInfo(), type, userService.getProfile(user.getId()),
                 agreementService.needConsent(user.getId()));
     }
 

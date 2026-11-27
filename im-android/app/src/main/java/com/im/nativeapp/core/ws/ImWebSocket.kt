@@ -115,7 +115,7 @@ class ImWebSocket @Inject constructor(
 
         scope.launch {
             val ticketVo: WsTicketVO = try {
-                apiClient.api().wsTicket(SessionStore.DEVICE_ID).unwrap(apiClient.json)
+                apiClient.api().wsTicket(session.deviceSlot).unwrap(apiClient.json)
             } catch (e: ApiError) {
                 if (ApiError.isAuthError(e.code)) {
                     // 登录态已经没了，重连只是反复撞 401；清凭证回登录页由上层 me() 失败触发

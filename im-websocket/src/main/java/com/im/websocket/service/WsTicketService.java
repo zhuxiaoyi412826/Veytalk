@@ -4,8 +4,8 @@ import cn.hutool.core.convert.Convert;
 import com.im.common.api.ResultCode;
 import com.im.common.config.ImProperties;
 import com.im.common.constant.ImConstants;
-import com.im.common.enums.DeviceType;
 import com.im.common.exception.BusinessException;
+import com.im.common.util.DeviceIds;
 import com.im.common.util.JwtUtil;
 import com.im.websocket.dto.vo.WsTicketVO;
 import com.im.websocket.manager.WsPrincipal;
@@ -55,15 +55,17 @@ public class WsTicketService {
     /**
      * 为已登录用户签发连接票据。
      *
-     * @param deviceId 客户端声明的设备标识，会经 {@link DeviceType#codeOf} 归一化后写进票据。
-     *                 归一化必须在签发时做完而不是留到握手时，
-     *                 因为 Sa-Token 的多端管理用的也是归一化后的值，两边不一致会导致踢不中
+     * @param deviceId 客户端声明的设备位（{@code 类型:实例}），会经 {@link DeviceIds#normalize}
+     *                 清洗后写进票据。清洗必须在签发时做完而不是留到握手时，
+     *                 因为 Sa-Token 的多端管理用的也是清洗后的值，两边不一致会导致踢不中。
+     *                 ★ 这里不能用 {@code DeviceType.codeOf}：它会把实例 ID 洗掉，
+     *                 于是同一类设备的两台手机共用一个注册表键，踢一台等于踢两台
      */
     public WsTicketVO issue(Long userId, String deviceId) {
         if (userId == null) {
             throw new BusinessException(ResultCode.UNAUTHORIZED);
         }
-        String device = DeviceType.codeOf(deviceId);
+        String device = DeviceIds.normalize(deviceId);
         long ttl = imProperties.getJwt().getTicketTtlSeconds();
         String ticket = jwtUtil.createToken(userId, device, PURPOSE, Duration.ofSeconds(ttl));
         log.debug("签发 WebSocket 连接票据: userId={}, deviceId={}, ttl={}s", userId, device, ttl);
@@ -92,7 +94,7 @@ public class WsTicketService {
             log.warn("WebSocket 票据缺少 userId 载荷");
             throw new BusinessException(ResultCode.WS_TICKET_INVALID);
         }
-        return new WsPrincipal(userId, DeviceType.codeOf(Convert.toStr(claims.get(JwtUtil.CLAIM_DEVICE_ID))));
+        return new WsPrincipal(userId, DeviceIds.normalize(Convert.toStr(claims.get(JwtUtil.CLAIM_DEVICE_ID))));
     }
 
     /**

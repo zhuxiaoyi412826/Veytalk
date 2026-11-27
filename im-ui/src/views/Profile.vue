@@ -286,6 +286,87 @@
           <el-button type="danger" @click="onCancelAccount">注销账号</el-button>
         </div>
       </section>
+
+      <!-- ==================== 登录设备 ==================== -->
+      <section class="profile__card">
+        <div class="profile__card-title">登录设备</div>
+        <div class="profile__hint">
+          一个账号可以在浏览器 / 桌面端 / 手机 / 小程序 各占一位同时在线；同一类设备超过后台配的台数时，
+          最早那台会被顶下线。撤销只是踢掉那台设备，不禁止它下次用密码登录。
+        </div>
+        <el-table
+          v-loading="device.loading"
+          :data="device.rows"
+          size="small"
+          class="profile__table"
+          empty-text="还没有设备登记记录（重新登录一次就有了）"
+        >
+          <el-table-column label="设备" min-width="180">
+            <template #default="{ row }">
+              <div class="profile__cell-main">{{ row.deviceName || row.deviceTypeDesc }}</div>
+              <div class="profile__cell-sub">{{ row.deviceTypeDesc }} · 共登录 {{ row.loginCount || 0 }} 次</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="96">
+            <template #default="{ row }">
+              <el-tag v-if="row.current" size="small" type="primary" effect="plain">本机</el-tag>
+              <el-tag v-else-if="row.status !== 1" size="small" type="info" effect="plain">已撤销</el-tag>
+              <el-tag v-else-if="row.online" size="small" type="success" effect="plain">在线</el-tag>
+              <el-tag v-else size="small" type="info" effect="plain">离线</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最近登录" min-width="150">
+            <template #default="{ row }">{{ formatDateTime(row.lastLoginTime) || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="IP" min-width="120">
+            <template #default="{ row }">{{ row.ip || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="76">
+            <template #default="{ row }">
+              <!-- 本机的撤销按钮必须禁用：点了等于自己把自己踢下线，而那不是「管理设备」是误操作 -->
+              <el-button link type="danger" :disabled="row.current || row.status !== 1" @click="onRevokeDevice(row)">
+                撤销
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="device.rows.some((it) => !it.identifiable)" class="profile__hint profile__hint--warn">
+          列表里有只认到设备类型、认不到具体一台的记录（旧版客户端上送的）：撤销它会把同类型的所有登录一起下线。
+        </div>
+        <div class="profile__actions">
+          <el-button :loading="device.busy" @click="onLogoutOthers">下线其他设备</el-button>
+          <el-button text type="primary" @click="toggleRecords">
+            {{ device.showRecords ? '收起登录记录' : '查看登录记录' }}
+          </el-button>
+        </div>
+        <el-table
+          v-if="device.showRecords"
+          v-loading="record.loading"
+          :data="record.rows"
+          size="small"
+          class="profile__table"
+          empty-text="暂无记录"
+        >
+          <el-table-column label="时间" min-width="150">
+            <template #default="{ row }">{{ formatDateTime(row.createTime) || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="事件" width="110">
+            <template #default="{ row }">{{ row.eventDesc || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="设备" min-width="150">
+            <template #default="{ row }">{{ row.deviceName || row.deviceTypeDesc || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="IP" min-width="120">
+            <template #default="{ row }">{{ row.ip || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="180">
+            <template #default="{ row }">{{ row.detail || '—' }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-if="device.showRecords" class="profile__hint">
+          记录只到 IP，不显示城市：服务端没接任何归属地库，凭 IP 写「来自某市」是编出来的。
+        </div>
+      </section>
     </div>
 
     <!-- ==================== 修改 / 首次设置密码 ==================== -->
@@ -354,6 +435,13 @@
             </el-button>
           </div>
         </el-form-item>
+        <!-- 首绑不涉及“换了别人的号”，这个选项只在换绑时出现 -->
+        <el-form-item v-if="auth.phone">
+          <el-checkbox v-model="phoneForm.logoutAll">换绑后退出所有设备（包括当前）</el-checkbox>
+          <div class="profile__hint">
+            不勾选也会把其他设备下线，只留着本机这一台——换绑就在手机上做，做完不必再登一次。
+          </div>
+        </el-form-item>
       </el-form>
       <div v-if="smsDebugCode" class="profile__hint profile__hint--warn">
         开发环境短信验证码：{{ smsDebugCode }}
@@ -374,6 +462,7 @@ import { Camera, Loading, Lock, Plus, SwitchButton } from '@element-plus/icons-v
 import UserAvatar from '@/components/UserAvatar.vue'
 import { uploadAvatar, uploadFileSmart } from '@/api/file'
 import { cancelAccount } from '@/api/user'
+import { fetchDevices, fetchLoginRecords, logoutOtherDevices, revokeDevice } from '@/api/device'
 import {
   addPhoto, deletePhoto, fetchDatingDict, fetchDatingProfile, fetchPhotos, fetchTagLibrary, fetchTags,
   saveDatingPrivacy, saveDatingProfile, saveTags, setMainPhoto, sortPhotoOrder
@@ -381,7 +470,7 @@ import {
 import { guardImage } from '@/utils/nsfw'
 import { mediaUrl, readImageSize } from '@/utils/media'
 import { regionOptions, regionCodes, regionNames } from '@/data/regionTree'
-import { resolveRegionByCoords } from '@/utils/regionLookup'
+import { resolveRegionByCoords, provinceByCoords } from '@/utils/regionLookup'
 import { requestLocation } from '@/utils/location'
 import { getCache, setCache } from '@/utils/localCache'
 import { sendSmsCode } from '@/api/auth'
@@ -440,6 +529,9 @@ async function submit() {
     return
   }
   saving.value = true
+  // 先记下旧邮箱：后端在换绑邮箱时会顺带下线其他设备，提示必须说出来，
+  // 否则用户会以为手机那边还登着（而实际上已经被踢了）
+  const oldEmail = (auth.userInfo?.email || '').trim().toLowerCase()
   try {
     // 只发后端 UpdateProfileRequest 认得的字段：多传 phone 之类的会被静默忽略，
     // 但会让读代码的人误以为这里能改手机号
@@ -450,7 +542,11 @@ async function submit() {
       email: form.email
     })
     fillForm()
-    ElMessage.success('资料已更新')
+    ElMessage.success(
+      oldEmail && oldEmail !== (form.email || '').trim().toLowerCase()
+        ? '资料已更新，其他设备已下线'
+        : '资料已更新'
+    )
   } catch {
     // 提示已由 request.js 弹出
   } finally {
@@ -495,7 +591,10 @@ const LOCATION_VALID_DAYS = 7
 
 const regionOpts = regionOptions()
 // checkStrictly：东莞、儋州这类下面没有区县的市，以及不想填到区的用户，都要能只选到市那一档
-const regionProps = { checkStrictly: true, expandTrigger: 'hover' }
+// checkOnClickNode：点一级就选中一级（上方立刻显示「广东省」，再点市就显示「广东省 / 深圳市」）。
+// 不开这个的话，非叶子节点只能点它前面那个小圆圈才选中，点文字只展开下一级，
+// 用户的感受就是「必须三级全选完才一次显示」。
+const regionProps = { checkStrictly: true, expandTrigger: 'hover', checkOnClickNode: true }
 /** 级联框的值是编码数组，而库里存的是三个名字（为什么这么切分见 data/regionTree.js 头注释） */
 const regionValue = ref([])
 const regionHint = ref('')
@@ -526,6 +625,32 @@ function onRegionChange(value) {
   datingForm.district = names[2] || ''
   regionLegacy.value = ''
   regionHint.value = ''
+}
+
+/**
+ * 把一套编码写进级联框（regionValue）与表单三个名字。
+ *
+ * <p>★ 两边必须一起写：级联框显示的是 regionValue，而 {@code onRegionChange} 只写名字。
+ * 只调 onRegionChange 就是「定位后框里空的，保存之后才出现三级」那个 bug：名字已经进了表单，
+ * 但要等保存后回读调一次 syncRegionValue() 才把编码算回来给级联框。
+ *
+ * <p>两条不覆盖原则：① 空的不动（定位没判出来 ≠ 用户原来填的是错的）；
+ * ② 同一个省里档数变少也不动（定位只判到省，不能把用户填好的市与区县抹掉）。
+ *
+ * @returns {boolean} 是否真写进去了（false = 按上面两条保住了原值）
+ */
+function applyRegionCodes(codes, note) {
+  const next = (Array.isArray(codes) ? codes : []).filter(Boolean)
+  // 级联框取消选中时 v-model 会变 null（不是空数组），不能直接读 .length
+  const prev = Array.isArray(regionValue.value) ? regionValue.value : []
+  const keep = !next.length || (next.length < prev.length && next[0] === prev[0])
+  if (!keep) {
+    regionValue.value = next
+    onRegionChange(next)
+  }
+  // onRegionChange 会把 hint 清空，所以这句必须放在它后面
+  regionHint.value = note || ''
+  return !keep
 }
 
 const privacy = reactive({ showAge: 1, showDistance: 1, showOnline: 1, discoverable: 1, momentVisibleDays: 0 })
@@ -652,20 +777,32 @@ async function clearMyLocation() {
 }
 
 /**
- * 坐标 → 三级并回填。
+ * 坐标 → 三级并回填到级联框。
  *
- * <p>这一步可能要连公网取边界文件（内网与打包成 EXE/APK 时大概率取不到，那时只回填到省），
- * 所以它不参与 locating 那把锁：坐标已经落库，行政区划只是顺手预填，再慢也不能把按钮占着。
+ * <p>两步走：先用随包的省级外包框<b>零请求</b>填出省（同步、立刻可见），再等
+ * {@code resolveRegionByCoords} 把市与区县补上。判市判区可能要连公网取边界文件（内网与
+ * 打包成 EXE/APK 时取不到，那时走随包中心点表兜底），所以它不参与 locating 那把锁：
+ * 坐标已经落库，行政区划只是顺手预填，再慢也不能把按钮占着。
+ *
+ * <p>★ 这里填的只是界面与表单，三个名字仍要点「保存交友资料」才写库（坐标是另一条路，
+ * 定位成功即落库）。不跟着坐标一起自动写库的理由：出差在外点一下定位，不应该静默把
+ * 家里的城市改掉——那会直接改变同城匹配的结果。
  */
 async function fillRegionByCoords(lng, lat) {
-  regionHint.value = '正在按坐标判断所在地区…'
+  const quick = provinceByCoords(lng, lat)
+  applyRegionCodes(quick ? [quick.code] : [], '正在按坐标判断所在地区…')
   const got = await resolveRegionByCoords(lng, lat)
   if (!got.codes.length) {
-    regionHint.value = got.note || '这个坐标对不上行政区划字典，请手动选择所在地区'
+    // 判不出来只说原因，不动用户原来填的值（applyRegionCodes 对空数组就是这个语义）
+    applyRegionCodes([], got.note || '这个坐标对不上行政区划字典，请手动选择所在地区')
     return
   }
-  onRegionChange(got.codes)
-  regionHint.value = got.note
+  const written = applyRegionCodes(got.codes, got.note)
+  if (!written) {
+    regionHint.value = `定位只判断到「${got.text}」，已保留原来更细的地区`
+  } else if (!got.note) {
+    regionHint.value = `已按定位填为 ${got.text}，确认无误后点「保存交友资料」写库`
+  }
 }
 
 /** 定位失败只在原地提示、不弹全局错误：不授权定位也能只用城市列做同城筛选 */
@@ -680,9 +817,13 @@ async function locateMe() {
   }
   locationForm.lng = got.lng
   locationForm.lat = got.lat
-  await persistLocation()
   locating.value = false
-  fillRegionByCoords(got.lng, got.lat)
+  // 先起地区反查再落库坐标：反查第一步是零请求的省级判定，能立刻把「广东省」显示出来，
+  // 市与区县等公网边界回来再补——点完定位框里马上有东西，而不是等一趟保存请求回来还是空的
+  const filling = fillRegionByCoords(got.lng, got.lat)
+  await persistLocation()
+  // 反查失败不影响已经落库的坐标，也不能抛到事件处理器外面变成 unhandled rejection
+  await filling.catch(() => {})
 }
 
 /**
@@ -1194,7 +1335,7 @@ function useCountdown() {
 
 const phoneFormRef = ref(null)
 const phoneDialog = reactive({ visible: false, saving: false })
-const phoneForm = reactive({ phone: '', smsCode: '' })
+const phoneForm = reactive({ phone: '', smsCode: '', logoutAll: false })
 const smsSending = ref(false)
 const smsDebugCode = ref('')
 const sms = useCountdown()
@@ -1214,6 +1355,7 @@ const phoneRules = {
 function openPhoneDialog() {
   phoneForm.phone = ''
   phoneForm.smsCode = ''
+  phoneForm.logoutAll = false
   smsDebugCode.value = ''
   phoneDialog.visible = true
 }
@@ -1221,6 +1363,7 @@ function openPhoneDialog() {
 function resetPhoneForm() {
   phoneForm.phone = ''
   phoneForm.smsCode = ''
+  phoneForm.logoutAll = false
   smsDebugCode.value = ''
   sms.stop()
   phoneFormRef.value?.clearValidate()
@@ -1258,9 +1401,17 @@ async function submitPhone() {
   }
   phoneDialog.saving = true
   try {
-    await auth.bindPhone({ phone: phoneForm.phone, smsCode: phoneForm.smsCode })
+    // 换绑时后端默认保留本机、只踢其他设备；勾上 logoutAll 则连本机一起下线（需重登）
+    const rebind = !!auth.phone
+    await auth.bindPhone({ phone: phoneForm.phone, smsCode: phoneForm.smsCode, logoutAll: phoneForm.logoutAll })
     phoneDialog.visible = false
-    ElMessage.success('手机号已绑定')
+    if (rebind && phoneForm.logoutAll) {
+      ElMessage.success('手机号已换绑，所有设备需重新登录')
+      await signOut()
+      router.replace({ name: 'login' })
+      return
+    }
+    ElMessage.success(rebind ? '手机号已换绑，其他设备已下线' : '手机号已绑定')
   } catch {
     // 验证码错误 / 号码被占用等提示已弹出，保留对话框让用户重试
   } finally {
@@ -1321,6 +1472,94 @@ async function onCancelAccount() {
   }
 }
 
+/* ------------------------------ 登录设备 ------------------------------ */
+
+const device = reactive({ rows: [], loading: false, busy: false, showRecords: false })
+const record = reactive({ rows: [], loading: false, loaded: false })
+
+async function loadDevices() {
+  device.loading = true
+  try {
+    device.rows = (await fetchDevices()) || []
+  } catch (e) {
+    // 拦截器已经弹了错误条，这里只兼顾「列表拿不到不要把页面弄挂」
+    device.rows = []
+  } finally {
+    device.loading = false
+  }
+}
+
+async function loadRecords() {
+  record.loading = true
+  try {
+    record.rows = (await fetchLoginRecords(30)) || []
+    record.loaded = true
+  } catch (e) {
+    record.rows = []
+  } finally {
+    record.loading = false
+  }
+}
+
+/** 展开时才拉：登录记录是一张只增表，没人开页就想看它 */
+function toggleRecords() {
+  device.showRecords = !device.showRecords
+  if (device.showRecords && !record.loaded) {
+    loadRecords()
+  }
+}
+
+async function onRevokeDevice(row) {
+  const name = row.deviceName || row.deviceTypeDesc || '该设备'
+  try {
+    await ElMessageBox.confirm(
+      row.identifiable
+        ? `确定撤销「${name}」？它会立刻下线，下次需重新登录。`
+        : `「${name}」只认到设备类型认不到具体一台，撤销会把 ${row.deviceTypeDesc} 类型的所有登录一起下线。确定继续？`,
+      '撤销设备',
+      { type: 'warning', confirmButtonText: '确定撤销', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    await revokeDevice(row.id)
+    ElMessage.success('该设备已下线')
+    await loadDevices()
+    // 撤销会写一条流水，已经展开的记录表得跟着重拉，否则用户以为没生效
+    if (device.showRecords) {
+      loadRecords()
+    }
+  } catch (e) {
+    // 错误提示由拦截器统一弹（含 2033「设备不存在或已下线」）
+  }
+}
+
+async function onLogoutOthers() {
+  try {
+    await ElMessageBox.confirm(
+      '除当前这台以外的登录全部下线，包括手机与小程序。确定继续？',
+      '下线其他设备',
+      { type: 'warning', confirmButtonText: '确定下线', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  device.busy = true
+  try {
+    const res = await logoutOtherDevices()
+    ElMessage.success(res && res.count ? `已下线 ${res.count} 台其他设备` : '没有其他设备在线')
+    await loadDevices()
+    if (device.showRecords) {
+      loadRecords()
+    }
+  } catch (e) {
+    // 同上，拦截器已提示
+  } finally {
+    device.busy = false
+  }
+}
+
 /* ------------------------------ 生命周期 ------------------------------ */
 
 onMounted(async () => {
@@ -1330,6 +1569,7 @@ onMounted(async () => {
   }
   fillForm()
   loadDating()
+  loadDevices()
 })
 </script>
 
@@ -1468,6 +1708,22 @@ onMounted(async () => {
 .profile__hint--warn {
   margin-bottom: 12px;
   color: #e6a23c;
+}
+
+/* 登录设备与登录记录两张表：靠上边留白与上方提示行分开，不改 .profile__actions 的既有间距 */
+.profile__table {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.profile__cell-main {
+  font-size: 13px;
+  color: var(--im-text);
+}
+
+.profile__cell-sub {
+  font-size: 12px;
+  color: var(--im-text-secondary);
 }
 
 /* 交友块：标题与完资料度同一行，不动 .profile__card-title 本身的样式，免得影响已有的两处 */

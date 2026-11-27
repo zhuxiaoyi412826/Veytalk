@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
-import { getToken, getTokenName, clearToken } from '@/utils/token'
+import { getToken, getTokenName, clearToken, getDeviceName } from '@/utils/token'
 import { apiBaseURL } from '@/utils/env'
 
 /**
@@ -95,6 +95,11 @@ http.interceptors.request.use((config) => {
   }
   // 后端的 TraceIdFilter 认这个头并原样回写，浏览器控制台与服务器日志因此能用同一个 ID 对上
   config.headers['X-Trace-Id'] = newTraceId()
+  // 设备友好名只在桌面端发（浏览器留给后端的 UA 识别），空头发上去后端会当成「上送了一个空名字」
+  const deviceName = getDeviceName()
+  if (deviceName) {
+    config.headers['X-Device-Name'] = deviceName
+  }
   return config
 })
 

@@ -234,9 +234,21 @@ public class WsSessionManager {
      * <p>这里<strong>不</strong>调用 {@code StpUtil.kickout}：注销登录态是调用方的职责，
      * 若这里也调一次，两条路径会互相触发，同一次踢出产生两轮注销。
      *
-     * @param deviceId 为空表示踢掉该用户的全部端
+     * @param deviceId 为空表示踢掉该用户的全部端；从 1.0.9 起传的是<b>设备位</b>（{@code 类型:实例}），
+     *                 它就是这个注册表第二层 Map 的键，两边必须同源，否则会出现
+     *                 「会话踢中了、socket 还活着」这种最难查的一半失效
      */
     public void kickOut(Long userId, String deviceId, String reason) {
+        kickOut(userId, deviceId, reason, null);
+    }
+
+    /**
+     * 踢下线，并把额外信息并进 {@code kickout} 报文。
+     *
+     * <p>顶号场景需要告诉被踢的一方「是谁把你挤了」：设备名、IP、时间。这些字段由调用方给
+     * （它才知道那台新设备是谁），本类只负责合并与送达。detail 为空时退化成原来的报文形状。
+     */
+    public void kickOut(Long userId, String deviceId, String reason, Map<String, Object> detail) {
         if (userId == null) {
             return;
         }
@@ -246,7 +258,7 @@ public class WsSessionManager {
         if (targets.isEmpty()) {
             return;
         }
-        String payload = write(kickoutPacket(userId, deviceId, reason));
+        String payload = write(kickoutPacket(userId, deviceId, reason, detail));
         for (WsConnection connection : targets) {
             if (payload != null) {
                 // 送达失败也要继续关：踢下线是状态变更，不能因为对方网络已经断了就不生效
@@ -392,13 +404,22 @@ public class WsSessionManager {
         return payload;
     }
 
-    private WsPacket kickoutPacket(Long userId, String deviceId, String reason) {
-        Map<String, Object> data = new LinkedHashMap<>(4);
+    private WsPacket kickoutPacket(Long userId, String deviceId, String reason, Map<String, Object> detail) {
+        // 4 个固定键 + detail 的几条，给到 8 避免一次扩容
+        Map<String, Object> data = new LinkedHashMap<>(8);
         data.put("userId", userId);
         if (TextUtil.isNotBlank(deviceId)) {
             data.put("deviceId", deviceId);
         }
         data.put("reason", TextUtil.isBlank(reason) ? ResultCode.USER_KICKED_OUT.getMessage() : reason);
+        if (detail != null && !detail.isEmpty()) {
+            // 放在最后：固定键的优先级更高，detail 不许把 reason 或 userId 盖掉
+            for (Map.Entry<String, Object> entry : detail.entrySet()) {
+                if (entry.getValue() != null && !data.containsKey(entry.getKey())) {
+                    data.put(entry.getKey(), entry.getValue());
+                }
+            }
+        }
         return WsPacket.of(WsMessageType.KICKOUT, data);
     }
 

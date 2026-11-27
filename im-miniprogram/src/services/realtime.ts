@@ -2,7 +2,7 @@ import Taro from '@tarojs/taro'
 import { messageApi } from '@/services/api'
 import { subscribe, subscribeState } from '@/services/websocket'
 import { useAppStore } from '@/store/useAppStore'
-import type { Message, NotifyData, OnlineStateData, UnreadData, WsEvent } from '@/types/im'
+import type { KickoutData, Message, NotifyData, OnlineStateData, UnreadData, WsEvent } from '@/types/im'
 import { messageSummary } from '@/utils/format'
 
 let installed = false
@@ -101,7 +101,16 @@ function handleEvent(event: WsEvent): void {
     return
   }
   if (event.type === 'kickout') {
-    store.expireSession(event.message || '账号已在其他设备登录')
+    const data = eventData<KickoutData>(event)
+    // 顶号详情三件套（后端 kickoutPacket 里的 deviceName / ip / time）：
+    // 只说“其他设备”用户无从判断那是不是自己刚开的另一台
+    const detail = [
+      data?.deviceName ? `设备：${data.deviceName}` : '',
+      data?.ip ? `IP：${data.ip}` : '',
+      data?.time ? `时间：${data.time}` : ''
+    ].filter(Boolean).join(' · ')
+    const reason = data?.reason || event.message || '账号已在其他设备登录'
+    store.expireSession(detail ? `${reason}（${detail}）` : reason)
     return
   }
   if (event.type === 'error' && event.message) Taro.showToast({ title: event.message, icon: 'none' })

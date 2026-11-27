@@ -1,4 +1,4 @@
-import { DEVICE_ID } from '@/config/runtime'
+import { getDeviceId } from '@/config/runtime'
 import type {
   AiChatMessage,
   AiStatus,
@@ -24,13 +24,13 @@ import { del, get, post, put } from './http'
 
 export const authApi = {
   login(account: string, password: string) {
-    return post<LoginResult>('/auth/login', { loginType: 'username', account, password, deviceId: DEVICE_ID }, undefined, false)
+    return post<LoginResult>('/auth/login', { loginType: 'username', account, password, deviceId: getDeviceId() }, undefined, false)
   },
   loginBySms(phone: string, smsCode: string) {
-    return post<LoginResult>('/auth/login/sms', { phone, smsCode, deviceId: DEVICE_ID }, undefined, false)
+    return post<LoginResult>('/auth/login/sms', { phone, smsCode, deviceId: getDeviceId() }, undefined, false)
   },
   register(data: { username: string; password: string; nickname?: string; phone?: string; email?: string }) {
-    return post<LoginResult>('/auth/register', { ...data, deviceId: DEVICE_ID }, undefined, false)
+    return post<LoginResult>('/auth/register', { ...data, deviceId: getDeviceId() }, undefined, false)
   },
   me: () => get<UserInfo>('/auth/me'),
   logout: () => post<void>('/auth/logout'),
@@ -39,7 +39,7 @@ export const authApi = {
   sendSms(data: { phone: string; scene: string; captchaKey: string; captchaCode: string }) {
     return post<{ debugCode?: string; retryAfter?: number; expiresIn?: number }>('/captcha/sms', data, undefined, false)
   },
-  wsTicket: () => post<{ endpoint: string; ticket: string }>('/ws/ticket', undefined, { deviceId: DEVICE_ID }),
+  wsTicket: () => post<{ endpoint: string; ticket: string }>('/ws/ticket', undefined, { deviceId: getDeviceId() }),
   qrScanned: (scene: string) => post<void>('/auth/qr-login/scanned', { scene }),
   qrAuthorize: (scene: string) => post<void>('/auth/qr-login/authorize', { scene })
 }

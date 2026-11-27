@@ -609,11 +609,12 @@ cd ..\electron; npm install; npm run build
 所以邮箱登录与邮箱找回密码的代码路径和生产完全一致，只是最后一步没出网。
 生产该开关为 `false`，SMTP 没配就老老实实报 `MAIL_NOT_CONFIGURED`。
 
-> ⚠️ **同一个账号开两个浏览器标签页会互相顶下线。**
-> 这是设计行为：`AuthServiceImpl#kickSameDevice` 按「用户 + 设备类型」顶号，
-> 而两个标签页的 `deviceId` 都是 `web`，归一化后属于同一设备。
-> 想同时挂 alice 和 bob，请用**两个不同的浏览器**或一个正常窗口 + 一个隐身窗口。
-> 被顶下线的一方会收到 WS `kickout` 报文并看到明确的中文提示，不是莫名的「登录失效」。
+> ℹ️ **同一个账号开两个浏览器标签页不会互相顶下线**：它们共用 localStorage 里的同一个实例 ID，
+> 属于同一个设备位（`web:<uid>`），只算 1 台。真正的顶号从 1.0.9 起回归，但条件是
+> 「同端台数超过 `im.account.device-limit.web`（默认 3）」，届时按登录时间从旧到新淘汰，
+> 被踢的一方会收到 WS `kickout` 报文并看到「设备 / IP / 时间」，不是莫名的「登录失效」。
+> 想同时挂 alice 和 bob，请用**两个不同的浏览器**或一个正常窗口 + 一个隐身窗口
+> （隐身窗是另一份 localStorage，因此算另一个设备位）。
 
 ---
 
@@ -2385,6 +2386,28 @@ spring-boot-duomokuia/
 **⑤ 后台看不了视频 = 链路上把类型丢了**：SPI 原本只传 `List<String>` 地址，前端一律拿 `<img>` 去画视频地址，于是碎图标。修法是 `AdminMomentDTO.mediaTypes` 与 `mediaUrls` **同序一一对应**（由同一批 `im_moment_media` 行按同一顺序拆出，★ 绝不拆成两次查询，那会一错位就张冠李戴），前端 `zipMedia(urls, types, blobs)` **先配对后过滤**（先 filter 会让下标错位：第 2 条拉失败，第 3 条的类型就挂到了第 2 条上）。★ 三条渲染路径（列表缩略 / 详情弹层 / 评论队列点进动态）统一走同一个 `fillDetail`，只修列表不修第三条就是老毛病复发；视频取 blob 必须 `fetchMedia(url, { timeout: 0 })`，否则被默认 20 秒掐断。
 
 逐项手验步骤、只读核对 SQL 与症状→原因速查表见 `md/交友功能手动验证清单.md` **§18**（本批六项）与 §16（全局速查）。
+
+### 15. 2026-11-26 定位回填与级联交互修补批的口径
+
+★ **上线只做一步**：用新构建覆盖 `im-ui/dist`，浏览器 Ctrl+F5。零 SQL、后端一行未动，不需重启也不需清 Redis。
+
+**① 级联框显示的是编码而不是名字**：`el-cascader` 的 v-model 是 `regionValue`（编码数组），而 `onRegionChange` 只把三个名字写进 `datingForm.province/city/district`。定位回填原来只调后者 → 名字进了表单但框里是空的，直到保存后 `fillDating` → `syncRegionValue()` 拿名字反查编码才出现三级，用户的感受就是「必须点保存才填上」。现在统一走 `applyRegionCodes(codes, note)`：**编码与名字一起写**，并守两条不覆盖原则——① 空数组不动（定位没判出来 ≠ 用户原来填的是错的）；② 同一个省里档数变少也不动（只判到省不能把用户填好的市/区抹掉）。★ 开了 `checkOnClickNode` 后再点已选中的节点会取消选中，Element Plus 这时传的是 `null` 而不是 `[]`，读 `regionValue.length` 前必须先 `Array.isArray` 守卫。
+
+**② 定位回填刻意分两步**：`locateMe` 先起 `fillRegionByCoords`（它第一步是零请求的省级判定，`provinceByCoords` 只查随包省外包框，能立刻把「广东省」显示出来），再 `await persistLocation()` 落库坐标，最后 `await filling.catch(() => {})` 等市与区县补完。这个顺序是为了点完定位框里马上有东西，而不是等一趟保存请求回来还是空的；而那个 catch 是必须的——反查失败不该影响已经落库的坐标，也不能抛到事件处理器外面变成 unhandled rejection。
+
+**③「只填到省」有三条并存真因，各修各的**：
+
+- 超时口径：DataV 单次 6s 无重试，手机上 DNS + TLS + 200KB 边界文件容易吃满 → `FETCH_TIMEOUT_MS` 提到 10s 并加 `FETCH_ATTEMPTS = 2`。★ 只对超时/断网/5xx 重试：404 是这一档本来就没有下级文件（济源市这种省直辖县级市、兵团各市就是），重试只是白等。
+- 无外网（内网、EXE、APK）：新增随包中心点表 `im-ui/src/data/regionCenters.js`（3181 条，结构 `[编码, 中心经度, 中心纬度, minLng, minLat, maxLng, maxLat]`，外包框向外扩到 0.01°≈1km），按「外包框筛候选 → 中心点最近」推断市与区县。★ 它是**动态 `import()`** 的，只有走兜底那条路才加载，Rollup 因此切出独立 chunk，首屏包不受影响。
+- DataV 的行政区划比随包字典旧：撤县设区换了码，坐标在崇川区它发 320602 而字典里崇川区已是 320613，按编码查不到就只剩两级 → 新增 `codeByName(parentCode, name)`，编码对不上时按名字在同一父下找（★ 名字比编码稳）。
+
+**④ 推断结果不进缓存，三个名字不自动落库**：走中心点表得到的结果一律标 `approximate` 并**不写 30 天结果缓存**——缓存了的话网络恢复后再定位也拿不到精确结果，一次断网能把错档位钉一个月。三个名字仍只填 UI + hint 提示「确认无误后点保存写库」：坐标是定位成功即落库（那是「附近的人」的前提），但出差在外点一下定位不该静默改掉家里城市，那会直接改变同城匹配结果。
+
+**⑤ 级联「选一级就显示一级」靠 `checkOnClickNode`**：`checkStrictly: true` 时非叶子节点默认只能点它前面那个 radio 才选中；再配上 `expandTrigger: 'hover'`，Element Plus 的 `handleClick` 里 `else if (!isHoverMenu) handleExpand()` 这条不执行，于是**点文字毫无反应**，用户必须一路点到叶子才看到上方出现内容 → `regionProps` 加 `checkOnClickNode: true`（该 prop 默认 false）。副作用是 `checkStrictly` 下面板不会自动关闭（`emitClose` 的条件里排除了它），这是刻意的：还要接着点市与区县。
+
+**要更新中心点表就重跑** `node scripts/gen-region-centers.mjs`（并发 8 / 30s 超时 / 3 次重试，三趟：35 份省文件 → 353 份市文件 → 缺位的市按下级中心点均值补），换过字典 `release/省市县三级联动数组.json` 后必须重跑。★ 生成器里的 `toDictCode` 只允许「以 `00` 结尾」的 adcode 截成四位市码：DataV 发的旧区码在字典里已不存在，要是让它退到市码，就会拿一个区的中心点冒充整个市，兜底时会把邻市坐标归错市。
+
+逐项手验步骤见 `md/交友功能手动验证清单.md` **§18.1**（级联逐级显示）与 **§18.2 / 18.3**（定位回填与断网兜底）。
 
 
 

@@ -1,12 +1,15 @@
 package com.im.nativeapp.core.config
 
 import android.content.Context
+import android.os.Build
+import android.provider.Settings
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.im.nativeapp.core.network.TlsCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.first
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -51,7 +54,9 @@ class SessionStore @Inject constructor(
         /** sa-token 默认头名，仅在本地没有记录时兜底（对应 token.js 的 DEFAULT_TOKEN_NAME） */
         const val DEFAULT_TOKEN_NAME = "satoken"
         /** DeviceType 枚举只认 web/pc/android/ios/mini，原生安卓报 android */
-        const val DEVICE_ID = "android"
+        const val DEVICE_TYPE = "android"
+        /** 设备友好名（X-Device-Name）的最大长度，与后端 DeviceIds.MAX_NAME_LENGTH 对齐 */
+        private const val DEVICE_NAME_MAX = 50
 
         private val KEY_SERVER = stringPreferencesKey("server_base")
         private val KEY_TOKEN = stringPreferencesKey("token")
@@ -59,6 +64,43 @@ class SessionStore @Inject constructor(
     }
 
     private val store = context.sessionStore
+
+    /**
+     * 本机实例 ID：取 ANDROID_ID。
+     *
+     * Android 8 起它是「同一设备 + 同一签名密钥 + 同一用户」稳定的值，恢复出厂会变，
+     * 不需要自己往 DataStore 里写；拿不到（极少数定制 ROM）时退化为本次进程随机一个，
+     * 宁可让这台设备在列表里多出一行，也不能拿裸类型码去登录——那等于关掉了同端顶号。
+     */
+    private val deviceUid: String = runCatching {
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+
+    /**
+     * 设备位 类型:实例（对应 Web 端 token.js 的 getDeviceId）。
+     *
+     * 登录、注册、WS 票据三处必须用同一个值：后端拿它定位 Sa-Token 会话、
+     * WS 注册表键与 im_user_device 的行，三处不同源就会出现「会话踢中了、socket 还活着」。
+     */
+    val deviceSlot: String get() = "$DEVICE_TYPE:$deviceUid"
+
+    /**
+     * 设备友好名（品牌 + 型号），只用于展示与被顶时的提示文案。
+     *
+     * 只留可打印 ASCII：这个值走 HTTP 请求头，而容器按 ISO-8859-1 解头，
+     * 塞中文进去到那边就是一串乱码（部分定制 ROM 的 MODEL 确实是中文）。
+     * 洗完全空就不发这个头，后端会用 User-Agent 兜底。
+     */
+    val deviceName: String? = run {
+        val raw = listOf(Build.BRAND, Build.MODEL)
+            .filter { !it.isNullOrBlank() }
+            .joinToString(" ")
+            .filter { it.code in 0x20..0x7E }
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+            .take(DEVICE_NAME_MAX)
+        raw.ifEmpty { null }
+    }
 
     @Volatile private var serverBase: String = DEFAULT_SERVER
     @Volatile private var token: String = ""

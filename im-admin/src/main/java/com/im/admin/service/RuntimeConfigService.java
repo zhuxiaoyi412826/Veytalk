@@ -300,6 +300,13 @@ public class RuntimeConfigService {
             case MESSAGE_RECALL_LIMIT_SECONDS -> () -> imProperties.getMessage().getRecallLimitSeconds();
             case MESSAGE_MAX_TEXT_LENGTH -> () -> imProperties.getMessage().getMaxTextLength();
             case MESSAGE_RETENTION_DAYS -> () -> imProperties.getMessage().getRetentionDays();
+            case ACCOUNT_EXCLUSIVE_LOGIN -> () -> imProperties.getAccount().isExclusiveLogin();
+            case ACCOUNT_DEVICE_LIMIT_WEB -> () -> imProperties.getAccount().limitOf("web");
+            case ACCOUNT_DEVICE_LIMIT_PC -> () -> imProperties.getAccount().limitOf("pc");
+            case ACCOUNT_DEVICE_LIMIT_ANDROID -> () -> imProperties.getAccount().limitOf("android");
+            case ACCOUNT_DEVICE_LIMIT_IOS -> () -> imProperties.getAccount().limitOf("ios");
+            case ACCOUNT_DEVICE_LIMIT_MINI -> () -> imProperties.getAccount().limitOf("mini");
+            case ACCOUNT_LOGIN_LOG_KEEP_DAYS -> () -> imProperties.getAccount().getLoginLogKeepDays();
             case CACHE_ENABLED -> () -> imProperties.getCache().isEnabled();
             case RATE_LIMIT_ENABLED -> () -> imProperties.getRateLimit().isEnabled();
             case RATE_LIMIT_GLOBAL_COUNT -> () -> imProperties.getRateLimit().getGlobalCount();
@@ -347,6 +354,20 @@ public class RuntimeConfigService {
                     value -> imProperties.getMessage().setMaxTextLength(number(key, value).intValue());
             case MESSAGE_RETENTION_DAYS ->
                     value -> imProperties.getMessage().setRetentionDays(number(key, value).intValue());
+            case ACCOUNT_EXCLUSIVE_LOGIN -> value -> imProperties.getAccount().setExclusiveLogin((Boolean) value);
+            // setLimit 会把键收敛成 DeviceType 的小写码并夹在 [1, 20]，所以这里不必再校验一遍范围
+            case ACCOUNT_DEVICE_LIMIT_WEB ->
+                    value -> imProperties.getAccount().setLimit("web", number(key, value).intValue());
+            case ACCOUNT_DEVICE_LIMIT_PC ->
+                    value -> imProperties.getAccount().setLimit("pc", number(key, value).intValue());
+            case ACCOUNT_DEVICE_LIMIT_ANDROID ->
+                    value -> imProperties.getAccount().setLimit("android", number(key, value).intValue());
+            case ACCOUNT_DEVICE_LIMIT_IOS ->
+                    value -> imProperties.getAccount().setLimit("ios", number(key, value).intValue());
+            case ACCOUNT_DEVICE_LIMIT_MINI ->
+                    value -> imProperties.getAccount().setLimit("mini", number(key, value).intValue());
+            case ACCOUNT_LOGIN_LOG_KEEP_DAYS ->
+                    value -> imProperties.getAccount().setLoginLogKeepDays(number(key, value).intValue());
             case CACHE_ENABLED -> value -> imProperties.getCache().setEnabled((Boolean) value);
             case RATE_LIMIT_ENABLED -> value -> imProperties.getRateLimit().setEnabled((Boolean) value);
             case RATE_LIMIT_GLOBAL_COUNT ->

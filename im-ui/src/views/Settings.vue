@@ -226,6 +226,17 @@
             <el-option label="1440p" value="1440" />
           </el-select>
         </div>
+
+        <div class="settings__row">
+          <div class="settings__label">
+            <span>位置消息默认地图</span>
+            <span class="settings__desc">点聊天里的位置卡片时用哪家地图打开；选「每次询问」则每次都弹选择框（聊天窗里勾「记住我的选择」会写到这里）</span>
+          </div>
+          <el-select v-model="mapProvider" style="width: 140px">
+            <el-option label="每次询问" value="" />
+            <el-option v-for="item in MAP_PROVIDERS" :key="item.key" :label="item.label" :value="item.key" />
+          </el-select>
+        </div>
       </section>
 
       <!-- ==================== 三、消息提醒 ==================== -->
@@ -704,6 +715,7 @@ import { getServerBridge } from '@/utils/serverBridge'
 import { serverBaseInfo } from '@/utils/env'
 import { signOut } from '@/stores'
 import { useSettingsStore, THEME_COLORS, FONT_FAMILIES } from '@/stores/settings'
+import { MAP_PROVIDERS } from '@/utils/geo'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { useAgreementStore } from '@/stores/agreement'
@@ -781,6 +793,7 @@ const showReadReceipt = setting('showReadReceipt')
 const imagePreview = setting('imagePreview')
 const autoPlay = setting('autoPlay')
 const liveQuality = setting('liveQuality')
+const mapProvider = setting('mapProvider')
 const chatWatermark = setting('chatWatermark')
 const previewNoDownload = setting('previewNoDownload')
 const shareMultiDevice = setting('shareMultiDevice')

@@ -6,6 +6,7 @@ import com.im.common.api.PageResult;
 import com.im.common.api.Result;
 import com.im.common.constant.ImConstants;
 import com.im.common.util.SecurityUtil;
+import com.im.common.util.TextUtil;
 import com.im.user.dto.req.BindPhoneRequest;
 import com.im.user.dto.req.CancelAccountRequest;
 import com.im.user.dto.req.ChangePasswordRequest;
@@ -33,6 +34,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 用户资料接口，全部需要登录（由 {@code SaTokenConfigure} 的路由拦截统一保证）。
@@ -54,33 +56,78 @@ public class UserController {
         return Result.ok(userService.getProfile(SecurityUtil.getUserId()));
     }
 
-    @Operation(summary = "修改本人资料", description = "只更新请求体中非 null 的字段")
+    @Operation(summary = "修改本人资料", description = "只更新请求体中非 null 的字段；改绑邮箱会顺带下线其他设备（保留当前设备）")
     @SaCheckPermission(ImConstants.PERM_USER_UPDATE)
     @PutMapping("/profile")
     public Result<UserVO> updateProfile(@RequestBody @Valid UpdateProfileRequest request) {
-        return Result.ok(userService.updateProfile(SecurityUtil.getUserId(), request), "资料已更新");
+        Long userId = SecurityUtil.getUserId();
+        // 先取一次旧邮箱作为比对基准：改邮箱这条路径没有验证码（已知现状），
+        // 正因如此它才是改绑类变更里最该连带踢掉其他设备的一条
+        UserVO before = userService.getProfile(userId);
+        String oldEmail = before == null ? null : before.getEmail();
+        UserVO vo = userService.updateProfile(userId, request);
+        if (request.getEmail() != null && emailChanged(oldEmail, vo.getEmail())) {
+            authService.logoutEverywhere(userId, "该账号的绑定邮箱已变更，如非本人操作请立即修改密码",
+                    true, "改绑邮箱：" + TextUtil.maskEmail(vo.getEmail()));
+            return Result.ok(vo, "资料已更新，其他设备已下线");
+        }
+        return Result.ok(vo, "资料已更新");
     }
 
-    @Operation(summary = "修改密码", description = "logoutAll 为 true 时修改成功后所有设备都需要重新登录")
+    @Operation(summary = "修改密码",
+            description = "logoutAll=true（默认）修改后全端下线含本端；false 保留本端、仅下线其他设备")
     @SaCheckPermission(ImConstants.PERM_USER_UPDATE)
     @PutMapping("/password")
     public Result<Void> changePassword(@RequestBody @Valid ChangePasswordRequest request) {
         Long userId = SecurityUtil.getUserId();
         userService.changePassword(userId, request);
         if (!Boolean.FALSE.equals(request.getLogoutAll())) {
-            authService.logoutEverywhere(userId);
+            authService.logoutEverywhere(userId, "密码已修改，请使用新密码登录", false,
+                    "修改密码，全部设备下线");
             return Result.ok(null, "密码已修改，请使用新密码重新登录");
         }
-        return Result.ok(null, "密码已修改");
+        // 不勾“包括当前设备”不等于“什么都不做”：登录凭据已经换了，其余设备没理由继续合法在线，
+        // 只把本端留下（本端的 token 是刚改完密码这一份，用户不该被自己的操作踢走）
+        authService.logoutEverywhere(userId, "该账号的密码已修改，请使用新密码登录", true,
+                "修改密码，其他设备下线");
+        return Result.ok(null, "密码已修改，其他设备已下线");
     }
 
-    @Operation(summary = "绑定手机号", description = "凭短信验证码绑定或换绑手机号；验证码通过 /api/captcha/sms（scene=bind）获取，无需图形验证码")
+    @Operation(summary = "绑定手机号",
+            description = "凭短信验证码绑定或换绑手机号；验证码通过 /api/captcha/sms（scene=bind）获取，无需图形验证码。"
+                    + "换绑属于凭据变更：默认保留当前设备、下线其他设备，logoutAll=true 时连本端一起下线")
     @SaCheckPermission(ImConstants.PERM_USER_UPDATE)
     @PutMapping("/phone")
     public Result<UserVO> bindPhone(@RequestBody @Valid BindPhoneRequest request) {
         Long userId = SecurityUtil.getUserId();
+        UserVO before = userService.getProfile(userId);
         userService.bindPhone(userId, request);
-        return Result.ok(userService.getProfile(userId), "手机号已绑定");
+        UserVO vo = userService.getProfile(userId);
+        // 首绑（旧值为空）不涉及“换了别人的号”，不必惊动其他设备；只有换绑才踢
+        boolean rebind = TextUtil.isNotBlank(before == null ? null : before.getPhone())
+                && !Objects.equals(before.getPhone(), vo.getPhone());
+        String msg = "手机号已绑定";
+        if (rebind) {
+            if (Boolean.TRUE.equals(request.getLogoutAll())) {
+                authService.logoutEverywhere(userId, "该账号的绑定手机号已变更，请重新登录", false,
+                        "改绑手机号：" + TextUtil.maskPhone(vo.getPhone()));
+                msg = "手机号已换绑，所有设备需重新登录";
+            } else {
+                authService.logoutEverywhere(userId, "该账号的绑定手机号已变更，请重新登录", true,
+                        "改绑手机号：" + TextUtil.maskPhone(vo.getPhone()));
+                msg = "手机号已换绑，其他设备已下线";
+            }
+        }
+        return Result.ok(vo, msg);
+    }
+
+    /**
+     * 邮箱算不算“改了”：两边都去空白、大小写不敏感（邮箱按约定不区分域名大小写）。
+     */
+    private boolean emailChanged(String oldEmail, String newEmail) {
+        String a = oldEmail == null ? "" : oldEmail.trim();
+        String b = newEmail == null ? "" : newEmail.trim();
+        return !a.equalsIgnoreCase(b);
     }
 
     @Operation(summary = "他人资料卡片", description = "不含手机号与邮箱，附带与当前用户的好友/拉黑关系")

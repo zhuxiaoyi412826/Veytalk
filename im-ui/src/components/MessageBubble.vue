@@ -430,7 +430,12 @@ const locationCoord = computed(() =>
 )
 function onLocationClick() {
   if (hasCoord.value) {
-    emit('open-location', { latitude: Number(extra.value.latitude), longitude: Number(extra.value.longitude) })
+    // 带上地点名：高德/百度能把它当标注标题，否则对方页面上只有一个裸坐标
+    emit('open-location', {
+      latitude: Number(extra.value.latitude),
+      longitude: Number(extra.value.longitude),
+      name: locationName.value
+    })
   }
 }
 

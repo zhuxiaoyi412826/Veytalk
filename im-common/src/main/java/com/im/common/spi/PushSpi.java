@@ -3,6 +3,7 @@ package com.im.common.spi;
 import com.im.common.domain.WsPacket;
 
 import java.util.Collection;
+import java.util.Map;
 
 /**
  * 实时推送契约，由 im-websocket 模块实现。
@@ -41,10 +42,27 @@ public interface PushSpi {
     /**
      * 强制下线：先推送 kickout 报文再关闭连接。
      *
-     * @param deviceId 为空表示踢掉全部设备
+     * @param deviceId 为空表示踢掉全部设备；从 1.0.9 起这里传的是<b>设备位</b>（{@code 类型:实例}），
+     *                 与 WebSocket 注册表的键同源
      * @param reason   下线原因，展示给客户端
      */
     void kickOut(Long userId, String deviceId, String reason);
+
+    /**
+     * 带附加信息的强制下线。
+     *
+     * <p>顶号与封号要给用户看的不是一个「原因」就完事：QQ 式被踢时用户需要知道
+     * 「设备：Pixel 8 · IP：192.168.1.20 · 时间：11-27 14:03」才能判断那是不是自己人。
+     * 这些信息只有调用方（它才知道是谁把谁挤了）拿得到，所以下沉为一个可选的 detail 而不是另开接口。
+     *
+     * <p>默认实现直接丢弃 detail 转调三参版本，因此现有实现不强制改；
+     * 需要把字段送进报文的实现（im-websocket）覆写它。
+     *
+     * @param detail 合并进报文 {@code data} 的额外键（如 {@code deviceName} / {@code ip} / {@code time}），可为空
+     */
+    default void kickOut(Long userId, String deviceId, String reason, Map<String, Object> detail) {
+        kickOut(userId, deviceId, reason);
+    }
 
     /**
      * 用户是否当前存在活跃的 WebSocket 连接。

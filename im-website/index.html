@@ -4,8 +4,40 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Veytalk —— 开箱即用的多模块企业级即时通讯系统：群聊、文件传输、远程控制、AI 面试、HLS 直播，一套 jar 全搞定。" />
+  <!--
+    社交分享卡片（微信/钉钉/Twitterbot/Slack 这类）不执行 JS，只读静态 meta，
+    所以 og:* 必须写在这份 index.html 里而不能放到 Vue 组件里设——放到组件里只有已经打开页面的人看得到。
+    带域名的两条（canonical 与 og:url）不在这里写：要构建时用 VITE_SITE_ORIGIN 注入，
+    由 vite.config.js 的 seoPlugin 补进来（域名是部署时才定的，写死一个假的比不写更糟）。
+    刻意不写 og:image：本站连一个图片资源都没有（favicon 是内联的 SVG emoji），
+    指向不存在的图会让卡片退化成光板，比不声明还难看。
+  -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Veytalk" />
+  <meta property="og:title" content="Veytalk IM 即时通讯系统 · 官网" />
+  <meta property="og:description" content="开箱即用的多模块企业级即时通讯系统：群聊、文件传输、远程控制、AI 面试、HLS 直播，一套 jar 全搞定。" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Veytalk IM 即时通讯系统 · 官网" />
+  <meta name="twitter:description" content="开箱即用的多模块企业级即时通讯系统，一套 jar 全搞定。" />
   <title>Veytalk IM 即时通讯系统 · 官网</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>" />
+  <!--
+    结构化数据：让搜索引擎知道这是一款可下载的软件而不是一个普通网页。
+    ★ 不写 aggregateRating：评分得有真实评价来源，编一个数字是给搜索引擎递假数据，
+      被人工处置时整站富结果都没了；也不写 softwareVersion：那与 App.vue 里的版本同源，
+      写在这里就等于埋一个会过时的硬编码数字（本次改动正是在清这类值）。
+  -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Veytalk IM 即时通讯系统",
+    "applicationCategory": "BusinessApplication",
+    "operatingSystem": "Windows, Android, macOS, Linux",
+    "license": "https://www.apache.org/licenses/LICENSE-2.0",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" }
+  }
+  </script>
 </head>
 <body>
   <div id="app"></div>

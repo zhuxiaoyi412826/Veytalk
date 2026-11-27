@@ -34,14 +34,14 @@ class AuthRepository @Inject constructor(
 ) {
     suspend fun login(account: String, password: String): LoginVO {
         val vo: LoginVO = apiClient.api()
-            .login(LoginRequest(account = account, password = password, deviceId = SessionStore.DEVICE_ID))
+            .login(LoginRequest(account = account, password = password, deviceId = session.deviceSlot))
             .unwrap(apiClient.json)
         return applyLogin(vo)
     }
 
     suspend fun loginBySms(phone: String, smsCode: String): LoginVO {
         val vo: LoginVO = apiClient.api()
-            .loginBySms(SmsLoginRequest(phone = phone, smsCode = smsCode, deviceId = SessionStore.DEVICE_ID))
+            .loginBySms(SmsLoginRequest(phone = phone, smsCode = smsCode, deviceId = session.deviceSlot))
             .unwrap(apiClient.json)
         return applyLogin(vo)
     }
@@ -62,7 +62,7 @@ class AuthRepository @Inject constructor(
                     nickname = nickname,
                     phone = phone,
                     email = email,
-                    deviceId = SessionStore.DEVICE_ID
+                    deviceId = session.deviceSlot
                 )
             )
             .unwrap(apiClient.json)

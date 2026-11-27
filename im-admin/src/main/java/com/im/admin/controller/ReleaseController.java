@@ -18,6 +18,7 @@ import org.springframework.util.StreamUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
@@ -26,10 +27,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * 官网下载页的公开端点（匿名可达，路径已列入 {@code SaTokenConfigure.EXCLUDE_PATTERNS}）。
+ * 官网下载页的公开端点（匿名可达，三条路径逐个列入 {@code SaTokenConfigure.EXCLUDE_PATTERNS}）。
  *
- * <p>只有两条：列表只回「启用中」的行，下载只认「启用中」的行——停用与不存在同回 404，
- * 不让探测者凭响应差异枚举历史版本 ID。
+ * <p><b>字节层面的防枚举没松</b>：下载只认「启用中」的行，停用与不存在同回 404，
+ * 不让探测者凭响应差异区分「曾经有过」与「从来没有」；列表也只回启用行。
+ *
+ * <p>新增的 {@code /history} 会把「某平台发过哪些版本（含已停用）」元信息列出来，
+ * 这是对防枚举口径的一处<b>有意放宽</b>而不是疏忽：那条口径守的是安装包字节，
+ * 而历史版本号本来就公开在 GitHub Releases 页上（官网下载区下面就是那条外链），
+ * 藏起来不得到任何收益。停用行拿不到 downloadPath，就算拿着 ID 去探也只得到 404（详见 service 层注释）。
  *
  * <p>下载不复用 {@code /api/file/download}（那条要登录态或一次性票据）：官网访客两者都没有。
  * 安全口径改由三道门兜住：只递启用行 + 按 IP 的 {@code @RateLimit} + 响应头
@@ -50,6 +56,19 @@ public class ReleaseController {
     @GetMapping("/list")
     public Result<List<PublicReleaseVO>> list() {
         return Result.ok(clientReleaseService.publicList());
+    }
+
+    @Operation(summary = "历史版本列表（含已停用）",
+            description = "官网「历史版本」区块数据源：每平台取最近 N 条，按创建时间倒序；"
+                    + "已停用行的 downloadPath 为空（站点只递启用行），不认识的平台码回空数组而不是全表")
+    @RateLimit(count = 60, key = "release.history")
+    @GetMapping("/history")
+    public Result<List<PublicReleaseVO>> history(
+            @Parameter(description = "平台码过滤：windows_setup / windows_portable / android / macos / linux；为空则每平台都取")
+            @RequestParam(value = "platform", required = false) String platform,
+            @Parameter(description = "每平台取几条，默认 5，上限 20")
+            @RequestParam(value = "limit", required = false) Integer limit) {
+        return Result.ok(clientReleaseService.publicHistory(platform, limit));
     }
 
     @Operation(summary = "下载安装包",

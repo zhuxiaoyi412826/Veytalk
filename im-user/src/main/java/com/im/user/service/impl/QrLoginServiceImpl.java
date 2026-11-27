@@ -3,10 +3,11 @@ package com.im.user.service.impl;
 import cn.dev33.satoken.stp.SaTokenInfo;
 import cn.dev33.satoken.stp.StpUtil;
 import com.im.common.api.ResultCode;
-import com.im.common.enums.DeviceType;
 import com.im.common.exception.BusinessException;
+import com.im.common.util.DeviceIds;
 import com.im.common.util.QrCodeUtil;
 import com.im.common.util.RedisUtil;
+import com.im.common.util.SecurityUtil;
 import com.im.user.dto.QrLoginState;
 import com.im.user.dto.vo.QrLoginCreateVO;
 import com.im.user.dto.vo.QrLoginStatusVO;
@@ -48,6 +49,8 @@ public class QrLoginServiceImpl implements QrLoginService {
         QrLoginState state = new QrLoginState();
         state.setStatus(QrLoginStatusVO.STATUS_WAITING);
         state.setCreateTime(System.currentTimeMillis());
+        // 此刻的请求来自待登录的浏览器，设备位只有这里拿得到（扫码方是另一个设备）
+        state.setDeviceSlot(SecurityUtil.getDevice());
         redisUtil.setObject(key(scene), state, TTL);
 
         String root = normalizeBase(base);
@@ -75,8 +78,13 @@ public class QrLoginServiceImpl implements QrLoginService {
         QrLoginState state = requireState(scene);
         BusinessException.throwIf(state.getStatus() == QrLoginStatusVO.STATUS_AUTHORIZED,
                 ResultCode.BAD_REQUEST, "该二维码已授权，请刷新后重试");
-        // 以当前 APP 用户身份为 web 设备新签一个 token（is-concurrent=true，不挤掉 APP 自己的登录态）
-        StpUtil.login(userId, StpUtil.createSaLoginParameter().setDeviceType(DeviceType.WEB.getCode()));
+        // 以当前 APP 用户身份为扫码页新签一个 token（is-concurrent=true，不挤掉 APP 自己的登录态）
+        // 设备位拆成类型 + 实例两段，与密码 / 短信 / 邮箱三条路径同一个形状；
+        // 存量二维码（本次升级前生成、state 里没有 deviceSlot）归一化成裸 web，与改造前等价
+        String slot = DeviceIds.normalize(state.getDeviceSlot());
+        StpUtil.login(userId, StpUtil.createSaLoginParameter()
+                .setDeviceType(DeviceIds.typeOf(slot))
+                .setDeviceId(DeviceIds.instanceOf(slot)));
         SaTokenInfo info = StpUtil.getTokenInfo();
         state.setStatus(QrLoginStatusVO.STATUS_AUTHORIZED);
         state.setUserId(userId);
@@ -84,7 +92,7 @@ public class QrLoginServiceImpl implements QrLoginService {
         state.setTokenName(info.getTokenName());
         state.setExpiresIn(info.getTokenTimeout());
         savePreservingTtl(scene, state);
-        log.info("[扫码登录] scene={} 已授权给用户 {}", scene, userId);
+        log.info("[扫码登录] scene={} 已授权给用户 {}, device={}", scene, userId, slot);
     }
 
     @Override

@@ -60,6 +60,45 @@ public enum AdminConfigKey {
                     + "超期的消息就真没了，改回 0 也不会把它们找回来。",
             0L, 3650L),
 
+    /* ==================== 账号与登录 ==================== */
+
+    /**
+     * 同端顶号的应急旋钮。它存在的理由不是“这是个好配置”，而是顶号一旦在真实设备上误踢了
+     * 正常用户，需要能在<b>不重新发版</b>的情况下一刀停掉（行为回到同端顶号上线之前的“全并存”）。
+     */
+    ACCOUNT_EXCLUSIVE_LOGIN("account.exclusive-login", Group.ACCOUNT, Type.BOOLEAN,
+            "同端顶号总开关",
+            "关掉后一个账号的任意多台设备全部并存、永不互踢（退化为旧行为）。"
+                    + "注意老客户端只上报裸类型码、不带实例 ID，它无论开关如何都不参与顶号。"
+                    + "发现误踢先关这里，而不是把下面的台数调大凑数。",
+            null, null),
+    ACCOUNT_DEVICE_LIMIT_WEB("account.device-limit-web", Group.ACCOUNT, Type.NUMBER,
+            "浏览器端同时在线台数",
+            "数的不是标签页而是一个浏览器实例（同一 Chrome 开十个页签只算 1）。"
+                    + "默认 3 是为了让 Chrome / Edge / 另外的电脑能共存；调成 1 则第二个浏览器登录会顶掉第一个。",
+            1L, 20L),
+    ACCOUNT_DEVICE_LIMIT_PC("account.device-limit-pc", Group.ACCOUNT, Type.NUMBER,
+            "桌面端（Electron）同时在线台数",
+            "超限后按登录时间从旧到新淘汰，被顶的一端会收到带新设备名与 IP 的通知。",
+            1L, 20L),
+    ACCOUNT_DEVICE_LIMIT_ANDROID("account.device-limit-android", Group.ACCOUNT, Type.NUMBER,
+            "安卓端同时在线台数",
+            "只对上报了实例 ID 的新版 APK 生效；存量旧版 APK 上报裸 android，无论这里填几都并存。",
+            1L, 20L),
+    ACCOUNT_DEVICE_LIMIT_IOS("account.device-limit-ios", Group.ACCOUNT, Type.NUMBER,
+            "iOS 端同时在线台数",
+            "与安卓端同理，只对带实例 ID 的客户端生效。",
+            1L, 20L),
+    ACCOUNT_DEVICE_LIMIT_MINI("account.device-limit-mini", Group.ACCOUNT, Type.NUMBER,
+            "小程序端同时在线台数",
+            "小程序的实例 ID 存在本地缓存里，清了缓存就是一个新设备位（表现为“旧的那台被顶下线”）。",
+            1L, 20L),
+    ACCOUNT_LOGIN_LOG_KEEP_DAYS("account.login-log-keep-days", Group.ACCOUNT, Type.NUMBER,
+            "登录流水保留天数（0 为永不清理）",
+            "清理任务每六小时一轮、每轮最多删 500 行。<b>从 0 改成正数是不可逆的</b>："
+                    + "超期的登录与顶号记录会被物理删掉，改回 0 也找不回来——而它们正是查盗号时的唯一证据。",
+            0L, 3650L),
+
     /* ==================== 缓存 ==================== */
 
     CACHE_ENABLED("cache.enabled", Group.CACHE, Type.BOOLEAN,
@@ -236,7 +275,8 @@ public enum AdminConfigKey {
         CALL("call", "音视频通话"),
         WALLET("wallet", "钱包与礼物"),
         LINKMIC("linkmic", "直播连麦"),
-        AI_GUARD("aiGuard", "AI 护栏");
+        AI_GUARD("aiGuard", "AI 护栏"),
+        ACCOUNT("account", "账号与登录");
 
         private final String code;
         private final String label;

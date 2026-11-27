@@ -649,6 +649,26 @@
       </template>
     </el-dialog>
 
+    <!-- 点位置卡片后选地图：默认每次都问，勾了「记住」就把这家钉进设置，以后直接开 -->
+    <el-dialog v-model="mapPicker.visible" title="用哪个地图打开" width="360px" append-to-body>
+      <div class="chat-window__map-picker">
+        <div class="chat-window__map-addr im-ellipsis" :title="mapPicker.name">{{ mapPicker.name || '位置' }}</div>
+        <el-button
+          v-for="item in MAP_PROVIDERS"
+          :key="item.key"
+          class="chat-window__map-item"
+          @click="chooseMap(item.key)"
+        >{{ item.label }}</el-button>
+      </div>
+      <template #footer>
+        <div class="chat-window__loc-footer">
+          <el-checkbox v-model="mapPicker.remember">记住我的选择，以后直接打开</el-checkbox>
+          <span class="chat-window__loc-spacer"></span>
+          <el-button @click="mapPicker.visible = false">取消</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <!-- 发起投票：主题 + 动态选项 + 单选/多选 + 是否匿名 -->
     <el-dialog v-model="voteDialog.visible" title="发起投票" width="440px" append-to-body>
       <el-form label-width="64px" @submit.prevent>
@@ -867,7 +887,7 @@ import { riskCategoryOf, riskConfirmText } from '@/utils/riskFile'
 import { isElectron } from '@/utils/env'
 import { formatFileSize, formatMsgTime, needTimeDivider } from '@/utils/format'
 import { asId, sameId } from '@/utils/id'
-import { externalMapUrl } from '@/utils/geo'
+import { externalMapUrl, MAP_PROVIDERS } from '@/utils/geo'
 import { requestLocation } from '@/utils/location'
 
 defineOptions({ name: 'ChatWindow' })
@@ -1111,10 +1131,37 @@ async function sendLocation() {
   }
 }
 
-/** 点击气泡里的位置→在系统/浏览器地图打开 */
-function onOpenLocation({ latitude, longitude }) {
-  const url = externalMapUrl(latitude, longitude)
-  window.open(url, '_blank', 'noopener')
+/**
+ * 点击气泡里的位置→选一家地图，在新标签页打开。
+ * 坐标一律按 WGS-84 交给对方（转换由地图服务端做），理由与各家参数口径见 utils/geo.js。
+ */
+const mapPicker = reactive({ visible: false, latitude: null, longitude: null, name: '', remember: false })
+
+/** 拼链接并开新页。三处调用共用，保证「记住」与「每次问」两条路开出来的是同一个 URL */
+function openInMap(providerKey, latitude, longitude, name) {
+  window.open(externalMapUrl(latitude, longitude, providerKey, name), '_blank', 'noopener')
+}
+
+function onOpenLocation({ latitude, longitude, name }) {
+  // 已经钉了一家就不再问；要改回去走设置页「位置消息默认地图」或把它改成「每次询问」
+  if (settings.mapProvider) {
+    openInMap(settings.mapProvider, latitude, longitude, name)
+    return
+  }
+  mapPicker.latitude = latitude
+  mapPicker.longitude = longitude
+  mapPicker.name = name || ''
+  mapPicker.remember = false
+  mapPicker.visible = true
+}
+
+function chooseMap(providerKey) {
+  openInMap(providerKey, mapPicker.latitude, mapPicker.longitude, mapPicker.name)
+  // 先开页再写设置：写在前面的话，万一 open 被拦用户就被钉在一个根本没打开的选择上
+  if (mapPicker.remember) {
+    settings.update({ mapProvider: providerKey })
+  }
+  mapPicker.visible = false
 }
 
 /* ------------------------------ 合并转发（多选） ------------------------------ */
@@ -3930,6 +3977,24 @@ watch(key, async () => {
 
 .chat-window__loc-spacer {
   flex: 1;
+}
+
+/* 选地图弹窗：地址一行 + 三家竖排按钮（撑满宽度，手机上好点） */
+.chat-window__map-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-window__map-addr {
+  color: var(--im-text-secondary, #909399);
+  font-size: 13px;
+}
+
+.chat-window__map-item {
+  width: 100%;
+  /* 竖排时 Element Plus 的 `.el-button + .el-button` 左边距会把按钮推歪，在这里抵掉 */
+  margin-left: 0;
 }
 
 /* 多选操作栏：与输入区同层，选中模式时顶替它 */

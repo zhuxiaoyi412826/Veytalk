@@ -275,6 +275,13 @@ jobs:
         if: steps.pick.outputs.skip != 'true'
         run: npm run build
         working-directory: ${{ matrix.app }}
+        # 只有 im-website 用得着（SEO 的 canonical / robots.txt / sitemap.xml 要绝对域名）：
+        #   不配也能出产物——vite.config.js 会回落到仓库里的 Docker/.env.example 的 WEBSITE_DOMAIN；
+        #   这里留个覆盖口，换域名又不想动 example 时去仓库 Settings → Secrets and variables → Actions
+        #   新建一个 **Variables**（不是 Secrets）WEBSITE_SITE_ORIGIN=https://官网域 即可。
+        #   三站共用这一步，多传一个变量对 im-ui / im-admin-ui 无副作用（它们不读它）
+        env:
+          VITE_SITE_ORIGIN: ${{ vars.WEBSITE_SITE_ORIGIN }}
 
       - name: 上传 dist
         if: steps.pick.outputs.skip != 'true'

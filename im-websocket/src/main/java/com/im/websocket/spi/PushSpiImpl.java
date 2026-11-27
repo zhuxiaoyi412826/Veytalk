@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
+import java.util.Map;
 
 /**
  * {@link PushSpi} 的实现，把跨模块推送契约适配到本进程的连接注册表。
@@ -27,9 +28,9 @@ import java.util.Collection;
  *
  * <h2>为什么 kickOut 里不注销登录态</h2>
  *
- * <p>{@code AuthServiceImpl.kickSameDevice} 的调用顺序是「先 {@code pushSpi.kickOut} 推报文，
- * 再 {@code StpUtil.kickout} 注销会话」。这个顺序不能反：注销之后再推，
- * 那条连接对应的登录态已经没了，但 socket 还开着，前端收到 kickout 后尝试重连，
+ * <p>顶号与封号的调用顺序都是「先 {@code pushSpi.kickOut} 推报文，再 {@code StpUtil.kickout}
+ * 注销会话」（现在在 {@code DeviceServiceImpl} 与 {@code AdminUserSpiImpl} 两处）。这个顺序不能反：
+ * 注销之后再推，那条连接对应的登录态已经没了，但 socket 还开着，前端收到 kickout 后尝试重连，
  * 换票据时发现 token 已失效，用户看到的是「被踢下线 → 重连失败 → 回到登录页」，
  * 中间的 kickout 报文反而是唯一能告诉他「你是被顶号了，不是网断了」的信息。
  * 既然注销由调用方负责，这里再调一次 {@code StpUtil.kickout} 就会让同一次顶号产生两轮踢出。
@@ -64,6 +65,11 @@ public class PushSpiImpl implements PushSpi {
     @Override
     public void kickOut(Long userId, String deviceId, String reason) {
         sessionManager.kickOut(userId, deviceId, reason);
+    }
+
+    @Override
+    public void kickOut(Long userId, String deviceId, String reason, Map<String, Object> detail) {
+        sessionManager.kickOut(userId, deviceId, reason, detail);
     }
 
     /**

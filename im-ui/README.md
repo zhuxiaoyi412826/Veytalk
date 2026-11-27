@@ -75,10 +75,10 @@ npm run preview   # 本地预览 dist/ 构建产物（注意：preview 不带 pr
 **建议的双端联调方式**：开两个浏览器（或一个普通窗口 + 一个无痕窗口），分别登录 `alice` 与 `bob`，
 即可看到消息实时往返、未读角标变化、在线状态更新。
 
-> ⚠️ 同一个账号在两个标签页登录会**互相顶下线**。这不是 bug：
-> 后端 `DeviceType` 只认 `web / pc / android / ios / mini` 五种取值，`AuthServiceImpl.kickSameDevice`
-> 按 `(userId, device)` 匹配并踢掉旧连接，浏览器端一律归一化成 `web`，所以两个标签页算同一端。
-> 被踢的一侧会收到 `kickout` 帧并自动跳回登录页。
+> ℹ️ 同一个账号在两个标签页登录**不会**互相顶下线：`getDeviceId()` 用的是 localStorage 里的实例 ID，
+> 两个标签页拿到的是同一个值，算同一个设备位（`web:<uid>`）。只有同端台数超过后端
+> `im.account.device-limit.web`（默认 3）才会挤掉最旧的那台，被踢的一侧收到带设备名 / IP / 时间的
+> `kickout` 帧并自动跳回登录页。自己查一眼登录过哪几台：「我的 → 登录设备」。
 
 登录页有三个 Tab：
 

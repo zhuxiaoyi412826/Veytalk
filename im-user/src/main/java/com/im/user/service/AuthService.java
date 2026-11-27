@@ -62,9 +62,21 @@ public interface AuthService {
     void logout();
 
     /**
-     * 注销指定用户的全部设备，修改密码等敏感操作后使用。
+     * 注销指定用户的全部设备（不推报文，适合调用方自己已经推过的场景，如后台封号）。
      */
     void logoutEverywhere(Long userId);
+
+    /**
+     * 注销设备，并可选地先把原因告诉用户。
+     *
+     * <p>改密与换绑属于「凭证变了」，安全上应当全端下线；但把用户自己正在用的这台也踢了
+     * 会得到一句「为什么我改个密码就要重登」，所以这里给一个 {@code keepCurrent} 旋钮。
+     *
+     * @param reason       非空时先给将被下线的连接推一条 {@code kickout} 报文（这句话会被用户看到）
+     * @param keepCurrent  true = 保留当前这台设备，只下线其他端
+     * @param recordDetail 非空时留一条「凭证变更导致全端下线」流水
+     */
+    void logoutEverywhere(Long userId, String reason, boolean keepCurrent, String recordDetail);
 
     /**
      * 续签：换发一个新 token 并注销旧 token。

@@ -60,6 +60,17 @@ export function hasDistricts(cityCode) {
   return !!city && city.children.length > 0
 }
 
+/**
+ * 一个节点的直接下级编码（省给市、市给区县）。
+ *
+ * 定位反查走兜底那条路时要在「这一档的候选里挑最近的」，而不是全国三千多个一起比：
+ * 市与区县重名重码前缀的太多，先按父码缩到十几个候选，最近中心点才有意义。
+ */
+export function childCodes(parentCode) {
+  const node = REGION_NODES.get(parentCode)
+  return node ? node.children.map((child) => child.code) : []
+}
+
 /** 编码数组 → 三级名称数组，认不出的那一档给空串（调用方按名字写库，所以宁可短也不要错） */
 export function regionNames(codes) {
   const names = []

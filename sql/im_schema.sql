@@ -29,8 +29,11 @@ USE `im_db`;
 -- 重复执行时按依赖倒序清理，保证脚本幂等
 -- ★ 加表必须回头补这里：本块的 DROP 与后面的 CREATE 条数要相等，少一条就会在重跑时
 --   撞「表已存在」中断，库变成半新半旧（先例：im_live_room 漏在其中一次）。
---   末尾这十六张是 V1.0.7 交友域，最后建、最先删。
+--   开头这两张是 V1.0.9 登录设备与流水，最后建、最先删；
+--   紧接着的十六张是 V1.0.7 交友域。
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS `im_login_log`;
+DROP TABLE IF EXISTS `im_user_device`;
 DROP TABLE IF EXISTS `im_icebreaker`;
 DROP TABLE IF EXISTS `im_moment_comment`;
 DROP TABLE IF EXISTS `im_moment_like`;
@@ -1832,3 +1835,76 @@ INSERT INTO `im_icebreaker` (`id`, `type`, `tag_id`, `content`, `sort`, `status`
 (53, 3, 45, '桌游局缺人，你常去哪家店？', 53, 1),
 (54, 3, 46, '剧本杀玩家，你偏情感本还是硬核本？', 54, 1),
 (55, 3, 10, '练瑜伽的人体态都不差，你是从什么时候开始的？', 55, 1);
+
+-- =====================================================================================
+--  二十、登录设备与账号安全流水（im-user）
+--
+--  本节与 sql/versions/V1.0.9__login_device.sql 逐字同构：这里靠文件头的 DROP 块保证幂等，
+--  那里靠 CREATE TABLE IF NOT EXISTS（存量库走后台「SQL 版本」页应用它，不需要重跑本文件）。
+--
+--  历史上请求字段 deviceId 装的一直是设备类型码，后端因此分不清「同一个 android 是几台手机」，
+--  同端顶号根本没法实现（当年 kickSameDevice 被删就是因为它）。这两张表把「设备位 = 类型:实例」
+--  落进库，同时接管 Sa-Token 终端列表存不下的那些展示字段（设备名 / IP / UA / 累计次数）。
+--  只记 IP 不记城市：全仓没有离线 GeoIP 库，不能凭空编一个地名给用户看。
+-- =====================================================================================
+
+-- -------------------------------------------------------------------------------------
+-- 1. im_user_device：登录设备登记（一台登录实例一行，多端策略与「下线其他设备」的数据来源）
+--
+--    为什么不能只靠 Sa-Token 的终端列表：它的 SaTerminalInfo 只有 deviceType / deviceId /
+--    createTime / tokenValue，没有设备名、IP、UA，而且会话一过期这批信息就随 Redis 键一起没了
+--    ——「上次登录：iPhone 15，192.168.1.20」这种要留几个月的展示字段，必须落在库里。
+--    device_id 用 NOT NULL DEFAULT '' 而不是 NULL：MySQL 唯一索引里 NULL 与 NULL 不算重复，
+--    写成可空的话 uk_user_device 对老客户端（不带实例 ID）完全失效。
+-- -------------------------------------------------------------------------------------
+CREATE TABLE `im_user_device`
+(
+    `id`               BIGINT       NOT NULL COMMENT '主键（雪花）',
+    `user_id`          BIGINT       NOT NULL COMMENT '所属用户 ID（= im_user.id）',
+    `device_type`      VARCHAR(16)  NOT NULL COMMENT '设备类型码：web 浏览器 / pc 桌面端 / android 安卓 / ios iOS / mini 小程序',
+    `device_id`        VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '安装实例 ID（客户端首启生成的 UUID，卸载重装会变）；空串=老客户端只上送了类型码，这类行不参与顶号',
+    `device_name`      VARCHAR(50)           DEFAULT NULL COMMENT '客户端自报的友好名（如「张三的 Pixel 8」），仅展示与踢下线提示，不参与任何判定',
+    `ip`               VARCHAR(64)           DEFAULT NULL COMMENT '最近一次登录的客户端 IP（IPv6 最长 45 字符，留 64）；未接归属地库，故只到 IP',
+    `user_agent`       VARCHAR(255)          DEFAULT NULL COMMENT '最近一次登录的 User-Agent（已洗成单行并截断），device_name 缺失时靠它兜底推设备名',
+    `login_count`      INT          NOT NULL DEFAULT 1 COMMENT '该实例累计登录成功次数（同一实例重复登录只更新本行，不新增行）',
+    `last_login_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近登录时间',
+    `last_logout_time` DATETIME              DEFAULT NULL COMMENT '最近下线时间（主动注销 / 被同端顶号 / 被后台踢 / 撤销设备时写入）',
+    `status`           TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 在用 0 已撤销（撤销只注销既有会话，凭密码重新登录会自动回到 1）',
+    `create_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '该实例首次登记时间',
+    `update_time`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    -- 一个账号在同一台机器上只有一行：类型 + 实例唯一确定一台设备，重复登录走 UPDATE
+    UNIQUE KEY `uk_user_device` (`user_id`, `device_type`, `device_id`),
+    -- 「我的登录设备」列表按最近登录倒序取一页（上限 50 行，见 im.account.device-list-max）
+    KEY `idx_user_last` (`user_id`, `last_login_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='登录设备登记表（一台登录实例一行：多端登录策略、被踢提示、设备管理页的数据来源）';
+
+-- -------------------------------------------------------------------------------------
+-- 2. im_login_log：登录与设备变动流水（账号安全留痕）
+--
+--    与设备表分表的意义：设备表答「现在有哪些设备在用」（状态表，一行一台），
+--    流水表答「谁在什么时候从哪个 IP 进来过、被谁挤掉了」（事件表，只增）。
+--    出盗号投诉时要的是后者，而状态表里的 last_login_time 只有一个，历史全被覆盖掉了。
+--    继承 AuditEntity 口径：不启 deleted 列，超保留期由定时任务物理删除。
+-- -------------------------------------------------------------------------------------
+CREATE TABLE `im_login_log`
+(
+    `id`          BIGINT       NOT NULL COMMENT '主键（雪花，兼时间排序键）',
+    `user_id`     BIGINT       NOT NULL COMMENT '用户 ID（= im_user.id）',
+    `event`       TINYINT      NOT NULL COMMENT '事件：1 登录成功 2 登录失败 3 主动注销 4 同端顶下线 5 被后台踢下线 6 设备被撤销 7 改绑凭证导致全端下线',
+    `device_type` VARCHAR(16)  NOT NULL DEFAULT '' COMMENT '设备类型码；登录失败（账号都不存在）时可能为空串',
+    `device_id`   VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '安装实例 ID；老客户端为空串',
+    `device_name` VARCHAR(50)           DEFAULT NULL COMMENT '设备名（上送的友好名，UA 兜底），仅展示',
+    `ip`          VARCHAR(64)           DEFAULT NULL COMMENT '客户端 IP（未接归属地库，只到 IP）',
+    `user_agent`  VARCHAR(255)          DEFAULT NULL COMMENT 'User-Agent（洗成单行并截断）',
+    `detail`      VARCHAR(255)          DEFAULT NULL COMMENT '补充说明：失败原因 / 顶掉它的那台设备名 / 操作来源（如 bind-phone）',
+    `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发生时间',
+    `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（流水不回改，列仅为与 AuditEntity 对齐）',
+    PRIMARY KEY (`id`),
+    -- 「我的登录记录」按用户过滤后天然按主键倒序取一页
+    KEY `idx_user_time` (`user_id`, `id`),
+    -- 保留期清理任务按天删除（im.account.login-log-keep-days）
+    KEY `idx_create_time` (`create_time`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='登录与设备变动流水（账号安全留痕，只 INSERT 不更新；超保留期由定时任务物理删除）';

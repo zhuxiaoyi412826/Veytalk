@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
@@ -170,11 +171,22 @@ class WsDispatcher @Inject constructor(
             "notify" -> handleNotify(data as? JsonObject)
             "call-signal" -> calls.onSignal(data as? JsonObject)
             "kickout" -> {
-                val reason = (data as? JsonObject)?.get("reason")?.jsonPrimitive?.content ?: "账号已在其他设备登录"
+                val obj = data as? JsonObject
+                val reason = obj?.get("reason")?.jsonPrimitive?.contentOrNull ?: "账号已在其他设备登录"
+                // 顶号详情三件套（后端 kickoutPacket 里的 deviceName / ip / time）：
+                // 只说“其他设备”用户无从判断那是不是自己刚开的另一台，详情只能从服务端拿
+                val detail = listOfNotNull(
+                    obj?.get("deviceName")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?.let { "设备：$it" },
+                    obj?.get("ip")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?.let { "IP：$it" },
+                    obj?.get("time")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?.let { "时间：$it" }
+                ).joinToString(" · ")
                 // socket 已置 manualClose 不再重连，这里只负责清态收尾
                 auth.teardownLocal()
                 resetAll()
-                _kickout.tryEmit(reason)
+                _kickout.tryEmit(if (detail.isEmpty()) reason else "$reason（$detail）")
             }
             "error" -> Log.w(TAG, "ws error frame: ${packet["message"]?.jsonPrimitive?.content}")
         }

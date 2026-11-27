@@ -24,6 +24,7 @@
   - [1.0.6 直播三板块：三张作品表 + 分类字典加 type + 权限点 129~131（2026-11-22，补登记）](#106-直播三板块三张作品表--分类字典加-type--权限点-1291312026-11-22补登记)
   - [1.0.7 交友域一次建齐 16 张表 + 权限点 132~134（2026-11-22）](#107-交友域一次建齐-16-张表--权限点-1321342026-11-22)
   - [1.0.8 im_moment 新增 view_count 列（我的动态按浏览量筛选，2026-11-25）](#108-im_moment-新增-view_count-列我的动态按浏览量筛选2026-11-25)
+  - [1.0.9 新增 im_user_device 与 im_login_log（登录设备与账号安全流水，2026-11-27）](#109-新增-im_user_device-与-im_login_log登录设备与账号安全流水2026-11-27)
   - [1.0.1 模板（下一条照抄这个）](#101-模板下一条照抄这个)
 - [六、两类环境的执行方式](#六两类环境的执行方式)
 - [七、改完 SQL 必须清的 Redis 缓存](#七改完-sql-必须清的-redis-缓存)
@@ -361,6 +362,44 @@ SELECT id, code, version, status FROM im_agreement WHERE id BETWEEN 1301 AND 130
 
 > **★ 不重跑旧版本**：本版**不回头改 `V1.0.7`**（那会改变已发布脚本的内容与 checksum，页面会拒绝应用）。
 > 全新库靠 `im_schema.sql` 直接带上新列，存量库靠本版增量，两边结构最终一致。
+
+---
+
+### 1.0.9 新增 im_user_device 与 im_login_log（登录设备与账号安全流水，2026-11-27）
+
+- **背景**：`md/待开发功能.txt` 原第 28–31 行要求「四端同时登录 + 同端互斥挤下线（QQ 式）+ 被踢端收到带设备/时间/地点的通知」。
+  这三件事全都卡在同一个地基缺失上：请求字段 `deviceId` 历史上装的是**设备类型码**（web/pc/android/ios/mini），
+  后端分不清「同一个 android 是几台手机」，所以任何顶号实现都会重现「同一浏览器三个标签页互相踢下线」——
+  那正是当年 `kickSameDevice` 被显式删掉的原因（`application.yml` 与 `AuthServiceImpl.doLogin` 的注释里还留着这条记录）。
+  本版把 deviceId 升级为**设备位 `类型:实例`**（`com.im.common.util.DeviceIds`），并建两张承接表：
+  设备表存「现在哪些机器在用」（Sa-Token 终端列表存不下的设备名/IP/UA/累计次数），
+  流水表存「谁何时从哪个 IP 进来过、被谁挤掉」（会话一过期 Sa-Token 那边就什么都没了）。
+- **脚本文件**：`sql/versions/V1.0.9__login_device.sql`（122 行）+ `U1.0.9__login_device.sql`（90 行）
+- **★ 清除**：无（两张表都是新增，不删任何既有行；也不动 `im_user` 的列，`last_login_ip` 仍归老字段）
+- **★ 增加**：表 `im_user_device`（13 列，`uk_user_device(user_id,device_type,device_id)` 唯一键 + `idx_user_last`）；
+  表 `im_login_log`（11 列，`idx_user_time(user_id,id)` + `idx_create_time`，无唯一键，继承 `AuditEntity` 口径不启 `deleted`）。
+  **本版无种子、无权限点**（设备管理是前台「设置」里用户管自己的设备，不是后台新菜单）
+- **★ 修改**：无（不动任何既有表的列与索引；两张表全篇 `CREATE TABLE IF NOT EXISTS`，天然幂等，
+  因此**不需要 V1.0.6 那套 `information_schema` 会话变量守卫**）
+- **是否并回全量脚本**：`im_schema.sql` ☑ 第二十节（第 **1837** 行起至文件末：两张建表）+ DROP 块第 **35–36** 行补 2 行
+  （**加表必须同步补 DROP，否则重跑撞「表已存在」中断、库变半新半旧**）；实测 `^DROP TABLE` 与 `^CREATE TABLE` 各 **69** 条，相等；
+  `im_data.sql` ☐ 无（不塞任何行）
+- **需清的 Redis 键**：**无**（不涉及 `im_permission` / `im_role_permission` / `im_config`；
+  在线键 `im:online:{userId}` 的 field 从本版起由「类型码」变成「设备位」，但它是心跳级短期数据且老数据只会被当作老设备并存，不需要手工清）
+- **回滚方式**：页面点 U1.0.9（第 0 段取存在性判定 → 第 1 段落 `im_user_device_bak_20261127` 前像备份 →
+  第 2 段 `DROP TABLE im_user_device` → 第 3 段落 `im_login_log_bak_20261127` 并 `DROP TABLE im_login_log`）。
+  ★ 回滚后必须同步退回 jar，并把 `im.account.exclusive-login` 关掉，否则代码仍在读这两张表（登录不受影响但会刷 warn，设备屏直接 1146）
+- **验证 SQL**：`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='im_db' AND TABLE_NAME IN ('im_user_device','im_login_log');` 期望 **2**；
+  `SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='im_db' AND TABLE_NAME='im_user_device' GROUP BY INDEX_NAME;` 应看到 `PRIMARY` / `uk_user_device` / `idx_user_last`；
+  用新版 web 端登一次后 `SELECT user_id,device_type,device_id,ip,login_count FROM im_user_device ORDER BY last_login_time DESC LIMIT 5;` 应有行且 `device_id` 非空
+
+> **★ 上线顺序铁律：先应用 SQL，再重启后端**。表没建而后端先升，登录会在 `doLogin` 回调里抛
+> 「设备登记失败」（代码包了 try-catch，**登录本身仍然成功**），但设备列表永远空——
+> 顶号不生效、被踢提示没得取，相当于新功能静默失踪。反过来（先建表后发版）两张表只是始终为空，老后端完全不认识它们。
+
+> **★ 生产应用顺序**：台账只应用「最小的待应用版本」，而 1.0.4 / 1.0.6 / 1.0.7 / 1.0.8 都没在页面点过「应用」，
+> 所以顺序必须是 1.0.4 → 1.0.6 → 1.0.7 → 1.0.8 → **1.0.9**（前四个幂等，对已手工 source 过的库只登记台账）。
+> 1.0.7 跑完要清一次权限缓存（三个新权限点），1.0.9 本身不需清。
 
 ---
 

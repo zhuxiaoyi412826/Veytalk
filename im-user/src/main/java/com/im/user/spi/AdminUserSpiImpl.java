@@ -346,7 +346,7 @@ public class AdminUserSpiImpl implements AdminUserSpi {
     /**
      * 断掉这个用户的一切凭据：先推 kickout 报文，再注销登录态。
      *
-     * <p>顺序不能反，与 {@code AuthServiceImpl.kickSameDevice} 同一个理由：
+     * <p>顺序不能反，与 {@code DeviceServiceImpl.killSlot} 同一个理由：
      * 会话先没了，socket 还开着，客户端只会看到「连接断了」，
      * 而 kickout 报文是唯一能告诉他「你是被平台停用的」的信息。
      *

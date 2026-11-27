@@ -63,8 +63,10 @@ public class SaTokenConfigure implements WebMvcConfigurer {
             "/api/agreement/view/**",
             // 客户端版本公示：官网是匿名纯静态站，下载页的列表与安装包都必须免登录可达
             // （下载是 <a href> 普通导航，列表经官网 nginx 反代 /api 同源 fetch，都不涉及跨域）。
-            // 与协议同一条规矩：只逐路径列只读的两条，不放 /api/release/** 整片
+            // 与协议同一条规矩：只逐路径列只读的三条，不放 /api/release/** 整片
             "/api/release/list",
+            // 下载页「历史版本」区块：只读元信息，不提供停用包的站点下载（详见 ClientReleaseService#publicHistory）
+            "/api/release/history",
             "/api/release/download/**"
     );
 

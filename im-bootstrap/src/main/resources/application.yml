@@ -276,9 +276,10 @@ sa-token:
   # 设成正数会把人半夜踢下线。真正的连接活性由 WebSocket 心跳负责。
   active-timeout: -1
   # 允许同一账号多端同时在线（web / pc / android 各自独立），且同设备位也允许多条会话共存：
-  # 同一浏览器的多个标签页、Electron 的多个窗口都不再互相顶号（多标签互踢 bug 的修复项）。
-  # 历史行为：登录时由 AuthServiceImpl#kickSameDevice 顶掉同设备旧会话，该方法已移除；
-  # 踢下线能力仅保留给管理操作（封号、改密码后全端下线，见 WsSessionManager#kickOut）。
+  # 同一浏览器的多个标签页共用一个实例 ID，算同设备位，它们之间不互踢（多标签互踢 bug 的修复项）。
+  # 顶号能力自 1.0.9 起回归，但口径改了：按「设备位 = 类型:实例」判定，且只在同端台数超过
+  # im.account.device-limit 时才踢最旧的那台；触发点在 SaTokenListenerImpl.doLogin → DeviceServiceImpl，
+  # 不在 Sa-Token 自己的登录流程里。只上送裸类型码的老客户端一律不参与顶号。
   # 若改成 false，Sa-Token 会在登录流程里抢先调用 replaced(loginId, device)，第二个标签页登录会顶掉第一个。
   is-concurrent: true
   # 必须为 false：StpLogicJwtForSimple 的 isSupportShareToken() 返回 false，
@@ -607,6 +608,33 @@ im:
     request-timeout-seconds: 60
     # 单路连麦最大时长（秒），超时服务端下发 leave 兑底
     max-duration-seconds: 3600
+
+  # ---------------------------------------------------------------------------
+  # 账号与多端登录（1.0.9 同端顶号）
+  #
+  # 一个账号可以在 PC / 手机 / 浏览器 / 小程序 各占一位同时在线，只有同一类设备超过下面
+  # 的台数时才顶号。设备位是「类型:实例」：实例 ID 由客户端首次启动生成并长期保存，
+  # 老客户端只传裸类型码，那种位不参与顶号也不计入台数（否则两台手机会互相踢下线）。
+  # 每一项都是每次登录现取的，后台「系统配置 · 账号与登录」改了立刻生效，不必重启；
+  # 这里的值只是后台没覆盖时的默认。键名对应 ImProperties.Account。
+  # ---------------------------------------------------------------------------
+  account:
+    # 同端顶号总开关（应急旋钮）：顶号若在真实设备上误踢正常用户，关掉即回到「全部并存」的旧行为
+    exclusive-login: ${IM_ACCOUNT_EXCLUSIVE:true}
+    # 每类设备同时允许几台，键为 DeviceType 码；表里没写到的类型按 default-device-limit
+    device-limit:
+      # 一个浏览器实例（同一 Chrome 的十个页签共用一个设备位，只算 1 台）
+      web: 3
+      pc: 1
+      android: 1
+      ios: 1
+      mini: 1
+    # 表里缺某类设备时的兜底台数
+    default-device-limit: 1
+    # im_login_log 的保留天数，由 LoginLogCleanTask 每六小时一轮物理删除（0 = 永不清理，表会单调增长）
+    login-log-keep-days: 180
+    # 设备管理页最多列几台已登记设备（防养号脚本把上千行塞进用户屏幕）
+    device-list-max: 50
 
   # ---------------------------------------------------------------------------
   # 管理后台（im-admin）：举报受理闸门与看板缓存

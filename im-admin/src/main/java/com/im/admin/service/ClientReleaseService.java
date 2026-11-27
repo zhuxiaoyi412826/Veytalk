@@ -22,6 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -47,6 +48,13 @@ public class ClientReleaseService {
 
     /** 单页上限：一行只带元数据不带正文，但安装包列表没必要一屏百行，与公告同档 */
     private static final long MAX_PAGE_SIZE = 50;
+
+    /**
+     * 历史版本每平台默认取几条。五档平台 × 5 = 至多 25 行，官网一个区块够用又不至于把页面拉长；
+     * 上限 20 是给「一个平台发过很多次」的场景留的口，但不是让访客拿它拖全表。
+     */
+    private static final int HISTORY_PER_PLATFORM = 5;
+    private static final int HISTORY_PER_PLATFORM_MAX = 20;
 
     private final ClientReleaseMapper releaseMapper;
     private final ObjectProvider<FileStorageSpi> fileStorageSpiProvider;
@@ -209,19 +217,76 @@ public class ClientReleaseService {
                 .eq(ClientRelease::getStatus, ClientRelease.STATUS_ENABLED));
         return enabled.stream()
                 .sorted((a, b) -> platformOrder(a.getPlatform()) - platformOrder(b.getPlatform()))
-                .map(row -> PublicReleaseVO.builder()
-                        .id(row.getId())
-                        .platform(row.getPlatform())
-                        .platformName(platformName(row.getPlatform()))
-                        .version(row.getVersion())
-                        .releaseNote(row.getReleaseNote())
-                        .fileName(row.getFileName())
-                        .fileSize(row.getFileSize())
-                        .md5(row.getMd5())
-                        .updateTime(row.getUpdateTime())
-                        .downloadPath("/api/release/download/" + row.getId())
-                        .build())
+                .map(this::toPublicVO)
                 .toList();
+    }
+
+    /**
+     * 官网「历史版本」区块数据源：每平台取最近 N 条（含已停用），按创建时间倒序。
+     *
+     * <p>与 {@link #publicList()} 的分工：list 是「现在能下到的包」（每平台一条、只认启用行），
+     * history 是「发过哪些版本」。停用行的 {@code downloadPath} 一律为 null ——
+     * {@code /api/release/download/{id}} 只递启用行，给了链接访客点了必 404。
+     *
+     * <p>★ 这里确实把「某个停用版本存在过」公开了，与下载端点那条防枚举口径不矛盾：
+     * 那条守的是<b>字节</b>（拿到 ID 也只能拿到 404），不是版本号；而历史包本来就
+     * 在 GitHub Releases 页上公开摆着（官网下载区下面就是那条外链），藏着没有收益。
+     *
+     * <p>排序取 createTime 而不是 version：实体注释已定下「版本号不做语义比较，1.10 与 1.9
+     * 谁新由发版的人知道、代码不猜」，按时间倒序是同一个口径的另一面。
+     *
+     * <p>每平台各取 N 条而不是一条全局 limit：后者会让发版勤的那个平台把其余平台挤没；
+     * 而平台最多五档，五次带索引的查询比一次窗口函数划算。
+     *
+     * @param platformCode 平台码，为空则每档平台都取；不认识的平台码回空数组而不是全表
+     *                     （与 {@code adminPage} 「筛错了不许看到全部」同一条口径）
+     * @param perPlatform  每平台条数，null/非正取默认 5，上限 20
+     */
+    public List<PublicReleaseVO> publicHistory(String platformCode, Integer perPlatform) {
+        int limit = perPlatform == null || perPlatform <= 0
+                ? HISTORY_PER_PLATFORM : Math.min(perPlatform, HISTORY_PER_PLATFORM_MAX);
+        List<ReleasePlatform> targets;
+        if (TextUtil.isNotBlank(platformCode)) {
+            ReleasePlatform platform = ReleasePlatform.of(platformCode);
+            if (platform == null) {
+                return List.of();
+            }
+            targets = List.of(platform);
+        } else {
+            targets = List.of(ReleasePlatform.values());
+        }
+        // 按枚举声明顺序遍历，拼出来的次序天然就是码表顺序（Windows 安装版在最前），不必再排一次
+        List<PublicReleaseVO> rows = new ArrayList<>();
+        for (ReleasePlatform platform : targets) {
+            List<ClientRelease> list = releaseMapper.selectList(Wrappers.<ClientRelease>lambdaQuery()
+                    .eq(ClientRelease::getPlatform, platform.getCode())
+                    .orderByDesc(ClientRelease::getCreateTime)
+                    .orderByDesc(ClientRelease::getId)
+                    .last("LIMIT " + limit));
+            list.forEach(row -> rows.add(toPublicVO(row)));
+        }
+        return rows;
+    }
+
+    /**
+     * 实体 → 官网公开视图。停用行刻意不给 downloadPath：
+     * 公开下载只认启用行，链子递出去就是一个必 404 的死按钮，不如让前端渲染成「已停用」。
+     */
+    private PublicReleaseVO toPublicVO(ClientRelease row) {
+        boolean enabled = row.getStatus() != null && row.getStatus() == ClientRelease.STATUS_ENABLED;
+        return PublicReleaseVO.builder()
+                .id(row.getId())
+                .platform(row.getPlatform())
+                .platformName(platformName(row.getPlatform()))
+                .version(row.getVersion())
+                .releaseNote(row.getReleaseNote())
+                .fileName(row.getFileName())
+                .fileSize(row.getFileSize())
+                .md5(row.getMd5())
+                .updateTime(row.getUpdateTime())
+                .enabled(enabled)
+                .downloadPath(enabled ? "/api/release/download/" + row.getId() : null)
+                .build();
     }
 
     /**
